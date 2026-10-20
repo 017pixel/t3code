@@ -31,11 +31,9 @@ const EMPTY_CHECKPOINT_SUMMARIES: ReadonlyArray<ThreadCheckpointSummary> = Objec
 // older than it is missing events.
 function isBehindShell(
   projection: OrchestrationV2ThreadProjection,
-  shell: Pick<EnvironmentThreadShell, "updatedAt"> | null,
+  shell: Pick<EnvironmentThreadShell, "updatedAt">,
 ): boolean {
-  return (
-    shell !== null && DateTime.toEpochMillis(projection.updatedAt) < Date.parse(shell.updatedAt)
-  );
+  return DateTime.toEpochMillis(projection.updatedAt) < Date.parse(shell.updatedAt);
 }
 
 export function createEnvironmentThreadDetailAtoms<E>(
@@ -214,7 +212,9 @@ export function createEnvironmentThreadDetailAtoms<E>(
     return Atom.make((get): "none" | "behind" | "current" => {
       const state = get(threadStateValueAtomFamily(key));
       if (threadShellAtom === undefined || Option.isNone(state.data)) return "none";
-      if (!isBehindShell(state.data.value, get(threadShellAtom(ref)))) return "current";
+      const shell = get(threadShellAtom(ref));
+      if (shell === null) return "none";
+      if (!isBehindShell(state.data.value, shell)) return "current";
       return state.status === "live" &&
         Option.contains(get.self<"none" | "behind" | "current">(), "current")
         ? "current"

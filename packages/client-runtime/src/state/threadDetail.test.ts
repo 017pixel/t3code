@@ -152,15 +152,18 @@ describe("createEnvironmentThreadDetailAtoms", () => {
         threadState({ data: Option.some(v2Projection), status: "live", error: Option.none() }),
       ),
     );
-    const shellAtom = Atom.make<{ readonly updatedAt: string } | null>({
-      updatedAt: "2026-06-20T00:05:00.000Z",
-    });
+    const shellAtom = Atom.make<{ readonly updatedAt: string } | null>(null);
     const details = createEnvironmentThreadDetailAtoms(
       () => sourceAtom,
       () => shellAtom,
     );
     const registry = AtomRegistry.make();
+    const unmount = registry.mount(details.behindShellAtom(ref));
+    // Without a shell yet, nothing is known; a later newer shell still marks it.
+    expect(registry.get(details.behindShellAtom(ref))).toBe(false);
+    registry.set(shellAtom, { updatedAt: "2026-06-20T00:05:00.000Z" });
     expect(registry.get(details.behindShellAtom(ref))).toBe(true);
+    unmount();
     registry.dispose();
   });
 });
