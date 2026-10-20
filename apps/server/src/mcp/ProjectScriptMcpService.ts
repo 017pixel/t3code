@@ -20,6 +20,7 @@ import {
 } from "@t3tools/shared/projectScripts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Project from "../project/ProjectService.ts";
@@ -201,25 +202,31 @@ const make = Effect.gen(function* () {
     });
 
   const run: ProjectScriptMcpService["Service"]["run"] = (scope, input) =>
-    mutate(scope, input.threadId, ({ target, project }) => {
+    Effect.suspend(() => {
       let admittedHandle: TerminalManager.TerminalSessionHandle | undefined;
-      const key = runKey(target.id, input.terminalId);
       return Effect.gen(function* () {
-        const current = yield* settings.getSettings.pipe(Effect.mapError(unavailable));
-        const script = resolveProjectScripts(current, project).find(
-          (script) => script.id === input.scriptId,
+        const { target, project, script, data } = yield* mutate(scope, input.threadId, (resolved) =>
+          Effect.gen(function* () {
+            const current = yield* settings.getSettings.pipe(Effect.mapError(unavailable));
+            const script = resolveProjectScripts(current, resolved.project).find(
+              (script) => script.id === input.scriptId,
+            );
+            if (script === undefined)
+              return yield* new ProjectScriptMcpFailure({
+                code: "script_not_found",
+                message: "The saved script was not found.",
+              });
+            const data = projectScriptTerminalInput(script.command);
+            if (data.length > 65_535)
+              return yield* new ProjectScriptMcpFailure({
+                code: "script_command_too_large",
+                message: "The saved script exceeds the terminal input limit including its newline.",
+              });
+            return { ...resolved, script, data };
+          }),
         );
-        if (script === undefined)
-          return yield* new ProjectScriptMcpFailure({
-            code: "script_not_found",
-            message: "The saved script was not found.",
-          });
-        const data = projectScriptTerminalInput(script.command);
-        if (data.length > 65_535)
-          return yield* new ProjectScriptMcpFailure({
-            code: "script_command_too_large",
-            message: "The saved script exceeds the terminal input limit including its newline.",
-          });
+        const key = runKey(target.id, input.terminalId);
+        // Startup takes the workspace lease; rollback holds that lease before taking executor locks.
         const opened = yield* terminals
           .openFreshWithHandle(
             {
@@ -256,14 +263,28 @@ const make = Effect.gen(function* () {
                 }),
             ),
           );
-        const accepted = yield* terminals
-          .writeWithHandle({
-            threadId: target.id,
-            terminalId: input.terminalId,
-            handle: opened.handle,
-            data,
-          })
-          .pipe(Effect.orElseSucceed(() => false));
+        const accepted = yield* mutate(scope, target.id, (resolved) =>
+          Effect.gen(function* () {
+            if (
+              resolved.project.id !== project.id ||
+              resolved.project.workspaceRoot !== project.workspaceRoot ||
+              resolved.target.worktreePath !== target.worktreePath ||
+              resolved.target.modelSelection.instanceId !== target.modelSelection.instanceId
+            )
+              return yield* new ProjectScriptMcpFailure({
+                code: "operation_failed",
+                message: "The target launch context changed while opening the script terminal.",
+              });
+            return yield* terminals
+              .writeWithHandle({
+                threadId: target.id,
+                terminalId: input.terminalId,
+                handle: opened.handle,
+                data,
+              })
+              .pipe(Effect.orElseSucceed(() => false));
+          }),
+        );
         return {
           threadId: target.id,
           projectId: project.id,
@@ -281,10 +302,10 @@ const make = Effect.gen(function* () {
           previewAutoOpened: false as const,
         };
       }).pipe(
-        Effect.onInterrupt(() =>
-          admittedHandle === undefined
-            ? Effect.void
-            : terminals.closeWithHandle(admittedHandle).pipe(Effect.ignore),
+        Effect.onExit((exit) =>
+          Exit.isFailure(exit) && admittedHandle !== undefined
+            ? terminals.closeWithHandle(admittedHandle).pipe(Effect.ignore)
+            : Effect.void,
         ),
       );
     });

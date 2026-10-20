@@ -159,6 +159,15 @@ export function summarizeT3ToolCalls(
     case "thread-list":
       label = phrase("Listed", "list", `threads ${times}`);
       break;
+    case "project-script-list":
+      label = phrase("Listed", "list", `saved scripts ${times}`);
+      break;
+    case "project-script-run":
+      label = phrase("Ran", "run", quantity(selected.length, "saved script"));
+      break;
+    case "project-script-stop":
+      label = phrase("Stopped", "stop", quantity(selected.length, "saved script"));
+      break;
     case "thread-interrupt":
       label = phrase(
         "Requested interrupts for",
