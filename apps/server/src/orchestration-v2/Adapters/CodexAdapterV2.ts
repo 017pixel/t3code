@@ -1530,6 +1530,10 @@ function redactCodexProtocolValue(
   const entries: Array<[string, unknown]> = [];
   for (const key in value) {
     if (!Object.hasOwn(value, key)) continue;
+    if (budget.remainingFields <= 0)
+      return redactCodexProtocolValue(boundProviderEventForLogging(value), depth + 1, {
+        remainingFields: 1_025,
+      });
     entries.push([
       key,
       redactCodexProtocolValue(
