@@ -59,7 +59,7 @@ function Notice({ thread }: { thread: EnvironmentThreadShell }) {
     working.current = true;
     setBusy(true);
     setError(null);
-    try {
+    const run = async () => {
       const result =
         action === "retry"
           ? await threadHandoffEnvironment.start.run(appAtomRegistry, {
@@ -87,12 +87,13 @@ function Notice({ thread }: { thread: EnvironmentThreadShell }) {
           failure instanceof Error ? failure.message : "Could not update the move. Try again.",
         );
       }
-    } finally {
+    };
+    await run().finally(() => {
       if (alive.current) {
         working.current = false;
         setBusy(false);
       }
-    }
+    });
   };
   const abandon = () =>
     Dialog.confirm({

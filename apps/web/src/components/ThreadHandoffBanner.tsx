@@ -54,7 +54,7 @@ function Notice({ thread }: { thread: EnvironmentThreadShell }) {
     working.current = true;
     setBusy(true);
     setError(null);
-    try {
+    const run = async () => {
       if (action === "abandon") {
         const confirmed = await readLocalApi()?.dialogs.confirm(
           "The move outcome is unknown. The destination may already have a copy or finish accepting it later. Continue working here anyway?",
@@ -92,12 +92,13 @@ function Notice({ thread }: { thread: EnvironmentThreadShell }) {
           failure instanceof Error ? failure.message : "Could not update the move. Try again.",
         );
       }
-    } finally {
+    };
+    await run().finally(() => {
       if (alive.current) {
         working.current = false;
         setBusy(false);
       }
-    }
+    });
   };
   return (
     <div

@@ -33,7 +33,9 @@ vi.mock("../hooks/useScratchProject", () => ({
   useScratchProject: () => ({ scratchEnvironmentId: () => null }),
 }));
 vi.mock("../hooks/useNewProject", () => ({ useNewProject: () => vi.fn() }));
-vi.mock("../hooks/useHandleNewThread", () => ({ useHandleNewThread: () => ({}) }));
+vi.mock("../hooks/useHandleNewThread", () => ({
+  useHandleNewThread: () => ({ activeThread: null }),
+}));
 vi.mock("../hooks/useOpenPanelPullRequestUrl", () => ({ useOpenPanelPullRequestUrl: () => null }));
 vi.mock("../connection/useDesktopLocalBootstraps", () => ({ useDesktopLocalBootstraps: () => [] }));
 vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));

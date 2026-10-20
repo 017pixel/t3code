@@ -86,6 +86,7 @@ vi.mock("./use-atom-command", () => ({ useAtomCommand: <A>(command: A) => comman
 vi.mock("./threads", async () => {
   const { Atom } = await import("effect/reactivity");
   return {
+    environmentThreadShells: { threadShellsAtom: Atom.make([state.thread]) },
     environmentThreadDetails: { queueWorkflowAtom: () => Atom.make(null) },
     threadEnvironment: {
       respondToApproval: state.approve,
