@@ -3269,8 +3269,15 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       input.threadId,
       Effect.gen(function* () {
         const key = toSessionKey(input.threadId, input.terminalId);
-        yield* flushPersist(input.threadId, input.terminalId);
         const existing = yield* getSession(input.threadId, input.terminalId);
+        // A loaded terminal can keep persistence busy for as long as it emits output.
+        if (Option.isSome(existing) || closedSessionKeys.has(key)) {
+          return yield* new TerminalAlreadyExistsError({
+            threadId: input.threadId,
+            terminalId: input.terminalId,
+          });
+        }
+        yield* flushPersist(input.threadId, input.terminalId);
         const paths = [
           historyPath(input.threadId, input.terminalId),
           ...(input.terminalId === DEFAULT_TERMINAL_ID ? [legacyHistoryPath(input.threadId)] : []),
@@ -3287,7 +3294,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               }),
           ),
         );
-        if (Option.isSome(existing) || persisted || closedSessionKeys.has(key)) {
+        if (persisted) {
           return yield* new TerminalAlreadyExistsError({
             threadId: input.threadId,
             terminalId: input.terminalId,
