@@ -629,10 +629,14 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
               const current = (yield* providerRegistry.refreshInstance(instanceId)).find(
                 (candidate) => candidate.instanceId === instanceId,
               );
+              const currentVersion =
+                current?.installedVersion !== undefined
+                  ? current.installedVersion
+                  : current?.version;
               if (
                 !current?.enabled ||
                 !current.installed ||
-                (current.version && compareVersions(current.version, candidateVersion) >= 0)
+                (currentVersion && compareVersions(currentVersion, candidateVersion) >= 0)
               ) {
                 return yield* finish(
                   makeUpdateState({
