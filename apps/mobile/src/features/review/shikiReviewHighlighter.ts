@@ -321,14 +321,13 @@ function resolveLanguageAlias(language: string): string {
   return languageAliases[normalized] ?? normalized;
 }
 
-/** The grammar to highlight a file with, or `"text"` when there is none to load for it. */
+// Native and incremental review diffs use the same language registry and fallback.
 export function resolveReviewLanguage(path: string, languageHint: string | null = null) {
   const detectedLanguage = languageHint ?? getFiletypeFromFileName(path);
   const candidate = detectedLanguage ? resolveLanguageAlias(detectedLanguage) : "text";
   return candidate in languageImports ? candidate : "text";
 }
 
-/** Imports the grammar module for a language from `resolveReviewLanguage`. */
 export function importReviewLanguage(language: string) {
   return languageImports[language]?.();
 }

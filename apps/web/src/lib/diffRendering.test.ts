@@ -1,5 +1,10 @@
 import { toHtml } from "hast-util-to-html";
-import { getSharedHighlighter, hydratePartialDiff, renderDiffWithHighlighter } from "@pierre/diffs";
+import {
+  getSharedHighlighter,
+  hydratePartialDiff,
+  parseDiffFromFile,
+  renderDiffWithHighlighter,
+} from "@pierre/diffs";
 import { describe, expect, it } from "vite-plus/test";
 import { resolveDiffReviewPosition } from "../reviewCommentContext";
 import {
@@ -12,6 +17,27 @@ import {
   resolveFileDiffPath,
   resolveFileDiffPreviousPath,
 } from "./diffRendering";
+
+async function renderSvelteTokens(file: ReturnType<typeof parseDiffFromFile>) {
+  const highlighter = await getSharedHighlighter({
+    langs: ["svelte"],
+    themes: ["pierre-dark"],
+    preferredHighlighter: "shiki-wasm",
+  });
+  const { code } = renderDiffWithHighlighter(file, highlighter, {
+    theme: "pierre-dark",
+    useTokenTransformer: false,
+    tokenizeMaxLineLength: 1000,
+    lineDiffType: "none",
+    maxLineDiffLength: 1000,
+  });
+  return (["deletionLines", "additionLines"] as const).flatMap((side) =>
+    code[side].map((line, index) => ({
+      content: file[side][index]!.replace(/\n$/, ""),
+      html: toHtml(line.type === "element" ? line.children : line),
+    })),
+  );
+}
 
 describe("buildPatchCacheKey", () => {
   it("normalizes outer whitespace before hashing", () => {
@@ -245,73 +271,143 @@ describe("getRenderablePatch", () => {
     expect(parsed.files[0]?.hunks[0]?.unifiedLineStart).toBe(47);
   });
 
-  it("highlights a Svelte hunk inside the block it sits in", async () => {
-    const patch = [
-      "diff --git a/App.svelte b/App.svelte",
-      "--- a/App.svelte",
-      "+++ b/App.svelte",
-      "@@ -5,3 +5,3 @@",
-      "   let count = $state(0);",
-      '-  const label = "count";',
-      '+  const label = "total";',
-      "   function increment() {",
-      "@@ -20,3 +20,3 @@",
-      " <main>",
-      "-  <p>{label}</p>",
-      '+  <p class="label">{label}</p>',
-      " </main>",
-      "@@ -40,4 +40,4 @@",
-      "   p {",
-      "-    color: red;",
-      "+    color: blue;",
-      "   }",
-      " </style>",
-    ].join("\n");
-
-    const parsed = getRenderablePatch(patch, "review");
-    expect(parsed?.kind).toBe("files");
-    if (parsed?.kind !== "files") return;
-    const file = parsed.files[0]!;
-    expect(file.hunks.map((hunk) => hunk.grammarContextCode)).toEqual([
-      '<script lang="ts">\n',
-      undefined,
-      "<style>\n",
-    ]);
-
-    const highlighter = await getSharedHighlighter({
-      langs: ["svelte"],
-      themes: ["pierre-dark"],
-      preferredHighlighter: "shiki-wasm",
-    });
-    const { code } = renderDiffWithHighlighter(file, highlighter, {
-      theme: "pierre-dark",
-      useTokenTransformer: false,
-      tokenizeMaxLineLength: 1000,
-      lineDiffType: "none",
-      maxLineDiffLength: 1000,
-    });
-    const colors = new Set(toHtml(code.additionLines[0]!).match(/color:[^;"]+/g));
-    expect(colors.size).toBeGreaterThan(2);
-  });
-
-  it("starts a Svelte style hunk inside the rule it opens in", () => {
+  it("renders partial Svelte script, style and markup like full-file syntax on both sides", async () => {
     const parsed = getRenderablePatch(
       [
         "diff --git a/App.svelte b/App.svelte",
         "--- a/App.svelte",
         "+++ b/App.svelte",
+        "@@ -5,2 +5,2 @@",
+        "   let count = $state(0);",
+        '-  const label = "count";',
+        '+  const label = "total";',
+        "@@ -20,3 +20,3 @@",
+        " <main>",
+        "-  <p>{label}</p>",
+        '+  <p class="label">{label}</p>',
+        " </main>",
         "@@ -40,4 +40,4 @@",
         "     display: grid;",
         "-    color: red;",
         "+    color: blue;",
         "   }",
         " </style>",
+        "@@ -60,5 +60,3 @@",
+        " export const prerender = true;",
+        " </script>",
+        "-<script>",
+        "-  const removed = 1;",
+        "-</script>",
+        '+<div class="x">hi</div>',
+        "@@ -80,3 +80,6 @@",
+        "     count += 1;",
+        "   }",
+        " ",
+        "+  function reset() {",
+        "+    count = 0;",
+        "+  }",
       ].join("\n"),
       "review",
     );
     expect(parsed?.kind).toBe("files");
     if (parsed?.kind !== "files") return;
-    expect(parsed.files[0]!.hunks[0]!.grammarContextCode).toBe("<style>\n* {\n");
+    const actual = await renderSvelteTokens(parsed.files[0]!);
+    const expected = await renderSvelteTokens(
+      parseDiffFromFile(null, {
+        name: "App.svelte",
+        contents: [
+          '<script lang="ts">',
+          "  let count = $state(0);",
+          '  const label = "count";',
+          '  const label = "total";',
+          "export const prerender = true;",
+          "  function reset() {",
+          "    count = 0;",
+          "  }",
+          "</script>",
+          "<main>",
+          "  <p>{label}</p>",
+          '  <p class="label">{label}</p>',
+          "</main>",
+          "<style>",
+          "  p {",
+          "    display: grid;",
+          "    color: red;",
+          "    color: blue;",
+          "  }",
+          "</style>",
+          '<div class="x">hi</div>',
+        ].join("\n"),
+      }),
+    );
+    for (const content of [
+      "  let count = $state(0);",
+      '  const label = "count";',
+      '  const label = "total";',
+      "  <p>{label}</p>",
+      '  <p class="label">{label}</p>',
+      "    display: grid;",
+      "    color: red;",
+      "    color: blue;",
+      '<div class="x">hi</div>',
+      "  function reset() {",
+      "    count = 0;",
+    ]) {
+      const matching = actual.filter((line) => line.content === content);
+      expect(matching.length, content).toBeGreaterThan(0);
+      const reference = expected.find((line) => line.content === content)!;
+      for (const line of matching) expect.soft(line.html, content).toBe(reference.html);
+    }
+  });
+  it("uses CSS evidence without closing tags and leaves ambiguous Svelte text as markup", async () => {
+    const parsed = getRenderablePatch(
+      [
+        "diff --git a/App.svelte b/App.svelte",
+        "--- a/App.svelte",
+        "+++ b/App.svelte",
+        "@@ -40,2 +40,2 @@",
+        "     display: grid;",
+        "-    color: red;",
+        "+    color: blue;",
+        "@@ -70 +70 @@",
+        "-Welcome to version 1",
+        "+Welcome to version 2",
+      ].join("\n"),
+      "review",
+    );
+    expect(parsed?.kind).toBe("files");
+    if (parsed?.kind !== "files") return;
+    const actual = await renderSvelteTokens(parsed.files[0]!);
+    const expected = await renderSvelteTokens(
+      parseDiffFromFile(null, {
+        name: "App.svelte",
+        contents: [
+          "<style>",
+          "  p {",
+          "    display: grid;",
+          "    color: red;",
+          "    color: blue;",
+          "  }",
+          "</style>",
+          "<main>",
+          "Welcome to version 1",
+          "Welcome to version 2",
+          "</main>",
+        ].join("\n"),
+      }),
+    );
+    for (const content of [
+      "    display: grid;",
+      "    color: red;",
+      "    color: blue;",
+      "Welcome to version 1",
+      "Welcome to version 2",
+    ]) {
+      const matching = actual.filter((line) => line.content === content);
+      expect(matching.length, content).toBeGreaterThan(0);
+      const reference = expected.find((line) => line.content === content)!;
+      for (const line of matching) expect.soft(line.html, content).toBe(reference.html);
+    }
   });
 });
 

@@ -282,7 +282,8 @@ function createHighlighterHandle(
           lang: language,
           theme,
           grammarState,
-          grammarContextCode,
+          // An inferred opener may have closed before a skipped line reset the state.
+          grammarContextCode: start === 0 ? grammarContextCode : undefined,
         });
         grammarState = highlighter.getLastGrammarState(tokens);
         highlighted.push(...normalizeTokens(tokens));
@@ -407,6 +408,39 @@ function* linesToHunkEnd(rows: ReadonlyArray<NativeReviewDiffRow>, fromRowIndex:
   }
 }
 
+// A replacement's two segments need the grammar state reached on their own side of the hunk.
+function precedingHunkCode(
+  rows: ReadonlyArray<NativeReviewDiffRow>,
+  firstRowIndex: number,
+  skippedChange: "add" | "delete",
+  maxCharacters: number,
+) {
+  const lines: string[] = [];
+  let characters = 0;
+  let hunkStartIndex = firstRowIndex;
+  for (let rowIndex = firstRowIndex - 1; rowIndex >= 0; rowIndex -= 1) {
+    if (firstRowIndex - rowIndex > NATIVE_REVIEW_DIFF_VISIBLE_MAX_ROWS) return undefined;
+    const row = rows[rowIndex]!;
+    if (row.kind === "comment") continue;
+    if (!isHighlightableLineRow(row) || row.fileId !== rows[firstRowIndex]!.fileId) break;
+    hunkStartIndex = rowIndex;
+    if (row.change === skippedChange) continue;
+    characters += row.content.length + 1;
+    if (
+      row.content.length > NATIVE_REVIEW_DIFF_TOKENIZE_MAX_LINE_LENGTH ||
+      characters > maxCharacters
+    ) {
+      return undefined;
+    }
+    lines.push(row.content);
+  }
+  let precedingCode = "";
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    precedingCode += `${lines[index]}\n`;
+  }
+  return { hunkStartIndex, precedingCode };
+}
+
 function canShareGrammarContext(
   previous: IndexedNativeReviewDiffLineRow,
   next: IndexedNativeReviewDiffLineRow,
@@ -499,6 +533,7 @@ export async function highlightNativeReviewDiffVisibleRows(
   let segmentRows: IndexedNativeReviewDiffLineRow[] = [];
   let segmentFile: NativeReviewDiffFile | undefined;
   let charactersSinceYield = 0;
+  let contextCharactersRemaining = NATIVE_REVIEW_DIFF_TOKENIZE_MAX_CHARACTERS;
 
   const flushSegment = async () => {
     if (!segmentFile || segmentRows.length === 0 || input.signal?.aborted) {
@@ -508,27 +543,56 @@ export async function highlightNativeReviewDiffVisibleRows(
     }
 
     const code = segmentRows.map(({ row }) => row.content).join("\n");
+    const { row: firstRow, rowIndex: firstRowIndex } = segmentRows[0]!;
+    const replay =
+      segmentFile.language === "svelte" && contextCharactersRemaining > 0
+        ? precedingHunkCode(
+            input.rows,
+            firstRowIndex,
+            segmentRows.some(({ row }) => row.change === "delete") ? "add" : "delete",
+            contextCharactersRemaining,
+          )
+        : undefined;
+    const { hunkStartIndex, precedingCode } = replay ?? {
+      hunkStartIndex: firstRowIndex,
+      precedingCode: "",
+    };
+    const hunkStart = input.rows[hunkStartIndex] ?? firstRow;
+    const opener = inferEmbeddedGrammarContext(
+      segmentFile.language,
+      hunkStart.oldLineNumber ?? hunkStart.newLineNumber ?? 0,
+      linesToHunkEnd(input.rows, hunkStartIndex),
+    );
+    // Replaying a hunk for every edit would multiply hidden tokenizer work across the window.
+    let grammarContextCode = precedingCode ? (opener ?? "") + precedingCode : opener;
+    if ((grammarContextCode?.length ?? 0) > contextCharactersRemaining) {
+      grammarContextCode = inferEmbeddedGrammarContext(
+        segmentFile.language,
+        firstRow.oldLineNumber ?? firstRow.newLineNumber ?? 0,
+        linesToHunkEnd(input.rows, firstRowIndex),
+      );
+    }
+    if ((grammarContextCode?.length ?? 0) > contextCharactersRemaining) {
+      grammarContextCode = undefined;
+    }
+    const contextCharacters = grammarContextCode?.length ?? 0;
+    contextCharactersRemaining -= contextCharacters;
+    const tokenizeCharacters = code.length + contextCharacters;
     if (
       charactersSinceYield > 0 &&
-      charactersSinceYield + code.length > NATIVE_REVIEW_DIFF_TOKENIZE_MAX_CHARACTERS
+      charactersSinceYield + tokenizeCharacters > NATIVE_REVIEW_DIFF_TOKENIZE_MAX_CHARACTERS
     ) {
       await waitForNextFrame();
       charactersSinceYield = 0;
       if (input.signal?.aborted) return;
     }
-    // Segments split inside a hunk, so the line that gives the block away can sit after this one.
-    const { row: firstRow, rowIndex: firstRowIndex } = segmentRows[0]!;
     const tokenLines = await highlighter.tokenize(code, {
       lang: segmentFile.language,
       theme,
-      grammarContextCode: inferEmbeddedGrammarContext(
-        segmentFile.language,
-        firstRow.oldLineNumber ?? firstRow.newLineNumber ?? 0,
-        linesToHunkEnd(input.rows, firstRowIndex),
-      ),
+      grammarContextCode,
       signal: input.signal,
     });
-    charactersSinceYield += code.length;
+    charactersSinceYield += tokenizeCharacters;
     segmentRows.forEach(({ row }, rowIndex) => {
       tokensByRowId[row.id] = tokenLines[rowIndex] ?? makePlainTokenFallback(row);
     });

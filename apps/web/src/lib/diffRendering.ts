@@ -171,10 +171,14 @@ function* lineRange(lines: readonly string[], start: number, count: number) {
   }
 }
 
+function* hunkLines(file: FileDiffMetadata, hunk: FileDiffMetadata["hunks"][number]) {
+  yield* lineRange(file.deletionLines, hunk.deletionLineIndex, hunk.deletionCount);
+  yield* lineRange(file.additionLines, hunk.additionLineIndex, hunk.additionCount);
+}
+
 /**
- * Pierre highlights a partial file one hunk at a time, so each hunk carries the context its
- * embedded block needs. Read from the old side, or the new side for a hunk that only adds. The
- * context follows from the patch alone, so the patch-derived cache key still holds.
+ * Pierre highlights each partial hunk separately. Either side can supply missing block context;
+ * unchanged context counts as old-side lines even in a hunk that only adds code.
  */
 function withEmbeddedGrammarContext(file: FileDiffMetadata) {
   if (!file.isPartial) return file;
@@ -185,9 +189,7 @@ function withEmbeddedGrammarContext(file: FileDiffMetadata) {
     const grammarContextCode = inferEmbeddedGrammarContext(
       language,
       fromDeletions ? hunk.deletionStart : hunk.additionStart,
-      fromDeletions
-        ? lineRange(file.deletionLines, hunk.deletionLineIndex, hunk.deletionCount)
-        : lineRange(file.additionLines, hunk.additionLineIndex, hunk.additionCount),
+      hunkLines(file, hunk),
     );
     return grammarContextCode === undefined ? hunk : { ...hunk, grammarContextCode };
   });
