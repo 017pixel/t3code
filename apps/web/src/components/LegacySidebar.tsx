@@ -187,6 +187,7 @@ import {
   archiveSelectedThreadEntries,
   buildMultiSelectThreadContextMenuItems,
   deleteSelectedThreadEntries,
+  filterSidebarV2VisibleThreads,
   getSidebarThreadIdsToPrewarm,
   resolveAdjacentThreadId,
   isContextMenuPointerDown,
@@ -205,7 +206,6 @@ import {
 import { sortThreads } from "../lib/threadSort";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
-import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
 import { useClientSettings, updateClientSettings } from "~/hooks/useSettings";
 import { primaryServerKeybindingsAtom } from "../state/server";
@@ -421,7 +421,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     environmentId: thread.environmentId,
     threadId: thread.id,
   });
-  const isMobile = useIsMobile();
+  const { isMobile } = useSidebar();
   const discoveredPorts = useThreadDiscoveredPorts({
     environmentId: thread.environmentId,
     threadId: thread.id,
@@ -1175,7 +1175,7 @@ function useProjectThreads(project: SidebarProjectSnapshot) {
     ]),
   );
   const visibleProjectThreads = sortThreads(
-    sidebarThreads.filter((thread) => thread.archivedAt === null),
+    filterSidebarV2VisibleThreads(sidebarThreads, null),
     threadSortOrder,
   );
   const projectStatus = resolveProjectStatusIndicator(
@@ -2299,7 +2299,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                 <span className="absolute inset-0 flex items-center justify-center transition-opacity duration-150 group-hover/project-header:opacity-0">
                   <span
                     className={`size-[9px] rounded-full ${projectStatus.dotClass} ${
-                      projectStatus.pulse ? "animate-status-pulse" : ""
+                      projectStatus.pulse ? "motion-safe:animate-status-pulse" : ""
                     }`}
                   />
                 </span>
@@ -3121,18 +3121,16 @@ function useSortedLegacySidebarProjects(input: {
     ...project,
     id: project.projectKey,
   }));
-  const sortableThreads = sidebarThreads
-    .filter((thread) => thread.archivedAt === null)
-    .map((thread) => {
-      const physicalKey =
-        projectPhysicalKeyByScopedRef.get(
-          scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
-        ) ?? scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId));
-      return {
-        ...thread,
-        projectId: (physicalToLogicalKey.get(physicalKey) ?? physicalKey) as ProjectId,
-      };
-    });
+  const sortableThreads = filterSidebarV2VisibleThreads(sidebarThreads, null).map((thread) => {
+    const physicalKey =
+      projectPhysicalKeyByScopedRef.get(
+        scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
+      ) ?? scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId));
+    return {
+      ...thread,
+      projectId: (physicalToLogicalKey.get(physicalKey) ?? physicalKey) as ProjectId,
+    };
+  });
   const sortedProjects = sortProjectsForSidebar(
     sortableProjects,
     sortableThreads,
@@ -3196,9 +3194,7 @@ function useLegacySidebarThreads(input: {
   }
   const visibleSidebarThreadKeys = sortedProjects.flatMap((project) => {
     const projectThreads = sortThreads(
-      (threadsByProjectKey.get(project.projectKey) ?? []).filter(
-        (thread) => thread.archivedAt === null,
-      ),
+      filterSidebarV2VisibleThreads(threadsByProjectKey.get(project.projectKey) ?? [], null),
       sidebarThreadSortOrder,
     );
     const projectExpanded = resolveProjectExpanded(
