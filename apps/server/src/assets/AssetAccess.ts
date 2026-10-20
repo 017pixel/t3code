@@ -20,10 +20,11 @@ import {
 import {
   hostPreviewMimeTypeFromExtension,
   officePreviewKind,
+  binaryPreviewKind,
   isWorkspaceImagePreviewPath,
+  isWorkspaceFontPreviewPath,
   isWorkspacePreviewEntryPath,
   WORKSPACE_BROWSER_PREVIEW_EXTENSIONS,
-  WORKSPACE_IMAGE_PREVIEW_EXTENSIONS,
 } from "@t3tools/shared/filePreview";
 import {
   IMAGE_DIMENSIONS_HEADER_BYTES,
@@ -89,23 +90,18 @@ const inlinePreviewMimeTypeForExtension = (extension: string) =>
   undefined;
 const PREVIEW_ASSET_EXTENSIONS = new Set([
   ...WORKSPACE_BROWSER_PREVIEW_EXTENSIONS,
-  ...WORKSPACE_IMAGE_PREVIEW_EXTENSIONS,
-  ".docx",
-  ".xlsx",
-  ".pptx",
-  ".odt",
-  ".ods",
-  ".odp",
-  ".rtf",
-  ".epub",
-  ".ipynb",
+  // Keep HTML dependency grants independent of newly supported file viewers.
+  ".avif",
+  ".gif",
+  ".ico",
+  ".jpeg",
+  ".jpg",
+  ".png",
+  ".svg",
+  ".webp",
   ".css",
   ".js",
   ".mjs",
-  ".otf",
-  ".ttf",
-  ".woff",
-  ".woff2",
 ]);
 
 const AssetClaimsSchema = Schema.Union([
@@ -486,7 +482,9 @@ const finalizeWorkspaceFileAsset = Effect.fn("AssetAccess.finalizeWorkspaceFileA
     return {
       claims:
         isWorkspaceImagePreviewPath(resolved.relativePath) ||
-        officePreviewKind({ name: resolved.relativePath }) !== null
+        isWorkspaceFontPreviewPath(resolved.relativePath) ||
+        officePreviewKind({ name: resolved.relativePath }) !== null ||
+        binaryPreviewKind({ name: resolved.relativePath }) !== null
           ? {
               version: 1 as const,
               kind: "workspace-file-exact" as const,

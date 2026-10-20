@@ -9,7 +9,12 @@ import {
 export async function boundedZip(
   bytes: ArrayBuffer,
   entryLimit = BINARY_PREVIEW_MAX_BYTES,
-  limits: { totalLimit?: number; xmlLimit?: number; ratioFloor?: number } = {},
+  limits: {
+    totalLimit?: number;
+    xmlLimit?: number;
+    ratioFloor?: number;
+    markupLimit?: number;
+  } = {},
 ) {
   if (bytes.byteLength > BINARY_PREVIEW_MAX_BYTES)
     throw new Error("Preview limited to files under 50 MB.");
@@ -93,6 +98,7 @@ export async function boundedZip(
     { bytes: Uint8Array<ArrayBuffer>; date: Date; directory: boolean }
   >();
   let total = 0;
+  let markup = 0;
   for (const entry of entries) {
     if (entry.name.length > 1024) throw new Error("An archive path is too long to preview.");
     const chunks: Uint8Array<ArrayBuffer>[] = [];
@@ -107,7 +113,11 @@ export async function boundedZip(
         .on("data", (chunk) => {
           total += chunk.length;
           length += chunk.length;
+          // Word relationship targets can use arbitrary extensions, so count every part.
+          if (limits.markupLimit !== undefined)
+            for (const byte of chunk) if (byte === 0x3c) markup++;
           if (
+            markup > (limits.markupLimit ?? Infinity) ||
             total > (limits.totalLimit ?? BINARY_PREVIEW_MAX_BYTES) ||
             total >
               Math.max(limits.ratioFloor ?? 0, Math.max(1, bytes.byteLength) * ARCHIVE_MAX_RATIO) ||

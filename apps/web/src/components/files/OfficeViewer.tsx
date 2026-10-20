@@ -6,6 +6,13 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import VirtualTablePreview from "./VirtualTablePreview";
 
 import { useTheme } from "~/hooks/useTheme";
+import {
+  Select,
+  SelectItem,
+  SelectPopup,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
 
 import { FileSurfaceAction, FileSurfaceLoading, FileSurfaceNotice } from "./fileSurfaceChrome";
 import { OFFICE_PREVIEW_MAX_BYTES, type OfficeWorkerResult } from "./officePreviewProtocol";
@@ -320,16 +327,36 @@ export default function OfficeViewer(props: {
           >
             <ChevronLeftIcon className="size-3.5" />
           </FileSurfaceAction>
-          {workbook || previewDocument?.navigation === "chapter" ? (
+          {workbook ? (
+            <div className="min-w-0 flex-1">
+              <Select
+                value={page}
+                onValueChange={(value) => {
+                  if (value !== null) selectPage(value);
+                }}
+              >
+                <SelectTrigger aria-label="Sheet" size="xs">
+                  <SelectValue>{sheet?.name}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup>
+                  {workbook.sheets.map((item, index) => (
+                    <SelectItem key={index} value={index}>
+                      {item.name}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            </div>
+          ) : previewDocument?.navigation === "chapter" ? (
             <select
-              aria-label={workbook ? "Sheet" : "Chapter"}
+              aria-label="Chapter"
               value={page}
               onChange={(event) => selectPage(Number(event.target.value))}
               className="min-w-0 flex-1 rounded border border-input bg-background px-2 py-1 text-foreground"
             >
-              {(workbook?.sheets ?? previewDocument?.pages ?? []).map((item, index) => (
+              {previewDocument.pages.map((item, index) => (
                 <option key={index} value={index}>
-                  {"name" in item ? item.name : item.title}
+                  {item.title}
                 </option>
               ))}
             </select>
