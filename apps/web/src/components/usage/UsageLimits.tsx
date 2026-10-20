@@ -21,6 +21,7 @@ import { GaugeIcon, TrendingDownIcon, TrendingUpIcon } from "lucide-react";
 import { type ReactNode, useState } from "react";
 
 import { usePrimarySettings } from "../../hooks/useSettings";
+import { cn } from "../../lib/utils";
 import { environmentPresentations } from "../../state/presentation";
 import { useEnvironmentScope, readEnvironmentScope } from "../../state/session";
 import { serverEnvironment } from "../../state/server";
@@ -184,7 +185,7 @@ export function LimitRows({
       className={
         compact
           ? "grid grid-cols-[minmax(0,9rem)_minmax(3rem,1fr)_auto] gap-x-3 gap-y-0.5"
-          : "grid grid-cols-[minmax(0,11rem)_minmax(4rem,1fr)_minmax(7rem,auto)] gap-x-4 gap-y-1"
+          : "flex flex-col gap-3 md:grid md:grid-cols-[minmax(0,11rem)_minmax(4rem,1fr)_minmax(7rem,auto)] md:items-start md:gap-x-4 md:gap-y-1"
       }
     >
       {children}
@@ -192,34 +193,51 @@ export function LimitRows({
   );
 }
 
-/** One window across the three `LimitRows` columns: label and percent, bar, pace and reset. */
+/**
+ * One window across the three `LimitRows` columns: label and percent, bar, pace and reset.
+ * Below `md` the full layout puts the bar under the label and reset, since three columns
+ * leave a phone-width label no room.
+ */
 export function LimitRow({
   label,
   remaining,
   bar,
   pace,
   trailing,
+  compact = false,
 }: {
   readonly label: string;
   readonly remaining: number;
   readonly bar: ReactNode;
   readonly pace: LimitPace | null;
   readonly trailing: ReactNode;
+  readonly compact?: boolean;
 }) {
   return (
-    <>
-      <span className="flex min-w-0 items-center gap-2 text-xs">
+    <div
+      className={
+        compact
+          ? "contents"
+          : "grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 gap-y-1.5 md:contents"
+      }
+    >
+      <span className={cn("flex min-w-0 items-center gap-2 text-xs", !compact && "h-6")}>
         <span className="truncate text-muted-foreground">{label}</span>
         <span className="ms-auto shrink-0 font-medium text-foreground tabular-nums">
           {remaining}% left
         </span>
       </span>
-      {bar}
-      <span className="flex items-center gap-2 text-xs whitespace-nowrap text-muted-foreground tabular-nums">
+      {compact ? bar : <div className="min-w-0 max-md:col-span-full max-md:row-start-2">{bar}</div>}
+      <span
+        className={cn(
+          "flex items-center gap-2 text-xs whitespace-nowrap text-muted-foreground tabular-nums",
+          !compact && "h-6",
+        )}
+      >
         {pace ? <PaceIcon pace={pace} /> : null}
         <span className="ms-auto flex shrink-0 items-center gap-1.5">{trailing}</span>
       </span>
-    </>
+    </div>
   );
 }
 
@@ -245,6 +263,7 @@ export function LimitWindows({
           bar={<WindowBar color={color} window={window} now={now} />}
           pace={paceOf(window, now)}
           trailing={formatResetsIn(window, now) ?? ""}
+          compact={compact}
         />
       ))}
     </LimitRows>

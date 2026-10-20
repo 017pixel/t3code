@@ -432,7 +432,7 @@ function PoolWindowRow({
         trailing={
           <>
             {refill && resetsIn
-              ? `+${refill.restoresPercent}% ${resetsIn.replace("resets in ", "in ")}`
+              ? `+${refill.restoresPercent}% ${resetsIn.replace("resets in ", "in ").toLowerCase()}`
               : (resetsIn ?? "")}
             {credits ? (
               <span className="inline-flex items-center gap-0.5 font-semibold text-foreground">
