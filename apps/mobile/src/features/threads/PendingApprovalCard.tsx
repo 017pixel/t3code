@@ -1,4 +1,4 @@
-import { RequestActionButton } from "./RequestActionButton";
+import { Button } from "../../components/ui/Button";
 import { approvalRequestLabel } from "@t3tools/client-runtime/state/thread-requests";
 import { approvalCommandDisplayText } from "@t3tools/client-runtime/work-log/command-label";
 import type {
@@ -73,7 +73,7 @@ export function PendingApprovalCard(props: PendingApprovalCardProps) {
       ) : null}
       <View className="flex-row flex-wrap gap-2.5">
         {options.map((option) => (
-          <RequestActionButton
+          <Button
             key={option.decision}
             label={option.label}
             tone={
