@@ -3378,10 +3378,163 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
 
+  it.effect.each(["release-after", "cancel-after", "release-before"] as const)(
+    "keeps attachment reservations across compaction: %s boundary",
+    (outcome) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const backgrounding = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const harness = yield* makeWakeHarnessWithOptions({
+          backgroundTasks: () =>
+            Deferred.succeed(backgrounding, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
+              Effect.as(true),
+            ),
+        });
+        const document = ChatFileAttachment.make({
+          type: "file",
+          id: ChatAttachmentId.make("compacting-document"),
+          name: "compacting.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 19 * 1024 * 1024,
+        });
+        const pages = Buffer.from(
+          `%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Count 60 >> endobj\n${Array.from({ length: 60 }, (_, i) => `${i + 3} 0 obj << /Type /Page /Parent 2 0 R >> endobj`).join("\n")}\n`,
+        );
+        yield* fileSystem.writeFile(
+          path.join(harness.attachmentsDir, attachmentRelativePath(document)!),
+          Buffer.concat([
+            pages,
+            Buffer.alloc(document.sizeBytes - pages.length - 5, 32),
+            Buffer.from("%%EOF"),
+          ]),
+        );
+        const input = makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("compacting-reservation"),
+          text: "Audit with a subagent.",
+          attachments: [],
+        });
+        yield* harness.runtime.startTurn(input);
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_started",
+            task_id: "compacting-task",
+            tool_use_id: "compacting-tool",
+            description: "Audit",
+            subagent_type: "general-purpose",
+            is_backgrounded: false,
+            task_type: "local_agent",
+            prompt: "Audit.",
+            uuid: "00000000-0000-4000-8000-000000000811",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        const steer = harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: input.runId,
+          providerThread: harness.providerThread,
+          providerTurnId: idAllocator.derive.providerTurn({
+            driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+            nativeTurnId: `turn:${input.attemptId}`,
+          }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make("compacting-steer"),
+            text: "Read this PDF.",
+            attachments: [document],
+          },
+        });
+        const pending = yield* Effect.forkScoped(steer);
+        yield* Deferred.await(backgrounding);
+        assert.lengthOf(harness.offeredMessages, 1);
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "system",
+            subtype: "status",
+            status: "compacting",
+            uuid: "00000000-0000-4000-8000-000000000812",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        if (outcome === "release-before") {
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(pending);
+        }
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "system",
+            subtype: "compact_boundary",
+            compact_metadata: { trigger: "auto", pre_tokens: 1500, post_tokens: 400 },
+            uuid: "00000000-0000-4000-8000-000000000813",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        if (outcome === "cancel-after") {
+          yield* Fiber.interrupt(pending);
+          assert.isTrue(Exit.hasInterrupts(yield* Fiber.await(pending)));
+        } else if (outcome === "release-after") {
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(pending);
+        }
+        // Flush the budget update through the event stream before trying again.
+        yield* harness.offerAndWait(
+          makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000814", result: "Read." }),
+        );
+        yield* Queue.take(harness.terminalReceipts);
+        const updates = harness.events.flatMap((event) =>
+          event.type === "provider_thread.updated" ? [event.providerThread] : [],
+        );
+        for (const thread of updates) {
+          yield* decodeProviderThreadJson(yield* encodeProviderThreadJson(thread));
+        }
+        const persisted = updates.at(-1)!;
+        const usage = persisted.nativeMetadata?.claudeAttachmentBudget;
+        assert.equal(usage?.pagesUsed, outcome === "cancel-after" ? 0 : 60);
+        if (outcome === "cancel-after") assert.equal(usage?.bytesUsed, 0);
+        else assert.isAbove(usage?.bytesUsed ?? 0, 25 * 1024 * 1024);
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: persisted,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("after-compacting-reservation"),
+            text: "Read this PDF again.",
+            attachments: [document],
+            providerTurnOrdinal: 2,
+          }),
+        );
+        const delivered = harness.offeredMessages.slice(1);
+        const documents = delivered.flatMap((message) =>
+          Array.isArray(message.message.content)
+            ? message.message.content.filter((block) => block.type === "document")
+            : [],
+        );
+        assert.lengthOf(documents, 1);
+        assert.isBelow(
+          Buffer.byteLength(encodeJsonString(delivered.map((message) => message.message.content))),
+          32_000_000,
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
   const attachmentBudgetOutcomes = [
     "resume",
     "legacy",
     "compacted",
+    "preserved-segment",
+    "preserved-messages",
     "failed",
     "stopped",
     "fork-bytes",
@@ -3434,7 +3587,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             const first = harness.offeredMessages[0]?.message.content;
             assert.isArray(first);
             if (Array.isArray(first)) assert.equal(first[0]?.type, "document");
-            if (["compacted", "failed", "stopped"].includes(outcome)) {
+            if (
+              [
+                "compacted",
+                "preserved-segment",
+                "preserved-messages",
+                "failed",
+                "stopped",
+              ].includes(outcome)
+            ) {
               yield* harness.offerAndWait(
                 claudeSdkFrame({
                   type: "system",
@@ -3446,11 +3607,33 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               );
               yield* harness.offerAndWait(
                 claudeSdkFrame(
-                  outcome === "compacted"
+                  outcome === "compacted" ||
+                    outcome === "preserved-segment" ||
+                    outcome === "preserved-messages"
                     ? {
                         type: "system",
                         subtype: "compact_boundary",
-                        compact_metadata: { trigger: "auto", pre_tokens: 1500, post_tokens: 400 },
+                        compact_metadata: {
+                          trigger: "auto",
+                          pre_tokens: 1500,
+                          post_tokens: 400,
+                          ...(outcome === "preserved-segment"
+                            ? {
+                                preserved_segment: {
+                                  head_uuid: harness.promptUuid(0),
+                                  tail_uuid: harness.promptUuid(0),
+                                  anchor_uuid: "00000000-0000-4000-8000-000000000802",
+                                },
+                              }
+                            : outcome === "preserved-messages"
+                              ? {
+                                  preserved_messages: {
+                                    anchor_uuid: "00000000-0000-4000-8000-000000000802",
+                                    uuids: [harness.promptUuid(0)],
+                                  },
+                                }
+                              : {}),
+                        },
                         uuid: "00000000-0000-4000-8000-000000000802",
                         session_id: WAKE_NATIVE_SESSION,
                       }

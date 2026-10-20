@@ -1929,17 +1929,42 @@ const estimateClaudePdfPages = (bytes: Buffer): number | null => {
 const CLAUDE_ATTACHMENT_MAX_BYTES = 28 * 1024 * 1024;
 const CLAUDE_ATTACHMENT_MAX_PAGES = 100;
 
+const makeClaudeAttachmentBudget = (used?: { pagesUsed: number; bytesUsed: number }) => ({
+  committed: { pages: used?.pagesUsed ?? 0, bytes: used?.bytesUsed ?? 0 },
+  pending: { pages: 0, bytes: 0 },
+  compacting: null as { pages: number; bytes: number } | null,
+  get remainingPages() {
+    return CLAUDE_ATTACHMENT_MAX_PAGES - this.committed.pages - this.pending.pages;
+  },
+  get remainingBytes() {
+    return CLAUDE_ATTACHMENT_MAX_BYTES - this.committed.bytes - this.pending.bytes;
+  },
+});
+
 const reserveClaudePdfBudget = (
-  budget: { remainingPages: number; remainingBytes: number },
+  budget: ReturnType<typeof makeClaudeAttachmentBudget>,
   persist: Effect.Effect<void>,
 ) =>
   Effect.acquireRelease(
-    Effect.sync(() => ({ budget, pages: 0, bytes: 0, delivered: false })),
+    Effect.sync(() => ({
+      budget,
+      pages: 0,
+      bytes: 0,
+      delivered: false,
+      commit() {
+        if (this.delivered) return;
+        this.delivered = true;
+        budget.pending.pages -= this.pages;
+        budget.pending.bytes -= this.bytes;
+        budget.committed.pages += this.pages;
+        budget.committed.bytes += this.bytes;
+      },
+    })),
     (reservation) =>
       Effect.sync(() => {
         if (reservation.delivered) return;
-        budget.remainingPages += reservation.pages;
-        budget.remainingBytes += reservation.bytes;
+        budget.pending.pages -= reservation.pages;
+        budget.pending.bytes -= reservation.bytes;
       }).pipe(Effect.andThen(persist)),
   );
 
@@ -1961,7 +1986,7 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
       ...(input.uuid === undefined ? {} : { uuid: input.uuid }),
     });
     const bytes = Buffer.byteLength(encodeClaudeJson(message.message.content));
-    input.pdfReservation.budget.remainingBytes -= bytes;
+    input.pdfReservation.budget.pending.bytes += bytes;
     input.pdfReservation.bytes += bytes;
     return message;
   }
@@ -2001,7 +2026,7 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
         : [{ type: "text", text: textWithAttachmentPaths }],
     ),
   );
-  input.pdfReservation.budget.remainingBytes -= textBytes;
+  input.pdfReservation.budget.pending.bytes += textBytes;
   input.pdfReservation.bytes += textBytes;
   for (const [index, attachment] of input.attachments.entries()) {
     if (attachment.type !== "image") continue;
@@ -2034,7 +2059,7 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
     );
     const retainedBytes = 4 * Math.ceil(bytes.length / 3) + 128;
     if (retainedBytes > input.pdfReservation.budget.remainingBytes) continue;
-    input.pdfReservation.budget.remainingBytes -= retainedBytes;
+    input.pdfReservation.budget.pending.bytes += retainedBytes;
     input.pdfReservation.bytes += retainedBytes;
     const block: ClaudeUserContentBlock = {
       type: "image",
@@ -2089,13 +2114,13 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
         retainedBytes > input.pdfReservation.budget.remainingBytes
       )
         continue;
-      input.pdfReservation.budget.remainingPages -= pageCount;
+      input.pdfReservation.budget.pending.pages += pageCount;
       input.pdfReservation.pages += pageCount;
       const block: ClaudeUserContentBlock = {
         type: "document",
         source: { type: "base64", media_type: "application/pdf", data: bytes.toString("base64") },
       };
-      input.pdfReservation.budget.remainingBytes -= retainedBytes;
+      input.pdfReservation.budget.pending.bytes += retainedBytes;
       input.pdfReservation.bytes += retainedBytes;
       content.push(block);
       continue;
@@ -4184,7 +4209,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           );
         });
         const openedNativeThreads = yield* Ref.make(new Set<string>());
-        const pdfBudgets = new Map<string, { remainingPages: number; remainingBytes: number }>();
+        const pdfBudgets = new Map<string, ReturnType<typeof makeClaudeAttachmentBudget>>();
         const latestPlanByKind = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact>());
         // Claude 5 task tools edit one list per native session, across turns.
         const taskListsByNativeThread = yield* Ref.make(
@@ -4418,8 +4443,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   nativeMetadata: {
                     ...event.providerThread.nativeMetadata,
                     claudeAttachmentBudget: {
-                      bytesUsed: CLAUDE_ATTACHMENT_MAX_BYTES - budget.remainingBytes,
-                      pagesUsed: CLAUDE_ATTACHMENT_MAX_PAGES - budget.remainingPages,
+                      bytesUsed: budget.committed.bytes + budget.pending.bytes,
+                      pagesUsed: budget.committed.pages + budget.pending.pages,
                     },
                   },
                 },
@@ -7884,7 +7909,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 driver: CLAUDE_PROVIDER,
                 turnItem: context.compaction,
               });
-              if (message.compact_result !== "success") context.compaction = null;
+              if (message.compact_result !== "success") {
+                context.compaction = null;
+                const budget = pdfBudgets.get(context.nativeThreadId);
+                if (budget !== undefined) budget.compacting = null;
+              }
             }
           }
 
@@ -7924,6 +7953,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 updatedAt: now,
               } satisfies OrchestrationV2TurnItem);
             if (message.subtype === "status") {
+              const budget = pdfBudgets.get(context.nativeThreadId);
+              // Offers made while compaction runs are outside the history it
+              // removes. Pending reservations must survive its boundary too.
+              if (budget !== undefined) budget.compacting = { ...budget.committed };
               context.compaction = compaction;
               yield* emitProviderEvent({
                 type: "turn_item.updated",
@@ -7934,8 +7967,17 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             }
             const budget = pdfBudgets.get(context.nativeThreadId);
             if (budget !== undefined) {
-              budget.remainingPages = CLAUDE_ATTACHMENT_MAX_PAGES;
-              budget.remainingBytes = CLAUDE_ATTACHMENT_MAX_BYTES;
+              // Aggregate persisted usage cannot identify attachments in a
+              // preserved segment. Retain it conservatively on partial compacts.
+              if (
+                message.compact_metadata.preserved_segment === undefined &&
+                message.compact_metadata.preserved_messages === undefined
+              ) {
+                const compacted = budget.compacting ?? { ...budget.committed };
+                budget.committed.pages -= compacted.pages;
+                budget.committed.bytes -= compacted.bytes;
+              }
+              budget.compacting = null;
               yield* persistAttachmentBudget(context.nativeThreadId);
             }
             if (context.streamUsage !== null) context.streamUsage.usage = null;
@@ -9583,10 +9625,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               // Older sessions did not record retained attachments. Keep their
               // existing native-image allowance rather than disabling images.
               const used = turnInput.providerThread.nativeMetadata?.claudeAttachmentBudget;
-              pdfBudgets.set(nativeThreadId, {
-                remainingPages: CLAUDE_ATTACHMENT_MAX_PAGES - (used?.pagesUsed ?? 0),
-                remainingBytes: CLAUDE_ATTACHMENT_MAX_BYTES - (used?.bytesUsed ?? 0),
-              });
+              pdfBudgets.set(nativeThreadId, makeClaudeAttachmentBudget(used));
             }
             const pdfReservation = yield* reserveClaudePdfBudget(
               pdfBudgets.get(nativeThreadId)!,
@@ -9721,12 +9760,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               yield* Effect.uninterruptibleMask((restore) =>
                 restore(
                   querySession.query.offer(userMessage, () => {
-                    pdfReservation.delivered = true;
+                    pdfReservation.commit();
                   }),
                 ).pipe(
                   Effect.tap(() =>
                     Effect.sync(() => {
-                      pdfReservation.delivered = true;
+                      pdfReservation.commit();
                     }),
                   ),
                 ),
@@ -10043,7 +10082,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               });
             }
             const pdfReservation = yield* reserveClaudePdfBudget(
-              pdfBudgets.get(existing.nativeThreadId) ?? { remainingPages: 0, remainingBytes: 0 },
+              pdfBudgets.get(existing.nativeThreadId) ??
+                makeClaudeAttachmentBudget({
+                  pagesUsed: CLAUDE_ATTACHMENT_MAX_PAGES,
+                  bytesUsed: CLAUDE_ATTACHMENT_MAX_BYTES,
+                }),
               persistAttachmentBudget(existing.nativeThreadId),
             );
             const userMessage = yield* makeClaudeUserMessageWithAttachments({
@@ -10082,12 +10125,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             yield* Effect.uninterruptibleMask((restore) =>
               restore(
                 existing.query.offer(userMessage, () => {
-                  pdfReservation.delivered = true;
+                  pdfReservation.commit();
                 }),
               ).pipe(
                 Effect.tap(() =>
                   Effect.sync(() => {
-                    pdfReservation.delivered = true;
+                    pdfReservation.commit();
                   }),
                 ),
               ),
