@@ -285,6 +285,34 @@ describe("bounded binary previews", () => {
 });
 
 describe("large text preview recovery", () => {
+  it("scrolls within a wrapped row when the row-count track is shorter than the viewport", async () => {
+    await using screen = await render(
+      <div style={{ display: "flex", height: 400, width: 600 }}>
+        <VirtualTablePreview
+          name="one.txt"
+          count={1}
+          columns={1}
+          source
+          wrap
+          getRows={() => [["wrapped source text ".repeat(500)]]}
+        />
+      </div>,
+    );
+    const row = () => screen.container.querySelector<HTMLElement>('[data-preview-row="0"]')!;
+    const viewport = () => screen.container.querySelector<HTMLElement>('[tabindex="0"]')!;
+    await vi.waitFor(() => expect(row()?.offsetHeight).toBeGreaterThan(1000));
+    await act(() =>
+      viewport().dispatchEvent(
+        new WheelEvent("wheel", { deltaY: 150, bubbles: true, cancelable: true }),
+      ),
+    );
+    await vi.waitFor(() => {
+      const offset = viewport().getBoundingClientRect().top - row().getBoundingClientRect().top;
+      expect(offset).toBeGreaterThan(50);
+      expect(offset).toBeLessThan(300);
+    });
+  });
+
   it("rejects malformed UTF-8 bytes through the real text worker", async () => {
     const src = URL.createObjectURL(new Blob([new Uint8Array([0xe9, 10])]));
     try {
