@@ -3260,33 +3260,23 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         const key = toSessionKey(input.threadId, input.terminalId);
         yield* flushPersist(input.threadId, input.terminalId);
         const existing = yield* getSession(input.threadId, input.terminalId);
-        const persisted = yield* fileSystem
-          .exists(historyPath(input.threadId, input.terminalId))
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new TerminalHistoryError({
-                  operation: "read",
-                  threadId: input.threadId,
-                  terminalId: input.terminalId,
-                  cause,
-                }),
-            ),
-          );
-        const legacyPersisted =
-          input.terminalId === DEFAULT_TERMINAL_ID &&
-          (yield* fileSystem.exists(legacyHistoryPath(input.threadId)).pipe(
-            Effect.mapError(
-              (cause) =>
-                new TerminalHistoryError({
-                  operation: "read",
-                  threadId: input.threadId,
-                  terminalId: input.terminalId,
-                  cause,
-                }),
-            ),
-          ));
-        if (Option.isSome(existing) || persisted || legacyPersisted || closedSessionKeys.has(key)) {
+        const paths = [
+          historyPath(input.threadId, input.terminalId),
+          ...(input.terminalId === DEFAULT_TERMINAL_ID ? [legacyHistoryPath(input.threadId)] : []),
+        ];
+        const persisted = yield* Effect.forEach(paths, (path) => fileSystem.exists(path)).pipe(
+          Effect.map((existing) => existing.some(Boolean)),
+          Effect.mapError(
+            (cause) =>
+              new TerminalHistoryError({
+                operation: "read",
+                threadId: input.threadId,
+                terminalId: input.terminalId,
+                cause,
+              }),
+          ),
+        );
+        if (Option.isSome(existing) || persisted || closedSessionKeys.has(key)) {
           return yield* new TerminalAlreadyExistsError({
             threadId: input.threadId,
             terminalId: input.terminalId,
