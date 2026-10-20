@@ -249,9 +249,11 @@ export function AttachmentFilePreview(props: {
   ) : streamsText && url ? (
     <Suspense fallback={<FileSurfaceLoading />}>
       <LargeTextViewer
-        key={`${url}:${rendered}`}
+        key={`${url}:${rendered}:${revision}`}
         name={props.name}
         src={url}
+        sizeBytes={props.sizeBytes}
+        onRetry={() => setRevision((value) => value + 1)}
         delimiter={rendered ? delimiter : null}
         copyContents={copyContents}
       />

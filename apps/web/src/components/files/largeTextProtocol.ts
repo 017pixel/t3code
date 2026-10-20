@@ -3,7 +3,7 @@ export const LARGE_TEXT_MAX_ROWS = 5_000_000;
 export const LARGE_TEXT_MAX_COLUMNS = 1024;
 export const PREVIEW_PAGE_ROWS = 32;
 export type TextPreviewRequest =
-  | { type: "open"; src?: string; text?: string; delimiter: "," | "\t" | null }
+  | { type: "open"; src?: string; text?: string; sizeBytes?: number; delimiter: "," | "\t" | null }
   | { type: "page"; index: number }
   | { type: "copy" };
 export type TextPreviewResult =

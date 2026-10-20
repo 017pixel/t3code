@@ -480,3 +480,95 @@ describe("attachment HTML preview recovery", () => {
     expect(screen.container.querySelector("iframe")?.title).toBe("document.html");
   });
 });
+
+it("opens a known empty attachment even when its range response is inaccessible", async () => {
+  refresh.mockResolvedValue("https://unreachable.invalid/empty.txt");
+  await using screen = await render(
+    <AttachmentFilePreview
+      name="empty.txt"
+      mimeType="text/plain"
+      sizeBytes={0}
+      asset={{ environmentId: EnvironmentId.make("test"), attachmentId: "empty" }}
+    />,
+  );
+  await vi.waitFor(() => expect(screen.container.textContent).toContain("This file is empty."));
+});
+
+it("refreshes authorization and retries a failed streamed attachment", async () => {
+  const bad = URL.createObjectURL(new Blob(["invalid\0text"]));
+  const good = URL.createObjectURL(new Blob(["recovered text\n"]));
+  refresh.mockReset().mockResolvedValueOnce(bad).mockResolvedValue(good);
+  try {
+    await using screen = await render(
+      <AttachmentFilePreview
+        name="retry.txt"
+        mimeType="text/plain"
+        sizeBytes={2_000_000}
+        asset={{ environmentId: EnvironmentId.make("test"), attachmentId: "retry" }}
+      />,
+    );
+    await vi.waitFor(() =>
+      expect(screen.container.textContent).toContain("This file contains binary data."),
+    );
+    await act(() =>
+      screen.container.querySelector<HTMLButtonElement>('[role="alert"] button')!.click(),
+    );
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("recovered text"));
+    expect(refresh).toHaveBeenCalledTimes(2);
+  } finally {
+    URL.revokeObjectURL(bad);
+    URL.revokeObjectURL(good);
+  }
+});
+
+it.each([
+  ["custom/sheet1.xml", 250001],
+  ["/xl/custom/sheet1.bin", 250001],
+  ["custom/valid.xml", 1],
+] as const)(
+  "bounds the worksheet relationship target %s at row %i before the reader allocates its grid",
+  async (target, row) => {
+    const { default: JSZip } = await import("jszip");
+    const zip = new JSZip();
+    zip.file(
+      "xl/workbook.xml",
+      '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet" sheetId="1" r:id="rId1"/></sheets></workbook>',
+    );
+    zip.file(
+      "xl/_rels/workbook.xml.rels",
+      `<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="${target}"/></Relationships>`,
+    );
+    zip.file(
+      target.startsWith("/") ? target.slice(1) : `xl/${target}`,
+      `<worksheet><sheetData><row r="${row}"><c r="A${row}" t="inlineStr"><is><t>worksheet value</t></is></c></row></sheetData></worksheet>`,
+    );
+    const file = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
+    const src = URL.createObjectURL(file);
+    try {
+      await using screen = await render(
+        <div style={{ display: "flex", height: 400, width: 600 }}>
+          <OfficeFilePreview name="custom.xlsx" src={src} kind="xlsx" sizeBytes={file.size} />
+        </div>,
+      );
+      await vi.waitFor(
+        () =>
+          expect(screen.container.textContent).toContain(
+            row > 250000 ? "This workbook exceeds the preview limit" : "worksheet value",
+          ),
+        { timeout: 10_000 },
+      );
+    } finally {
+      URL.revokeObjectURL(src);
+    }
+  },
+);
+
+it("copies every indexed line rather than the mounted preview rows", async () => {
+  const text = Array.from({ length: 10_000 }, (_, i) => `line-${i}`).join("\n");
+  const copyContents = { current: null as (() => Promise<string>) | null };
+  await using screen = await render(
+    <LargeTextViewer name="whole.txt" text={text} delimiter={null} copyContents={copyContents} />,
+  );
+  await vi.waitFor(() => expect(screen.container.textContent).toContain("line-0"));
+  await vi.waitFor(async () => expect(await copyContents.current!()).toBe(text));
+});

@@ -61,12 +61,14 @@ async function page(index: number) {
 async function open(input: Extract<TextPreviewRequest, { type: "open" }>) {
   delimiter = input.delimiter;
   let response =
-    input.text !== undefined
-      ? new Response(new Blob([input.text]))
-      : await fetch(input.src!, {
-          headers: { Range: `bytes=0-${LARGE_TEXT_MAX_BYTES}` },
-          cache: "no-store",
-        });
+    input.sizeBytes === 0
+      ? new Response(new Blob([]))
+      : input.text !== undefined
+        ? new Response(new Blob([input.text]))
+        : await fetch(input.src!, {
+            headers: { Range: `bytes=0-${LARGE_TEXT_MAX_BYTES}` },
+            cache: "no-store",
+          });
   if (response.status === 416 && response.headers.get("content-range") === "bytes */0") {
     await response.body?.cancel();
     response = new Response(new Blob([]));

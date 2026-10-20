@@ -207,6 +207,12 @@
   ],
   "packageOverrides": [
     {
+      "name": "fast-xml-parser",
+      "version": "5.7.3",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/NaturalIntelligence/fast-xml-parser"
+    },
+    {
       "name": "worker-f",
       "version": "0.1.20",
       "sourceUrl": "https://gitlab.com/catamphetamine/worker-f",
