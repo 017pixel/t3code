@@ -1835,16 +1835,16 @@ describe("UpdateWindow", () => {
     () =>
       Effect.gen(function* () {
         const state = {
-          quietFor: Duration.minutes(15),
+          quietFor: Duration.minutes(2),
           active: [] as ReadonlyArray<ThreadId> | "unreadable",
           installing: false,
         };
         const window = yield* makeWindow(state);
         assert.isTrue(yield* window.isOpen());
 
-        state.quietFor = Duration.minutes(14);
+        state.quietFor = Duration.seconds(119);
         assert.isFalse(yield* window.isOpen());
-        state.quietFor = Duration.minutes(15);
+        state.quietFor = Duration.minutes(2);
 
         state.active = [ThreadId.make("thread:busy")];
         assert.isFalse(yield* window.isOpen());
