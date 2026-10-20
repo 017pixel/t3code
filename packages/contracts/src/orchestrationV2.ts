@@ -9,6 +9,10 @@ import {
   CheckpointId,
   CheckpointRef,
   CheckpointScopeId,
+  ClientConnectionMethod,
+  ClientDeviceType,
+  ClientOs,
+  ClientSurface,
   CommandId,
   ContextHandoffId,
   ContextTransferId,
@@ -84,6 +88,23 @@ export const OrchestrationV2CreationSource = Schema.Literals([
   "server",
 ]);
 export type OrchestrationV2CreationSource = typeof OrchestrationV2CreationSource.Type;
+
+/**
+ * The connection a user message arrived on. The server stamps it from the
+ * sending WebSocket, so agents can tell where the user is (this machine, the
+ * tailnet, T3 Connect) and give them URLs that work.
+ */
+export const OrchestrationV2MessageSentFrom = Schema.Struct({
+  surface: Schema.optional(ClientSurface),
+  os: Schema.optional(ClientOs),
+  deviceType: Schema.optional(ClientDeviceType),
+  connectionMethod: Schema.optional(ClientConnectionMethod),
+  /** The `Host` the client dialed, such as `127.0.0.1:3773` or a `*.ts.net` name. */
+  host: Schema.optional(TrimmedNonEmptyString),
+  /** The receiving server's environment label, such as the computer name. */
+  serverLabel: Schema.optional(TrimmedNonEmptyString),
+});
+export type OrchestrationV2MessageSentFrom = typeof OrchestrationV2MessageSentFrom.Type;
 
 export const OrchestrationV2ThreadHistoryOrigin = Schema.Literals(["native", "v1_import"]);
 export type OrchestrationV2ThreadHistoryOrigin = typeof OrchestrationV2ThreadHistoryOrigin.Type;
@@ -1092,6 +1113,7 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   ...OrchestrationV2CreationFields,
   scheduledTaskId: Schema.optional(ScheduledTaskId),
   senderThreadId: Schema.optional(ThreadId),
+  sentFrom: Schema.optional(OrchestrationV2MessageSentFrom),
   /**
    * The message is the script a provider-native workflow run executes, not prose. Clients show
    * the workflow's opening instead and keep the script behind a disclosure.
@@ -2787,6 +2809,8 @@ export const OrchestrationV2Command = Schema.Union([
     ...OrchestrationV2CreationFields,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
     senderThreadId: Schema.optional(ThreadId),
+    /** Set by the server for client connections; a client-sent value is replaced. */
+    sentFrom: Schema.optional(OrchestrationV2MessageSentFrom),
     commandId: CommandId,
     threadId: ThreadId,
     messageId: MessageId,

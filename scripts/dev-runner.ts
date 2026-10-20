@@ -10,6 +10,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Hash from "effect/Hash";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
@@ -580,6 +581,81 @@ interface DevRunnerCliInput {
   readonly runArgs: ReadonlyArray<string>;
 }
 
+/**
+ * Written to `<T3 home>/dev-runner.json` while the stack runs, so agents read
+ * ports and links instead of polling the log. Pairing URLs exist only with a
+ * reusable `T3CODE_DEV_AUTH_TOKEN`, which the server accepts as the startup
+ * credential; without one, mint a link with `node apps/server/src/bin.ts pair`.
+ */
+export const DevRunnerState = Schema.Struct({
+  pid: Schema.Number,
+  mode: Schema.Literals(DEV_RUNNER_MODES),
+  baseDir: Schema.String,
+  serverPort: Schema.Number,
+  webPort: Schema.NullOr(Schema.Number),
+  localUrl: Schema.NullOr(Schema.String),
+  tailnetUrl: Schema.NullOr(Schema.String),
+  localPairingUrl: Schema.NullOr(Schema.String),
+  tailnetPairingUrl: Schema.NullOr(Schema.String),
+});
+export type DevRunnerState = typeof DevRunnerState.Type;
+const encodeDevRunnerState = Schema.encodeSync(Schema.fromJsonString(DevRunnerState, { space: 2 }));
+
+export const DEV_RUNNER_STATE_FILE = "dev-runner.json";
+
+function devPairingUrl(baseUrl: string, token: string): string {
+  const url = new URL(baseUrl);
+  url.pathname = "/pair";
+  url.hash = new URLSearchParams([["token", token]]).toString();
+  return url.toString();
+}
+
+export function buildDevRunnerState(input: {
+  readonly mode: DevMode;
+  readonly pid: number;
+  readonly baseDir: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly tailnetUrl: string | undefined;
+}): DevRunnerState {
+  const hasWeb = input.mode === "dev" || input.mode === "dev:web";
+  const localUrl = hasWeb ? `http://localhost:${String(input.env.PORT)}/` : null;
+  const tailnetUrl = hasWeb ? (input.tailnetUrl ?? null) : null;
+  const token = input.env.T3CODE_DEV_AUTH_TOKEN?.trim() || undefined;
+  return {
+    pid: input.pid,
+    mode: input.mode,
+    baseDir: input.baseDir,
+    serverPort: Number(input.env.T3CODE_PORT),
+    webPort: hasWeb ? Number(input.env.PORT) : null,
+    localUrl,
+    tailnetUrl,
+    localPairingUrl: localUrl !== null && token ? devPairingUrl(localUrl, token) : null,
+    tailnetPairingUrl: tailnetUrl !== null && token ? devPairingUrl(tailnetUrl, token) : null,
+  };
+}
+
+const writeDevRunnerState = Effect.fn("dev-runner.writeDevRunnerState")(function* (
+  baseDir: string,
+  state: DevRunnerState,
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const file = path.join(baseDir, DEV_RUNNER_STATE_FILE);
+  yield* Effect.acquireRelease(
+    fileSystem.makeDirectory(baseDir, { recursive: true }).pipe(
+      Effect.andThen(
+        // Owner-only: the pairing URLs carry the reusable admin token.
+        fileSystem.writeFileString(file, `${encodeDevRunnerState(state)}\n`, { mode: 0o600 }),
+      ),
+    ),
+    () => fileSystem.remove(file, { force: true }).pipe(Effect.ignore),
+  ).pipe(
+    Effect.catch((error) =>
+      Effect.logWarning(`[dev-runner] could not write ${file}: ${error.message}`),
+    ),
+  );
+});
+
 export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput")(function* (
   input: DevRunnerCliInput,
 ) {
@@ -661,6 +737,7 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
   }
 
   const sharedWebPort = BASE_WEB_PORT + webOffset;
+  let tailnetUrl: string | undefined;
   if (input.share) {
     if (input.mode === "dev:server") {
       yield* Effect.logInfo("[dev-runner] --share has no effect for dev:server (no web server).");
@@ -717,9 +794,24 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
         if (env.T3CODE_BUNDLED_DEV === undefined) {
           env.T3CODE_BUNDLED_DEV = "1";
         }
+        tailnetUrl = shared.url;
         yield* Effect.logInfo(`[dev-runner] shared on tailnet: ${shared.url}`);
       }
     }
+  }
+
+  // The live install's home is never written to; only worktree or explicit homes get the file.
+  if (baseDir !== (yield* DEFAULT_T3_HOME)) {
+    yield* writeDevRunnerState(
+      baseDir,
+      buildDevRunnerState({
+        mode: input.mode,
+        pid: process.pid,
+        baseDir,
+        env,
+        tailnetUrl,
+      }),
+    );
   }
 
   const args = [...MODE_ARGS[input.mode], ...input.runArgs];

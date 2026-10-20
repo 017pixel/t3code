@@ -53,6 +53,7 @@ import {
 } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import { formatSentFromContext } from "./sentFromContext.ts";
 import {
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
@@ -954,10 +955,15 @@ export const layer: Layer.Layer<
       const routableSubagents = projection.subagents.filter((subagent) =>
         RunExecutionService.canRouteRelatedSubagent(subagent.status),
       );
-      const userText = projectComposerContextForProvider({
+      const promptText = projectComposerContextForProvider({
         text: message.text,
         records: message.context?.records ?? [],
       });
+      // Adapters run slash commands (`/compact`, skills) only from the start of the text.
+      const userText =
+        message.sentFrom === undefined || promptText.trimStart().startsWith("/")
+          ? promptText
+          : `${formatSentFromContext(message.sentFrom)}\n\n${promptText}`;
       // Delivered once: this run's provider turn marks the work as told. A
       // restart continuation is prompted by its own text or resumes natively.
       const noteContinuation = isRestartNoteContinuation(

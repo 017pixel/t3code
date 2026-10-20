@@ -26,7 +26,7 @@ import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import { Headers } from "effect/http";
+import { Headers, HttpServerRequest } from "effect/http";
 import { RpcGroup, RpcMessage, RpcServer } from "effect/rpc";
 import { ChildProcessSpawner } from "effect/process";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -117,6 +117,7 @@ import * as ProjectService from "./project/ProjectService.ts";
 import {
   hasCompatibleOrchestrationProtocol,
   layerWsRpc,
+  readMessageSentFrom,
   resolveAvailableEditorsForConfig,
   shouldUseBoundedThreadSnapshot,
   subscribeOrchestrationV2Shell,
@@ -143,6 +144,21 @@ it("keeps full thread snapshot fallback unless the client opts into bounded hist
   assert.isFalse(shouldUseBoundedThreadSnapshot({}));
   assert.isFalse(shouldUseBoundedThreadSnapshot({ acceptBoundedSnapshot: false }));
   assert.isTrue(shouldUseBoundedThreadSnapshot({ acceptBoundedSnapshot: true }));
+});
+
+it("records the dialed host and drops unknown client values in sentFrom", () => {
+  const request = HttpServerRequest.fromWeb(
+    new Request(
+      "http://127.0.0.1:3773/ws?clientSurface=mobile&clientOs=iOS&clientDeviceType=unknown&connectionMethod=relay",
+      { headers: { host: "box.example.ts.net:3773" } },
+    ),
+  );
+  assert.deepEqual(readMessageSentFrom(request), {
+    surface: "mobile",
+    os: "iOS",
+    connectionMethod: "relay",
+    host: "box.example.ts.net:3773",
+  });
 });
 
 it.effect("does not block server config when editor discovery never resolves", () =>
@@ -619,6 +635,7 @@ it.effect(
               method: "browser-session-cookie",
               scopes: [],
             },
+            {},
             {},
             {},
             yield* PreviewAutomationBroker.PreviewAutomationBroker,

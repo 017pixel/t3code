@@ -9,6 +9,7 @@ import {
   type ModelSelection,
   type OrchestrationV2Command,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2MessageSentFrom,
   type OrchestrationV2RunStatus,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
@@ -205,6 +206,7 @@ export type OrchestratorFixtureInputStep =
       readonly type: "message";
       readonly text: string;
       readonly attachments?: ReadonlyArray<ChatAttachment>;
+      readonly sentFrom?: OrchestrationV2MessageSentFrom;
     }
   | {
       readonly type: "queue_message";
@@ -466,6 +468,7 @@ function dispatchMessageCommand(input: {
   readonly messageId: MessageId;
   readonly text: string;
   readonly attachments?: ReadonlyArray<ChatAttachment>;
+  readonly sentFrom?: OrchestrationV2MessageSentFrom;
   readonly createdBy?: Extract<
     OrchestrationV2Command,
     { readonly type: "message.dispatch" }
@@ -488,6 +491,7 @@ function dispatchMessageCommand(input: {
     messageId: input.messageId,
     text: input.text,
     attachments: [...(input.attachments ?? [])],
+    ...(input.sentFrom === undefined ? {} : { sentFrom: input.sentFrom }),
     modelSelection: input.modelSelection,
     dispatchMode: input.dispatchMode ?? { type: "start_immediately" },
   };
@@ -600,6 +604,7 @@ export function materializeFixtureInput(input: {
                 }),
                 text: step.text,
                 ...(step.attachments === undefined ? {} : { attachments: step.attachments }),
+                ...(step.sentFrom === undefined ? {} : { sentFrom: step.sentFrom }),
               }),
               shouldRunInBackground ? { await: false, key } : undefined,
             );
