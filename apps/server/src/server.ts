@@ -149,6 +149,7 @@ import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts"
 import {
   MANAGED_TUNNEL_FIRST_REGISTRATION_JITTER,
   MANAGED_TUNNEL_RECOVERY_COOLDOWN,
+  MANAGED_TUNNEL_RECOVERY_MAX_RETRY_DELAY,
   managedTunnelStartupAction,
   retryManagedTunnelRegistration,
 } from "./cloud/managedTunnelStartup.ts";
@@ -878,7 +879,9 @@ const layerMakeServer = Layer.unwrap(
                       error._tag !== "CloudLinkEndpointUnavailableError",
                     schedule: Schedule.exponential("1 second").pipe(
                       Schedule.modifyDelay(({ duration }) =>
-                        Effect.succeed(Duration.min(duration, Duration.seconds(30))),
+                        Effect.succeed(
+                          Duration.min(duration, MANAGED_TUNNEL_RECOVERY_MAX_RETRY_DELAY),
+                        ),
                       ),
                       Schedule.jittered,
                     ),

@@ -71,6 +71,11 @@ export const retryManagedTunnelRegistration = <A, E, R>(
 // turn into a fleet-wide request storm.
 export const MANAGED_TUNNEL_RECOVERY_COOLDOWN = Duration.minutes(2);
 
+// Recovery retries until it succeeds, so this cap sets how hard every affected
+// host hits the relay during an outage. Each attempt also spends calls from
+// the relay's shared Cloudflare API budget, which slows recovery for everyone.
+export const MANAGED_TUNNEL_RECOVERY_MAX_RETRY_DELAY = Duration.minutes(5);
+
 // Existing hosts register on their first boot after an upgrade, and desktop
 // auto-update delivers that boot to many hosts at once. Spread the first
 // registration so the relay and Cloudflare see a ramp instead of a spike.
