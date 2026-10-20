@@ -76,6 +76,7 @@ function* paragraphs(node: XmlNode): Generator<TextPart, void> {
   if (["script", "style", "binary-data"].includes(node.name)) return;
   for (const child of node.children) {
     if (typeof child === "string") yield child;
+    else if (["br", "line-break"].includes(child.name)) yield "\n";
     else if (["tbl", "table"].includes(child.name)) yield* table(child);
     else if (["p", "h"].includes(child.name) || /^h[1-6]$/.test(child.name)) {
       const style = all(child, "pStyle").next().value?.attrs.val ?? "";
@@ -99,16 +100,26 @@ function* inCell(parts: Iterable<TextPart>): Generator<TextPart, void> {
   yield* parts;
   yield CELL_END;
 }
+function hasCellText(cell: XmlNode): boolean {
+  if (cell.attrs.value) return true;
+  for (const part of text(cell)) if (part) return true;
+  return false;
+}
 function* table(node: XmlNode): Generator<TextPart, void> {
   let rowCount = 0;
   for (const row of all(node, ["tr", "table-row"])) {
+    const cells = children(row).filter((cell) =>
+      ["tc", "table-cell", "covered-table-cell", "td", "th"].includes(cell.name),
+    );
+    // ODS writers pad sheets with repeated empty rows and trailing cells.
+    while (cells.length && !hasCellText(cells.at(-1)!)) cells.pop();
+    if (!cells.length) continue;
     const repeat = Math.min(10_000, Number(row.attrs["number-rows-repeated"]) || 1);
     rowCount += repeat;
     if (rowCount > 10_000) throw new Error("Row limit");
     for (let index = 0; index < repeat; index++) {
       let column = 0;
-      for (const cell of children(row)) {
-        if (!["tc", "table-cell", "covered-table-cell", "td", "th"].includes(cell.name)) continue;
+      for (const cell of cells) {
         const count = Math.min(512, Number(cell.attrs["number-columns-repeated"]) || 1);
         if (column + count > 512) throw new Error("Column limit");
         for (let i = 0; i < count; i++) {
@@ -237,6 +248,7 @@ function* rtf(source: string): Generator<string, void> {
   let fallback = 0;
   for (let i = 0; i < source.length; i++) {
     const char = source[i]!;
+    if (char === "{" || char === "}") fallback = 0;
     if (char === "{") {
       stack.push({ ...state });
       if (stack.length > 128) throw new Error("RTF depth limit");
@@ -254,6 +266,15 @@ function* rtf(source: string): Generator<string, void> {
         i += word[0].length;
         const control = word[1]!;
         const value = Number(word[2]);
+        if (control === "bin") {
+          if (!Number.isSafeInteger(value) || value < 0)
+            throw new Error("Invalid RTF binary length");
+          i += value;
+        }
+        if (fallback) {
+          fallback--;
+          continue;
+        }
         if (
           [
             "fonttbl",
@@ -273,10 +294,6 @@ function* rtf(source: string): Generator<string, void> {
           if (value !== 874 && (value < 1250 || value > 1258))
             throw new Error("Unsupported RTF code page");
           state.decoder = new TextDecoder(`windows-${value}`, { fatal: true });
-        } else if (control === "bin") {
-          if (!Number.isSafeInteger(value) || value < 0)
-            throw new Error("Invalid RTF binary length");
-          i += value;
         } else if (control === "uc") state.uc = Math.max(0, Math.min(16, value));
         else if (control === "u" && !state.skip) {
           yield String.fromCharCode(value < 0 ? value + 65536 : value);
@@ -285,8 +302,8 @@ function* rtf(source: string): Generator<string, void> {
         else if (!state.skip && ["tab", "cell"].includes(control)) yield "\t";
       } else {
         i++;
-        if (rest[0] === "*") state.skip = true;
-        else if (fallback) fallback--;
+        if (fallback) fallback--;
+        else if (rest[0] === "*") state.skip = true;
         else if (!state.skip && ["\\", "{", "}"].includes(rest[0]!)) yield rest[0]!;
         else if (!state.skip && rest[0] === "~") yield " ";
       }

@@ -5,6 +5,9 @@ import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import { vi } from "vite-plus/test";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -32,6 +35,71 @@ const attachment = {
   sizeBytes: 4,
 };
 describe("question answer paths", () => {
+  it.effect("keeps unrelated files and cached text available during document extraction", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const path = NodePath.join(config.attachmentsDir, "blocked.rtf");
+      const cached = NodePath.join(config.attachmentsDir, "cached.rtf");
+      NodeFS.writeFileSync(path, String.raw`{\rtf1 Available}`);
+      NodeFS.writeFileSync(cached + ".txt", "Cached text");
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let reads = 0;
+      yield* Effect.gen(function* () {
+        const documents = yield* DocumentText.DocumentText;
+        const extraction = yield* documents.ensure(path).pipe(Effect.forkChild);
+        yield* Deferred.await(started);
+        const duplicate = yield* documents.ensure(path).pipe(Effect.forkChild);
+        expect(yield* documents.ensure(path + ".png")).toBeUndefined();
+        expect(yield* documents.ensure(path + ".pdf")).toBeUndefined();
+        expect(yield* documents.ensure(cached)).toBe(cached + ".txt");
+        expect(NodeFS.readFileSync(cached + ".txt", "utf8")).toBe("Cached text");
+        yield* Deferred.succeed(release, undefined);
+        expect(yield* Fiber.join(extraction)).toBe(path + ".txt");
+        expect(yield* Fiber.join(duplicate)).toBe(path + ".txt");
+        expect(reads).toBe(1);
+        expect(NodeFS.readFileSync(path + ".txt", "utf8")).toBe("Available");
+      }).pipe(
+        Effect.provide(Layer.fresh(DocumentText.layer)),
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          stat: (file) =>
+            file === path
+              ? Effect.gen(function* () {
+                  reads++;
+                  yield* Deferred.succeed(started, undefined);
+                  yield* Deferred.await(release);
+                  return yield* fs.stat(file);
+                })
+              : fs.stat(file),
+        }),
+      );
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect.each([
+    ["control word", String.raw`{\rtf1\ansi A\u9\tab X}`, "A\tX"],
+    ["group close", String.raw`{\rtf1\ansi{\u945}Z}`, "αZ"],
+    ["group open", String.raw`{\rtf1\ansi\u945{Z}}`, "αZ"],
+    ["hex byte", String.raw`{\rtf1\ansi\u945\'3fZ}`, "αZ"],
+    ["escaped symbol", String.raw`{\rtf1\ansi\u945\{Z}`, "αZ"],
+    ["destination symbol", String.raw`{\rtf1\ansi\u945\*Z}`, "αZ"],
+    ["multiple units", String.raw`{\rtf1\ansi\uc4\u945?\tab\'3f\~Z}`, "αZ"],
+    ["binary unit", String.raw`{\rtf1\ansi\u945\bin3 abcZ}`, "αZ"],
+    ["no fallback", String.raw`{\rtf1\ansi\uc0\u945Z}`, "αZ"],
+    ["scoped count", String.raw`{\rtf1\ansi{\uc2\u945??}\u946?Z}`, "αβZ"],
+  ] as const)("skips RTF Unicode fallback units: %s", ([name, source, expected]) =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const path = NodePath.join(config.attachmentsDir, `${name}.rtf`);
+      NodeFS.writeFileSync(path, source);
+      expect(yield* Effect.promise(() => extractDocumentText(path, ".rtf"))).toBe(expected);
+      expect(yield* (yield* DocumentText.DocumentText).ensure(path)).toBe(path + ".txt");
+      expect(NodeFS.readFileSync(path + ".txt", "utf8")).toBe(expected);
+    }).pipe(Effect.provide(layer)),
+  );
+
   it.effect.each([false, true])("limits the child heap for standalone=%s", (standalone) =>
     Effect.acquireUseRelease(
       Effect.promise(async () => {
@@ -281,6 +349,26 @@ describe("question answer paths", () => {
           ext: "ods",
           bounded: true,
           parts: {
+            "content.xml":
+              '<office:document><table:table table:name="Padded rows"><table:table-row><table:table-cell><text:p>Left</text:p></table:table-cell><table:table-cell table:number-columns-repeated="2"/><table:table-cell><text:p>Right</text:p></table:table-cell></table:table-row><table:table-row table:number-rows-repeated="1048575"><table:table-cell/></table:table-row></table:table></office:document>',
+          },
+          expected: ["## Sheet: Padded rows", "Left\t\t\tRight"],
+          absent: ["[Extracted text truncated"],
+        },
+        {
+          ext: "ods",
+          bounded: true,
+          parts: {
+            "content.xml":
+              '<office:document><table:table table:name="Padded"><table:table-row><table:table-cell><text:p>Populated</text:p></table:table-cell><table:table-cell table:number-columns-repeated="16383"/></table:table-row><table:table-row table:number-rows-repeated="1048575"><table:table-cell table:number-columns-repeated="16384"><text:p/></table:table-cell></table:table-row></table:table></office:document>',
+          },
+          expected: ["## Sheet: Padded", "Populated"],
+          absent: ["[Extracted text truncated", "\t"],
+        },
+        {
+          ext: "ods",
+          bounded: true,
+          parts: {
             "content.xml": `<office:document><table:table table:name="Repeated"><table:table-row><table:table-cell table:number-columns-repeated="512"><text:p>Lead ${"a".repeat(600_000)} Tail</text:p></table:table-cell></table:table-row></table:table></office:document>`,
           },
           expected: [
@@ -393,7 +481,7 @@ describe("question answer paths", () => {
             "OEBPS/a.xhtml":
               '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html><body><p>Last chapter</p><p>Price <s>10</s> 8</p></body></html>',
             "OEBPS/b.xhtml":
-              "<!DOCTYPE html><html><body><h1>First chapter</h1><p>Larkspur</p><div>Direct div<section>Direct section<li>Direct item <em>emphasis</em> trailing</li></section></div><table><thead><tr><th>Heading</th><th>Total</th></tr></thead><tbody><tr><td>Important value</td><td>731</td></tr></tbody></table></body></html>",
+              "<!DOCTYPE html><html><body><h1>First chapter</h1><p>Larkspur</p><div>Direct div<section>Direct section<li>Direct item <em>emphasis</em> trailing</li></section></div><div>Account: A<br/>Balance: 731<line-break/>Currency: USD</div><table><thead><tr><th>Heading</th><th>Total</th></tr></thead><tbody><tr><td>Important value</td><td>731</td></tr></tbody></table></body></html>",
           },
           expected: [
             "## Chapter 1",
@@ -402,6 +490,7 @@ describe("question answer paths", () => {
             "Direct div",
             "Direct section",
             "Direct item emphasis trailing",
+            "Account: A\nBalance: 731\nCurrency: USD",
             "Heading\tTotal",
             "Important value\t731",
             "## Chapter 2",
