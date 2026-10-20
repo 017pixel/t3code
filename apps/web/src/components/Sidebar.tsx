@@ -1457,14 +1457,16 @@ const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHeader(prop
           </span>
         ) : null}
       </button>
-      <button
-        type="button"
-        aria-label={`New thread in ${group.displayName}`}
-        onClick={() => props.onNewThread(group)}
-        className="absolute inset-y-0 right-1 my-auto inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity outline-none hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring group-hover/project-folder:opacity-100 pointer-coarse:opacity-100"
-      >
-        <SquarePenIcon aria-hidden className="size-3.5" />
-      </button>
+      <span className="absolute inset-y-0 right-1 flex items-center opacity-0 transition-opacity focus-within:opacity-100 group-hover/project-folder:opacity-100 pointer-coarse:opacity-100">
+        <Button
+          size="icon-xs"
+          variant="ghost-muted"
+          aria-label={`New thread in ${group.displayName}`}
+          onClick={() => props.onNewThread(group)}
+        >
+          <SquarePenIcon aria-hidden />
+        </Button>
+      </span>
     </li>
   );
 });
