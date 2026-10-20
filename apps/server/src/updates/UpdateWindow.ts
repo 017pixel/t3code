@@ -11,11 +11,11 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import * as RestartWork from "./RestartWork.ts";
 
 /** How long every client must be untouched before an update may run. */
-const QUIET_PERIOD = Duration.minutes(15);
+const QUIET_PERIOD = Duration.minutes(2);
 
 /**
  * Decides when a background update may replace something without anyone
- * noticing: no client was used for 15 minutes, no run is active, and no
+ * noticing: no client was used for 2 minutes, no run is active, and no
  * provider installer is running on this host. A server restart also waits for
  * restart-sensitive work and busy terminals, which an install does not touch.
  */
