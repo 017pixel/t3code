@@ -2898,7 +2898,6 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             });
             const buffered = context.pendingSubagentNotifications.get(childSessionId) ?? [];
             context.pendingSubagentNotifications.delete(childSessionId);
-            const rootSessionId = yield* Ref.get(activeSessionId);
             yield* Effect.forEach(
               buffered,
               (notification) => handleSubagentSessionUpdate(context, notification),
