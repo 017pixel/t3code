@@ -431,7 +431,7 @@ async function* document(path: string, extension: string): AsyncGenerator<TextPa
             return !!raw && !!populatedStrings[Number(raw)];
           }
           if (cell.attrs.t === "inlineStr") return hasCellText(cell);
-          if (value) return hasCellText(value);
+          if (value && hasCellText(value)) return true;
           for (const formula of all(cell, "f")) if (hasCellText(formula)) return true;
           return false;
         };
@@ -465,13 +465,13 @@ async function* document(path: string, extension: string): AsyncGenerator<TextPa
               if (shared) yield* inCell(text(shared));
             } else if (cell.attrs.t === "inlineStr") yield* inCell(text(cell));
             else {
-              if (value) yield* inCell(text(value));
+              if (value && hasCellText(value)) yield* inCell(text(value));
               else for (const formula of all(cell, "f")) yield* inCell(text(formula));
               const formatId = formats[Number(cell.attrs.s ?? 0)]?.attrs.numFmtId;
               const format = formatId ? customFormats.get(formatId) : undefined;
               if (
                 (cell.attrs.t === undefined || cell.attrs.t === "n") &&
-                raw &&
+                raw.trim() &&
                 formatId &&
                 formatId !== "0"
               )
@@ -492,11 +492,33 @@ async function* document(path: string, extension: string): AsyncGenerator<TextPa
           skip(`slide relationship ${index}`);
           continue;
         }
-        yield* paragraphs(
-          read(
-            target.startsWith("/") ? target.slice(1) : NodePath.posix.normalize(`ppt/${target}`),
-          ),
+        const name = target.startsWith("/")
+          ? target.slice(1)
+          : NodePath.posix.normalize(`ppt/${target}`);
+        yield* paragraphs(read(name));
+        const slideRels = NodePath.posix.join(
+          NodePath.posix.dirname(name),
+          "_rels",
+          `${NodePath.posix.basename(name)}.rels`,
         );
+        if (!files.has(slideRels)) continue;
+        for (const rel of all(read(slideRels), "Relationship")) {
+          const target = rel.attrs.Target;
+          if (
+            !rel.attrs.Type?.endsWith("/notesSlide") ||
+            rel.attrs.TargetMode === "External" ||
+            !target
+          )
+            continue;
+          yield "Notes:\n";
+          yield* paragraphs(
+            read(
+              target.startsWith("/")
+                ? target.slice(1)
+                : NodePath.posix.join(NodePath.posix.dirname(name), target),
+            ),
+          );
+        }
       }
     } else if (extension === ".epub") {
       const rootfile = all(read("META-INF/container.xml"), "rootfile").next().value?.attrs[

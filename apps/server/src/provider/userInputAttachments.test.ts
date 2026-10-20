@@ -402,6 +402,23 @@ describe("question answer paths", () => {
         },
         {
           ext: "xlsx",
+          bounded: true,
+          parts: {
+            "xl/workbook.xml": '<workbook><sheet name="Formulas" r:id="a"/></workbook>',
+            "xl/_rels/workbook.xml.rels":
+              '<Relationships><Relationship Id="a" Target="worksheets/a.xml"/></Relationships>',
+            "xl/styles.xml": '<styleSheet><cellXfs><xf numFmtId="9"/></cellXfs></styleSheet>',
+            "xl/worksheets/a.xml":
+              "<worksheet><row><c><f>SUM(11,22)</f><v/></c></row><row><c><f>SUM(33,44)</f><v> \n </v></c></row><row><c><f>SUM(55,66)</f></c></row><row><c><f>SUM(11,22)</f><v>33</v></c><c><f>SUM(0,0)</f><v>0</v></c></row></worksheet>",
+          },
+          expected: [
+            "SUM(11,22)\nSUM(33,44)\nSUM(55,66)",
+            "33 [Excel numFmtId=9; date system 1900]\t0 [Excel numFmtId=9; date system 1900]",
+          ],
+          absent: ["SUM(0,0)", "[Extracted text truncated"],
+        },
+        {
+          ext: "xlsx",
           parts: {
             "xl/workbook.xml":
               '<workbook><sheets><sheet name="Inventory" r:id="a"/><sheet name="Budget" r:id="b"/></sheets></workbook>',
@@ -458,6 +475,7 @@ describe("question answer paths", () => {
         },
         {
           ext: "pptx",
+          bounded: true,
           parts: {
             "ppt/presentation.xml":
               '<p:presentation><p:sldIdLst><p:sldId id="1" r:id="b"/><p:sldId id="2" r:id="a"/></p:sldIdLst></p:presentation>',
@@ -465,8 +483,63 @@ describe("question answer paths", () => {
               '<Relationships><Relationship Id="a" Target="slides/slide1.xml"/><Relationship Id="b" Target="slides/slide2.xml"/></Relationships>',
             "ppt/slides/slide1.xml": "<p:sld><a:p><a:r><a:t>Departure</a:t></a:r></a:p></p:sld>",
             "ppt/slides/slide2.xml": "<p:sld><a:p><a:r><a:t>Juniper Pier</a:t></a:r></a:p></p:sld>",
+            "ppt/slides/_rels/slide2.xml.rels":
+              '<Relationships><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../notesSlides/ignored.xml"/><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" TargetMode="External" Target="https://example.com/notes.xml"/><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notes7.xml"/></Relationships>',
+            "ppt/slides/_rels/slide1.xml.rels":
+              '<Relationships><Relationship Type="http://purl.oclc.org/ooxml/officeDocument/relationships/notesSlide" Target="/ppt/notesSlides/notes3.xml"/></Relationships>',
+            "ppt/notesSlides/notes7.xml":
+              "<p:notes><a:p><a:r><a:t>evacuation code ORCHID-81</a:t></a:r></a:p></p:notes>",
+            "ppt/notesSlides/notes3.xml":
+              "<p:notes><a:p><a:r><a:t>Board at gate 4</a:t></a:r></a:p></p:notes>",
+            "ppt/notesSlides/ignored.xml": "<p:notes><a:p>Unrelated notes</a:p></p:notes>",
           },
-          expected: ["## Slide 1", "Juniper Pier", "## Slide 2", "Departure"],
+          expected: [
+            "## Slide 1",
+            "Juniper Pier\nNotes:\nevacuation code ORCHID-81",
+            "## Slide 2",
+            "Departure\nNotes:\nBoard at gate 4",
+          ],
+          absent: ["Unrelated notes", "[Skipped document part", "[Extracted text truncated"],
+        },
+        ...[false, true].map((missing) => ({
+          ext: "pptx",
+          bounded: true,
+          parts: {
+            "ppt/presentation.xml": '<presentation><sldId r:id="a"/></presentation>',
+            "ppt/_rels/presentation.xml.rels":
+              '<Relationships><Relationship Id="a" Target="slides/a.xml"/></Relationships>',
+            "ppt/slides/a.xml": "<slide><p>Slide text</p></slide>",
+            "ppt/slides/_rels/a.xml.rels": `<Relationships><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/${missing ? "missing" : "bad"}.xml"/></Relationships>`,
+            "ppt/notesSlides/bad.xml": "<notes><p>Discard broken notes</notes>",
+          },
+          expected: [
+            "Slide text",
+            `[Skipped document part: ppt/notesSlides/${missing ? "missing" : "bad"}.xml (missing or invalid XML).]`,
+          ],
+          absent: ["Discard broken notes", "[Extracted text truncated"],
+        })),
+        {
+          ext: "pptx",
+          bounded: true,
+          parts: {
+            "ppt/presentation.xml":
+              '<presentation><sldId r:id="a"/><sldId r:id="b"/></presentation>',
+            "ppt/_rels/presentation.xml.rels":
+              '<Relationships><Relationship Id="a" Target="slides/a.xml"/><Relationship Id="b" Target="slides/b.xml"/></Relationships>',
+            "ppt/slides/a.xml": `<slide><p>${"A".repeat(600_000)}</p></slide>`,
+            "ppt/slides/b.xml": "<slide><p>Unneeded slide</p></slide>",
+            "ppt/slides/_rels/a.xml.rels":
+              '<Relationships><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/a.xml"/></Relationships>',
+            "ppt/notesSlides/a.xml": `<notes><p>evacuation code ORCHID-81 ${"B".repeat(600_000)} Unneeded notes</p></notes>`,
+          },
+          expected: [
+            "## Slide 1",
+            "A".repeat(32),
+            "Notes:\nevacuation code ORCHID-81",
+            "B".repeat(32),
+            "[Extracted text truncated at document extraction limits.]",
+          ],
+          absent: ["Unneeded notes", "Unneeded slide", "## Slide 2"],
         },
         {
           ext: "odt",
