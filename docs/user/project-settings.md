@@ -68,6 +68,9 @@ list by environment or project. Each task runs on the environment you choose,
 using its project, model, and workspace settings. Fixed-time schedules use that
 environment's time zone, which may differ from your phone's.
 
+Deleting a thread also deletes tasks that post into that thread. Tasks that start
+a new thread on each run survive deletion of their previous threads.
+
 You can edit, pause, resume, run immediately, or delete a task from the list.
 Webhook tasks only run when their URL is called, so they can't be run
 immediately.
@@ -105,6 +108,15 @@ same secret in the repository's webhook settings with content type
 `application/json`. Requests without a valid signature are rejected. Set this
 up on desktop or web; mobile keeps an existing signature check but can't turn
 one on.
+
+To run only for some requests, add **Filters**. Each one tests a value named
+like a placeholder, without the braces, such as `headers.x-github-event` equals
+`pull_request` or `body.action` is one of `opened, reopened`. A task runs only
+when every filter matches; other requests are answered normally, logged as
+**Filtered** with the first filter that failed, and start nothing. Values
+compare as text, and a value that is an object or a list only passes
+**exists**. Separate **is one of** values with commas; a value can't contain
+a comma or start or end with a space.
 
 On desktop and web, pick **Deliveries** from a task's menu to see recent
 requests and the prompt each one produced.

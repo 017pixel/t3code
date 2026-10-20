@@ -7,6 +7,7 @@ import {
 import {
   markdownWithFileEmbeds,
   markdownWithHtml,
+  markdownWithInlineFileLinks,
   markdownWithTableBreaks,
 } from "../lib/markdownDocument";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
@@ -63,6 +64,15 @@ function enrichedStyle(
   };
   return {
     paragraph: body,
+    math: {
+      fontSize: style.fontSize,
+      color: style.color,
+      backgroundColor: "transparent",
+      padding: 8,
+      marginTop: 4,
+      marginBottom: 12,
+    },
+    inlineMath: { color: style.color },
     h1: heading(1),
     h2: heading(2),
     h3: heading(3),
@@ -144,14 +154,17 @@ function enrichedStyle(
 
 export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
   const { renderImage, resolveImageSource, fileEmbedLabel } = props;
+  const { themeAppearance, mathRenderingEnabled } = useAppearancePreferences();
   const { markdown, fileHrefs } = useMemo(() => {
-    const content = markdownWithHtml(props.markdown);
+    const content = markdownWithInlineFileLinks(
+      markdownWithHtml(props.markdown),
+      ENRICHED_INLINE_FILE_LINK_REGEX,
+    );
     const files = fileEmbedLabel
       ? markdownWithFileEmbeds(content, fileEmbedLabel)
       : { markdown: content, fileHrefs: new Set<string>() };
     return { ...files, markdown: markdownWithTableBreaks(files.markdown) };
   }, [props.markdown, fileEmbedLabel]);
-  const { themeAppearance } = useAppearancePreferences();
   const [documentAssets, setDocumentAssets] = useState<DocumentAssetsEvent["assets"]>([]);
   const onDocumentAssets = useCallback(({ assets }: DocumentAssetsEvent) => {
     setDocumentAssets((previous) =>
@@ -180,7 +193,6 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
   const linkRecognition = useMemo(
     () => ({
       text: enrichedSkillLinkRegex(props.skills) ?? undefined,
-      inlineCode: ENRICHED_INLINE_FILE_LINK_REGEX,
     }),
     [props.skills],
   );
@@ -324,7 +336,7 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
           selectionColor={props.textStyle.selectionColor}
           selectionHandleColor={props.textStyle.selectionHandleColor}
           md4cFlags={{
-            latexMath: false,
+            latexMath: mathRenderingEnabled,
             hardSoftBreaks: props.preserveSoftBreaks ?? false,
             admonitions: true,
           }}
