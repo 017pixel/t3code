@@ -1,7 +1,7 @@
 import DocumentPages, { sanitizeDocumentHtml } from "./DocumentPages";
 import { act, render, stubGlobal, type Screen } from "../../../test/render";
 import "~/index.css";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 
@@ -907,6 +907,38 @@ it("opens a known empty attachment even when its range response is inaccessible"
   );
   await vi.waitFor(() => expect(screen.container.textContent).toContain("This file is empty."));
 });
+
+it.each(["draft", "thread"] as const)(
+  "reads an unknown-size %s workspace file instead of treating it as empty",
+  async (source) => {
+    refresh.mockResolvedValue("https://example.test/binary.txt");
+    using _fetch = stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("invalid\0text")),
+    );
+    await using screen = await render(
+      <AttachmentFilePreview
+        name="binary.txt"
+        mimeType="application/octet-stream"
+        sizeBytes={0}
+        asset={{
+          environmentId: EnvironmentId.make("test"),
+          resource:
+            source === "draft"
+              ? { _tag: "draft-workspace-file", cwd: "/repo", path: "/repo/binary.txt" }
+              : { _tag: "media-file", threadId: ThreadId.make("test"), path: "/repo/binary.txt" },
+        }}
+      />,
+    );
+    await vi.waitFor(() =>
+      expect(screen.container.textContent).toContain(
+        "This file contains binary data and cannot be shown as text.",
+      ),
+    );
+    expect(fetch).toHaveBeenCalled();
+    expect(screen.container.textContent).not.toContain("This file is empty.");
+  },
+);
 
 it("refreshes authorization and retries a failed streamed attachment", async () => {
   const bad = URL.createObjectURL(new Blob(["invalid\0text"]));
