@@ -1,3 +1,4 @@
+import { XMLParser } from "fast-xml-parser";
 import JSZip from "jszip";
 import { boundedZip } from "./boundedZip";
 import type { PresentationHandle, SlidePrimitive } from "@betteroffice/pptx";
@@ -129,28 +130,69 @@ async function handle(input: OfficeWorkerRequest) {
     reply({ type: "docx", bytes });
   } else if (input.kind === "xlsx") {
     const { default: readXlsxFile } = await import("read-excel-file/universal");
+    const sheetIds = new Set<string>();
+    const targets = new Map<string, string>();
+    const scan = (xml: string, visit: (name: string, attrs: Record<string, string>) => void) => {
+      if (/<!\s*(DOCTYPE|ENTITY)/i.test(xml)) throw new Error("Workbook DTDs are not supported.");
+      new XMLParser({
+        ignoreAttributes: false,
+        attributeNamePrefix: "",
+        parseAttributeValue: false,
+        updateTag(name, _path, attrs) {
+          visit(name.split(":").at(-1)!, attrs);
+          return name;
+        },
+      }).parse(xml);
+    };
+    scan(await archive.file("xl/workbook.xml")!.async("string"), (name, attrs) => {
+      if (name === "sheet" && attrs["r:id"]) sheetIds.add(attrs["r:id"]);
+    });
+    const relationships = archive.file("xl/_rels/workbook.xml.rels");
+    if (!relationships) throw new Error("This workbook has no worksheet relationships.");
+    scan(await relationships.async("string"), (name, attrs) => {
+      if (
+        name === "Relationship" &&
+        (attrs.Type ===
+          "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" ||
+          attrs.Type === "http://purl.oclc.org/ooxml/officeDocument/relationships/worksheet")
+      ) {
+        // Match read-excel-file's absolute/relative target handling exactly.
+        const target = attrs.Target;
+        if (!target) throw new Error("This workbook has an invalid worksheet relationship.");
+        targets.set(attrs.Id!, target.startsWith("/") ? target.slice(1) : `xl/${target}`);
+      }
+    });
+    if (sheetIds.size === 0 || sheetIds.size > 100)
+      throw new Error("This workbook has no readable sheets or too many sheets to preview.");
     let cells = 0;
-    for (const entry of Object.values(archive.files)) {
-      if (!/^xl\/worksheets\/[^/]+\.xml$/.test(entry.name)) continue;
-      const xml = await entry.async("string");
+    for (const id of sheetIds) {
+      const target = targets.get(id);
+      const entry = target ? archive.file(target) : null;
+      if (!entry) throw new Error("This workbook has a missing worksheet.");
       let maxRow = 0;
       let maxColumn = 0;
-      for (const cell of xml.matchAll(/<c\b[^>]*\br=["']([A-Z]+)(\d+)["']/g)) {
-        cells++;
-        maxRow = Math.max(maxRow, Number(cell[2]));
-        let column = 0;
-        for (const letter of cell[1]!) column = column * 26 + letter.charCodeAt(0) - 64;
-        maxColumn = Math.max(maxColumn, column);
-      }
-      if (
-        maxRow > OFFICE_PREVIEW_MAX_ROWS ||
-        maxColumn > OFFICE_PREVIEW_MAX_COLUMNS ||
-        maxRow * maxColumn > 8_000_000 ||
-        cells > 2_000_000
-      )
-        throw new Error(
-          "This workbook exceeds the preview limit: 250,000 rows, 1,024 columns, 2 million cells or 8 million grid positions.",
-        );
+      scan(await entry.async("string"), (name, attrs) => {
+        if (name === "row") maxRow = Math.max(maxRow + 1, Number(attrs.r ?? 0));
+        if (name === "c") {
+          cells++;
+          const address = /^([A-Z]+)(\d+)$/.exec(attrs.r ?? "");
+          if (!address) throw new Error("This workbook has an invalid cell address.");
+          maxRow = Math.max(maxRow, Number(address[2]));
+          let column = 0;
+          for (const letter of address[1]!) column = column * 26 + letter.charCodeAt(0) - 64;
+          maxColumn = Math.max(maxColumn, column);
+        }
+        if (
+          !Number.isFinite(maxRow) ||
+          maxRow > OFFICE_PREVIEW_MAX_ROWS ||
+          maxColumn > OFFICE_PREVIEW_MAX_COLUMNS ||
+          maxRow * maxColumn > 8_000_000 ||
+          cells > 2_000_000
+        )
+          throw new Error(
+            "This workbook exceeds the preview limit: 250,000 rows, 1,024 columns, 2 million cells or 8 million grid positions.",
+          );
+      });
     }
     const sheets = await readXlsxFile(bytes);
     if (sheets.length === 0 || sheets.length > 100)

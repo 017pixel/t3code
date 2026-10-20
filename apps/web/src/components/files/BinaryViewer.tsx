@@ -9,6 +9,14 @@ import { ChevronLeftIcon, ChevronRightIcon, FileIcon, FolderIcon } from "lucide-
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 
 import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectPopup,
+  SelectItem,
+} from "~/components/ui/select";
+
+import {
   FileSurfaceAction,
   FileSurfaceFailure,
   FileSurfaceLoading,
@@ -72,6 +80,7 @@ export default function BinaryViewer(props: {
   readonly src: string;
   readonly name: string;
   readonly kind: "archive" | "sqlite";
+  readonly onRetry?: () => void;
 }) {
   const [archive, setArchive] = useState<Archive | null>(null);
   const [database, setDatabase] = useState<Database | null>(null);
@@ -203,19 +212,28 @@ export default function BinaryViewer(props: {
       {database && table ? (
         <>
           <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border/60 px-3 text-xs">
-            <select
-              aria-label="Table"
-              className="min-w-0 flex-1 rounded border border-input bg-background px-2 py-1 text-foreground"
-              value={selectedTable}
-              disabled={busy}
-              onChange={(event) => selectPage(0, event.target.value)}
-            >
-              {database.tables.map((item) => (
-                <option key={item.name} value={item.name}>
-                  {item.name} ({item.count.toLocaleString()} rows)
-                </option>
-              ))}
-            </select>
+            <div className="min-w-0 flex-1">
+              <Select
+                value={selectedTable}
+                disabled={busy}
+                onValueChange={(value) => {
+                  if (value !== null) selectPage(0, value);
+                }}
+              >
+                <SelectTrigger aria-label="Table" size="xs">
+                  <SelectValue>
+                    {table.name} ({table.count.toLocaleString()} rows)
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup>
+                  {database.tables.map((item) => (
+                    <SelectItem key={item.name} value={item.name}>
+                      {item.name} ({item.count.toLocaleString()} rows)
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            </div>
             <FileSurfaceAction
               label="Previous rows"
               disabled={busy || page === 0}
@@ -242,7 +260,10 @@ export default function BinaryViewer(props: {
         </>
       ) : null}
       {error ? (
-        <FileSurfaceFailure message={error} />
+        <FileSurfaceFailure
+          message={error}
+          {...(props.onRetry ? { onRetry: props.onRetry } : {})}
+        />
       ) : busy ? (
         <FileSurfaceLoading />
       ) : selectedPath ? (
