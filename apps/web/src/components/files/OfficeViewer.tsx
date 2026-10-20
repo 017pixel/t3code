@@ -327,19 +327,23 @@ export default function OfficeViewer(props: {
             Cell values only. Charts, images, and formatting are not shown.
             {sheet.truncated ? " Limited to 250,000 rows and 1,024 columns." : ""}
           </FileSurfaceNotice>
-          <VirtualTablePreview
-            key={page}
-            name={`${props.name}: ${sheet.name}`}
-            count={sheet.rowCount}
-            columns={sheet.columns}
-            getRows={(index) => (index === 0 ? sheet.rows : sheetPages.get(`${page}:${index}`))}
-            loadPage={(index) => {
-              const key = `${page}:${index}`;
-              if (pendingPages.current.has(key)) return;
-              pendingPages.current.add(key);
-              workerRef.current?.postMessage({ type: "sheet-page", sheet: page, index });
-            }}
-          />
+          {sheet.rowCount === 0 ? (
+            <p className="p-6 text-xs text-muted-foreground">This sheet is empty.</p>
+          ) : (
+            <VirtualTablePreview
+              key={page}
+              name={`${props.name}: ${sheet.name}`}
+              count={sheet.rowCount}
+              columns={sheet.columns}
+              getRows={(index) => (index === 0 ? sheet.rows : sheetPages.get(`${page}:${index}`))}
+              loadPage={(index) => {
+                const key = `${page}:${index}`;
+                if (pendingPages.current.has(key)) return;
+                pendingPages.current.add(key);
+                workerRef.current?.postMessage({ type: "sheet-page", sheet: page, index });
+              }}
+            />
+          )}
         </>
       ) : slide ? (
         <SlideCanvas slide={slide} onError={setError} />

@@ -45,6 +45,10 @@ export default function LargeTextViewer(props: {
   const pending = useRef(new Set<number>());
   const wordWrap = useClientSettings((settings) => settings.wordWrap);
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- A replacement source must discard the previous worker's error and pages.
+    setError(null);
+    setMeta(null);
+    setPages(new Map());
     const controller = new AbortController();
     let indexed = false;
     let prefetched = false;
