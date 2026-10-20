@@ -147,7 +147,7 @@ describe("createEnvironmentThreadDetailAtoms", () => {
   });
 
   it("marks a warm resume that is live but behind the shell", () => {
-    const sourceAtom = Atom.make(
+    const sourceAtom = Atom.make<AsyncResult.AsyncResult<EnvironmentThreadState, never>>(
       AsyncResult.success(
         threadState({ data: Option.some(v2Projection), status: "live", error: Option.none() }),
       ),
@@ -163,6 +163,17 @@ describe("createEnvironmentThreadDetailAtoms", () => {
     expect(registry.get(details.behindShellAtom(ref))).toBe(false);
     registry.set(shellAtom, { updatedAt: "2026-06-20T00:05:00.000Z" });
     expect(registry.get(details.behindShellAtom(ref))).toBe(true);
+
+    // Once it has synchronized, live is trusted even if a skipped event left
+    // updatedAt short of the shell.
+    const synced = (status: "synchronizing" | "live") =>
+      AsyncResult.success(
+        threadState({ data: Option.some(v2Projection), status, error: Option.none() }),
+      );
+    registry.set(sourceAtom, synced("synchronizing"));
+    expect(registry.get(details.behindShellAtom(ref))).toBe(true);
+    registry.set(sourceAtom, synced("live"));
+    expect(registry.get(details.behindShellAtom(ref))).toBe(false);
     unmount();
     registry.dispose();
   });
