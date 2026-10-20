@@ -1807,7 +1807,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       workspaceRoot: props.workspaceRoot,
       imageEmbed,
     });
-    if (media) {
+    if (media && media.kind !== "file") {
       void Haptics.selectionAsync();
       if (media.kind === "video") {
         setExpandedVideo((current) => current ?? media.source);
@@ -1909,11 +1909,16 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         />
       );
     }
-    if (media && (media.kind === "pdf" || media.kind === "document")) {
+    const fileLink = resolveMarkdownLinkPresentation(image.href);
+    if (
+      (media && (media.kind === "pdf" || media.kind === "document" || media.kind === "file")) ||
+      (fileLink.kind === "file" && fileLink.line !== undefined)
+    ) {
+      const name = media?.source.name ?? (fileLink.kind === "file" ? fileLink.label : "Open file");
       return (
         <Text
           accessibilityRole="link"
-          accessibilityLabel={`Open ${media.source.name ?? "file"}`}
+          accessibilityLabel={`Open ${name}`}
           onPress={() => onMarkdownLinkPress(image.href, true)}
           style={{
             color: markdownStyles.assistant.nativeTextStyle.linkColor,
@@ -1921,7 +1926,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             lineHeight: markdownStyles.assistant.nativeTextStyle.lineHeight,
           }}
         >
-          {image.alt || media.source.name || "Open file"}
+          {name}
         </Text>
       );
     }

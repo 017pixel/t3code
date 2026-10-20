@@ -4,6 +4,7 @@ import {
 } from "@t3tools/client-runtime/markdown-images";
 import {
   audioMimeTypeFromExtension,
+  filePreviewKind,
   mediaMimeTypeFromExtension,
 } from "@t3tools/shared/filePreview";
 import { splitFilePathPosition } from "@t3tools/shared/fileLinks";
@@ -44,7 +45,7 @@ export function resolveMarkdownMediaPreview(
   },
 ):
   | { readonly kind: "image"; readonly source: FilePreviewSource }
-  | { readonly kind: "pdf" | "audio" | "document"; readonly source: FilePreviewSource }
+  | { readonly kind: "pdf" | "audio" | "document" | "file"; readonly source: FilePreviewSource }
   | { readonly kind: "video"; readonly source: MediaVideoPreviewSource }
   | null {
   if (parseMarkdownFileLink(href)?.line !== undefined) return null;
@@ -71,10 +72,15 @@ export function resolveMarkdownMediaPreview(
         audioMimeTypeFromExtension(extension) !== null)
     ) {
       const audioMimeType = audioMimeTypeFromExtension(extension);
-      // Host assets only serve supported media; other files use ThreadFile.
-      if (classified._tag === "WorkspaceFile" && !audioMimeType && extension !== ".pdf")
-        return null;
-      const kind = audioMimeType ? "audio" : extension === ".pdf" ? "pdf" : "document";
+      const previewKind = filePreviewKind({ name });
+      const kind = audioMimeType
+        ? "audio"
+        : extension === ".pdf"
+          ? "pdf"
+          : classified._tag === "WorkspaceFile" &&
+              (previewKind === "text" || previewKind === "markdown" || previewKind === "html")
+            ? "file"
+            : "document";
       const mimeType =
         audioMimeType ?? DOCUMENT_MIME_TYPES[extension] ?? "application/octet-stream";
       const common = {

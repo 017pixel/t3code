@@ -204,20 +204,57 @@ describe("resolveMarkdownMediaPreview", () => {
     "package.json",
     "report.csv",
     "report.tsv",
-    "report.docx",
-    "report.xlsx",
-    "report.pptx",
-    "report.unknown",
     "LICENSE",
     "Dockerfile",
-  ])("keeps source and unsupported host files on the file route: %s", (name) => {
+  ])("routes text and table links and embeds to the file screen: %s", (name) => {
     for (const href of [name, "./" + name, "/tmp/" + name, "file:///tmp/" + name]) {
       for (const imageEmbed of [false, true]) {
-        expect(resolveMarkdownMediaPreview(href, { ...input, imageEmbed })).toBeNull();
+        expect(resolveMarkdownMediaPreview(href, { ...input, imageEmbed })).toMatchObject({
+          kind: "file",
+          source: { name: name.split("/").at(-1) },
+        });
       }
       expect(resolveMarkdownLinkPresentation(href)).toMatchObject({ kind: "file" });
     }
   });
+
+  it.each(["doc", "docx", "xls", "xlsx", "ppt", "pptx", "unknown"])(
+    "opens host %s links and embeds in the native viewer",
+    (extension) => {
+      const name = `report.${extension}`;
+      for (const href of [name, `./${name}`, `/tmp/${name}`, `file:///tmp/${name}`]) {
+        for (const imageEmbed of [false, true]) {
+          expect(resolveMarkdownMediaPreview(href, { ...input, imageEmbed })).toMatchObject({
+            kind: "document",
+            source: {
+              kind: "document",
+              name,
+              resource: { _tag: "media-file", threadId: input.threadId },
+            },
+          });
+        }
+      }
+    },
+  );
+
+  it.each(["report.csv", "report.tsv", "report.docx", "report.xlsx", "report.unknown"])(
+    "preserves draft, captured, and encoded document paths: %s",
+    (name) => {
+      const href = `/tmp/one%23two%2520.${name.split(".").at(-1)}`;
+      const preview = resolveMarkdownMediaPreview(href, { ...input, imageEmbed: true });
+      expect(preview?.source).toMatchObject({
+        name: `one#two%20.${name.split(".").at(-1)}`,
+        resource: { path: decodeURIComponent(href) },
+      });
+      expect(
+        resolveMarkdownMediaPreview(href, { ...input, threadId: undefined })?.source,
+      ).toMatchObject({ resource: { _tag: "draft-workspace-file", cwd: "/repo" } });
+      expect(resolveMarkdownMediaPreview(href, { ...input, captured: true })).toBeNull();
+      expect(
+        resolveMarkdownMediaPreview(href, { ...input, threadId: undefined, workspaceRoot: null }),
+      ).toBeNull();
+    },
+  );
 
   it.each([
     ["src/main.ts:42", "/repo/src/main.ts", 42],
