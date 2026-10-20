@@ -11,6 +11,7 @@ import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
 import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
 import { ReadOnlySourcePreview } from "../files/AttachmentFilePreview";
 import { InlineAudioPreview } from "../files/InlineAudioPreview";
+import { AudioPreviewUnmountContext } from "../files/AudioPreview";
 import { filePreviewKind } from "@t3tools/shared/filePreview";
 import { useRightPanelStore } from "~/rightPanelStore";
 import {
@@ -1064,7 +1065,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const alwaysRenderKeys = [
     ...(citationAlwaysRender?.keys ?? []),
     ...(fullscreenAppRowId === null ? [] : [fullscreenAppRowId]),
-    ...new Set(playingAudioRows.values()),
+    ...new Set(
+      [...playingAudioRows].filter(([audio]) => audio.isConnected).map(([, rowId]) => rowId),
+    ),
   ];
   const alwaysRender =
     alwaysRenderIndices.length === 0 && alwaysRenderKeys.length === 0
@@ -1473,6 +1476,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
       return next;
     });
   };
+  const onAudioUnmount = useStableCallback((audio: HTMLAudioElement) => {
+    setPlayingAudioRows((current) => {
+      if (!current.has(audio)) return current;
+      const next = new Map(current);
+      next.delete(audio);
+      return next;
+    });
+  });
   // Each row carries its own provider. LegendList moves rows into their
   // containers one commit after this component renders, so a provider around
   // the list would re-render the outgoing thread's rows with the incoming
@@ -1490,7 +1501,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
           className="@container/chat-lane chat-content-lane overflow-x-clip"
           data-timeline-root="true"
         >
-          <TimelineRowContent row={item} />
+          <AudioPreviewUnmountContext value={onAudioUnmount}>
+            <TimelineRowContent row={item} />
+          </AudioPreviewUnmountContext>
         </div>
       </div>
     </TimelineRowCtx>
