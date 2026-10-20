@@ -929,11 +929,11 @@ describe("ChatMarkdown source citations", () => {
     const singleLabel = textNode(single[0]!, "1");
     const groupedLabel = textNode(grouped[0]!, "1, 2");
     expect(copy(singleLabel, 0, singleLabel, singleLabel.length)).toEqual({
-      text: "\\[Source 1: turn0view0\\]",
+      text: "[Source 1: turn0view0\\]",
       html: "[Source 1: turn0view0]",
     });
     expect(copy(groupedLabel, 0, groupedLabel, groupedLabel.length)).toEqual({
-      text: "\\[Source 1: turn0view0; Source 2: opaque-id; L8-L13\\]",
+      text: "[Source 1: turn0view0; Source 2: opaque-id; L8-L13\\]",
       html: "[Source 1: turn0view0; Source 2: opaque-id; L8-L13]",
     });
 
@@ -941,7 +941,7 @@ describe("ChatMarkdown source citations", () => {
     const after = textNode(container, " after outside.");
     expect(copy(before, 8, before, 14)).toEqual({ text: "before", html: "before" });
     expect(copy(before, 8, after, 6)).toEqual({
-      text: "before \\[Source 1: turn0view0\\] middle \\[Source 1: turn0view0; Source 2: opaque-id; L8-L13\\] after",
+      text: "before [Source 1: turn0view0\\] middle [Source 1: turn0view0; Source 2: opaque-id; L8-L13\\] after",
       html: "before [Source 1: turn0view0] middle [Source 1: turn0view0; Source 2: opaque-id; L8-L13] after",
     });
     expect(single[0]!.textContent).toBe("1");
