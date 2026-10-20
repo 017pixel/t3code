@@ -25,14 +25,16 @@ on:
         required: false
         type: string
 
-# Serialize nightlies (scheduled and manual) so overlapping runs cannot build
-# the same commit twice or publish out of order. Stable tag releases get their
-# own group so a nightly never blocks them. Running publishers are never
+# Three queues: scheduled nightlies, manual nightlies and previews, and stable.
+# Manual runs never wait behind a scheduled one. Instead, a manual nightly takes
+# over from any scheduled nightly that is building, and scheduled runs skip
+# while a manual run is active (see check-nightly-release.cjs), so nightlies
+# still never build twice or publish out of order. Running publishers are never
 # canceled, and queue: max keeps every pending run instead of the default
 # newest-wins single slot, so a queued stable tag can never be silently
 # dropped. Automatic nightlies recheck the release gap after leaving the queue.
 concurrency:
-  group: release-${{ (github.event_name == 'schedule' || inputs.channel == 'nightly' || inputs.channel == 'preview') && 'nightly' || 'stable' }}
+  group: release-${{ github.event_name == 'schedule' && 'nightly' || (github.event_name == 'workflow_dispatch' && inputs.channel != 'stable') && 'manual' || 'stable' }}
   cancel-in-progress: false
   queue: max
 
@@ -53,6 +55,10 @@ jobs:
     if: github.repository == 'pingdotgg/t3code'
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 5
+    permissions:
+      # A manual nightly cancels the scheduled nightly it replaces.
+      actions: write
+      contents: read
     outputs:
       ref: ${{ steps.resolve.outputs.ref }}
       nightly_version: ${{ steps.resolve.outputs.nightly_version }}
@@ -74,6 +80,7 @@ jobs:
               assertCommitOnDefaultBranch,
               assertReleaseSource,
               shouldReleaseNightly,
+              takeOverScheduledNightlies,
               resolveLatestNightlyCommit,
             } = require('./.github/scripts/check-nightly-release.cjs');
 
@@ -96,6 +103,9 @@ jobs:
               core.setOutput('ref', sha);
               core.setOutput('nightly_version', version);
             } else {
+              if (context.eventName === 'workflow_dispatch' && dispatchChannel === 'nightly') {
+                core.setOutput('has_changes', await takeOverScheduledNightlies({ github, context, core }));
+              }
               core.setOutput('ref', context.sha);
             }
 
@@ -104,7 +114,7 @@ jobs:
     needs: [resolve_commit]
     if: |
       needs.resolve_commit.result == 'success' &&
-      (github.event_name != 'schedule' || needs.resolve_commit.outputs.has_changes == 'true')
+      needs.resolve_commit.outputs.has_changes != 'false'
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:
@@ -332,7 +342,7 @@ jobs:
     needs: [resolve_commit]
     if: |
       needs.resolve_commit.result == 'success' &&
-      (github.event_name != 'schedule' || needs.resolve_commit.outputs.has_changes == 'true')
+      needs.resolve_commit.outputs.has_changes != 'false'
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 5
     environment:
@@ -529,13 +539,12 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # One job per platform and architecture (see release-desktop.yml), each on
-  # hardware of its own architecture, and each gated only on the JS bundle.
-  # The Windows jobs also embed the same-arch Linux CLI archive as the WSL
-  # runtime; they wait for that artifact partway through instead of for the
-  # whole Linux job. Every job builds the desktop app; all but macOS x64 also
-  # build the CLI archive for their platform, so a target either ships fully or
-  # not at all.
+  # One job per platform and architecture (see release-desktop.yml), each gated
+  # only on the JS bundle. The Windows jobs also embed the same-arch Linux CLI
+  # archive as the WSL runtime; they wait for that artifact partway through
+  # instead of for the whole Linux job. Every CLI archive is built and
+  # smoke-tested on hardware of its own architecture. Desktop apps are too,
+  # except macOS x64 and Windows arm64, which cross-build on faster runners.
   desktop_mac_arm64:
     name: Desktop macOS arm64
     needs: [preflight, relay_public_config, build_bundle]
@@ -659,6 +668,11 @@ jobs:
       resource_key: win32-x64
       cli_archive: true
 
+  # GitHub's 4-vCPU windows-11-arm runner took 11-13 minutes for this job,
+  # three times any other target, mostly installing dependencies and packaging.
+  # node-pty ships win32-arm64 prebuilds, so the app cross-builds on x64, and
+  # only the CLI archive, which needs arm64 hardware for its smoke test, stays
+  # on the ARM runner (cli_win_arm64).
   desktop_win_arm64:
     name: Desktop Windows arm64
     needs: [preflight, relay_public_config, build_bundle]
@@ -674,6 +688,29 @@ jobs:
       clerk_cli_oauth_client_id: ${{ needs.relay_public_config.outputs.clerk_cli_oauth_client_id }}
       relay_url: ${{ needs.relay_public_config.outputs.relay_url }}
       label: Windows arm64
+      runner: blacksmith-32vcpu-windows-2025
+      platform: win
+      target: nsis
+      arch: arm64
+      rust_target: aarch64-pc-windows-msvc
+      resource_key: win32-arm64
+      cli_archive: false
+
+  cli_win_arm64:
+    name: CLI Windows arm64
+    needs: [preflight, relay_public_config, build_bundle]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.relay_public_config.result == 'success' && needs.build_bundle.result == 'success' }}
+    uses: ./.github/workflows/release-desktop.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+      ref: ${{ needs.preflight.outputs.ref }}
+      release_channel: ${{ needs.preflight.outputs.release_channel }}
+      clerk_publishable_key: ${{ needs.relay_public_config.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.relay_public_config.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.relay_public_config.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.relay_public_config.outputs.relay_url }}
+      label: Windows arm64 CLI
       runner: windows-11-arm
       platform: win
       target: nsis
@@ -681,6 +718,7 @@ jobs:
       rust_target: aarch64-pc-windows-msvc
       resource_key: win32-arm64
       cli_archive: true
+      desktop: false
 
   release:
     name: Publish GitHub Release
@@ -697,8 +735,9 @@ jobs:
         desktop_linux_arm64,
         desktop_win_x64,
         desktop_win_arm64,
+        cli_win_arm64,
       ]
-    if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' && needs.relay_public_config.result == 'success' && needs.quality.result == 'success' && needs.test.result == 'success' && needs.test_server.result == 'success' && needs.desktop_mac_arm64.result == 'success' && needs.desktop_mac_x64.result == 'success' && needs.desktop_linux_x64.result == 'success' && needs.desktop_linux_arm64.result == 'success' && needs.desktop_win_x64.result == 'success' && needs.desktop_win_arm64.result == 'success' }}
+    if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' && needs.relay_public_config.result == 'success' && needs.quality.result == 'success' && needs.test.result == 'success' && needs.test_server.result == 'success' && needs.desktop_mac_arm64.result == 'success' && needs.desktop_mac_x64.result == 'success' && needs.desktop_linux_x64.result == 'success' && needs.desktop_linux_arm64.result == 'success' && needs.desktop_win_x64.result == 'success' && needs.desktop_win_arm64.result == 'success' && needs.cli_win_arm64.result == 'success' }}
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 30
     permissions:

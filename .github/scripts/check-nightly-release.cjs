@@ -50,7 +50,25 @@ async function findLatestNightly({ github, context }) {
     .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at))[0];
 }
 
+async function listActiveReleaseRuns({ github, context, event }) {
+  const { data } = await github.rest.actions.listWorkflowRuns({
+    ...context.repo,
+    workflow_id: "release.yml",
+    event,
+    per_page: 30,
+  });
+  return data.workflow_runs.filter((run) => run.status !== "completed" && run.id !== context.runId);
+}
+
 async function shouldReleaseNightly({ github, context, core, now = Date.now() }) {
+  // Manual runs queue apart from scheduled ones, so one can be building now.
+  // Leave the release to it; the six-hour gap covers the runs after it.
+  const [manualRun] = await listActiveReleaseRuns({ github, context, event: "workflow_dispatch" });
+  if (manualRun) {
+    core.info(`Manual release run ${manualRun.html_url} is active. Skipping.`);
+    return false;
+  }
+
   const lastNightly = await findLatestNightly({ github, context });
 
   if (!lastNightly) {
@@ -79,6 +97,41 @@ async function shouldReleaseNightly({ github, context, core, now = Date.now() })
   return true;
 }
 
+const isStarted = (job) => job?.status === "in_progress" || job?.status === "completed";
+const hasFailed = (job) => job.conclusion === "failure" || job.conclusion === "cancelled";
+
+// A manual nightly takes over from scheduled nightlies that are building, so it
+// never waits behind one. A healthy scheduled run on the same commit is left to
+// finish and the manual run stands down. Any other is canceled, unless it is
+// already publishing: publishers are never interrupted, and a manual run needs
+// far longer to reach its own publish step. Returns whether to build.
+async function takeOverScheduledNightlies({ github, context, core }) {
+  for (const run of await listActiveReleaseRuns({ github, context, event: "schedule" })) {
+    const { data } = await github.rest.actions.listJobsForWorkflowRun({
+      ...context.repo,
+      run_id: run.id,
+      filter: "latest",
+      per_page: 100,
+    });
+    // A scheduled run without a live Preflight is still deciding or decided
+    // not to build. It sees this run and skips (see shouldReleaseNightly).
+    const preflight = data.jobs.find((job) => job.name === "Preflight");
+    if (!preflight || preflight.conclusion === "skipped") continue;
+
+    if (run.head_sha === context.sha && !data.jobs.some(hasFailed)) {
+      core.notice(`Scheduled run ${run.html_url} already builds ${context.sha}. Skipping.`);
+      return false;
+    }
+    if (isStarted(data.jobs.find((job) => job.name === "Publish GitHub Release"))) {
+      core.info(`Scheduled run ${run.html_url} is publishing. Leaving it to finish.`);
+      continue;
+    }
+    await github.rest.actions.cancelWorkflowRun({ ...context.repo, run_id: run.id });
+    core.notice(`Canceled scheduled run ${run.html_url} in favor of this one.`);
+  }
+  return true;
+}
+
 async function resolveLatestNightlyCommit({ github, context, core }) {
   const lastNightly = await findLatestNightly({ github, context });
   if (!lastNightly) {
@@ -100,5 +153,6 @@ module.exports = {
   assertCommitOnDefaultBranch,
   assertReleaseSource,
   shouldReleaseNightly,
+  takeOverScheduledNightlies,
   resolveLatestNightlyCommit,
 };

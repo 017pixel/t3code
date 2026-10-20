@@ -86,16 +86,21 @@ test("accepts a release commit already contained in main", async () => {
   }
 });
 
-function fixture({ releases = [nightly(7)], comparisonStatus = "ahead" } = {}) {
+function fixture({ releases = [nightly(7)], comparisonStatus = "ahead", runs = [] } = {}) {
   const calls = [];
   return {
     calls,
     options: {
       now,
-      context: { repo: { owner: "example", repo: "app" }, sha: "new" },
+      context: { repo: { owner: "example", repo: "app" }, sha: "new", runId: 1 },
       core: { info() {} },
       github: {
         rest: {
+          actions: {
+            async listWorkflowRuns({ event }) {
+              return { data: { workflow_runs: runs.filter((run) => run.event === event) } };
+            },
+          },
           repos: {
             listReleases() {},
             async compareCommitsWithBasehead(params) {
@@ -174,6 +179,84 @@ for (const status of ["behind", "diverged"]) {
     assert.equal(await shouldReleaseNightly(options), false);
   });
 }
+
+test("skips while another manual release run is active", async () => {
+  const run = (overrides) => ({
+    id: 2,
+    event: "workflow_dispatch",
+    status: "in_progress",
+    ...overrides,
+  });
+  const { options } = fixture({ runs: [run({ status: "queued" })] });
+  assert.equal(await shouldReleaseNightly(options), false);
+
+  for (const ignored of [
+    run({ status: "completed" }),
+    run({ id: 1 }),
+    run({ event: "schedule" }),
+  ]) {
+    const { options } = fixture({ runs: [ignored] });
+    assert.equal(await shouldReleaseNightly(options), true);
+  }
+});
+
+const { takeOverScheduledNightlies } = require("./check-nightly-release.cjs");
+
+const job = (name, status = "in_progress", conclusion = null) => ({ name, status, conclusion });
+
+function takeOverFixture(scheduled) {
+  const canceled = [];
+  const { options } = fixture({
+    runs: scheduled.map(({ jobs, ...run }, index) => ({
+      id: 10 + index,
+      event: "schedule",
+      status: "in_progress",
+      html_url: `run-${10 + index}`,
+      ...run,
+    })),
+  });
+  options.core.notice = () => {};
+  options.github.rest.actions.listJobsForWorkflowRun = async ({ run_id }) => ({
+    data: { jobs: scheduled[run_id - 10].jobs },
+  });
+  options.github.rest.actions.cancelWorkflowRun = async ({ run_id }) => {
+    canceled.push(run_id);
+  };
+  return { options, canceled };
+}
+
+test("a manual nightly stands down for a healthy scheduled build of its commit", async () => {
+  const { options, canceled } = takeOverFixture([
+    { head_sha: "new", jobs: [job("Preflight", "completed", "success"), job("Build")] },
+  ]);
+  assert.equal(await takeOverScheduledNightlies(options), false);
+  assert.deepEqual(canceled, []);
+});
+
+test("a manual nightly cancels scheduled builds of older commits or failed ones", async () => {
+  const { options, canceled } = takeOverFixture([
+    { head_sha: "old", jobs: [job("Preflight"), job("Build", "queued")] },
+    {
+      head_sha: "new",
+      jobs: [job("Preflight", "completed", "success"), job("Build", "completed", "failure")],
+    },
+  ]);
+  assert.equal(await takeOverScheduledNightlies(options), true);
+  assert.deepEqual(canceled, [10, 11]);
+});
+
+test("a manual nightly never cancels a publishing or idle scheduled run", async () => {
+  const { options, canceled } = takeOverFixture([
+    {
+      head_sha: "old",
+      jobs: [job("Preflight", "completed", "success"), job("Publish GitHub Release")],
+    },
+    { head_sha: "new", jobs: [job("Resolve release commit")] },
+    { head_sha: "new", jobs: [job("Preflight", "completed", "skipped")] },
+  ]);
+  assert.equal(await takeOverScheduledNightlies(options), true);
+  assert.deepEqual(canceled, []);
+});
 
 const { resolveLatestNightlyCommit } = require("./check-nightly-release.cjs");
 

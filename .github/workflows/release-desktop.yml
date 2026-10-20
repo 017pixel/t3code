@@ -4,7 +4,8 @@ name: Release desktop build
 # each target is its own job with its own `needs`. The JS bundle (server, web
 # client, Electron main) comes from the `js-bundle` artifact that build_bundle
 # produced; this job only packages it, builds the native helpers, and, where
-# `cli_archive` is set, the self-contained CLI archive for its platform.
+# `cli_archive` is set, the self-contained CLI archive for its platform. With
+# `desktop: false` it builds only that archive.
 
 on:
   workflow_call:
@@ -63,6 +64,12 @@ on:
       cli_archive:
         required: false
         default: false
+        type: boolean
+      # False skips the desktop app and builds only the CLI archive, for a
+      # target whose app is cross-built on a faster runner elsewhere.
+      desktop:
+        required: false
+        default: true
         type: boolean
       version:
         required: true
@@ -129,11 +136,11 @@ jobs:
           git sparse-checkout set --no-cone '/*' '!/.repos/'
           git -c checkout.workers=0 checkout --detach FETCH_HEAD
 
-      # The runner's PowerShell 7.6/.NET 10 intermittently crashes during signing:
-      # https://github.com/dotnet/runtime/issues/131636
+      # The ARM runner's PowerShell 7.6/.NET 10 intermittently crashes during
+      # signing: https://github.com/dotnet/runtime/issues/131636
       # Put the .NET 8 release first for both workflow shells and electron-builder.
-      - name: Use PowerShell 7.4 for Windows ARM builds
-        if: inputs.platform == 'win' && inputs.arch == 'arm64'
+      - name: Use PowerShell 7.4 on Windows ARM runners
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -154,7 +161,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify Windows ARM PowerShell selection
-        if: inputs.platform == 'win' && inputs.arch == 'arm64'
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
         shell: pwsh
         run: |
           $expectedPath = Join-Path $env:RUNNER_TEMP "powershell-7.4.20-arm64\pwsh.exe"
@@ -187,7 +194,7 @@ jobs:
       - name: Install desktop dependencies
         env:
           pnpm_config_cache_dir: ${{ runner.temp }}/pnpm-metadata
-        run: vp install --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+        run: vp install ${{ inputs.desktop && '--filter=@t3tools/desktop...' || '' }} --filter=t3... --filter=@t3tools/scripts...
 
       - name: Cache resource monitor
         id: resource_monitor_cache
@@ -244,6 +251,7 @@ jobs:
       # Only the resource monitor build needs these libraries. With a cached
       # monitor, the desktop build's preflight skips its MSVC check, and node-pty
       # ships prebuilt Windows binaries, so the 30-60s install is skipped too.
+      # The ARM64 compiler lets an x64 runner cross-build the arm64 monitor.
       - name: Install Spectre-mitigated MSVC libs
         if: inputs.platform == 'win' && steps.resource_monitor_cache.outputs.cache-hit != 'true'
         shell: pwsh
@@ -253,7 +261,8 @@ jobs:
           $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
           $proc = Start-Process -FilePath $setupExe `
             -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
-            "Microsoft.VisualStudio.Component.VC.Runtimes.${{ inputs.arch == 'arm64' && 'ARM64' || 'x86.x64' }}.Spectre", "--quiet", "--norestart" `
+            "Microsoft.VisualStudio.Component.VC.Runtimes.${{ inputs.arch == 'arm64' && 'ARM64' || 'x86.x64' }}.Spectre", "--add", `
+            "Microsoft.VisualStudio.Component.VC.Tools.${{ inputs.arch == 'arm64' && 'ARM64' || 'x86.x64' }}", "--quiet", "--norestart" `
             -Wait -PassThru -NoNewWindow
           if ($null -eq $proc -or $proc.ExitCode -ne 0) {
             $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
@@ -349,7 +358,7 @@ jobs:
       # after all other setup. It stops early if the Linux job ended without
       # uploading the archive.
       - name: Wait for Linux CLI archive
-        if: inputs.platform == 'win'
+        if: inputs.platform == 'win' && inputs.desktop
         shell: pwsh
         timeout-minutes: 40
         env:
@@ -397,13 +406,14 @@ jobs:
           }
 
       - name: Download Linux CLI archive for WSL
-        if: inputs.platform == 'win'
+        if: inputs.platform == 'win' && inputs.desktop
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: cli-linux-${{ inputs.arch }}
           path: wsl-runtime
 
       - name: Build desktop artifact
+        if: inputs.desktop
         shell: bash
         env:
           pnpm_config_cache_dir: ${{ runner.temp }}/pnpm-metadata
@@ -487,6 +497,13 @@ jobs:
           fi
 
           vp run dist:desktop:artifact "${args[@]}"
+
+      # The desktop build compiles the monitor itself; a CLI-only job must do it
+      # here unless the cache already holds it.
+      - name: Build resource monitor
+        if: inputs.cli_archive && !inputs.desktop && steps.resource_monitor_cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target "${{ inputs.rust_target }}"
 
       # The single-executable is built with a Node that supports --build-sea
       # (25.7+); the repo itself stays on the engines.node version. It always
@@ -591,6 +608,7 @@ jobs:
           if-no-files-found: error
 
       - name: Collect release assets
+        if: inputs.desktop
         shell: bash
         run: |
           set -euo pipefail
@@ -636,6 +654,7 @@ jobs:
           fi
 
       - name: Collect resource monitor
+        if: inputs.desktop
         shell: bash
         run: |
           set -euo pipefail
@@ -649,6 +668,7 @@ jobs:
           cp "$source_path" "$target_dir/$binary_name"
 
       - name: Upload build artifacts
+        if: inputs.desktop
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: desktop-${{ inputs.platform }}-${{ inputs.arch }}
@@ -656,6 +676,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload resource monitor
+        if: inputs.desktop
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: resource-monitor-${{ inputs.resource_key }}
