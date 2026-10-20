@@ -1,6 +1,7 @@
 import { act, render, stubGlobal, type Screen } from "../../../test/render";
 import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
+import "~/index.css";
 
 const { refresh } = vi.hoisted(() => ({ refresh: vi.fn<() => Promise<string | null>>() }));
 
@@ -224,7 +225,13 @@ it.each([
   35_000,
 );
 
-it.each(["ordinary parts", "unused parts", "independent styles", "inherited styles"])(
+it.each([
+  "ordinary parts",
+  "unused parts",
+  "independent styles",
+  "inherited styles",
+  "python-docx package",
+])(
   "retains Word %s without a limit warning",
   async (scenario) => {
     const { default: JSZip } = await import("jszip");
@@ -236,6 +243,24 @@ it.each(["ordinary parts", "unused parts", "independent styles", "inherited styl
       "_rels/.rels",
       `<Relationships><Relationship Id="doc" Type="${r}/officeDocument" Target="word/document.xml"/></Relationships>`,
     );
+    if (scenario === "python-docx package") {
+      const packageRelationships = "http://schemas.openxmlformats.org/package/2006/relationships";
+      archive.file(
+        "_rels/.rels",
+        `<Relationships xmlns="${packageRelationships}"><Relationship Id="doc" Type="${r}/officeDocument" Target="word/document.xml"/><Relationship Id="thumbnail" Type="${packageRelationships}/metadata/thumbnail" Target="docProps/thumbnail.jpeg"/><Relationship Id="core" Type="${packageRelationships}/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="app" Type="${r}/extended-properties" Target="docProps/app.xml"/><Relationship Id="custom" Type="${r}/custom-properties" Target="docProps/custom.xml"/><Relationship Id="signature" Type="${packageRelationships}/digital-signature/origin" Target="_xmlsignatures/origin.sigs"/></Relationships>`,
+      );
+      archive.file(
+        "[Content_Types].xml",
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="jpeg" ContentType="image/jpeg"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="sigs" ContentType="application/vnd.openxmlformats-package.digital-signature-origin"/></Types>',
+      );
+      archive.file(
+        "docProps/thumbnail.jpeg",
+        new Uint8Array([255, 216, 255, 224, 0, 16, 74, 70, 73, 70]),
+      );
+      archive.file("_xmlsignatures/origin.sigs", new Uint8Array());
+      for (const part of ["core", "app", "custom"])
+        archive.file(`docProps/${part}.xml`, '<properties xmlns="urn:properties"/>');
+    }
     const ordinary = scenario === "ordinary parts";
     archive.file(
       "word/document.xml",
@@ -288,6 +313,10 @@ it.each(["ordinary parts", "unused parts", "independent styles", "inherited styl
         ])
           expect(html).toContain(label);
         expect(html.match(/footnotes retained/g)).toHaveLength(2);
+        const document = new DOMParser().parseFromString(html, "text/html");
+        const marker = document.querySelector(".docx-comment-ref")!;
+        expect(marker.textContent).toBe("");
+        expect(marker.getAttribute("aria-label")).toBe("Comment");
       } else expect(html).not.toContain("footnotes retained");
     } finally {
       URL.revokeObjectURL(src);
@@ -341,13 +370,48 @@ it("bounds shared-string text per cell and across sheets in the worker and viewe
   }
   const src = URL.createObjectURL(file);
   try {
+    const container = document.createElement("div");
+    container.style.cssText = "display:flex;flex-direction:column;width:640px;height:480px";
     await using screen = await render(
       <OfficeFilePreview src={src} name="shared.xlsx" kind="xlsx" />,
+      { container },
     );
     await vi.waitFor(() => expect(screen.container.textContent).toContain("bounded cell text"), {
       timeout: 30_000,
     });
     expect(screen.container.querySelector("td")!.textContent).toHaveLength(4_096);
+    const headers = [...screen.container.querySelectorAll('th[scope="col"]')];
+    expect(headers.map((header) => header.textContent)).toEqual(
+      Array.from({ length: 50 }, (_, index) =>
+        index < 26 ? String.fromCharCode(65 + index) : `A${String.fromCharCode(39 + index)}`,
+      ),
+    );
+    const firstRow = screen.container.querySelector('th[scope="row"]')!;
+    expect(firstRow.textContent).toBe("1");
+    const label = firstRow.querySelector("span")!;
+    const scroll = screen.container.querySelector("table")!.parentElement!;
+    const header = screen.container.querySelector("thead")!;
+    const top = scroll.getBoundingClientRect().top;
+    expect(label.getBoundingClientRect().top).toBeGreaterThanOrEqual(top);
+    expect(label.getBoundingClientRect().bottom).toBeLessThan(
+      scroll.getBoundingClientRect().bottom,
+    );
+    await act(async () => {
+      scroll.scrollTop = 200;
+      scroll.scrollLeft = 200;
+      await new Promise(requestAnimationFrame);
+    });
+    expect(header.getBoundingClientRect().top).toBeCloseTo(top, 0);
+    expect(firstRow.getBoundingClientRect().left).toBeCloseTo(
+      scroll.getBoundingClientRect().left,
+      0,
+    );
+    expect(label.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+      header.getBoundingClientRect().bottom,
+    );
+    expect(label.getBoundingClientRect().bottom).toBeLessThan(
+      scroll.getBoundingClientRect().bottom,
+    );
   } finally {
     URL.revokeObjectURL(src);
   }

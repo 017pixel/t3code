@@ -85,6 +85,12 @@ async function renderWord(
     for (const image of clean.images) {
       if (!/^data:image\/(png|jpeg|gif|webp|bmp);base64,/i.test(image.src)) image.remove();
     }
+    // docx-preview uses an emoji that may be absent from the client's fonts.
+    for (const marker of clean.querySelectorAll(".docx-comment-ref")) {
+      marker.textContent = "";
+      marker.setAttribute("role", "img");
+      marker.setAttribute("aria-label", "Comment");
+    }
     html.push(clean.body.innerHTML);
     for (const style of styles.querySelectorAll("style")) css.add(style.textContent);
   }
@@ -101,7 +107,7 @@ function WordFrame(props: {
 }) {
   const { resolvedTheme } = useTheme();
   // HTML reparsing moves block comment popovers out of their source paragraph.
-  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><style>${props.content.css}</style><style>html{background:${OFFICE_PAGE_BACKGROUND[resolvedTheme]}}body{margin:0}.docx-wrapper{background:transparent;padding:${OFFICE_PAGE_PADDING}px;box-sizing:border-box}.docx-wrapper section.docx{width:612pt;max-width:100%;box-sizing:border-box;padding:32px!important;min-height:0!important}img{max-width:100%;height:auto}.docx-wrapper section.docx div{max-width:100%}img{height:auto!important}.docx p:has(.docx-comment-ref:hover)+.docx-comment-popover{display:block}*{scrollbar-width:thin}</style></head><body>${props.content.html}</body></html>`;
+  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><style>${props.content.css}</style><style>html{background:${OFFICE_PAGE_BACKGROUND[resolvedTheme]}}body{margin:0}.docx-wrapper{background:transparent;padding:${OFFICE_PAGE_PADDING}px;box-sizing:border-box}.docx-wrapper section.docx{width:612pt;max-width:100%;box-sizing:border-box;padding:32px!important;min-height:0!important}img{max-width:100%;height:auto}.docx-wrapper section.docx div{max-width:100%}img{height:auto!important}.docx-comment-ref{display:inline-block;position:relative;width:.75em;height:.6em;margin-left:.25em;border:1px solid currentColor;border-radius:.12em;vertical-align:baseline}.docx-comment-ref::after{content:"";position:absolute;bottom:-.25em;left:.12em;width:.2em;height:.2em;border-left:1px solid currentColor;transform:skewY(-35deg)}.docx p:has(.docx-comment-ref:hover)+.docx-comment-popover{display:block}*{scrollbar-width:thin}</style></head><body>${props.content.html}</body></html>`;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {props.content.truncated ? (
@@ -347,14 +353,33 @@ export default function OfficeViewer(props: {
               aria-label={`${props.name}: ${sheet.name}`}
               className="min-w-full border-separate border-spacing-0 text-xs"
             >
+              <thead className="sticky top-0 z-20">
+                <tr>
+                  <th className="sticky left-0 border-b border-border bg-muted px-2 py-1.5" />
+                  {Array.from(
+                    { length: Math.max(0, ...sheet.rows.map((row) => row.length)) },
+                    (_, column) => (
+                      <th
+                        key={column}
+                        scope="col"
+                        className="border-b border-border bg-muted px-3 py-1.5 text-left font-medium text-muted-foreground"
+                      >
+                        {column < 26
+                          ? String.fromCharCode(65 + column)
+                          : `A${String.fromCharCode(39 + column)}`}
+                      </th>
+                    ),
+                  )}
+                </tr>
+              </thead>
               <tbody>
                 {sheet.rows.map((row, index) => (
                   <tr key={index} className="even:bg-muted/30">
                     <th
                       scope="row"
-                      className="sticky left-0 border-b border-border/60 bg-muted px-2 py-1.5 text-right font-normal text-muted-foreground tabular-nums"
+                      className="sticky left-0 z-10 border-b border-border/60 bg-muted px-2 py-1.5 text-right align-top font-normal text-muted-foreground tabular-nums"
                     >
-                      {index + 1}
+                      <span className="sticky top-9 block">{index + 1}</span>
                     </th>
                     {row.map((cell, column) => (
                       <td

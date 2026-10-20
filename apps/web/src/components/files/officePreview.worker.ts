@@ -330,6 +330,19 @@ async function boundWorkbook(archive: JSZip) {
 const WORD_RELATIONSHIP = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/";
 const WORD_EXPANDED_PARTS = new Set(["footnotes", "endnotes", "comments", "header", "footer"]);
 const WORD_DISABLED_PARTS = new Set(["commentsExtended", "fontTable", "aFChunk"]);
+const WORD_BINARY_PARTS = new Set([
+  "image",
+  "font",
+  "thumbnail",
+  "audio",
+  "video",
+  "oleObject",
+  "package",
+  "printerSettings",
+  "vbaProject",
+  "origin",
+  "certificate",
+]);
 
 function wordPartTypes() {
   const defaults = new Map<string, string>();
@@ -346,13 +359,25 @@ function wordPartTypes() {
     roles,
     relationships,
     binary(path: string) {
-      const type = overrides.get(path) ?? defaults.get(path.split(".").at(-1) ?? "");
+      const extension = path.split(".").at(-1)?.toLowerCase() ?? "";
+      const type = overrides.get(path) ?? defaults.get(extension) ?? "";
       // An XML relationship always wins over a misleading media content type.
-      if (path === "[Content_Types].xml" || path.endsWith(".rels") || xmlParts.has(path))
+      if (
+        path === "[Content_Types].xml" ||
+        extension === "rels" ||
+        extension === "xml" ||
+        xmlParts.has(path) ||
+        /(?:\+xml|\/xml)$/i.test(type)
+      )
         return false;
       return (
-        (roles.get(path)?.size === 1 && roles.get(path)?.has("font")) ||
-        /^image\/(?:png|jpeg|gif|webp|bmp|tiff)$/.test(type ?? "")
+        [...(roles.get(path) ?? [])].some((role) => WORD_BINARY_PARTS.has(role)) ||
+        /^(?:image|audio|video|font)\//i.test(type) ||
+        /^(?:png|jpe?g|gif|webp|bmp|tiff?|ico|bin|sigs|cer|ttf|otf|odttf|woff2?)$/.test(
+          extension,
+        ) ||
+        type === "application/octet-stream" ||
+        type === "application/vnd.openxmlformats-package.digital-signature-origin"
       );
     },
     metadata(path: string, xml: string) {
@@ -362,7 +387,8 @@ function wordPartTypes() {
       parser.on("opentag", (tag) => {
         const attr = (name: string) => tag.attributes[name]?.value ?? "";
         if (path === "[Content_Types].xml") {
-          if (tag.local === "Default") defaults.set(attr("Extension"), attr("ContentType"));
+          if (tag.local === "Default")
+            defaults.set(attr("Extension").toLowerCase(), attr("ContentType"));
           if (tag.local === "Override")
             overrides.set(attr("PartName").replace(/^\//, ""), attr("ContentType"));
         }
@@ -379,8 +405,14 @@ function wordPartTypes() {
           .toString()
           .slice("https://docx.invalid/".length);
         if (!external) {
-          if (role !== "image" && role !== "font" && role !== "hyperlink") xmlParts.add(target);
-          if (path === "_rels/.rels") xmlParts.add(attr("Target").replace(/^\//, ""));
+          if (
+            !WORD_BINARY_PARTS.has(role) &&
+            role !== "hyperlink" &&
+            (type.startsWith(WORD_RELATIONSHIP) ||
+              role === "core-properties" ||
+              role === "signature")
+          )
+            xmlParts.add(target);
           const types = roles.get(target) ?? new Set<string>();
           types.add(role);
           roles.set(target, types);
