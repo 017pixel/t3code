@@ -385,16 +385,18 @@ it.layer(NodeServices.layer)("server self update", (it) => {
     }),
   );
 
-  it.effect("stages and preflights before asking the launcher for an update ID", () =>
-    Effect.gen(function* () {
-      const { selfUpdate, order } = yield* makeHarness();
-      expect(yield* selfUpdate.update({ targetVersion: "1.1.0" })).toEqual({
-        targetVersion: "1.1.0",
-        method: "boot-service",
-        updateId: "launcher-id",
-      });
-      expect(order).toEqual(["download", "extract", "preflight", "accept"]);
-    }),
+  it.effect.each([ORCHESTRATION_PROTOCOL_VERSION, ORCHESTRATION_PROTOCOL_VERSION + 1])(
+    "stages and preflights before asking the launcher for an update ID (protocol: %s)",
+    (orchestrationProtocol) =>
+      Effect.gen(function* () {
+        const { selfUpdate, order } = yield* makeHarness({ orchestrationProtocol });
+        expect(yield* selfUpdate.update({ targetVersion: "1.1.0" })).toEqual({
+          targetVersion: "1.1.0",
+          method: "boot-service",
+          updateId: "launcher-id",
+        });
+        expect(order).toEqual(["download", "extract", "preflight", "accept"]);
+      }),
   );
 
   it.effect("rejects invalid versions and desktop-managed servers before staging", () =>
@@ -438,6 +440,9 @@ it.layer(NodeServices.layer)("server self update", (it) => {
   it.effect("preserves the preflight refusal reason", () =>
     Effect.gen(function* () {
       const { selfUpdate } = yield* makeHarness({ preflight: "blocked" });
+      expect(
+        (yield* selfUpdate.stage("1.1.0", ORCHESTRATION_PROTOCOL_VERSION).pipe(Effect.flip)).reason,
+      ).toBe("local update required");
       expect((yield* selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip)).reason).toBe(
         "local update required",
       );
@@ -508,11 +513,18 @@ it.layer(NodeServices.layer)("server self update", (it) => {
 
   it.effect("stages without handing off and returns the staged client protocol", () =>
     Effect.gen(function* () {
-      const { selfUpdate, order } = yield* makeHarness();
-      expect(yield* selfUpdate.stage("1.1.0")).toEqual({
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { selfUpdate, order, serverConfig } = yield* makeHarness();
+      expect(yield* selfUpdate.stage("1.1.0", ORCHESTRATION_PROTOCOL_VERSION)).toEqual({
         orchestrationProtocol: ORCHESTRATION_PROTOCOL_VERSION,
       });
       expect(order).toEqual(["download", "extract", "preflight"]);
+      expect(
+        yield* fs.readFileString(
+          path.join(serverConfig.baseDir, "runtime", "versions", "1.1.0", ".install-complete"),
+        ),
+      ).toBe("1.1.0\n");
       // Staging releases the in-flight guard, so a later update still runs.
       expect((yield* selfUpdate.update({ targetVersion: "1.1.0" })).updateId).toBe("launcher-id");
     }),
@@ -755,18 +767,37 @@ it.layer(NodeServices.layer)("background server updates", (it) => {
     }),
   );
 
-  it.effect("skips a target whose client protocol differs, without staging it again", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeHarness({
-        orchestrationProtocol: ORCHESTRATION_PROTOCOL_VERSION + 1,
-      });
-      const pass = yield* backgroundUpdates(harness, { open: { value: true } }).pass;
-      yield* pass;
-      expect(harness.order).toEqual(["download", "extract", "preflight"]);
-      yield* TestClock.adjust(Duration.hours(2));
-      yield* pass;
-      expect(harness.order).toEqual(["download", "extract", "preflight"]);
-    }),
+  it.effect.each([false, true])(
+    "skips a target whose client protocol differs, without staging it again (cached: %s)",
+    (cached) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const harness = yield* makeHarness({
+          orchestrationProtocol: ORCHESTRATION_PROTOCOL_VERSION + 1,
+        });
+        const versionsDir = path.join(harness.serverConfig.baseDir, "runtime", "versions");
+        if (cached) yield* harness.selfUpdate.stage("1.1.0");
+        const pass = yield* backgroundUpdates(harness, { open: { value: true } }).pass;
+        yield* pass;
+        expect(harness.order).toEqual([
+          "download",
+          "extract",
+          "preflight",
+          ...(cached ? ["preflight"] : []),
+        ]);
+        expect(yield* fs.readDirectory(versionsDir)).toEqual(cached ? ["1.1.0"] : []);
+        const order = [...harness.order];
+        yield* TestClock.adjust(Duration.hours(2));
+        yield* pass;
+        expect(harness.order).toEqual(order);
+        expect(yield* fs.readDirectory(versionsDir)).toEqual(cached ? ["1.1.0"] : []);
+        if (cached) {
+          expect(
+            yield* fs.readFileString(path.join(versionsDir, "1.1.0", ".install-complete")),
+          ).toBe("1.1.0\n");
+        }
+      }),
   );
 
   it.effect("does nothing when automatic updates are off or the server is not a service", () =>

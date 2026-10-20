@@ -75,7 +75,10 @@ export const makeUpdatePass = Effect.fn("updates.ServerAutoUpdater.makeUpdatePas
     staged = undefined;
     yield* Effect.logInfo("Staging a background server update", { targetVersion });
     // A failure leaves nothing staged and retries this target at the next hourly release check.
-    const { orchestrationProtocol } = yield* selfUpdate.stage(targetVersion);
+    const { orchestrationProtocol } = yield* selfUpdate.stage(
+      targetVersion,
+      ORCHESTRATION_PROTOCOL_VERSION,
+    );
     if (orchestrationProtocol !== ORCHESTRATION_PROTOCOL_VERSION) {
       // Connected clients would be refused after the restart.
       skipped.add(targetVersion);

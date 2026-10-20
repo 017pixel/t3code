@@ -73,6 +73,7 @@ export class ServerSelfUpdate extends Context.Service<
      */
     readonly stage: (
       targetVersion: string,
+      acceptedProtocol?: number,
     ) => Effect.Effect<
       { readonly orchestrationProtocol: number | undefined },
       ServerSelfUpdateError
@@ -225,8 +226,10 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   /** Downloads and preflights a runtime; the caller owns the in-flight guard. */
   const stageRuntime = Effect.fn("cloud.server_self_update.stage_runtime")(function* (
     targetVersion: string,
+    acceptedProtocol?: number,
   ) {
     let orchestrationProtocol: number | undefined;
+    let protocolMismatch = false;
     const paths = yield* ensurePinnedRuntimeInstalled({
       baseDir: serverConfig.baseDir,
       version: targetVersion,
@@ -297,6 +300,16 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
                 }
                 if (preflight.status === "ready") {
                   orchestrationProtocol = preflight.orchestrationProtocol;
+                  protocolMismatch =
+                    acceptedProtocol !== undefined && orchestrationProtocol !== acceptedProtocol;
+                  if (protocolMismatch) {
+                    return Effect.fail(
+                      new PinnedRuntimePreflightBlockedError({
+                        version: targetVersion,
+                        reason: "The release uses a different client protocol.",
+                      }),
+                    );
+                  }
                 }
                 return preflight.status === "ready"
                   ? Effect.void
@@ -310,6 +323,10 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
             ),
           ),
     }).pipe(
+      Effect.catchTags({
+        PinnedRuntimePreflightBlockedError: (error) =>
+          protocolMismatch ? Effect.succeed(undefined) : Effect.fail(error),
+      }),
       Effect.mapError((error) =>
         error._tag === "PinnedRuntimePreflightBlockedError"
           ? failWith(error.reason, error)
@@ -366,7 +383,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
       yield* Effect.logInfo("Server update prepared; handing off to the service launcher.", {
         updateId,
         targetVersion,
-        runtimePath: paths.entryPath,
+        runtimePath: paths?.entryPath,
       });
       return { targetVersion, method: "boot-service" as const, updateId };
     }).pipe(Effect.onError(() => Ref.set(inFlight, false)));
@@ -377,14 +394,17 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
     commitDesktopUpdate: (requestId, onHandoffAccepted) =>
       desktopAppUpdate.commit(requestId, onHandoffAccepted),
     capability,
-    stage: Effect.fn("cloud.server_self_update.stage")(function* (targetVersion: string) {
+    stage: Effect.fn("cloud.server_self_update.stage")(function* (
+      targetVersion: string,
+      acceptedProtocol?: number,
+    ) {
       if (capability !== "boot-service" || !isExactServiceVersion(targetVersion)) {
         return yield* failWith("Only a managed service can stage an exact server version.");
       }
       if (yield* Ref.getAndSet(inFlight, true)) {
         return yield* failWith("A server update is already in progress.");
       }
-      const { orchestrationProtocol } = yield* stageRuntime(targetVersion).pipe(
+      const { orchestrationProtocol } = yield* stageRuntime(targetVersion, acceptedProtocol).pipe(
         Effect.ensuring(Ref.set(inFlight, false)),
       );
       return { orchestrationProtocol };
