@@ -1,5 +1,45 @@
 const MAX_PIXELS = 32_000_000;
 
+function validateTiffMetadata(bytes: ArrayBuffer) {
+  const view = new DataView(bytes);
+  if (bytes.byteLength < 8) throw new Error("Invalid TIFF metadata.");
+  const order = view.getUint16(0);
+  const littleEndian = order === 0x4949;
+  if (![0x4949, 0x4d4d].includes(order) || view.getUint16(2, littleEndian) !== 42)
+    throw new Error("Invalid TIFF metadata.");
+  const visited = new Set<number>();
+  let entries = 0;
+  let allocation = 0;
+  const inspect = (offset: number, depth: number) => {
+    if (depth > 8 || visited.has(offset) || offset < 8 || offset + 2 > bytes.byteLength)
+      throw new Error("Invalid TIFF metadata.");
+    visited.add(offset);
+    const count = view.getUint16(offset, littleEndian);
+    entries += count;
+    if (entries > 2048 || offset + 2 + count * 12 + 4 > bytes.byteLength)
+      throw new Error("This TIFF has too much or truncated metadata.");
+    for (let index = 0; index < count; index++) {
+      const entry = offset + 2 + index * 12;
+      const tag = view.getUint16(entry, littleEndian);
+      const type = view.getUint16(entry + 2, littleEndian);
+      const values = view.getUint32(entry + 4, littleEndian);
+      const width = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8][type];
+      if (!width) throw new Error("Unsupported TIFF metadata type.");
+      const length = values * width;
+      const start = length > 4 ? view.getUint32(entry + 8, littleEndian) : entry + 8;
+      // The decoder retains a separate array or string for every tag, including aliases.
+      allocation += values * Math.max(16, width);
+      if (start + length > bytes.byteLength || allocation > 8 * 1024 * 1024)
+        throw new Error("This TIFF has too much or truncated metadata.");
+      if (tag === 0x8769 || tag === 0x8825) {
+        if (type !== 4 || values !== 1) throw new Error("Invalid TIFF metadata pointer.");
+        inspect(view.getUint32(entry + 8, littleEndian), depth + 1);
+      }
+    }
+  };
+  inspect(view.getUint32(4, littleEndian), 0);
+}
+
 function dimensions(width: number, height: number) {
   if (!(width > 0 && height > 0) || width > 16384 || height > 16384 || width > MAX_PIXELS / height)
     throw new Error("Image previews are limited to 32 megapixels and 16,384 pixels per side.");
@@ -101,8 +141,7 @@ async function validateTiffStrips(bytes: ArrayBuffer, image: import("tiff").Tiff
       } finally {
         await reader.cancel();
       }
-    } else if (image.compression !== 1 && image.compression !== 32773)
-      throw new Error("This TIFF compression is not supported.");
+    } else if (image.compression !== 1) throw new Error("This TIFF compression is not supported.");
     // Bound repeated strips and padding as well as the visible image dimensions.
     expanded += limit;
     if (expanded > 256 * 1024 * 1024) throw new Error("This TIFF has too much image data.");
@@ -117,10 +156,14 @@ async function decode(bytes: ArrayBuffer, heif: boolean) {
     return await heicTo({ blob: new Blob([bytes]), type: "image/png" });
   }
   const { decode: decodeTiff } = await import("tiff");
+  validateTiffMetadata(bytes);
   const metadata = decodeTiff(bytes, { ignoreImageData: true, pages: [0] })[0];
   if (!metadata) throw new Error("This TIFF has no readable image.");
   dimensions(metadata.width, metadata.height);
+  if (metadata.orientation && metadata.orientation !== 1)
+    throw new Error("This TIFF orientation is not supported.");
   if (
+    (metadata.tiled && metadata.components > 1) ||
     ![1, 2, 3, 4].includes(metadata.components) ||
     ![8, 16].includes(metadata.bitsPerSample) ||
     ![0, 1, 2, 3].includes(metadata.type)
@@ -142,7 +185,7 @@ async function decode(bytes: ArrayBuffer, heif: boolean) {
         rgba[pixel * 4 + channel] = image.data[index + channel]! / scale;
     } else {
       const gray = image.data[index]! / scale;
-      rgba.fill(image.type === 0 ? 255 - gray : gray, pixel * 4, pixel * 4 + 3);
+      rgba.fill(gray, pixel * 4, pixel * 4 + 3);
     }
     rgba[pixel * 4 + 3] = image.alpha ? image.data[index + image.components - 1]! / scale : 255;
   }

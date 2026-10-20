@@ -8,6 +8,7 @@ export default function PreviewImageContent(props: {
   readonly src: string;
   readonly name: string;
   readonly mimeType?: string;
+  readonly onError?: () => void;
 }) {
   const [failed, setFailed] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -26,7 +27,10 @@ export default function PreviewImageContent(props: {
           src={props.src}
           alt={props.name}
           className="max-h-full max-w-full object-contain"
-          onError={() => setFailed(true)}
+          onError={() => {
+            setFailed(true);
+            props.onError?.();
+          }}
         />
       </button>
       {expanded ? (
