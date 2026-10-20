@@ -18,6 +18,8 @@ vi.mock(import("./ReadOnlySourcePreview"), () => ({
 import { AttachmentFilePreview } from "./AttachmentFilePreview";
 import LargeTextViewer from "./LargeTextViewer";
 import VirtualTablePreview from "./VirtualTablePreview";
+import { OfficeFilePreview } from "./OfficeFilePreview";
+import { MermaidFilePreview } from "./MermaidFilePreview";
 import JSZip from "jszip";
 import { boundedZip } from "./boundedZip";
 import BinaryViewer from "./BinaryViewer";
@@ -633,6 +635,65 @@ describe("large text preview recovery", () => {
     expect(load).not.toHaveBeenCalled();
     await screen.rerender(view(2));
     await vi.waitFor(() => expect(load).toHaveBeenCalledWith(0));
+  });
+});
+
+describe("standalone Mermaid previews", () => {
+  it.each([
+    'A@{ "img": "//attacker.invalid/pixel.png" }',
+    'A@{ "im\\u0067": "/pixel.png" }',
+    "A@{ label: &key img, *key: '/pixel.png' }",
+    'A["<img src=//attacker.invalid/pixel.png>"]',
+  ])("rejects resource syntax before Mermaid lays out %s", async (node) => {
+    using imageSource = vi
+      .spyOn(HTMLImageElement.prototype, "src", "set")
+      .mockImplementation(() => {});
+    await using screen = await render(<MermaidFilePreview text={`flowchart LR\n${node}`} />);
+    await vi.waitFor(() =>
+      expect(screen.container.querySelector('[role="alert"]')?.textContent).toContain(
+        "Show Mermaid source",
+      ),
+    );
+    expect(imageSource).not.toHaveBeenCalled();
+    expect(screen.container.querySelector("svg")).toBeNull();
+  });
+
+  it.each(["<-->", "<==>", "<-.->", "-->"])("renders the %s arrow", async (arrow) => {
+    await using screen = await render(<MermaidFilePreview text={`flowchart LR\nA ${arrow} B`} />);
+    await vi.waitFor(
+      () => expect(screen.container.querySelector("svg .edgePaths path")).not.toBeNull(),
+      { timeout: 10_000 },
+    );
+    expect(screen.container.querySelector('[role="alert"]')).toBeNull();
+    expect(screen.container.textContent).toContain("A");
+    expect(screen.container.textContent).toContain("B");
+  });
+});
+
+it("clears an Office metadata error when the same URL becomes previewable", async () => {
+  const src = "data:application/octet-stream,invalid-office-file";
+  let resolveResponse!: (response: Response) => void;
+  const response = new Promise<Response>((resolve) => {
+    resolveResponse = resolve;
+  });
+  using _fetch = stubGlobal(
+    "fetch",
+    vi.fn(() => response),
+  );
+  await using screen = await render(
+    <OfficeFilePreview src={src} name="report.docx" kind="docx" sizeBytes={51 * 1024 * 1024} />,
+  );
+  await vi.waitFor(() => expect(screen.container.textContent).toContain("under 50 MB"));
+  await screen.rerender(
+    <OfficeFilePreview src={src} name="report.docx" kind="docx" sizeBytes={100} />,
+  );
+  await vi.waitFor(() =>
+    expect(screen.container.querySelector('[aria-label="Loading file"]')).not.toBeNull(),
+  );
+  expect(screen.container.textContent).not.toContain("under 50 MB");
+  resolveResponse(new Response("invalid-office-file"));
+  await vi.waitFor(() => expect(screen.container.textContent).toContain("not a valid Office"), {
+    timeout: 10_000,
   });
 });
 
