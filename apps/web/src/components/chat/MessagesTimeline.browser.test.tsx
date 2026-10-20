@@ -893,7 +893,7 @@ describe("MessagesTimeline messages", () => {
 });
 
 describe("MessagesTimeline attachments", () => {
-  it("keeps playing audio mounted across virtualization until every player stops", async () => {
+  it.each(["pause", "error"])("unpins audio after %s", async (event) => {
     const NativeObserver = IntersectionObserver;
     using _observer = stubGlobal(
       "IntersectionObserver",
@@ -971,8 +971,8 @@ describe("MessagesTimeline attachments", () => {
     });
     expect(two!.isConnected).toBe(true);
     await act(async () => {
-      vi.spyOn(two!, "paused", "get").mockReturnValue(true);
-      two!.dispatchEvent(new Event("pause"));
+      if (event === "pause") vi.spyOn(two!, "paused", "get").mockReturnValue(true);
+      two!.dispatchEvent(new Event(event));
     });
     await act(() => {
       void props.listRef.current!.scrollToIndex({ index: 20, animated: false });

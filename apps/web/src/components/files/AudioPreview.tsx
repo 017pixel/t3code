@@ -1,9 +1,21 @@
+import { createContext, useContext } from "react";
+
+import { useStableCallback } from "~/hooks/useStableCallback";
+
+export const AudioPreviewUnmountContext = createContext<((audio: HTMLAudioElement) => void) | null>(
+  null,
+);
+
 export function AudioPreview(props: {
   readonly src: string;
   readonly name: string;
   readonly onError?: () => void;
   readonly compact?: boolean;
 }) {
+  const onUnmount = useContext(AudioPreviewUnmountContext);
+  const audioRef = useStableCallback((audio: HTMLAudioElement | null) => {
+    if (audio) return () => onUnmount?.(audio);
+  });
   const Container = props.compact ? "span" : "div";
   return (
     <Container
@@ -14,6 +26,7 @@ export function AudioPreview(props: {
       }
     >
       <audio
+        ref={audioRef}
         controls
         preload="metadata"
         src={props.src}
