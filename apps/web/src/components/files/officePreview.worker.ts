@@ -328,16 +328,8 @@ async function boundWorkbook(archive: JSZip) {
 }
 
 const WORD_RELATIONSHIP = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/";
-const WORD_DISABLED_PARTS = new Set([
-  "footnotes",
-  "endnotes",
-  "comments",
-  "commentsExtended",
-  "header",
-  "footer",
-  "fontTable",
-  "aFChunk",
-]);
+const WORD_EXPANDED_PARTS = new Set(["footnotes", "endnotes", "comments", "header", "footer"]);
+const WORD_DISABLED_PARTS = new Set(["commentsExtended", "fontTable", "aFChunk"]);
 
 function wordPartTypes() {
   const defaults = new Map<string, string>();
@@ -349,14 +341,10 @@ function wordPartTypes() {
     "docProps/custom.xml",
   ]);
   const roles = new Map<string, Set<string>>();
-  const images = new Map<string, string>();
-  let omitted = false;
+  const relationships = new Map<string, Map<string, string>>();
   return {
     roles,
-    images,
-    get omitted() {
-      return omitted;
-    },
+    relationships,
     binary(path: string) {
       const type = overrides.get(path) ?? defaults.get(path.split(".").at(-1) ?? "");
       // An XML relationship always wins over a misleading media content type.
@@ -396,8 +384,10 @@ function wordPartTypes() {
           const types = roles.get(target) ?? new Set<string>();
           types.add(role);
           roles.set(target, types);
-          if (path === "word/_rels/document.xml.rels" && !images.has(attr("Id")))
-            images.set(attr("Id"), target);
+          const owner = path === "_rels/.rels" ? "" : path.replace(/_rels\/([^/]+)\.rels$/, "$1");
+          const refs = relationships.get(owner) ?? new Map<string, string>();
+          if (!refs.has(attr("Id"))) refs.set(attr("Id"), target);
+          relationships.set(owner, refs);
           if (target === "word/document.xml" && role !== "officeDocument")
             throw new Error("Preview limited: this Word document has an aliased document part.");
           if (type === WORD_RELATIONSHIP + "officeDocument" && target !== "word/document.xml")
@@ -407,7 +397,6 @@ function wordPartTypes() {
         }
         if (external || WORD_DISABLED_PARTS.has(role)) {
           start = xml.lastIndexOf("<", parser.position - 1);
-          if (!external) omitted = true;
         }
       });
       parser.on("closetag", (tag) => {
@@ -431,7 +420,13 @@ function wordXmlCost(xml: string, roles: Set<string> | undefined) {
   const parser = xmlParser();
   let depth = 0;
   let markup = 0;
-  let styles = 0;
+  const styles = new Map<
+    string,
+    { properties: Map<string, number>; base: string; linked: string }
+  >();
+  let style: { id: string; base: string; linked: string; properties: Map<string, number> } | null =
+    null;
+  const names: string[] = [];
   let numbers = 0;
   let numberIdLength = 16;
   let pictures = false;
@@ -439,7 +434,22 @@ function wordXmlCost(xml: string, roles: Set<string> | undefined) {
     if (++depth > 64)
       throw new Error("Preview limited: this Word document has excessive XML nesting.");
     markup++;
-    if (tag.local === "style" || tag.local === "docDefaults") styles++;
+    const attr = (name: string) =>
+      Object.values(tag.attributes).find((a) => a.local === name)?.value ?? "";
+    names.push(tag.local === "tblStylePr" ? `${tag.local}:${attr("type")}` : tag.local);
+    if (roles?.has("styles") && (tag.local === "style" || tag.local === "docDefaults"))
+      style = { id: attr("styleId"), properties: new Map(), base: "", linked: "" };
+    if (style) {
+      if (tag.local === "basedOn") style.base = attr("val");
+      else if (tag.local === "link") style.linked = attr("val");
+      else if (names.length > 2 && tag.local !== "name") {
+        const key = names.slice(2).join("/");
+        const size = new TextEncoder().encode(
+          xml.slice(xml.lastIndexOf("<", parser.position - 1), parser.position),
+        ).length;
+        style.properties.set(key, size);
+      }
+    }
     if (tag.local === "num") {
       numbers++;
       numberIdLength = Math.max(
@@ -451,24 +461,212 @@ function wordXmlCost(xml: string, roles: Set<string> | undefined) {
     }
     if (tag.local === "numPicBullet") pictures = true;
   });
-  parser.on("closetag", () => depth--);
+  parser.on("closetag", (tag) => {
+    if (style && (tag.local === "style" || tag.local === "docDefaults")) {
+      styles.set(style.id, style);
+      style = null;
+    }
+    names.pop();
+    depth--;
+  });
   parser.write(xml).close();
-  const multiplier = Math.max(
-    1,
-    roles?.has("styles") ? styles * 2 : 1,
-    roles?.has("numbering") ? numbers : 1,
-  );
+  const multiplier = Math.max(1, roles?.has("numbering") ? numbers : 1);
+  const rawBytes = new TextEncoder().encode(xml).length;
+  if (roles?.has("styles")) {
+    // Match processStyles' ordered basedOn merges, including forward links and
+    // cycles. Overridden properties are copied once, not once per ancestor.
+    const expanded = new Map([...styles].map(([id, style]) => [id, style.properties]));
+    for (const [id, style] of styles) {
+      const base = expanded.get(style.base);
+      if (base && style.base) expanded.set(id, new Map([...base, ...style.properties]));
+    }
+    let bytes = rawBytes;
+    let expandedMarkup = markup;
+    for (const [id, style] of styles) {
+      const properties = [
+        ...expanded.get(id)!.values(),
+        ...(style.linked ? (expanded.get(style.linked)?.values() ?? []) : []),
+      ];
+      // CSS adds selectors and may copy defaults for both root and style selectors.
+      bytes += properties.reduce((sum, size) => sum + (size * 2 + id.length + 32) * 2, 0);
+      expandedMarkup += properties.length * 2;
+    }
+    return { bytes, markup: expandedMarkup, pictures };
+  }
   return {
     bytes:
-      new TextEncoder().encode(xml).length *
-      (roles?.has("styles")
-        ? Math.max(multiplier, markup * 2)
-        : roles?.has("numbering")
-          ? Math.max(markup, numbers * numberIdLength) * 2
-          : 1),
+      rawBytes * (roles?.has("numbering") ? Math.max(markup, numbers * numberIdLength) * 2 : 1),
     markup: markup * multiplier,
     pictures,
   };
+}
+
+// docx-preview copies notes for every reference and headers/footers for every
+// explicit page. Charge those copies, not just the XML that defines them.
+async function wordExpansion(
+  archive: JSZip,
+  parts: ReturnType<typeof wordPartTypes>,
+  mediaSizes: Map<string, number>,
+  auxiliaryCosts: Map<string, { bytes: number; markup: number }>,
+  documents: string[],
+) {
+  type Cost = { bytes: number; markup: number; media: number; images: Set<string> };
+  const empty = (): Cost => ({ bytes: 0, markup: 0, media: 0, images: new Set() });
+  const nodes = new Map<string, { xml: string; path: string }>();
+  const optional = new Set<string>();
+  const noteParts = new Map<string, string>();
+  for (const [path, roles] of parts.roles) {
+    if (![...roles].some((role) => WORD_EXPANDED_PARTS.has(role))) continue;
+    const xml = await archive.file(path)?.async("string");
+    if (!xml) continue;
+    optional.add(path);
+    if (roles.has("header") || roles.has("footer")) nodes.set(path, { xml, path });
+    for (const role of ["footnotes", "endnotes", "comments"]) {
+      if (!roles.has(role)) continue;
+      noteParts.set(role.slice(0, -1), path);
+      const parser = xmlParser();
+      let start = 0;
+      let id = "";
+      let depth = 0;
+      let prefix = "";
+      let suffix = "";
+      parser.on("opentag", (tag) => {
+        if (++depth === 1) {
+          prefix = xml.slice(0, parser.position);
+          suffix = `</${tag.name}>`;
+        }
+        if (tag.local !== role.slice(0, -1)) return;
+        start = xml.lastIndexOf("<", parser.position - 1);
+        id = Object.values(tag.attributes).find((attr) => attr.local === "id")?.value ?? "";
+      });
+      parser.on("closetag", (tag) => {
+        if (tag.local === role.slice(0, -1))
+          nodes.set(`${path}#${id}`, {
+            xml: prefix + xml.slice(start, parser.position) + suffix,
+            path,
+          });
+        depth--;
+      });
+      parser.write(xml).close();
+    }
+  }
+  const used = new Set<string>();
+  const memo = new Map<string, Cost>();
+  const scan = (xml: string, path: string, chain: Set<string>, pages = 1, expand = true): Cost => {
+    const cost = empty();
+    const refs = new Map<string, number>();
+    const headers = new Set<string>();
+    const parser = xmlParser();
+    const add = (key: string) => refs.set(key, (refs.get(key) ?? 0) + 1);
+    parser.on("opentag", (tag) => {
+      const attr = (name: string) =>
+        Object.values(tag.attributes).find((a) => a.local === name)?.value ?? "";
+      const note = /^(footnote|endnote|comment)Reference$/.exec(tag.local)?.[1];
+      if (note && noteParts.has(note)) add(`${noteParts.get(note)}#${attr("id")}`);
+      if (tag.local === "headerReference" || tag.local === "footerReference") {
+        const target = parts.relationships.get(path)?.get(attr("id"));
+        if (target) headers.add(target);
+      }
+      if (tag.local === "altChunk") cost.bytes = Infinity;
+      if (tag.local !== "blip" && tag.local !== "imagedata") return;
+      const target = parts.relationships.get(path)?.get(attr("embed") || attr("id"));
+      if (target) {
+        cost.media += mediaSizes.get(target) ?? OFFICE_PREVIEW_MAX_BYTES + 1;
+        cost.images.add(target);
+      }
+    });
+    parser.write(xml).close();
+    for (const header of headers) refs.set(header, pages);
+    if (!expand) return cost;
+    for (const [key, copies] of refs) {
+      const node = nodes.get(key);
+      if (!node) continue;
+      used.add(node.path);
+      if (chain.has(key) || chain.size >= 64) {
+        cost.bytes = Infinity;
+        break;
+      }
+      let expanded = memo.get(key);
+      if (!expanded) {
+        const own = wordXmlCost(node.xml, undefined);
+        expanded = scan(node.xml, node.path, new Set([...chain, key]));
+        expanded.bytes += own.bytes;
+        expanded.markup += own.markup;
+        memo.set(key, expanded);
+      }
+      cost.bytes += expanded.bytes * copies;
+      cost.markup += expanded.markup * copies;
+      cost.media += expanded.media * copies;
+      for (const image of expanded.images) cost.images.add(image);
+    }
+    return cost;
+  };
+  const costs = new Map<string, Cost>();
+  let bytes = 0;
+  let markup = 0;
+  let media = 0;
+  // Styles may introduce a page break before each styled paragraph. The page
+  // bound also includes explicit breaks and section transitions in each batch.
+  let stylePageBreaks = false;
+  for (const [path, roles] of parts.roles)
+    if (
+      roles.has("styles") &&
+      /<(?:\w+:)?pageBreakBefore\b/.test((await archive.file(path)?.async("string")) ?? "")
+    )
+      stylePageBreaks = true;
+  for (const document of documents) {
+    const pages = Math.max(
+      1,
+      document.match(
+        stylePageBreaks ? /<(?:\w+:)?p\b/g : /<(?:\w+:)?(?:br|pageBreakBefore|sectPr)\b/g,
+      )?.length ?? 0,
+    );
+    const expanded = scan(document, "word/document.xml", new Set(), pages);
+    const body = wordXmlCost(document, undefined);
+    bytes += body.bytes + expanded.bytes;
+    markup += body.markup + expanded.markup;
+    media += expanded.media;
+    costs.set(document, expanded);
+  }
+  for (const [path, cost] of auxiliaryCosts) {
+    if (optional.has(path) && !used.has(path)) continue;
+    bytes += cost.bytes * documents.length;
+    markup += cost.markup * documents.length;
+  }
+  const overBudget =
+    bytes > 3 * 1024 * 1024 || markup > 100_000 || media > OFFICE_PREVIEW_MAX_BYTES;
+  const truncated = (used.size > 0 && overBudget) || bytes === Infinity;
+  const omitted = new Set([...optional].filter((path) => truncated || !used.has(path)));
+  for (const path of omitted) archive.remove(path);
+  if (truncated)
+    for (const document of documents)
+      costs.set(document, scan(document, "word/document.xml", new Set(), 1, false));
+  // Remove relationships too: related XML is parsed even when not rendered.
+  for (const [owner, refs] of parts.relationships) {
+    const ids = new Set([...refs].filter(([, path]) => omitted.has(path)).map(([id]) => id));
+    if (ids.size === 0) continue;
+    const relPath = owner ? owner.replace(/([^/]+)$/, "_rels/$1.rels") : "_rels/.rels";
+    let xml = await archive.file(relPath)?.async("string");
+    if (!xml) continue;
+    const removed: { start: number; end: number }[] = [];
+    const parser = xmlParser();
+    let start = -1;
+    parser.on("opentag", (tag) => {
+      if (tag.local === "Relationship" && ids.has(tag.attributes.Id?.value ?? ""))
+        start = xml!.lastIndexOf("<", parser.position - 1);
+    });
+    parser.on("closetag", (tag) => {
+      if (tag.local === "Relationship" && start >= 0) {
+        removed.push({ start, end: parser.position });
+        start = -1;
+      }
+    });
+    parser.write(xml).close();
+    for (const range of removed.toReversed())
+      xml = xml.slice(0, range.start) + xml.slice(range.end);
+    archive.file(relPath, xml);
+  }
+  return { costs, truncated, omitted };
 }
 
 // Stream each entry before handing it to an engine. A tiny compressed archive
@@ -599,7 +797,6 @@ async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open"
       archive.file(entry.name, xml);
     } else {
       if (input.kind === "docx" && partTypes.roles.get(entry.name)?.has("font")) {
-        wordInputTruncated = true;
         continue;
       }
       if (media) mediaSizes.set(entry.name, Math.ceil((content.length * 4) / 3));
@@ -607,6 +804,12 @@ async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open"
     }
   }
   if (word) {
+    const expansion = await wordExpansion(archive, partTypes, mediaSizes, costs, word.documents);
+    wordInputTruncated ||= expansion.truncated;
+    for (const path of expansion.omitted) {
+      archive.remove(path);
+      costs.delete(path);
+    }
     let bytes = 0;
     let markup = 0;
     let mediaBytes = 0;
@@ -617,23 +820,11 @@ async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open"
     );
     const documents: string[] = [];
     for (const document of word.documents) {
-      const cost = wordXmlCost(document, undefined);
-      let images = 0;
-      const batchImages = new Set<string>();
-      const parser = xmlParser();
-      parser.on("opentag", (tag) => {
-        if (tag.local !== "blip" && tag.local !== "imagedata") return;
-        const id = Object.values(tag.attributes).find(
-          (attr) => attr.local === "embed" || attr.local === "id",
-        )?.value;
-        const path = partTypes.images.get(id ?? "");
-        // Account for repeated base64 media, including repeated references.
-        if (path) {
-          images += mediaSizes.get(path) ?? OFFICE_PREVIEW_MAX_BYTES + 1;
-          batchImages.add(path);
-        }
-      });
-      parser.write(document).close();
+      const rawCost = wordXmlCost(document, undefined);
+      const extra = expansion.costs.get(document)!;
+      const cost = { bytes: rawCost.bytes + extra.bytes, markup: rawCost.markup + extra.markup };
+      const images = extra.media;
+      const batchImages = new Set(extra.images);
       if (
         bytes + cost.bytes + auxiliary.bytes > 3 * 1024 * 1024 ||
         markup + cost.markup + auxiliary.markup > 100_000 ||
@@ -648,8 +839,7 @@ async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open"
     }
     if (documents.length === 0)
       throw new Error("Preview limited: this Word document has too much expanded markup.");
-    word.truncated ||=
-      wordInputTruncated || partTypes.omitted || documents.length < word.documents.length;
+    word.truncated ||= wordInputTruncated || documents.length < word.documents.length;
     word.documents = documents;
     for (const path of mediaSizes.keys()) if (!usedImages.has(path)) archive.remove(path);
     archive.file("word/document.xml", documents[0]!);
@@ -706,28 +896,43 @@ async function handle(input: OfficeWorkerRequest) {
     const sheets = await readXlsxFile(bytes);
     if (sheets.length === 0 || sheets.length > 100)
       throw new Error("This workbook has no readable sheets or too many sheets to preview.");
+    let remainingText =
+      1024 * 1024 - sheets.reduce((sum, { sheet }) => sum + Math.min(sheet.length, 256), 0);
     reply({
       type: "xlsx",
-      sheets: sheets.map(({ sheet, data }, index) => ({
-        name: sheet,
-        rows: data
-          .slice(0, OFFICE_PREVIEW_MAX_ROWS)
-          .map((row) =>
-            row
-              .slice(0, OFFICE_PREVIEW_MAX_COLUMNS)
-              .map((cell) =>
-                cell === null
-                  ? ""
-                  : cell instanceof Date
-                    ? cell.toLocaleDateString(undefined, { timeZone: "UTC" })
-                    : String(cell),
-              ),
-          ),
-        truncated:
+      sheets: sheets.map(({ sheet, data }, index) => {
+        let truncated =
+          sheet.length > 256 ||
           truncatedSheets[index] === true ||
           data.length > OFFICE_PREVIEW_MAX_ROWS ||
-          data.some((row) => row.length > OFFICE_PREVIEW_MAX_COLUMNS),
-      })),
+          data.some((row) => row.length > OFFICE_PREVIEW_MAX_COLUMNS);
+        const rows: string[][] = [];
+        for (const row of data.slice(0, OFFICE_PREVIEW_MAX_ROWS)) {
+          const cells: string[] = [];
+          for (const cell of row.slice(0, OFFICE_PREVIEW_MAX_COLUMNS)) {
+            if (remainingText === 0) {
+              truncated = true;
+              break;
+            }
+            const text =
+              cell === null
+                ? ""
+                : cell instanceof Date
+                  ? cell.toLocaleDateString(undefined, { timeZone: "UTC" })
+                  : String(cell);
+            const length = Math.min(text.length, 4_096, remainingText);
+            truncated ||= length < text.length;
+            cells.push(text.slice(0, length));
+            remainingText -= length;
+          }
+          rows.push(cells);
+          if (remainingText === 0) {
+            truncated ||= rows.length < data.length;
+            break;
+          }
+        }
+        return { name: sheet.slice(0, 256), rows, truncated };
+      }),
     });
   } else {
     const [{ initWasm, openPresentation }, fontUrl] = await Promise.all([

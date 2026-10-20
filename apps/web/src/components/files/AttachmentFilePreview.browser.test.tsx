@@ -168,7 +168,6 @@ it.each([
   "header",
   "footer",
   "comments",
-  "fontTable",
   "styles",
   "numbering",
   "picture numbering",
@@ -186,7 +185,7 @@ it.each([
     const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
     archive.file(
       "word/document.xml",
-      `<w:document xmlns:w="${ns}"><w:body>${text("body retained")}${Array.from({ length: 500 }, () => `<w:p><w:r><w:footnoteReference w:id="1"/><w:endnoteReference w:id="1"/></w:r></w:p>`).join("")}<w:sectPr/></w:body></w:document>`,
+      `<w:document xmlns:w="${ns}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${text("body retained")}${Array.from({ length: 500 }, () => `<w:p><w:r><w:footnoteReference w:id="1"/><w:endnoteReference w:id="1"/><w:commentReference w:id="1"/><w:br w:type="page"/></w:r></w:p>`).join("")}<w:sectPr><w:headerReference w:type="default" r:id="aux"/><w:footerReference w:type="default" r:id="aux"/></w:sectPr></w:body></w:document>`,
     );
     archive.file(
       "word/_rels/document.xml.rels",
@@ -194,10 +193,12 @@ it.each([
     );
     const xml =
       role === "styles"
-        ? `<w:styles xmlns:w="${ns}">${Array.from({ length: 100 }, (_, i) => `<w:style w:styleId="s${i}" w:type="paragraph"><w:basedOn w:val="s0"/><w:pPr><w:spacing w:after="120"/></w:pPr></w:style>`).join("")}</w:styles>`
+        ? `<w:styles xmlns:w="${ns}">${Array.from({ length: 100 }, (_, i) => `<w:style w:styleId="${"s".repeat(2_000)}${i}" w:type="paragraph"><w:basedOn w:val="s0"/><w:pPr><w:spacing w:after="120"/></w:pPr></w:style>`).join("")}</w:styles>`
         : role.includes("numbering")
           ? `<w:numbering xmlns:w="${ns}">${role === "picture numbering" ? '<w:numPicBullet w:numPicBulletId="1"/>' : ""}<w:abstractNum w:abstractNumId="1">${Array.from({ length: 9 }, (_, i) => `<w:lvl w:ilvl="${i}"><w:lvlText w:val="%1."/></w:lvl>`).join("")}</w:abstractNum>${Array.from({ length: 100 }, (_, i) => `<w:num w:numId="${i}"><w:abstractNumId w:val="1"/></w:num>`).join("")}</w:numbering>`
-          : `<w:footnotes xmlns:w="${ns}"><w:footnote w:id="1">${text("omitted payload").repeat(2_000)}</w:footnote></w:footnotes>`;
+          : role === "header" || role === "footer"
+            ? `<w:${role === "header" ? "hdr" : "ftr"} xmlns:w="${ns}">${text("omitted payload").repeat(2_000)}</w:${role === "header" ? "hdr" : "ftr"}>`
+            : `<w:${role} xmlns:w="${ns}"><w:${role.slice(0, -1)} w:id="1">${text("omitted payload").repeat(2_000)}</w:${role.slice(0, -1)}></w:${role}>`;
     archive.file("word/media/aux.xml", xml);
     const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
     const src = URL.createObjectURL(file);
@@ -215,13 +216,142 @@ it.each([
       expect(screen.container.textContent).toContain("Preview limited");
       const frame = screen.container.querySelector("iframe")!;
       expect(frame.srcdoc).not.toContain("omitted payload");
-      expect(frame.srcdoc.length).toBeLessThan(150_000);
+      expect(frame.srcdoc.length).toBeLessThan(500_000);
     } finally {
       URL.revokeObjectURL(src);
     }
   },
   35_000,
 );
+
+it.each(["ordinary parts", "unused parts", "independent styles", "inherited styles"])(
+  "retains Word %s without a limit warning",
+  async (scenario) => {
+    const { default: JSZip } = await import("jszip");
+    const archive = new JSZip();
+    const ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
+    archive.file(
+      "_rels/.rels",
+      `<Relationships><Relationship Id="doc" Type="${r}/officeDocument" Target="word/document.xml"/></Relationships>`,
+    );
+    const ordinary = scenario === "ordinary parts";
+    archive.file(
+      "word/document.xml",
+      `<w:document xmlns:w="${ns}" xmlns:r="${r}"><w:body>${text("ordinary body")}<w:p><w:pPr><w:pStyle w:val="s19"/></w:pPr><w:r><w:t>styled body</w:t>${ordinary ? '<w:footnoteReference w:id="1"/><w:footnoteReference w:id="1"/><w:endnoteReference w:id="1"/><w:commentReference w:id="1"/>' : ""}</w:r></w:p><w:sectPr>${ordinary ? '<w:headerReference w:type="default" r:id="header"/><w:footerReference w:type="default" r:id="footer"/>' : ""}</w:sectPr></w:body></w:document>`,
+    );
+    archive.file(
+      "word/_rels/document.xml.rels",
+      `<Relationships>${["header", "footer", "footnotes", "endnotes", "comments", "fontTable", "styles"].map((role) => `<Relationship Id="${role}" Type="${r}/${role}" Target="${role}.xml"/>`).join("")}</Relationships>`,
+    );
+    for (const [role, root] of [
+      ["header", "hdr"],
+      ["footer", "ftr"],
+    ])
+      archive.file(
+        `word/${role}.xml`,
+        `<w:${root} xmlns:w="${ns}">${text(`${role} retained`)}</w:${root}>`,
+      );
+    for (const role of ["footnotes", "endnotes", "comments"])
+      archive.file(
+        `word/${role}.xml`,
+        `<w:${role} xmlns:w="${ns}"><w:${role.slice(0, -1)} w:id="1" w:author="reviewer" w:date="2026-10-01T00:00:00Z">${text(`${role} retained`)}</w:${role.slice(0, -1)}></w:${role}>`,
+      );
+    archive.file(
+      "word/fontTable.xml",
+      `<w:fonts xmlns:w="${ns}"><w:font w:name="unused"/></w:fonts>`,
+    );
+    archive.file(
+      "word/styles.xml",
+      `<w:styles xmlns:w="${ns}"><w:docDefaults/><w:style w:type="paragraph" w:styleId="base"><w:rPr><w:b/></w:rPr></w:style>${Array.from({ length: 20 }, (_, i) => `<w:style w:styleId="s${i}" w:type="paragraph">${scenario === "inherited styles" ? '<w:basedOn w:val="base"/>' : ""}<w:rPr><w:color w:val="123456"/></w:rPr></w:style>`).join("")}</w:styles>`,
+    );
+    const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
+    const src = URL.createObjectURL(file);
+    try {
+      await using screen = await render(
+        <OfficeFilePreview src={src} name="ordinary.docx" kind="docx" />,
+      );
+      await vi.waitFor(
+        () => expect(screen.container.querySelector("iframe")?.srcdoc).toContain("ordinary body"),
+        { timeout: 30_000 },
+      );
+      expect(screen.container.textContent).not.toContain("Preview limited");
+      const html = screen.container.querySelector("iframe")!.srcdoc;
+      expect(html).toContain("docx_s19");
+      if (ordinary) {
+        for (const label of [
+          "header retained",
+          "footer retained",
+          "endnotes retained",
+          "comments retained",
+        ])
+          expect(html).toContain(label);
+        expect(html.match(/footnotes retained/g)).toHaveLength(2);
+      } else expect(html).not.toContain("footnotes retained");
+    } finally {
+      URL.revokeObjectURL(src);
+    }
+  },
+  35_000,
+);
+
+it("bounds shared-string text per cell and across sheets in the worker and viewer", async () => {
+  const { default: JSZip } = await import("jszip");
+  const archive = new JSZip();
+  archive.file(
+    "xl/workbook.xml",
+    '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="one" sheetId="1" r:id="s"/><sheet name="two" sheetId="2" r:id="s"/></sheets></workbook>',
+  );
+  archive.file(
+    "xl/_rels/workbook.xml.rels",
+    '<Relationships><Relationship Id="s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+  );
+  archive.file("xl/sharedStrings.xml", `<sst><si><t>${"x".repeat(32_767)}</t></si></sst>`);
+  archive.file(
+    "xl/worksheets/sheet1.xml",
+    `<worksheet><sheetData>${Array.from({ length: 500 }, (_, i) => `<row r="${i + 1}">${Array.from({ length: 50 }, (_, j) => `<c r="${j < 26 ? String.fromCharCode(65 + j) : "A" + String.fromCharCode(65 + j - 26)}${i + 1}" t="s"><v>0</v></c>`).join("")}</row>`).join("")}</sheetData></worksheet>`,
+  );
+  const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
+  const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
+    type: "module",
+  });
+  try {
+    const result = await new Promise<OfficeWorkerResult>((resolve) => {
+      worker.addEventListener(
+        "message",
+        (event: MessageEvent<OfficeWorkerResult>) => resolve(event.data),
+        { once: true },
+      );
+      void file
+        .arrayBuffer()
+        .then((bytes) => worker.postMessage({ type: "open", kind: "xlsx", bytes }, [bytes]));
+    });
+    expect(result.type).toBe("xlsx");
+    if (result.type !== "xlsx") throw new Error("Expected bounded workbook");
+    const cells = result.sheets.flatMap((sheet) => sheet.rows.flat());
+    expect(
+      cells.reduce((total, cell) => total + cell.length, 0) +
+        result.sheets.reduce((total, sheet) => total + sheet.name.length, 0),
+    ).toBe(1024 * 1024);
+    expect(Math.max(...cells.map((cell) => cell.length))).toBe(4_096);
+    expect(result.sheets.every((sheet) => sheet.truncated)).toBe(true);
+  } finally {
+    worker.terminate();
+  }
+  const src = URL.createObjectURL(file);
+  try {
+    await using screen = await render(
+      <OfficeFilePreview src={src} name="shared.xlsx" kind="xlsx" />,
+    );
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("bounded cell text"), {
+      timeout: 30_000,
+    });
+    expect(screen.container.querySelector("td")!.textContent).toHaveLength(4_096);
+  } finally {
+    URL.revokeObjectURL(src);
+  }
+}, 35_000);
 
 it("charges auxiliary XML once per Word render batch", async () => {
   const { default: JSZip } = await import("jszip");

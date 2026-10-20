@@ -69,13 +69,11 @@ async function renderWord(
       ignoreFonts: true,
       useBase64URL: true,
       renderAltChunks: false,
-      // These parts can repeat once per reference or page. The worker removes
-      // their relationships too, so the main thread never parses their XML.
-      renderFootnotes: false,
-      renderEndnotes: false,
-      renderHeaders: false,
-      renderFooters: false,
-      renderComments: false,
+      renderFootnotes: true,
+      renderEndnotes: true,
+      renderHeaders: true,
+      renderFooters: true,
+      renderComments: true,
       renderChanges: false,
       experimental: false,
     });
@@ -102,7 +100,8 @@ function WordFrame(props: {
   readonly name: string;
 }) {
   const { resolvedTheme } = useTheme();
-  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><style>${props.content.css}</style><style>html{background:${OFFICE_PAGE_BACKGROUND[resolvedTheme]}}body{margin:0}.docx-wrapper{background:transparent;padding:${OFFICE_PAGE_PADDING}px;box-sizing:border-box}.docx-wrapper section.docx{width:612pt;max-width:100%;box-sizing:border-box;padding:32px!important;min-height:0!important}img{max-width:100%;height:auto}.docx-wrapper section.docx div{max-width:100%}img{height:auto!important}*{scrollbar-width:thin}</style></head><body>${props.content.html}</body></html>`;
+  // HTML reparsing moves block comment popovers out of their source paragraph.
+  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><style>${props.content.css}</style><style>html{background:${OFFICE_PAGE_BACKGROUND[resolvedTheme]}}body{margin:0}.docx-wrapper{background:transparent;padding:${OFFICE_PAGE_PADDING}px;box-sizing:border-box}.docx-wrapper section.docx{width:612pt;max-width:100%;box-sizing:border-box;padding:32px!important;min-height:0!important}img{max-width:100%;height:auto}.docx-wrapper section.docx div{max-width:100%}img{height:auto!important}.docx p:has(.docx-comment-ref:hover)+.docx-comment-popover{display:block}*{scrollbar-width:thin}</style></head><body>${props.content.html}</body></html>`;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {props.content.truncated ? (
@@ -339,7 +338,9 @@ export default function OfficeViewer(props: {
         <>
           <FileSurfaceNotice>
             Cell values only. Charts, images, and formatting are not shown.
-            {sheet.truncated ? " Limited to 500 rows and 50 columns." : ""}
+            {sheet.truncated
+              ? " Preview limited to 500 rows, 50 columns, and bounded cell text."
+              : ""}
           </FileSurfaceNotice>
           <div className="scrollbar-gutter-both min-h-0 flex-1 overflow-auto">
             <table
