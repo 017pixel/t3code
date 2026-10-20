@@ -20,6 +20,131 @@ import LargeTextViewer from "./LargeTextViewer";
 import VirtualTablePreview from "./VirtualTablePreview";
 
 describe("large text preview recovery", () => {
+  it("rejects malformed UTF-8 bytes through the real text worker", async () => {
+    const src = URL.createObjectURL(new Blob([new Uint8Array([0xe9, 10])]));
+    try {
+      await using screen = await render(
+        <LargeTextViewer src={src} name="latin.txt" delimiter={null} />,
+      );
+      await vi.waitFor(() =>
+        expect(screen.container.querySelector('[role="alert"]')).not.toBeNull(),
+      );
+    } finally {
+      URL.revokeObjectURL(src);
+    }
+  });
+
+  it("replaces both prefetched pages with the worker's current file version", async () => {
+    const old = Array.from({ length: 64 }, (_, i) => "old-" + i).join("\n") + "\n";
+    const current = Array.from({ length: 100 }, (_, i) => "current-" + i).join("\n");
+    const src = URL.createObjectURL(new Blob([current]));
+    using _fetch = stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(old, {
+          status: 206,
+          headers: {
+            "content-length": String(old.length),
+            "content-range": "bytes 0-" + (old.length - 1) + "/100000",
+          },
+        }),
+      ),
+    );
+    try {
+      await using screen = await render(
+        <div style={{ display: "flex", height: 2000, width: 600 }}>
+          <LargeTextViewer src={src} name="log.txt" delimiter={null} />
+        </div>,
+      );
+      await vi.waitFor(() => expect(screen.container.textContent).toContain("current-40"));
+      expect(screen.container.textContent).not.toContain("old-");
+    } finally {
+      URL.revokeObjectURL(src);
+    }
+  });
+
+  it("fills the horizontal viewport using measured column widths", async () => {
+    const header = Array.from({ length: 20 }, (_, i) => "C" + i);
+    await using screen = await render(
+      <div style={{ display: "flex", height: 400, width: 400 }}>
+        <VirtualTablePreview
+          name="wide.csv"
+          count={2}
+          columns={20}
+          header={header}
+          getRows={() => [header, header]}
+        />
+      </div>,
+    );
+    const outer = () => screen.container.querySelector('[role="table"]')!.parentElement!;
+    const check = () => {
+      const cells = screen.container.querySelectorAll('[role="columnheader"]');
+      expect(cells.length).toBeGreaterThan(0);
+      expect(cells[cells.length - 1]!.getBoundingClientRect().right).toBeGreaterThanOrEqual(
+        outer().getBoundingClientRect().right - 1,
+      );
+    };
+    await vi.waitFor(check);
+    await act(() => {
+      outer().scrollLeft = outer().scrollWidth;
+      outer().dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    await vi.waitFor(check);
+    expect(screen.container.textContent).toContain("C19");
+  });
+
+  it("reveals and highlights requested source lines again for a new request", async () => {
+    const view = (line: number, request: number) => (
+      <div style={{ display: "flex", height: 400, width: 600 }}>
+        <VirtualTablePreview
+          name="log.txt"
+          count={1000}
+          columns={1}
+          source
+          wrap
+          revealLine={line}
+          revealRequestId={request}
+          getRows={(page) =>
+            Array.from({ length: 32 }, (_, i) => [
+              "line-" + (page * 32 + i + 1) + " wrapped source text".repeat(20),
+            ])
+          }
+        />
+      </div>
+    );
+    await using screen = await render(view(500, 1));
+    await vi.waitFor(() =>
+      expect(screen.container.querySelector('[data-preview-reveal="true"]')?.textContent).toContain(
+        "line-500",
+      ),
+    );
+    const checkVisible = () => {
+      const row = screen.container.querySelector<HTMLElement>('[data-preview-reveal="true"]')!;
+      const viewport = screen.container.querySelector<HTMLElement>('[tabindex="0"]')!;
+      expect(row.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+        viewport.getBoundingClientRect().top - 1,
+      );
+      expect(row.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+        viewport.getBoundingClientRect().bottom + 1,
+      );
+    };
+    await vi.waitFor(checkVisible);
+    await screen.rerender(view(900, 2));
+    await vi.waitFor(() =>
+      expect(screen.container.querySelector('[data-preview-reveal="true"]')?.textContent).toContain(
+        "line-900",
+      ),
+    );
+    await vi.waitFor(checkVisible);
+    await screen.rerender(view(999, 3));
+    await vi.waitFor(() =>
+      expect(screen.container.querySelector('[data-preview-reveal="true"]')?.textContent).toContain(
+        "line-999",
+      ),
+    );
+    await vi.waitFor(checkVisible);
+  });
+
   it("recovers from a failed worker load when its source changes", async () => {
     await using screen = await render(
       <LargeTextViewer name="log.txt" text={"bad\0text"} delimiter={null} />,

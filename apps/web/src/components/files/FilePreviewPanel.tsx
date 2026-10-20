@@ -1425,6 +1425,8 @@ export default function FilePreviewPanel({
               name={relativePath}
               delimiter={renderTable ? tableDelimiter : null}
               workspaceMutationId={workspaceMutationId}
+              revealLine={revealLine}
+              revealRequestId={revealRequestId}
             />
           ) : relativePath && absolutePath && file.readError?.failure === "binary_file" ? (
             <AttachmentFilePreview
@@ -1565,6 +1567,8 @@ function WorkspaceLargeTextPreview(props: {
   name: string;
   delimiter: "," | "\t" | null;
   workspaceMutationId: string | null;
+  revealLine: number | null;
+  revealRequestId: number;
 }) {
   const resource = {
     _tag: "media-file",
@@ -1590,7 +1594,13 @@ function WorkspaceLargeTextPreview(props: {
   const src = `${assetUrl.url}${assetUrl.url.includes("?") ? "&" : "?"}revision=${encodeURIComponent(props.workspaceMutationId ?? "")}`;
   return (
     <Suspense fallback={<div className="p-6 text-xs text-muted-foreground">Loading…</div>}>
-      <LargeTextViewer name={props.name} src={src} delimiter={props.delimiter} />
+      <LargeTextViewer
+        name={props.name}
+        src={src}
+        delimiter={props.delimiter}
+        revealLine={props.revealLine}
+        revealRequestId={props.revealRequestId}
+      />
     </Suspense>
   );
 }

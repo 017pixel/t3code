@@ -31,6 +31,8 @@ export default function LargeTextViewer(props: {
   readonly text?: string;
   readonly copyContents?: RefObject<(() => Promise<string>) | null>;
   readonly delimiter: "," | "\t" | null;
+  readonly revealLine?: number | null;
+  readonly revealRequestId?: number;
 }) {
   const [meta, setMeta] = useState<{ count: number; columns: number; complete: boolean } | null>(
     null,
@@ -91,7 +93,12 @@ export default function LargeTextViewer(props: {
           } else setError(result.message);
         } else if (result.type === "meta") {
           indexed = true;
-          if (!prefetched || result.complete) setMeta(result);
+          if (prefetched) {
+            setPages(new Map());
+            pending.current.clear();
+            prefetched = false;
+          }
+          setMeta(result);
         } else if (result.type === "page") {
           pending.current.delete(result.index);
           setPages((old) => {
@@ -206,6 +213,8 @@ export default function LargeTextViewer(props: {
         header={header}
         source={!props.delimiter}
         wrap={wordWrap}
+        revealLine={meta.complete ? (props.revealLine ?? null) : null}
+        revealRequestId={props.revealRequestId ?? 0}
         getRows={(page) => pages.get(page)}
         loadPage={(page) => {
           if (pending.current.has(page)) return;
