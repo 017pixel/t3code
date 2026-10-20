@@ -18,6 +18,8 @@ import {
   getProjectSortTimestamp,
   getSidebarForkParentThreadId,
   groupSidebarThreadsByProject,
+  isSidebarFolderCollapsed,
+  sidebarFolderExpansionKeys,
   hasUnseenCompletion,
   isSidebarSubagentThread,
   resolveSidebarRowThreadId,
@@ -1669,6 +1671,20 @@ describe("sortSidebarV2ProjectGroups", () => {
         (project) => project.projectKey,
       ),
     ).toEqual(["logical-newer", "logical-older"]);
+  });
+});
+
+describe("sidebar folder expansion", () => {
+  it("honors a collapse the legacy sidebar saved under a member's cwd", () => {
+    const keys = sidebarFolderExpansionKeys({
+      projectKey: "github.com/pingdotgg/t3code",
+      memberProjects: [{ physicalProjectKey: "local:/code/t3code", workspaceRoot: "/code/t3code" }],
+    });
+    const cwdKey = keys.at(-1)!;
+
+    expect(isSidebarFolderCollapsed({}, keys)).toBe(false);
+    expect(isSidebarFolderCollapsed({ [cwdKey]: false }, keys)).toBe(true);
+    expect(isSidebarFolderCollapsed({ [keys[0]!]: true, [cwdKey]: false }, keys)).toBe(false);
   });
 });
 

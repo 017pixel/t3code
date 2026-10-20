@@ -26,6 +26,7 @@ import type { SidebarThreadSummary, Thread } from "../types";
 import { normalizeSearchText } from "../lib/utils";
 import { isLatestRunSettled } from "../session-logic";
 import { resolveServerBackedAppStageLabel } from "../branding.logic";
+import { legacyProjectCwdPreferenceKey } from "../uiStateStore";
 
 export function shouldNavigateAfterThreadPark(input: {
   readonly threadKey: string;
@@ -1244,6 +1245,33 @@ export function sortSidebarV2ProjectGroups<
     filterSidebarV2VisibleThreads(threads, null),
     sortOrder,
   );
+}
+
+/**
+ * Keys the old per-project sidebar saved folder open state under, most
+ * specific first. Boring folders read and write the same keys so a legacy
+ * user's collapsed folders stay collapsed, even after regrouping.
+ */
+export function sidebarFolderExpansionKeys(group: {
+  readonly projectKey: string;
+  readonly memberProjects: ReadonlyArray<{
+    readonly physicalProjectKey: string;
+    readonly workspaceRoot: string;
+  }>;
+}): string[] {
+  return [
+    group.projectKey,
+    ...group.memberProjects.map((member) => member.physicalProjectKey),
+    ...group.memberProjects.map((member) => legacyProjectCwdPreferenceKey(member.workspaceRoot)),
+  ];
+}
+
+export function isSidebarFolderCollapsed(
+  projectExpandedById: Readonly<Record<string, boolean>>,
+  keys: readonly string[],
+): boolean {
+  const saved = keys.find((key) => projectExpandedById[key] !== undefined);
+  return saved !== undefined && projectExpandedById[saved] === false;
 }
 
 /**
