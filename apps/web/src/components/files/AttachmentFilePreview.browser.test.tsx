@@ -62,6 +62,60 @@ describe("large text preview recovery", () => {
     );
   });
 
+  it("scrolls every tall row in the final virtual viewport", async () => {
+    await using screen = await render(
+      <div style={{ display: "flex", height: 400, width: 600 }}>
+        <VirtualTablePreview
+          name="tail.txt"
+          count={100}
+          columns={1}
+          source
+          wrap
+          getRows={(page) =>
+            Array.from({ length: 32 }, (_, i) => [
+              "line-" + (page * 32 + i + 1) + " wrapped source text".repeat(500),
+            ])
+          }
+        />
+      </div>,
+    );
+    const viewport = () => screen.container.querySelector<HTMLElement>('[tabindex="0"]')!;
+    const row = (index: number) =>
+      screen.container.querySelector<HTMLElement>('[data-preview-row="' + index + '"]')!;
+    await vi.waitFor(() => expect(row(0)?.offsetHeight).toBeGreaterThan(1000));
+    await act(() => {
+      viewport().scrollTop = 100 * 29 - viewport().clientHeight;
+      viewport().dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    const checkTop = (index: number) =>
+      expect(
+        Math.abs(row(index).getBoundingClientRect().top - viewport().getBoundingClientRect().top),
+      ).toBeLessThan(2);
+    await vi.waitFor(() => checkTop(87));
+    for (let index = 88; index < 100; index++) {
+      await act(() =>
+        viewport().dispatchEvent(
+          new WheelEvent("wheel", {
+            deltaY: row(index - 1).offsetHeight,
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+      );
+      if (index < 99) await vi.waitFor(() => checkTop(index));
+    }
+    await act(() =>
+      viewport().dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true })),
+    );
+    await vi.waitFor(() =>
+      expect(
+        Math.abs(
+          row(99).getBoundingClientRect().bottom - viewport().getBoundingClientRect().bottom,
+        ),
+      ).toBeLessThan(2),
+    );
+  });
+
   it("rejects malformed UTF-8 bytes through the real text worker", async () => {
     const src = URL.createObjectURL(new Blob([new Uint8Array([0xe9, 10])]));
     try {
