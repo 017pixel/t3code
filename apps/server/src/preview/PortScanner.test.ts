@@ -521,6 +521,7 @@ effectIt.effect.each(["linux", "darwin"] as const)(
     const agentListener = `p4242\ncnode\nn127.0.0.1:${agentPort}\n`;
     const otherListener = `p5000\ncpostgres\nn127.0.0.1:${otherPort}\n`;
     let lsofStdout = `${agentListener}${otherListener}`;
+    let lsofFails = false;
     let lsofCalls = 0;
     let environmentReads = 0;
     const requests: string[] = [];
@@ -544,7 +545,16 @@ effectIt.effect.each(["linux", "darwin"] as const)(
             run: (input) => {
               if (input.command === "lsof") {
                 lsofCalls += 1;
-                return Effect.succeed(processOutput(lsofStdout));
+                return lsofFails
+                  ? Effect.fail(
+                      new ProcessRunner.ProcessTimeoutError({
+                        command: input.command,
+                        argumentCount: input.args.length,
+                        cwd: input.cwd,
+                        timeoutMs: 5_000,
+                      }),
+                    )
+                  : Effect.succeed(processOutput(lsofStdout));
               }
               // A direct child of this process, so stop refuses it without signaling anything.
               if (input.args[0] === "-A") {
@@ -579,8 +589,12 @@ effectIt.effect.each(["linux", "darwin"] as const)(
       expect(yield* scanner.scan()).toEqual([]);
       expect(lsofCalls).toBe(0);
 
-      // The agent exits before any client looks; its server is still found.
+      // The agent exits before any client looks, and the first read fails; its server is still
+      // found.
       scanner.trackAgent()();
+      lsofFails = true;
+      expect(yield* scanner.scan()).toEqual([]);
+      lsofFails = false;
       expect(yield* scanner.scan()).toMatchObject([
         { port: agentPort, pid: 4242, terminal: null, agent: { threadId: "thread-agent" } },
       ]);

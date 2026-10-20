@@ -568,6 +568,8 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     terminalOwners: ReadonlyMap<number, ServerOwner>,
     pids: ReadonlyArray<number>,
   ) {
+    // Runs only once a listener snapshot exists, so a failed read leaves the scan pending.
+    agentScanPending = false;
     const threads = yield* readAgentThreads(pids.filter((pid) => !terminalOwners.has(pid)));
     const owners = new Map(terminalOwners);
     for (const [pid, threadId] of threads) {
@@ -886,7 +888,6 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
       (runningAgents > 0 ||
         agentScanPending ||
         [...(yield* Ref.get(agentThreadsRef)).values()].some((threadId) => threadId !== null));
-    if (agentsPossible) agentScanPending = false;
     if (terminalOwners.size === 0 && configuredUrls.length === 0 && !agentsPossible) {
       return { discovered: [], configured: new Map() } satisfies WebProbeSnapshot;
     }
