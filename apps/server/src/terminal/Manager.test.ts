@@ -437,8 +437,31 @@ it.layer(
 )("TerminalManager", (it) => {
   it.effect("saved-script terminals reject loaded, closed, persisted and legacy identities", () =>
     Effect.gen(function* () {
-      const { manager, ptyAdapter, logsDir } = yield* createManager();
       const fs = yield* FileSystem.FileSystem;
+      const historyWriteEntered = yield* Deferred.make<void>();
+      const releaseHistoryWrite = yield* Deferred.make<void>();
+      const outputPublished = yield* Deferred.make<void>();
+      const gatedFileSystem = FileSystem.FileSystem.of({
+        ...fs,
+        writeFileString: (filePath, contents, options) =>
+          Effect.gen(function* () {
+            if (contents === "live output\n") {
+              yield* Deferred.succeed(historyWriteEntered, undefined);
+              yield* Deferred.await(releaseHistoryWrite);
+            }
+            yield* fs.writeFileString(filePath, contents, options);
+          }),
+      });
+      const { manager, ptyAdapter, logsDir } = yield* createManager().pipe(
+        Effect.provideService(FileSystem.FileSystem, gatedFileSystem),
+      );
+      yield* Effect.addFinalizer(() => Deferred.succeed(releaseHistoryWrite, undefined));
+      const unsubscribe = yield* manager.subscribe((event) =>
+        event.type === "output" && event.terminalId === "loaded"
+          ? Deferred.succeed(outputPublished, undefined).pipe(Effect.asVoid)
+          : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
       const path = yield* Path.Path;
       const admitted: TerminalManager.TerminalSessionHandle[] = [];
       const fresh = (terminalId: string) =>
@@ -456,11 +479,16 @@ it.layer(
         "old",
       );
       yield* fs.writeFileString(path.join(logsDir, "thread-1.log"), "legacy");
+      ptyAdapter.processes[0]!.emitData("live output\n");
+      yield* Deferred.await(outputPublished);
+      yield* Deferred.await(historyWriteEntered);
+      // Known identities must reject before an in-flight history write finishes.
       for (const terminalId of ["loaded", "closed", "persisted", DEFAULT_TERMINAL_ID]) {
         expect(yield* Effect.flip(fresh(terminalId))).toMatchObject({
           _tag: "TerminalAlreadyExistsError",
         });
       }
+      yield* Deferred.succeed(releaseHistoryWrite, undefined);
       expect(admitted).toEqual([]);
       expect(ptyAdapter.processes).toHaveLength(2);
       const opened = yield* fresh("new");
