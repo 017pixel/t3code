@@ -87,6 +87,7 @@ describe("question answer paths", () => {
     ["destination symbol", String.raw`{\rtf1\ansi\u945\*Z}`, "αZ"],
     ["multiple units", String.raw`{\rtf1\ansi\uc4\u945?\tab\'3f\~Z}`, "αZ"],
     ["binary unit", String.raw`{\rtf1\ansi\u945\bin3 abcZ}`, "αZ"],
+    ["large fallback", String.raw`{\rtf1\ansi\uc20\u945????????????????????Z}`, "αZ"],
     ["no fallback", String.raw`{\rtf1\ansi\uc0\u945Z}`, "αZ"],
     ["scoped count", String.raw`{\rtf1\ansi{\uc2\u945??}\u946?Z}`, "αβZ"],
   ] as const)("skips RTF Unicode fallback units: %s", ([name, source, expected]) =>
@@ -245,6 +246,144 @@ describe("question answer paths", () => {
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
       const cases = [
+        ...[false, true].map((deep) => ({
+          ext: "docx",
+          bounded: true,
+          parts: {
+            "word/document.xml": `<document>${deep ? "<div>".repeat(129) + "Lost" + "</div>".repeat(129) : "<p/>".repeat(200_001)}</document>`,
+          },
+          expected: ["[Extracted text truncated at document extraction limits.]"],
+          absent: ["Lost"],
+        })),
+        ...["ods", "odt", "odp", "docx"].flatMap((ext) =>
+          [false, true].map((rows) => ({
+            ext,
+            bounded: true,
+            parts: {
+              [ext === "docx" ? "word/document.xml" : "content.xml"]:
+                `<document><page><table><table-row${rows ? ' number-rows-repeated="10001"' : ""}><table-cell${rows ? "" : ' number-columns-repeated="513"'}><p>Repeated value</p></table-cell></table-row></table></page></document>`,
+            },
+            expected: [
+              "Repeated value",
+              "[Extracted text truncated at document extraction limits.]",
+            ],
+            occurrences: { text: "Repeated value", count: rows ? 10_000 : 512 },
+          })),
+        ),
+        ...["ods", "odt", "odp", "docx"].map((ext) => ({
+          ext,
+          bounded: true,
+          parts: {
+            [ext === "docx" ? "word/document.xml" : "content.xml"]:
+              `<document><page><table><table-row><table-cell><p>Kept</p></table-cell><table-cell number-columns-repeated="16383"> \n <p> \t </p> <s c="1048575"/> </table-cell></table-row><table-row number-rows-repeated="1048575"><table-cell> \n <p> \t </p> </table-cell></table-row></table></page></document>`,
+          },
+          expected: ["Kept"],
+          absent: ["[Extracted text truncated", "\t"],
+        })),
+        ...["ods", "odt", "odp"].map((ext) => ({
+          ext,
+          bounded: true,
+          parts: {
+            "content.xml": `<document><page><table><table-row>
+              <table-cell office:value-type="string" office:string-value="Harbor"/>
+              <table-cell office:value-type="boolean" office:boolean-value="false"/>
+              <table-cell office:value-type="date" office:date-value="2026-10-20"/>
+              <table-cell office:value-type="time" office:time-value="PT2H30M"/>
+              <table-cell office:value-type="currency" office:value="125.50" office:currency="USD"/>
+              <table-cell office:value-type="percentage" office:value="0.25"/>
+              <table-cell office:value-type="float" office:value="0"/>
+              <table-cell office:value-type="string" office:string-value="Fallback"><p> \n </p></table-cell>
+              <table-cell office:value-type="string" office:string-value="Unshown"><p>Displayed</p></table-cell>
+              <table-cell office:value-type="void" office:value="Unshown"/>
+              <table-cell office:value-type="currency" office:value=" " office:currency="Unshown"/>
+              <table-cell office:value-type="percentage" office:value=" "/>
+            </table-row></table></page></document>`,
+          },
+          expected: [
+            "Harbor\tfalse\t2026-10-20\tPT2H30M\t125.50 USD\t0.25 [ODF value-type=percentage]\t0\tFallback\tDisplayed",
+          ],
+          absent: ["Unshown", "[Extracted text truncated"],
+        })),
+        ...[false, true].map((rows) => ({
+          ext: "xlsx",
+          bounded: true,
+          parts: {
+            "xl/workbook.xml": '<workbook><sheet name="Limited" r:id="a"/></workbook>',
+            "xl/_rels/workbook.xml.rels":
+              '<Relationships><Relationship Id="a" Target="worksheets/a.xml"/></Relationships>',
+            "xl/worksheets/a.xml": `<worksheet>${rows ? "<row><c><v>7</v></c></row>".repeat(10_001) : '<row><c r="A1"><v>7</v></c><c r="SS1"><v>Beyond</v></c></row>'}</worksheet>`,
+          },
+          expected: ["7", "[Extracted text truncated at document extraction limits.]"],
+          absent: ["Beyond"],
+        })),
+        {
+          ext: "xlsx",
+          bounded: true,
+          parts: {
+            "xl/workbook.xml": '<workbook><sheet name="Padding" r:id="a"/></workbook>',
+            "xl/_rels/workbook.xml.rels":
+              '<Relationships><Relationship Id="a" Target="worksheets/a.xml"/></Relationships>',
+            "xl/sharedStrings.xml": "<sst><si><t> \n </t></si><si><t>Present</t></si></sst>",
+            "xl/worksheets/a.xml": `<worksheet>${'<row><c t="s"><v>0</v></c><c r="XFD1" t="inlineStr"><is><t> \t </t></is></c></row>'.repeat(10_001)}<row><c t="s"><v>0</v></c><c t="s"><v>1</v></c><c r="XFD2"><v> \n </v></c></row></worksheet>`,
+          },
+          expected: ["Present"],
+          absent: ["[Extracted text truncated"],
+        },
+        {
+          ext: "epub",
+          bounded: true,
+          parts: {
+            "META-INF/container.xml": '<container><rootfile full-path="book.opf"/></container>',
+            "book.opf":
+              '<package><item id="bad" href="bad.xhtml"/><item id="good" href="good.xhtml"/><itemref idref="bad"/><itemref idref="good"/></package>',
+            "bad.xhtml": "<html><p>Discard this broken chapter</html>",
+            "good.xhtml":
+              '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html><p>North&nbsp;Harbor &NotEqualTilde; &CounterClockwiseContourIntegral; &amp; &lt;tag&gt; &quot;quoted&quot;</p><p><![CDATA[Literal &nbsp;]]></p><table><tr><td>&nbsp; </td></tr><tr><td>Kept&nbsp;cell</td></tr></table></html>',
+          },
+          expected: [
+            "## Chapter 2",
+            'North\u00a0Harbor ≂̸ ∳ & <tag> "quoted"',
+            "Literal &nbsp;",
+            "Kept cell",
+            "[Skipped document part: bad.xhtml (missing or invalid XML).]",
+          ],
+          absent: ["Discard this broken chapter", "[Extracted text truncated"],
+        },
+        ...["pptx", "xlsx"].map((ext) => ({
+          ext,
+          bounded: true,
+          parts:
+            ext === "pptx"
+              ? {
+                  "ppt/presentation.xml":
+                    '<presentation><sldId r:id="bad"/><sldId r:id="good"/></presentation>',
+                  "ppt/_rels/presentation.xml.rels":
+                    '<Relationships><Relationship Id="bad" Target="bad.xml"/><Relationship Id="good" Target="good.xml"/></Relationships>',
+                  "ppt/bad.xml": "<slide><p>Discard</slide>",
+                  "ppt/good.xml": "<slide><p>Healthy part</p></slide>",
+                }
+              : {
+                  "xl/workbook.xml":
+                    '<workbook><sheet name="Bad" r:id="bad"/><sheet name="Good" r:id="good"/></workbook>',
+                  "xl/_rels/workbook.xml.rels":
+                    '<Relationships><Relationship Id="bad" Target="bad.xml"/><Relationship Id="good" Target="good.xml"/></Relationships>',
+                  "xl/bad.xml": "<worksheet><row>Discard</worksheet>",
+                  "xl/good.xml":
+                    '<worksheet><row><c t="inlineStr"><is><t>Healthy part</t></is></c></row></worksheet>',
+                },
+          expected: [
+            "Healthy part",
+            `[Skipped document part: ${ext === "pptx" ? "ppt" : "xl"}/bad.xml (missing or invalid XML).]`,
+          ],
+          absent: ["Discard", "[Extracted text truncated"],
+        })),
+        {
+          ext: "odt",
+          bounded: true,
+          parts: { "content.xml": '<document><p>Start<s c="1000001"/>Unneeded</p></document>' },
+          expected: ["Start", "[Extracted text truncated at document extraction limits.]"],
+          absent: ["Unneeded"],
+        },
         {
           ext: "docx",
           parts: {
@@ -259,7 +398,7 @@ describe("question answer paths", () => {
           parts: {
             "word/document.xml": `<w:document><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>${"A".repeat(1_000_000)}</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Later cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>`,
           },
-          expected: ["A".repeat(32), "[Extracted text truncated at 1,000,000 characters.]"],
+          expected: ["A".repeat(32), "[Extracted text truncated at document extraction limits.]"],
         },
         {
           ext: "xlsx",
@@ -314,7 +453,7 @@ describe("question answer paths", () => {
           expected: [
             "## Sheet: Repeated",
             "A".repeat(32),
-            "[Extracted text truncated at 1,000,000 characters.]",
+            "[Extracted text truncated at document extraction limits.]",
           ],
         },
         {
@@ -375,7 +514,7 @@ describe("question answer paths", () => {
             "## Sheet: Repeated",
             "Lead ",
             " Tail\tLead ",
-            "[Extracted text truncated at 1,000,000 characters.]",
+            "[Extracted text truncated at document extraction limits.]",
           ],
         },
         {
@@ -399,7 +538,7 @@ describe("question answer paths", () => {
           expected: [
             "## Sheet: Shared",
             "B".repeat(32),
-            "[Extracted text truncated at 1,000,000 characters.]",
+            "[Extracted text truncated at document extraction limits.]",
           ],
           absent: ["## Sheet: Unneeded"],
         },
@@ -409,8 +548,8 @@ describe("question answer paths", () => {
           parts: {
             "content.xml": `<office:document><text:p>Before whitespace</text:p><table:table><table:table-row table:number-rows-repeated="10000"><table:table-cell table:number-columns-repeated="512"><text:p>${" ".repeat(10_000)}</text:p></table:table-cell></table:table-row></table:table><text:p>Unneeded</text:p></office:document>`,
           },
-          expected: ["Before whitespace", "[Extracted text truncated at 1,000,000 characters.]"],
-          absent: ["Unneeded"],
+          expected: ["Before whitespace", "Unneeded"],
+          absent: ["[Extracted text truncated"],
         },
         ...["odt", "odp", "ods"].flatMap((ext) =>
           [false, true].map((rows) => ({
@@ -425,7 +564,7 @@ describe("question answer paths", () => {
                 "",
               )}</draw:page><draw:page><text:p>Unneeded</text:p></draw:page></office:document>`,
             },
-            expected: ["Budget ", "[Extracted text truncated at 1,000,000 characters.]"],
+            expected: ["Budget ", "[Extracted text truncated at document extraction limits.]"],
             absent: ["Unneeded"],
           })),
         ),
@@ -435,7 +574,7 @@ describe("question answer paths", () => {
           parts: {
             "word/document.xml": `<w:document><w:p><w:t>${"A".repeat(1_000_100)}</w:t></w:p><w:p><w:t>Unneeded</w:t></w:p></w:document>`,
           },
-          expected: ["A".repeat(32), "[Extracted text truncated at 1,000,000 characters.]"],
+          expected: ["A".repeat(32), "[Extracted text truncated at document extraction limits.]"],
           absent: ["Unneeded"],
         },
         {
@@ -451,7 +590,7 @@ describe("question answer paths", () => {
           expected: [
             "## Slide 1",
             "A".repeat(32),
-            "[Extracted text truncated at 1,000,000 characters.]",
+            "[Extracted text truncated at document extraction limits.]",
           ],
           absent: ["## Slide 2"],
         },
@@ -467,7 +606,7 @@ describe("question answer paths", () => {
           expected: [
             "## Chapter 1",
             "A".repeat(32),
-            "[Extracted text truncated at 1,000,000 characters.]",
+            "[Extracted text truncated at document extraction limits.]",
           ],
           absent: ["## Chapter 2"],
         },
@@ -543,6 +682,8 @@ describe("question answer paths", () => {
           );
           previous = index;
         }
+        if ("occurrences" in item)
+          expect(extracted.split(item.occurrences.text).length - 1).toBe(item.occurrences.count);
         if ("absent" in item)
           for (const absent of item.absent) expect(extracted).not.toContain(absent);
         if (("bounded" in item && item.bounded) || item.ext === "epub") {
@@ -559,7 +700,7 @@ describe("question answer paths", () => {
           end.writeUInt16LE(2049, 10);
           NodeFS.writeFileSync(path, Buffer.concat([...local, ...central, end]));
           yield* Effect.promise(async () => {
-            await expect(extractDocumentText(path, ".docx")).rejects.toThrow("Archive limit");
+            expect(await extractDocumentText(path, ".docx")).toContain("[Extracted text truncated");
           });
           end.writeUInt16LE(central.length / 2, 8);
           end.writeUInt16LE(central.length / 2, 10);
@@ -567,7 +708,7 @@ describe("question answer paths", () => {
           central[0]!.writeUInt32LE(33 * 1024 * 1024, 24);
           NodeFS.writeFileSync(path, Buffer.concat([...local, ...central, end]));
           yield* Effect.promise(async () => {
-            await expect(extractDocumentText(path, ".docx")).rejects.toThrow("Archive limit");
+            expect(await extractDocumentText(path, ".docx")).toContain("[Extracted text truncated");
           });
         }
       }
@@ -605,6 +746,28 @@ describe("question answer paths", () => {
         expect(yield* documents.ensure(encodedPath)).toBe(encodedPath + ".txt");
         expect(NodeFS.readFileSync(encodedPath + ".txt", "utf8")).toBe(expected);
       }
+      const notebookPath = NodePath.join(config.attachmentsDir, "limited.ipynb");
+      NodeFS.writeFileSync(
+        notebookPath,
+        JSON.stringify({ cells: Array.from({ length: 10_001 }, () => ({ source: "Kept" })) }),
+      );
+      const notebookLimited = yield* Effect.promise(() =>
+        extractDocumentText(notebookPath, ".ipynb"),
+      );
+      expect(notebookLimited).toContain("## Cell 10000");
+      expect(notebookLimited).not.toContain("## Cell 10001");
+      expect(notebookLimited.match(/\[Extracted text truncated/g)).toHaveLength(1);
+      expect(yield* (yield* DocumentText.DocumentText).ensure(notebookPath)).toBe(
+        notebookPath + ".txt",
+      );
+      expect(NodeFS.readFileSync(notebookPath + ".txt", "utf8")).toBe(notebookLimited);
+      const deepPath = NodePath.join(config.attachmentsDir, "deep.rtf");
+      NodeFS.writeFileSync(
+        deepPath,
+        String.raw`{\rtf1 Kept` + "{".repeat(128) + "Lost" + "}".repeat(129),
+      );
+      const deepLimited = yield* Effect.promise(() => extractDocumentText(deepPath, ".rtf"));
+      expect(deepLimited).toBe("Kept\n\n[Extracted text truncated at document extraction limits.]");
       const unsupportedPath = NodePath.join(config.attachmentsDir, "unsupported-codepage.rtf");
       NodeFS.writeFileSync(unsupportedPath, String.raw`{\rtf1\ansi\ansicpg932 \'82\'a0}`);
       yield* Effect.promise(async () => {
@@ -621,14 +784,14 @@ describe("question answer paths", () => {
       NodeFS.writeFileSync(path, String.raw`{\rtf1 First` + " ".repeat(1_000_100) + "Last}");
       const whitespaceTruncated = yield* Effect.promise(() => extractDocumentText(path, ".rtf"));
       expect(whitespaceTruncated).toBe(
-        "First\n\n[Extracted text truncated at 1,000,000 characters.]",
+        "First\n\n[Extracted text truncated at document extraction limits.]",
       );
       const documents = yield* DocumentText.DocumentText;
       expect(yield* documents.ensure(path)).toBe(path + ".txt");
       expect(NodeFS.readFileSync(path + ".txt", "utf8")).toBe(whitespaceTruncated);
       NodeFS.truncateSync(path, 17 * 1024 * 1024);
       yield* Effect.promise(async () => {
-        await expect(extractDocumentText(path, ".rtf")).rejects.toThrow("Input byte limit");
+        expect(await extractDocumentText(path, ".rtf")).toContain("[Extracted text truncated");
       });
     }).pipe(Effect.provide(layer)),
   );
