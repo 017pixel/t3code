@@ -333,6 +333,16 @@ function ComposerPreviewAnnotationDetails({
   );
 }
 
+function ComposerThreadContextChip(props: { record: ThreadContextRecord }) {
+  const { environmentId } = use(ComposerContextActionsContext);
+  return (
+    <ThreadContextChip
+      record={props.record}
+      unreadable={environmentId !== null && props.record.environmentId !== environmentId}
+    />
+  );
+}
+
 function UnresolvedContextChip(props: { label: string }) {
   return (
     <UnresolvedChip
@@ -442,7 +452,7 @@ const composerContextPresentationRegistry = createContextPresentationRegistry<
       canRender: (entry) => entry.kind === "thread",
       render: (entry, context) =>
         entry.kind === "thread" ? (
-          <ThreadContextChip record={entry.record} />
+          <ComposerThreadContextChip record={entry.record} />
         ) : (
           <UnresolvedContextChip label={context.label} />
         ),
