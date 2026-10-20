@@ -57,13 +57,16 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
   const active = useRef(true);
-  const opening = useRef(false);
+  const requestGeneration = useRef(0);
   const playRequested = useRef(false);
   const [playbackRequested, setPlaybackRequested] = useState(false);
   const requestPlayback = useCallback((requested: boolean) => {
     playRequested.current = requested;
     setPlaybackRequested(requested);
-    if (!requested) setLoading(false);
+    if (!requested) {
+      requestGeneration.current += 1;
+      setLoading(false);
+    }
   }, []);
   useMediaAudioSessionHold(status.playing);
   const fullscreenVideoOpen = useFullscreenVideoOpen();
@@ -85,6 +88,7 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
     return () => {
       active.current = false;
       playRequested.current = false;
+      requestGeneration.current += 1;
       subscription.remove();
     };
   }, [player, requestPlayback]);
@@ -93,18 +97,18 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
       requestPlayback(false);
       return player.pause();
     }
-    if (opening.current) return;
     requestPlayback(true);
-    opening.current = true;
+    const generation = ++requestGeneration.current;
+    const isCurrentRequest = () =>
+      active.current && playRequested.current && requestGeneration.current === generation;
     setLoading(true);
     setError(false);
     void Promise.resolve()
       .then(async () => {
-        if (!playRequested.current) return;
+        if (!isCurrentRequest()) return;
         if (!status.isLoaded || status.error) {
           const uri = await props.resolveUri();
-          if (!active.current || !playRequested.current || AppState.currentState !== "active")
-            return;
+          if (!isCurrentRequest() || AppState.currentState !== "active") return;
           if (!uri) {
             requestPlayback(false);
             setError(true);
@@ -114,18 +118,16 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
         } else if (status.didJustFinish || status.currentTime >= status.duration) {
           await player.seekTo(0);
         }
-        if (active.current && playRequested.current && AppState.currentState === "active")
-          player.play();
+        if (isCurrentRequest() && AppState.currentState === "active") player.play();
       })
       .catch(() => {
-        if (active.current && playRequested.current) {
+        if (isCurrentRequest()) {
           requestPlayback(false);
           setError(true);
         }
       })
       .finally(() => {
-        opening.current = false;
-        if (active.current) setLoading(false);
+        if (isCurrentRequest()) setLoading(false);
       });
   };
   const progress =

@@ -71,6 +71,65 @@ describe("ThreadInlineFilePreview playback", () => {
     };
   });
 
+  it.each(["cancel", "unmount", "replay, stale first", "replay, latest first"])(
+    "honors the latest audio intent after %s during URL resolution",
+    async (intent) => {
+      (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+      const container = document.createElement("div");
+      root = createRoot(container);
+      const resolutions: Array<(uri: string) => void> = [];
+      audio.refresh.mockImplementation(() => new Promise((resolve) => resolutions.push(resolve)));
+      act(() =>
+        root!.render(
+          createElement(ThreadInlineFilePreview, {
+            source: {
+              kind: "document",
+              name: "sound.mp3",
+              environmentId: EnvironmentId.make("environment-1"),
+              resource: {
+                _tag: "workspace-file",
+                threadId: ThreadId.make("thread-1"),
+                path: "/repo/sound.mp3",
+              },
+            },
+            onOpen() {},
+          }),
+        ),
+      );
+      const button = container.querySelector<HTMLButtonElement>('button[aria-label="Play audio"]')!;
+      await act(async () => button.click());
+      if (intent !== "unmount") {
+        await act(async () => button.click());
+        expect(button.getAttribute("aria-label")).toBe("Play audio");
+      }
+      const replay = intent.startsWith("replay");
+      if (replay) {
+        await act(async () => button.click());
+        expect(button.getAttribute("aria-label")).toBe("Pause audio");
+        expect(audio.refresh).toHaveBeenCalledTimes(2);
+      } else if (intent === "unmount") {
+        act(() => root!.unmount());
+        root = undefined;
+      }
+      const latestFirst = intent === "replay, latest first";
+      if (latestFirst) await act(async () => resolutions[1]!("https://example.com/latest.mp3"));
+      await act(async () => resolutions[0]!("https://example.com/stale.mp3"));
+      expect(audio.player.play).toHaveBeenCalledTimes(latestFirst ? 1 : 0);
+      expect(audio.player.replace).toHaveBeenCalledTimes(latestFirst ? 1 : 0);
+      if (replay) {
+        expect(button.getAttribute("aria-label")).toBe("Pause audio");
+        if (!latestFirst) {
+          expect(container.textContent).toContain("Loading…");
+          await act(async () => resolutions[1]!("https://example.com/latest.mp3"));
+        }
+        expect(audio.player.replace).toHaveBeenCalledExactlyOnceWith({
+          uri: "https://example.com/latest.mp3",
+        });
+        expect(audio.player.play).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
   it.each([false, true])(
     "cancels a second tap while buffering with isLoaded=%s",
     async (isLoaded) => {
