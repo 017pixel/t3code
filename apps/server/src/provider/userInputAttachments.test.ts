@@ -202,9 +202,10 @@ describe("question answer paths", () => {
               '<container><rootfile full-path="OEBPS/book.opf"/></container>',
             "OEBPS/book.opf":
               '<package><manifest><item id="a" href="a.xhtml"/><item id="b" href="b.xhtml"/></manifest><spine><itemref idref="b"/><itemref idref="a"/></spine></package>',
-            "OEBPS/a.xhtml": "<html><body><p>Last chapter</p></body></html>",
+            "OEBPS/a.xhtml":
+              '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html><body><p>Last chapter</p></body></html>',
             "OEBPS/b.xhtml":
-              "<html><body><h1>First chapter</h1><p>Larkspur</p><div>Direct div<section>Direct section<li>Direct item <em>emphasis</em> trailing</li></section></div><table><thead><tr><th>Heading</th><th>Total</th></tr></thead><tbody><tr><td>Important value</td><td>731</td></tr></tbody></table></body></html>",
+              "<!DOCTYPE html><html><body><h1>First chapter</h1><p>Larkspur</p><div>Direct div<section>Direct section<li>Direct item <em>emphasis</em> trailing</li></section></div><table><thead><tr><th>Heading</th><th>Total</th></tr></thead><tbody><tr><td>Important value</td><td>731</td></tr></tbody></table></body></html>",
           },
           expected: [
             "## Chapter 1",
@@ -264,7 +265,7 @@ describe("question answer paths", () => {
           );
           previous = index;
         }
-        if ("bounded" in item && item.bounded) {
+        if (("bounded" in item && item.bounded) || item.ext === "epub") {
           expect(extracted.length).toBeLessThan(1_000_100);
           const documents = yield* DocumentText.DocumentText;
           expect(yield* documents.ensure(path)).toBe(path + ".txt");
@@ -299,6 +300,14 @@ describe("question answer paths", () => {
       expect(yield* Effect.promise(() => extractDocumentText(path, ".rtf"))).toContain(
         "[Extracted text truncated",
       );
+      NodeFS.writeFileSync(path, String.raw`{\rtf1 First` + " ".repeat(1_000_100) + "Last}");
+      const whitespaceTruncated = yield* Effect.promise(() => extractDocumentText(path, ".rtf"));
+      expect(whitespaceTruncated).toBe(
+        "First\n\n[Extracted text truncated at 1,000,000 characters.]",
+      );
+      const documents = yield* DocumentText.DocumentText;
+      expect(yield* documents.ensure(path)).toBe(path + ".txt");
+      expect(NodeFS.readFileSync(path + ".txt", "utf8")).toBe(whitespaceTruncated);
       NodeFS.truncateSync(path, 17 * 1024 * 1024);
       yield* Effect.promise(async () => {
         await expect(extractDocumentText(path, ".rtf")).rejects.toThrow("Input byte limit");

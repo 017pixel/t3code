@@ -20,9 +20,6 @@ function xml(source: string): XmlNode {
   const stack = [root];
   let nodes = 0;
   const parser = new SaxesParser();
-  parser.on("doctype", () => {
-    throw new Error("Document types are unsupported");
-  });
   parser.on("opentag", (tag) => {
     if (++nodes > 200_000 || stack.length > 128) throw new Error("XML structure limit");
     const node: XmlNode = {
@@ -290,9 +287,10 @@ export async function extractDocumentText(path: string, extension: string): Prom
   let result: string;
   let outputTruncated = false;
   if (extension === ".ipynb") result = notebook(await NodeFSP.readFile(path, "utf8"));
-  else if (extension === ".rtf")
+  else if (extension === ".rtf") {
     result = rtf(new TextDecoder("windows-1252").decode(await NodeFSP.readFile(path)));
-  else {
+    outputTruncated = result.length > MAX_OUTPUT;
+  } else {
     const files = await archive(path);
     const read = (name: string) => {
       const data = files.get(name);
