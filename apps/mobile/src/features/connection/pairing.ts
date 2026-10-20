@@ -59,10 +59,7 @@ export function parsePairingUrl(url: string): { host: string; code: string } {
       };
     }
 
-    const hashParams = new URLSearchParams(parsed.hash.slice(1));
-    const hashToken = hashParams.get("token");
-    const queryToken = parsed.searchParams.get("token");
-    const code = hashToken || queryToken || "";
+    const code = getPairingTokenFromUrl(parsed) ?? "";
 
     parsed.hash = "";
     parsed.search = "";

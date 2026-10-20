@@ -69,4 +69,11 @@ describe("parsePairingUrl", () => {
       code: "pairing-token",
     });
   });
+
+  it("reads the same nonblank token that the connection uses", () => {
+    expect(parsePairingUrl("http://192.168.1.100:3773/?token=new-token#token=%20")).toEqual({
+      host: "http://192.168.1.100:3773",
+      code: "new-token",
+    });
+  });
 });
