@@ -263,28 +263,40 @@ const make = Effect.gen(function* () {
                 }),
             ),
           );
-        const accepted = yield* mutate(scope, target.id, (resolved) =>
-          Effect.gen(function* () {
-            if (
-              resolved.project.id !== project.id ||
-              resolved.project.workspaceRoot !== project.workspaceRoot ||
-              resolved.target.worktreePath !== target.worktreePath ||
-              resolved.target.modelSelection.instanceId !== target.modelSelection.instanceId
-            )
-              return yield* new ProjectScriptMcpFailure({
-                code: "operation_failed",
-                message: "The target launch context changed while opening the script terminal.",
-              });
-            return yield* terminals
-              .writeWithHandle({
-                threadId: target.id,
-                terminalId: input.terminalId,
-                handle: opened.handle,
-                data,
-              })
-              .pipe(Effect.orElseSucceed(() => false));
-          }),
-        );
+        // Take the terminal lock before executor locks, which rollback needs while holding its lease.
+        const accepted = yield* terminals
+          .writeWithHandle(
+            {
+              threadId: target.id,
+              terminalId: input.terminalId,
+              handle: opened.handle,
+              data,
+            },
+            (operation) =>
+              mutate(scope, target.id, (resolved) =>
+                Effect.gen(function* () {
+                  if (
+                    resolved.project.id !== project.id ||
+                    resolved.project.workspaceRoot !== project.workspaceRoot ||
+                    resolved.target.worktreePath !== target.worktreePath ||
+                    resolved.target.modelSelection.instanceId !== target.modelSelection.instanceId
+                  )
+                    return yield* new ProjectScriptMcpFailure({
+                      code: "operation_failed",
+                      message:
+                        "The target launch context changed while opening the script terminal.",
+                    });
+                  return yield* operation;
+                }),
+              ),
+          )
+          .pipe(
+            Effect.catchIf(
+              (error) =>
+                error._tag !== "ProjectScriptMcpFailure" && error._tag !== "OrchestratorMcpFailure",
+              () => Effect.succeed(false),
+            ),
+          );
         return {
           threadId: target.id,
           projectId: project.id,
@@ -311,37 +323,50 @@ const make = Effect.gen(function* () {
     });
 
   const stop: ProjectScriptMcpService["Service"]["stop"] = (scope, input) =>
-    mutate(scope, input.threadId, ({ target, project }) =>
-      Effect.gen(function* () {
-        const key = runKey(target.id, input.terminalId);
-        const run = runs.get(key);
-        if (
-          run?.projectId !== project.id ||
-          run.scriptId !== input.scriptId ||
-          !(yield* terminals.closeWithHandle(run.handle).pipe(
-            Effect.mapError(
-              () =>
-                new ProjectScriptMcpFailure({
+    Effect.gen(function* () {
+      const { target, project, run } = yield* mutate(scope, input.threadId, (resolved) =>
+        Effect.gen(function* () {
+          const run = runs.get(runKey(resolved.target.id, input.terminalId));
+          if (run?.projectId !== resolved.project.id || run.scriptId !== input.scriptId)
+            return yield* new ProjectScriptMcpFailure({
+              code: "script_run_not_found",
+              message: "No matching live script run was found.",
+            });
+          return { ...resolved, run };
+        }),
+      );
+      const stopped = yield* terminals
+        .closeWithHandle(run.handle, (operation) =>
+          mutate(scope, target.id, (resolved) =>
+            resolved.project.id === project.id &&
+            runs.get(runKey(target.id, input.terminalId)) === run
+              ? operation
+              : Effect.succeed(false),
+          ),
+        )
+        .pipe(
+          Effect.mapError((error) =>
+            error._tag === "ProjectScriptMcpFailure" || error._tag === "OrchestratorMcpFailure"
+              ? error
+              : new ProjectScriptMcpFailure({
                   code: "operation_failed",
                   message: "The script terminal could not be stopped.",
                 }),
-            ),
-          ))
-        ) {
-          return yield* new ProjectScriptMcpFailure({
-            code: "script_run_not_found",
-            message: "No matching live script run was found.",
-          });
-        }
-        return {
-          threadId: target.id,
-          projectId: project.id,
-          scriptId: input.scriptId,
-          terminalId: input.terminalId,
-          stopped: true as const,
-        };
-      }),
-    );
+          ),
+        );
+      if (!stopped)
+        return yield* new ProjectScriptMcpFailure({
+          code: "script_run_not_found",
+          message: "No matching live script run was found.",
+        });
+      return {
+        threadId: target.id,
+        projectId: project.id,
+        scriptId: input.scriptId,
+        terminalId: input.terminalId,
+        stopped: true as const,
+      };
+    });
 
   return ProjectScriptMcpService.of({ list, run, stop });
 });
