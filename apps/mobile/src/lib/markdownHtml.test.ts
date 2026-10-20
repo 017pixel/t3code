@@ -130,10 +130,13 @@ describe("file embeds in native thread and file Markdown", () => {
         const converted = markdownWithFileEmbeds(markdownWithHtml(source), (url, standalone) =>
           markdownFileEmbedLabel(url, input, standalone),
         );
-        expect(assets(converted.markdown)).toMatchObject([
-          { type: "link", url: href, children: [{ type: "text", value: name }] },
-        ]);
-        expect(converted.fileHrefs.has(href)).toBe(true);
+        const image = href.startsWith("https:") && /\.(unknown|tf|prisma|astro|zig)$/.test(name);
+        if (image) expect(converted.markdown).toBe(markdownWithHtml(source));
+        else
+          expect(assets(converted.markdown)).toMatchObject([
+            { type: "link", url: href, children: [{ type: "text", value: name }] },
+          ]);
+        expect(converted.fileHrefs.has(href)).toBe(!image);
         const preview = resolveMarkdownMediaPreview(href, { ...input, imageEmbed: true });
         if (
           !href.startsWith("https:") &&

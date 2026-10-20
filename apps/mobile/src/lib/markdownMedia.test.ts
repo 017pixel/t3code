@@ -164,7 +164,7 @@ describe("resolveMarkdownMediaPreview", () => {
     ["report.docx", "document"],
     ["report.xlsx", "document"],
     ["report.pptx", "document"],
-    ["report.unknown", "document"],
+    ["report.unknown", "image"],
   ])("preserves direct signed embeds: %s", (name, kind) => {
     const href = `https://cdn.example.com/${name}?signature=a%2fb`;
     expect(resolveMarkdownMediaPreview(href, { ...input, imageEmbed: true })).toMatchObject({
@@ -177,11 +177,19 @@ describe("resolveMarkdownMediaPreview", () => {
     "https://docs.example.com/guide.html",
     "https://example.com/index.php?topic=files",
     "https://example.com/report.unknown",
+    "https://example.com/main.tf",
+    "https://example.com/schema.prisma",
+    "https://example.com/chart.php?id=1",
+    "http://example.com/chart.php?id=1",
+    "//example.com/chart.php?id=1",
+    "https://example.com/chart?format=png",
+    "http://example.com/chart?format=png",
+    "//example.com/chart?format=png",
   ])("keeps ordinary remote links in the browser: %s", (href) => {
     expect(resolveMarkdownMediaPreview(href, input)).toBeNull();
     expect(resolveMarkdownMediaPreview(href, { ...input, imageEmbed: true })).toMatchObject({
-      kind: "document",
-      source: { uri: href },
+      kind: "image",
+      source: { uri: href.startsWith("//") ? `https:${href}` : href },
     });
   });
 

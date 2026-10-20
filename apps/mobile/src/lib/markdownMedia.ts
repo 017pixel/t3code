@@ -66,7 +66,6 @@ export function resolveMarkdownMediaPreview(
       isFile &&
       mediaMimeTypeFromExtension(extension) === null &&
       (classified._tag !== "Direct" ||
-        input.imageEmbed ||
         Object.hasOwn(DOCUMENT_MIME_TYPES, extension) ||
         audioMimeTypeFromExtension(extension) !== null)
     ) {
