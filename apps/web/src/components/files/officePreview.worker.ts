@@ -17,7 +17,8 @@ function reply(result: OfficeWorkerResult) {
 
 // Stream each entry before handing it to an engine. A tiny compressed archive
 // must not turn into an unbounded allocation on the UI thread.
-async function boundedArchive(bytes: ArrayBuffer) {
+async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open" }>) {
+  const { bytes } = input;
   if (bytes.byteLength > OFFICE_PREVIEW_MAX_BYTES)
     throw new Error("Preview limited to files under 50 MB.");
   const source = await JSZip.loadAsync(bytes).catch(() => {
@@ -28,6 +29,7 @@ async function boundedArchive(bytes: ArrayBuffer) {
     throw new Error("This file contains too many archive entries to preview.");
   const archive = new JSZip();
   let total = 0;
+  let wordMarkup = 0;
   for (const entry of entries) {
     const chunks: Uint8Array[] = [];
     let length = 0;
@@ -42,6 +44,20 @@ async function boundedArchive(bytes: ArrayBuffer) {
         .on("data", (chunk: Uint8Array) => {
           total += chunk.length;
           length += chunk.length;
+          // Relationship targets can use arbitrary extensions. Bound every Word
+          // part before any reaches the synchronous XML parser and DOM renderer.
+          if (input.kind === "docx") {
+            for (const byte of chunk) if (byte === 0x3c) wordMarkup++;
+            if (total > 2 * 1024 * 1024 || wordMarkup > 50_000) {
+              stream.pause();
+              reject(
+                new Error(
+                  "Preview limited: this Word document has too much expanded content or markup.",
+                ),
+              );
+              return;
+            }
+          }
           if (
             total > OFFICE_PREVIEW_MAX_BYTES ||
             (entry.name.endsWith(".xml") && length > 8 * 1024 * 1024)
@@ -95,7 +111,7 @@ async function handle(input: OfficeWorkerRequest) {
     reply({ type: "slide", index: input.index, frame, images, text });
     return;
   }
-  const archive = await boundedArchive(input.bytes);
+  const archive = await boundedArchive(input);
   const root =
     input.kind === "docx"
       ? "word/document.xml"
