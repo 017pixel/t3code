@@ -15,6 +15,7 @@ import {
   ContextHandoffId,
   ContextTransferId,
   EventId,
+  EnvironmentId,
   IsoDateTime,
   MessageId,
   NodeId,
@@ -368,6 +369,46 @@ export const OrchestrationV2LimitRecoveryUpdate = Schema.Struct({
 );
 export type OrchestrationV2LimitRecoveryUpdate = typeof OrchestrationV2LimitRecoveryUpdate.Type;
 
+export const ThreadHandoffId = TrimmedNonEmptyString.check(
+  Schema.isPattern(/^[a-zA-Z0-9_-]{1,128}$/),
+);
+export const OrchestrationV2ThreadHandoffState = Schema.Literals([
+  "pending",
+  "departing",
+  "departed",
+  "failed",
+]);
+const handoffFields = {
+  handoffId: ThreadHandoffId,
+  environmentId: EnvironmentId,
+  label: Schema.String,
+  projectId: ProjectId,
+};
+export const OrchestrationV2ThreadHandoff = Schema.Union([
+  Schema.Struct({
+    ...handoffFields,
+    state: Schema.Literal("pending"),
+    requestCommandId: CommandId,
+    continuationPrompt: Schema.optional(Schema.String),
+  }),
+  Schema.Struct({
+    ...handoffFields,
+    state: Schema.Literal("departing"),
+    continuationPrompt: Schema.optional(Schema.String),
+  }),
+  Schema.Struct({
+    ...handoffFields,
+    state: Schema.Literal("departed"),
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    ...handoffFields,
+    state: Schema.Literal("failed"),
+    lastError: Schema.String,
+  }),
+]);
+export type OrchestrationV2ThreadHandoff = typeof OrchestrationV2ThreadHandoff.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -385,6 +426,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
+  handoff: Schema.optional(Schema.NullOr(OrchestrationV2ThreadHandoff)),
   lineage: OrchestrationV2AppThreadLineage,
   forkedFrom: Schema.NullOr(
     Schema.Union([
@@ -1830,6 +1872,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
+  handoff: Schema.optional(Schema.NullOr(OrchestrationV2ThreadHandoff)),
   latestRunId: Schema.NullOr(RunId),
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -3034,6 +3077,19 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  * send them.
  */
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("thread.handoff.update"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    expected: Schema.NullOr(
+      Schema.Struct({
+        state: OrchestrationV2ThreadHandoffState,
+        handoffId: ThreadHandoffId,
+      }),
+    ),
+    handoff: Schema.NullOr(OrchestrationV2ThreadHandoff),
+    callerThreadId: Schema.optional(ThreadId),
+  }),
   Schema.Struct({
     type: Schema.Literal("thread.pull-request-watch.sync"),
     commandId: CommandId,

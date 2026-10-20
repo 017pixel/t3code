@@ -187,6 +187,108 @@ it.effect.each([
   ["memory", ProjectionStore.layerMemory],
   ["SQL", layerTest],
 ] as const)(
+  "%s message tails page eligible history with bounded text and stable timestamp ties",
+  ([, layer]) =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = yield* addRolledBackRecoveryCandidate("message-tail");
+      const otherThreadId = yield* addRolledBackRecoveryCandidate("message-tail:other");
+      const runId = (yield* store.getThreadProjection(threadId)).runs[0]!.id;
+      const now = yield* DateTime.now;
+      const eligible = Array.from({ length: 16 }, (_, index) => ({
+        id: MessageId.make(`message:tail:${String((index + 8) % 16).padStart(2, "0")}`),
+        threadId,
+        runId,
+        role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        text:
+          index === 14
+            ? "x".repeat(200_001)
+            : index === 15
+              ? "😀".repeat(100_001)
+              : `text ${index}`,
+        createdAt: index < 8 ? DateTime.subtract(now, { milliseconds: 1 }) : now,
+      }));
+      const latest = eligible.at(-1)!;
+      const excluded = [
+        { ...latest, id: MessageId.make("message:tail:system"), role: "system" as const },
+        { ...latest, id: MessageId.make("message:tail:run"), runId: RunId.make("run:other") },
+        { ...latest, id: MessageId.make("message:tail:thread"), threadId: otherThreadId },
+      ].map((message) => ({ ...message, text: "excluded" }));
+      const omitted = { ...latest, id: MessageId.make("message:tail:omitted"), text: "omitted" };
+      // Arrival order differs from chronology and the cursor's same-timestamp id order.
+      for (const message of [...eligible.toReversed(), ...excluded, omitted]) {
+        yield* store.apply({
+          id: EventId.make(`event:${message.id}`),
+          type: "message.updated",
+          threadId: message.threadId,
+          runId: message.runId,
+          occurredAt: now,
+          payload: {
+            ...message,
+            createdBy: "user",
+            creationSource: "web",
+            nodeId: null,
+            attachments: [],
+            streaming: false,
+            updatedAt: now,
+          },
+        });
+      }
+      const filter = {
+        messageIds: [...eligible, ...excluded].map((message) => message.id),
+        messageRoles: ["user", "assistant"],
+        messageRunIds: [runId],
+      } satisfies ProjectionStore.ProjectionRecordFilter;
+      let before: NonNullable<ProjectionStore.ProjectionRecordFilter["messageTail"]>["before"];
+      const collected: Array<MessageId> = [];
+      for (const end of [16, 11, 6, 1, 0]) {
+        const { messages } = yield* store.getThreadRecords(threadId, ["messages"], {
+          ...filter,
+          messageTail: { limit: 5, maxTextLength: 200_000, ...(before ? { before } : {}) },
+        });
+        const expected = eligible.slice(Math.max(0, end - 5), end);
+        assert.deepEqual(
+          messages.map(({ id, text }) => ({ id, text })),
+          expected.map(({ id, text }) => ({ id, text: text.slice(0, 200_000) })),
+        );
+        collected.unshift(...messages.map((message) => message.id));
+        const first = messages[0];
+        if (first) before = { createdAt: first.createdAt, messageId: first.id };
+      }
+      assert.deepEqual(
+        collected,
+        eligible.map((message) => message.id),
+      );
+      const unicode = yield* store.getThreadRecords(threadId, ["messages"], {
+        ...filter,
+        messageTail: { limit: 1, maxTextLength: 3 },
+      });
+      assert.deepEqual(
+        unicode.messages.map(({ id, text }) => ({ id, text })),
+        [{ id: latest.id, text: latest.text.slice(0, 3) }],
+      );
+      assert.isEmpty(
+        (yield* store.getThreadRecords(threadId, ["messages"], {
+          ...filter,
+          messageRunIds: [RunId.make("run:missing")],
+          messageTail: { limit: 5, maxTextLength: 3 },
+        })).messages,
+      );
+      const full = yield* store.getThreadRecords(threadId, ["messages"], filter);
+      assert.equal(full.messages.length, eligible.length);
+      for (const expected of eligible) {
+        assert.equal(
+          full.messages.find((message) => message.id === expected.id)?.text,
+          expected.text,
+        );
+      }
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each([
+  ["memory", ProjectionStore.layerMemory],
+  ["SQL", layerTest],
+] as const)(
   "%s shells use the latest subagent owner for duplicate provider-thread ids",
   ([, layer]) =>
     Effect.gen(function* () {

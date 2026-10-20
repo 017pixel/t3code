@@ -34,6 +34,8 @@ import {
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 import {
   OrchestrationV2ImportedMessage,
+  ThreadHandoffId,
+  OrchestrationV2ThreadHandoff,
   OrchestrationV2ImportedMessages,
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
@@ -408,6 +410,8 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   linkedPullRequest: Schema.NullOr(ThreadLinkedPullRequest),
   /** Missing on older servers. */
   pullRequests: Schema.optional(Schema.Array(OrchestratorMcpThreadPullRequest)),
+  /** Missing on older servers. */
+  handoff: Schema.optional(Schema.NullOr(OrchestrationV2ThreadHandoff)),
   titleRegeneration: Schema.NullOr(ThreadTitleRegeneration),
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
@@ -543,11 +547,13 @@ export type OrchestratorMcpProviderCapability = typeof OrchestratorMcpProviderCa
 export const OrchestratorMcpImportedMessage = OrchestrationV2ImportedMessage;
 export type OrchestratorMcpImportedMessage = typeof OrchestratorMcpImportedMessage.Type;
 
+const isThreadHandoffId = Schema.is(ThreadHandoffId);
+
 export const OrchestratorMcpThreadImportInput = Schema.Struct({
   source: Schema.Struct({
     environmentId: EnvironmentId,
     threadId: ThreadId,
-    handoffId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+    handoffId: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
   }),
   projectId: ProjectId,
   title: TrimmedNonEmptyString.check(Schema.isMaxLength(512)),
@@ -556,9 +562,38 @@ export const OrchestratorMcpThreadImportInput = Schema.Struct({
   interactionMode: Schema.optional(ProviderInteractionMode),
   worktreePath: Schema.optional(TrimmedNonEmptyString),
   branch: Schema.optional(TrimmedNonEmptyString),
+  bundle: Schema.optional(
+    Schema.Struct({
+      attachmentId: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+      branch: Schema.NullOr(
+        TrimmedNonEmptyString.check(
+          Schema.isMaxLength(1024),
+          Schema.isPattern(
+            // oxlint-disable-next-line no-control-regex -- Git ref syntax excludes ASCII control characters.
+            /^(?!-)(?!.*(?:\.\.|@\{|\/\/|[~^:?*[\\\x00-\x20\x7f]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))(?!.*[/.]$).+$/,
+          ),
+        ),
+      ),
+      tip: Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/)),
+      snapshot: Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/)),
+      repository: Schema.optional(
+        Schema.Struct({
+          canonicalKey: Schema.NullOr(TrimmedNonEmptyString),
+          sourceRoot: TrimmedNonEmptyString,
+        }),
+      ),
+    }),
+  ),
   messages: OrchestrationV2ImportedMessages,
   continuationPrompt: Schema.optional(OrchestratorMcpPrompt),
-});
+}).check(
+  Schema.makeFilter(
+    (input) =>
+      input.bundle === undefined ||
+      isThreadHandoffId(input.source.handoffId) ||
+      "Git bundle handoff IDs must contain only letters, digits, underscores, and hyphens.",
+  ),
+);
 export type OrchestratorMcpThreadImportInput = typeof OrchestratorMcpThreadImportInput.Type;
 
 export const OrchestratorMcpThreadImportResult = Schema.Struct({
@@ -568,6 +603,16 @@ export const OrchestratorMcpThreadImportResult = Schema.Struct({
   runId: Schema.NullOr(RunId),
 });
 export type OrchestratorMcpThreadImportResult = typeof OrchestratorMcpThreadImportResult.Type;
+
+export const OrchestratorMcpThreadHandoffInput = Schema.Struct({
+  threadId: Schema.optional(ThreadId),
+  handoffId: Schema.optional(ThreadHandoffId),
+  environmentId: EnvironmentId,
+  projectId: Schema.optional(ProjectId),
+  continuationPrompt: Schema.optional(OrchestratorMcpPrompt),
+});
+export type OrchestratorMcpThreadHandoffInput = typeof OrchestratorMcpThreadHandoffInput.Type;
+export const OrchestratorMcpThreadHandoffResult = OrchestrationV2ThreadHandoff;
 
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   parentThreadId: Schema.NullOr(ThreadId),
@@ -733,5 +778,11 @@ export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFa
       "target_required",
     ]),
     message: Schema.String,
+    handoffNotAccepted: Schema.optional(
+      Schema.Struct({
+        source: OrchestratorMcpThreadImportInput.fields.source,
+        projectId: ProjectId,
+      }),
+    ),
   },
 ) {}

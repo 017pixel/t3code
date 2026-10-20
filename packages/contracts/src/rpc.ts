@@ -21,6 +21,7 @@ import {
   PeerLinkRemoveInput,
   PeerLinkRemoveResult,
   PeerLinkSummary,
+  ThreadHandoffError,
 } from "./peerLink.ts";
 import {
   ChatGptReconnectProfileInput,
@@ -33,7 +34,13 @@ import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
-import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  ProjectId,
+  ThreadId,
+  NonNegativeInt,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import {
   CodexAuthCallbackInput,
   CodexAuthCallbackState,
@@ -223,6 +230,8 @@ import {
   OrchestrationV2CommandOutputError,
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2RpcSchemas,
+  OrchestrationV2ThreadHandoff,
+  ThreadHandoffId,
   OrchestrationV2ThreadLaunchError,
 } from "./orchestrationV2.ts";
 import {
@@ -381,6 +390,9 @@ import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
 
 export const WS_METHODS = {
   peerLinksList: "peerLinks.list",
+  threadHandoffOptions: "threadHandoff.options",
+  threadHandoffStart: "threadHandoff.start",
+  threadHandoffCancel: "threadHandoff.cancel",
   peerLinksLink: "peerLinks.link",
   peerLinksUnlink: "peerLinks.unlink",
   projectsList: "projects.list",
@@ -755,6 +767,41 @@ const WsServerGetDatabaseStorageRpc = Rpc.make(WS_METHODS.serverGetDatabaseStora
   success: Schema.NullOr(DatabaseStorageStatus),
   stream: true,
   error: EnvironmentAuthorizationError,
+});
+
+const WsThreadHandoffOptionsRpc = Rpc.make(WS_METHODS.threadHandoffOptions, {
+  payload: Schema.Struct({ threadId: ThreadId }),
+  success: Schema.Struct({
+    options: Schema.Array(
+      Schema.Struct({
+        environmentId: EnvironmentId,
+        label: Schema.String,
+        projectId: Schema.NullOr(ProjectId),
+        reason: Schema.NullOr(Schema.String),
+      }),
+    ),
+  }),
+  error: Schema.Union([ThreadHandoffError, EnvironmentAuthorizationError]),
+});
+const WsThreadHandoffStartRpc = Rpc.make(WS_METHODS.threadHandoffStart, {
+  payload: Schema.Struct({
+    threadId: ThreadId,
+    handoffId: Schema.optional(ThreadHandoffId),
+    environmentId: EnvironmentId,
+    projectId: Schema.optional(ProjectId),
+    continuationPrompt: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(120_000))),
+  }),
+  success: OrchestrationV2ThreadHandoff,
+  error: Schema.Union([ThreadHandoffError, EnvironmentAuthorizationError]),
+});
+const WsThreadHandoffCancelRpc = Rpc.make(WS_METHODS.threadHandoffCancel, {
+  payload: Schema.Struct({
+    threadId: ThreadId,
+    handoffId: ThreadHandoffId,
+    abandon: Schema.optional(Schema.Boolean),
+  }),
+  success: Schema.Struct({}),
+  error: Schema.Union([ThreadHandoffError, EnvironmentAuthorizationError]),
 });
 
 const WsPeerLinksListRpc = Rpc.make(WS_METHODS.peerLinksList, {
@@ -1881,6 +1928,9 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
 
 export const WsRpcGroup = RpcGroup.make(
   WsPeerLinksListRpc,
+  WsThreadHandoffOptionsRpc,
+  WsThreadHandoffStartRpc,
+  WsThreadHandoffCancelRpc,
   WsPeerLinksLinkRpc,
   WsPeerLinksUnlinkRpc,
   WsServerProbeRpc,

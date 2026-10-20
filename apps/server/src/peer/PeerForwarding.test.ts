@@ -256,6 +256,7 @@ const makeEnvironment = Effect.fnUntraced(function* (id: EnvironmentId) {
     }),
     Layer.mock(SecretRequests.SecretRequests)({}),
     Layer.mock(ThreadSearch.ThreadSearch)({}),
+    Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
   );
   const base = Layer.mergeAll(
     threads,

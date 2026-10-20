@@ -13,6 +13,7 @@ import {
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
   ThreadId,
+  ProjectId,
   EnvironmentId,
   ScheduledTaskId,
   WS_METHODS,
@@ -135,6 +136,83 @@ describe("command permissions", () => {
         ).toBe(scope);
       }),
     ),
+  );
+  it.effect.each([
+    {
+      tag: WS_METHODS.threadHandoffStart,
+      input: { threadId: ThreadId.make("source-thread"), environmentId: other },
+      response: {
+        state: "departing",
+        handoffId: "handoff-one",
+        environmentId: other,
+        projectId: ProjectId.make("destination-project"),
+        label: "Other",
+      },
+    },
+    {
+      tag: WS_METHODS.threadHandoffCancel,
+      input: { threadId: ThreadId.make("source-thread"), handoffId: "handoff-one" },
+      response: {},
+    },
+  ] as const)(
+    "checks the source grant at execution before sending $tag",
+    ({ tag, input, response }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const registry = yield* setup;
+          registry.mount(sessions(other));
+          const rpc = vi.fn(() => Effect.succeed(response));
+          const session = { client: { [tag]: rpc } } as unknown as RpcSession;
+          const supervisor = {
+            target: { environmentId: env, label: "Source" },
+            session: yield* SubscriptionRef.make(Option.some(session)),
+          } as unknown as EnvironmentSupervisor["Service"];
+          const run: EnvironmentRegistry["Service"]["run"] = (environmentId, effect) => {
+            expect(environmentId).toBe(env);
+            return Effect.provideService(effect, EnvironmentSupervisor, supervisor);
+          };
+          const command = createEnvironmentRpcCommand(
+            Atom.runtime(
+              Layer.succeed(EnvironmentRegistry, {
+                run,
+              } as unknown as EnvironmentRegistry["Service"]),
+            ),
+            { label: tag, tag },
+          );
+          const target = { environmentId: env, input };
+          registry.set(sessions(other), AsyncResult.success(grant(true)));
+          registry.set(sessions(env), AsyncResult.success(grant(true, AuthSettingsWriteScope)));
+          expect(registry.get(command.permissionAtom(env, input))).toBe(false);
+          const denied = yield* Effect.promise(() => command.run(registry, target));
+          expect(denied._tag).toBe("Failure");
+          if (denied._tag === "Failure") {
+            expect(Cause.squash(denied.cause)).toMatchObject({
+              _tag: "EnvironmentAuthorizationError",
+              requiredPermission: AuthOrchestrationOperateScope,
+            });
+          }
+          expect(rpc).not.toHaveBeenCalled();
+
+          registry.set(sessions(env), AsyncResult.success(grant(true)));
+          expect(registry.get(command.permissionAtom(env, input))).toBe(true);
+          registry.set(sessions(env), AsyncResult.success(grant(false)));
+          const revoked = yield* Effect.promise(() => command.run(registry, target));
+          expect(revoked._tag).toBe("Failure");
+          if (revoked._tag === "Failure") {
+            expect(Cause.squash(revoked.cause)).toMatchObject({
+              _tag: "EnvironmentAuthorizationError",
+              requiredPermission: AuthOrchestrationOperateScope,
+            });
+          }
+          expect(rpc).not.toHaveBeenCalled();
+
+          registry.set(sessions(other), AsyncResult.success(grant(false)));
+          registry.set(sessions(env), AsyncResult.success(grant(true)));
+          const allowed = yield* Effect.promise(() => command.run(registry, target));
+          expect(allowed).toMatchObject({ _tag: "Success", value: response });
+          expect(rpc).toHaveBeenCalledExactlyOnceWith(input);
+        }),
+      ),
   );
   it.effect("waits for an initial grant", () =>
     Effect.scoped(

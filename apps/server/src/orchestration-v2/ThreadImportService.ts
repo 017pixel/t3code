@@ -66,6 +66,19 @@ export class ThreadImportDeletedError extends Schema.TaggedError<ThreadImportDel
 export class ThreadImportService extends Context.Service<
   ThreadImportService,
   {
+    readonly identity: (
+      source: OrchestratorMcpThreadImportInput["source"],
+    ) => Effect.Effect<ThreadId>;
+    readonly lookup: (
+      input: Pick<OrchestratorMcpThreadImportInput, "source" | "projectId">,
+    ) => Effect.Effect<
+      OrchestratorMcpThreadImportResult | null,
+      ThreadImportError | ThreadImportProjectMismatchError | ThreadImportDeletedError
+    >;
+    readonly withAcceptanceLock: <A, E, R>(
+      source: OrchestratorMcpThreadImportInput["source"],
+      effect: Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E, R>;
     readonly importThread: (
       input: OrchestratorMcpThreadImportInput & {
         readonly runtimeMode: RuntimeMode;
@@ -91,23 +104,54 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const imports = yield* KeyedLock.make<ThreadId>();
 
+  const acceptance = yield* KeyedLock.make<string>();
+  const sourceKey = (source: OrchestratorMcpThreadImportInput["source"]) =>
+    JSON.stringify([source.environmentId, source.threadId, source.handoffId]);
+  const identity = Effect.fnUntraced(function* (
+    source: OrchestratorMcpThreadImportInput["source"],
+  ) {
+    const digest = yield* crypto
+      .digest("SHA-256", new TextEncoder().encode(sourceKey(source)))
+      .pipe(Effect.orDie);
+    return ThreadId.make(`thread:import:${Hex.encode(digest)}`);
+  });
+  const lookup: ThreadImportService["Service"]["lookup"] = Effect.fn("ThreadImportService.lookup")(
+    function* (input) {
+      const threadId = yield* identity(input.source);
+      const existing = yield* threads
+        .getThreadShell(threadId)
+        .pipe(
+          Effect.mapError((cause) => new ThreadImportError({ threadId, operation: "read", cause })),
+        );
+      if (existing === null) return null;
+      if (existing.projectId !== input.projectId)
+        return yield* new ThreadImportProjectMismatchError({
+          threadId,
+          existingProjectId: existing.projectId,
+        });
+      if (existing.deletedAt !== null) return yield* new ThreadImportDeletedError({ threadId });
+      const projection = yield* threads
+        .getThreadRecords(threadId, ["messages"], {
+          messageIds: [MessageId.make(`${threadId}:continuation`)],
+        })
+        .pipe(
+          Effect.mapError((cause) => new ThreadImportError({ threadId, operation: "read", cause })),
+        );
+      return {
+        threadId,
+        projectId: existing.projectId,
+        created: false,
+        runId:
+          projection.messages.find(
+            (message) => message.id === MessageId.make(`${threadId}:continuation`),
+          )?.runId ?? null,
+      };
+    },
+  );
   const importThread: ThreadImportService["Service"]["importThread"] = Effect.fn(
     "ThreadImportService.importThread",
   )(function* (input) {
-    const digest = yield* crypto
-      .digest(
-        "SHA-256",
-        new TextEncoder().encode(
-          // @effect-diagnostics-next-line preferSchemaOverJson:off -- Hash a fixed tuple of source identity strings without delimiter ambiguity.
-          JSON.stringify([
-            input.source.environmentId,
-            input.source.threadId,
-            input.source.handoffId,
-          ]),
-        ),
-      )
-      .pipe(Effect.orDie);
-    const threadId = ThreadId.make(`thread:import:${Hex.encode(digest)}`);
+    const threadId = yield* identity(input.source);
     const commandId = CommandId.make(`${threadId}:create`);
     const messageId = MessageId.make(`${threadId}:continuation`);
     const wrap = (operation: ThreadImportError["operation"]) => (cause: unknown) =>
@@ -197,7 +241,12 @@ const make = Effect.gen(function* () {
       }),
     );
   });
-  return ThreadImportService.of({ importThread });
+  return ThreadImportService.of({
+    identity,
+    importThread,
+    lookup,
+    withAcceptanceLock: (source, effect) => acceptance.withLock(sourceKey(source), effect),
+  });
 });
 
 export const layer = Layer.effect(ThreadImportService, make);

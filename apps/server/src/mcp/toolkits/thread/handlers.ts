@@ -8,8 +8,11 @@ import {
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 
+import * as ThreadHandoff from "../../../peer/handoff/ThreadHandoff.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
   dispatchFailure,
@@ -75,6 +78,27 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
+  t3_thread_handoff: writesThread((input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const handoff = yield* Effect.serviceOption(ThreadHandoff.ThreadHandoff);
+      if (Option.isNone(handoff))
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "This server does not support thread handoff.",
+        });
+      return yield* handoff.value.start({ ...input, callerThreadId: scope.thread?.threadId }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new OrchestratorMcpFailure({
+              code: cause.reason === "failed" ? "orchestration_error" : "invalid_request",
+              message: cause.message,
+            }),
+        ),
+      );
+    }),
+  ),
+
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const scheduler = yield* ScheduledTasks.ScheduledTaskService;

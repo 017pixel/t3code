@@ -32,6 +32,7 @@ import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecuto
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
+import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
@@ -131,6 +132,15 @@ export class ProjectService extends Context.Service<
       options?: { readonly includeDeleted?: boolean },
     ) => Effect.Effect<Option.Option<Project>, ProjectOperationError>;
     readonly snapshot: Effect.Effect<ProjectSnapshot, ProjectOperationError>;
+    readonly list: (options?: {
+      readonly cursor?: number | undefined;
+      readonly limit?: number | undefined;
+      readonly resolveRepositoryIdentity?: boolean | undefined;
+    }) => Effect.Effect<
+      { readonly projects: ReadonlyArray<Project>; readonly nextCursor: number | null },
+      ProjectOperationError,
+      RepositoryIdentityResolver.RepositoryIdentityResolver
+    >;
     readonly getShell: (
       projectId: ProjectId,
     ) => Effect.Effect<Option.Option<OrchestrationProjectShell>, ProjectOperationError>;
@@ -562,6 +572,36 @@ export const make = Effect.gen(function* () {
     } satisfies ProjectSnapshot;
   });
 
+  const list: ProjectService["Service"]["list"] = Effect.fn("ProjectService.list")(
+    function* (options) {
+      const rows = yield* projects
+        .list()
+        .pipe(
+          Effect.mapError(
+            (cause) => new ProjectOperationError({ operation: "list-projects", cause }),
+          ),
+        );
+      const active = rows.filter((row) => row.deletedAt === null);
+      const start = Math.max(0, options?.cursor ?? 0);
+      const end = start + Math.min(100, Math.max(1, options?.limit ?? 20));
+      const identities = options?.resolveRepositoryIdentity
+        ? yield* RepositoryIdentityResolver.RepositoryIdentityResolver
+        : undefined;
+      const page = yield* Effect.forEach(
+        active.slice(start, end),
+        (row) =>
+          Effect.gen(function* () {
+            const project = yield* hydrate(row);
+            if (identities === undefined) return project;
+            const repositoryIdentity = yield* identities.resolve(row.workspaceRoot);
+            return { ...project, repositoryIdentity };
+          }),
+        { concurrency: 4 },
+      );
+      return { projects: page, nextCursor: end < active.length ? end : null };
+    },
+  );
+
   return ProjectService.of({
     create,
     bootstrap,
@@ -570,6 +610,7 @@ export const make = Effect.gen(function* () {
     getById,
     getByWorkspaceRoot,
     snapshot,
+    list,
     getShell,
     listShells,
   });

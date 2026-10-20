@@ -64,6 +64,9 @@ import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceR
 import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrideSweep.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
+import * as HandoffGit from "./peer/handoff/HandoffGit.ts";
+import * as HandoffImport from "./peer/handoff/HandoffImport.ts";
+import * as ThreadHandoff from "./peer/handoff/ThreadHandoff.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
@@ -696,6 +699,9 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer,
   ),
+  Layer.effectDiscard(
+    ThreadHandoff.ThreadHandoff.pipe(Effect.flatMap((handoff) => handoff.start_())),
+  ),
   McpHttpServer.layer.pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
@@ -709,6 +715,14 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(layerPullRequestService),
   Layer.provide(ServerBrowser.layer.pipe(Layer.provide(DesktopBrowserChannel.layer))),
   Layer.provide(PreviewBrowser.layer),
+  Layer.provide(
+    Layer.merge(
+      ThreadHandoff.layer.pipe(
+        Layer.provide(Layer.merge(ProjectionStoreV2.layer, RuntimeLayer.layerEventSink)),
+      ),
+      HandoffImport.layer,
+    ).pipe(Layer.provide(HandoffGit.layer)),
+  ),
   Layer.provide(PeerForwarding.layer.pipe(Layer.provide(PeerMcpClient.layer))),
   Layer.provide(PeerLinks.layer),
   Layer.provide(PreviewAutomationBroker.layer),

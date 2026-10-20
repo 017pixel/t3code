@@ -451,6 +451,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.active.reorder":
     case "thread.visit":
     case "thread.mark-unread":
+    case "thread.handoff.update":
     case "thread.metadata.update":
     case "thread.pull-request.link":
     case "thread.pull-request.unlink":
@@ -1289,6 +1290,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (
         projection.thread.archivedAt !== null ||
         projection.thread.deletedAt !== null ||
+        (projection.thread.handoff != null &&
+          ["pending", "departing", "departed"].includes(projection.thread.handoff.state)) ||
         projection.runs.some(isBlockingRun) ||
         projection.runs.some((run) => run.status === "queued" && run.queueHeld === true)
       ) {
@@ -4611,6 +4614,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) =>
     Effect.gen(function* () {
       let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      const handoff = projection.thread.handoff;
+      if (handoff?.state === "departing" || handoff?.state === "departed") {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread handoff is ${handoff.state}; continue in the destination thread.`,
+        });
+      }
+      if (
+        handoff?.state === "pending" &&
+        command.notification === undefined &&
+        command.delegatedCompletion === undefined &&
+        command.scheduledTaskId === undefined &&
+        command.restartContinuationOfRunId === undefined &&
+        (command.createdBy === "user" || command.creationSource === "mcp")
+      ) {
+        // The command lock orders this after the request, even when the clock has not advanced.
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: yield* DateTime.now,
+          payload: { ...projection.thread, handoff: null },
+        });
+        projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      }
+
       if (command.manualContinuationOfRunId !== undefined) {
         const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
         const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -7725,6 +7757,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .pipe(
           Effect.mapError(() => new OrchestratorProjectionError({ threadId: command.threadId })),
         );
+      if (
+        projection.thread.handoff?.state === "departing" ||
+        projection.thread.handoff?.state === "departed"
+      )
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Thread handoff has fenced provider work.",
+        });
+      if (projection.thread.handoff?.state === "pending") {
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: yield* DateTime.now,
+          payload: { ...projection.thread, handoff: null },
+        });
+      }
       if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -8116,7 +8168,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
 
   const loadProjectionForCommand = <K extends ProjectionRecordField>(
-    command: OrchestrationV2Command,
+    command: OrchestrationV2ServerCommand,
     fields: ReadonlyArray<K>,
     filter?: ProjectionRecordFilter,
   ) =>
@@ -8218,6 +8270,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ["runs", "attempts", "nodes", "providerThreads", "turnItems"],
         { turnItemTypes: ["command_execution"], turnItemRunId: command.runId },
       );
+      if (
+        projection.thread.handoff?.state === "departing" ||
+        projection.thread.handoff?.state === "departed"
+      )
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Thread handoff has fenced provider work.",
+        });
       const state = preparedRunState(command, projection);
       if (state === null) {
         return yield* new OrchestratorDispatchError({
@@ -10973,6 +11034,29 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.thread_id": commandThreadId(command),
     });
 
+    // These paths can start provider work or restore source files without a new message.
+    if (
+      [
+        "prepared-run.retry",
+        "checkpoint.rollback",
+        "delegated_task.request",
+        "thread.fork",
+        "thread.merge_back",
+        "provider.switch",
+      ].includes(command.type)
+    ) {
+      const threadId =
+        command.type === "thread.fork" ? command.sourceThreadId : commandThreadId(command);
+      const thread = yield* projectionStore
+        .getThread(threadId)
+        .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
+      if (thread.handoff?.state === "departing" || thread.handoff?.state === "departed")
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Thread handoff has fenced source work.",
+        });
+    }
     const events = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
     const effects = yield* Ref.make<Array<PendingOrchestrationEffectV2>>([]);
     let cancelUnsettledEffects:
@@ -11137,6 +11221,67 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             idAllocator,
           }),
         );
+      }
+      case "thread.handoff.update": {
+        const projection = yield* loadProjectionForCommand(command, ["runs"]);
+        const current = projection.thread.handoff;
+        const next = command.handoff;
+        const expected = command.expected;
+        const live = projection.runs.some(isBlockingRun);
+        const queued = projection.runs.some((run) => run.status === "queued");
+        const ownActive = command.callerThreadId === command.threadId && live;
+        const matches =
+          expected === null
+            ? current == null
+            : current?.state === expected.state && current.handoffId === expected.handoffId;
+        const initial = current == null || current.state === "failed";
+        const sameMove =
+          current == null ||
+          current.state === "failed" ||
+          next === null ||
+          (current.handoffId === next.handoffId &&
+            current.environmentId === next.environmentId &&
+            current.projectId === next.projectId &&
+            current.label === next.label);
+        const eligible =
+          projection.thread.deletedAt === null &&
+          projection.thread.archivedAt === null &&
+          projection.thread.lineage.relationshipToParent !== "subagent";
+        const allowed =
+          matches &&
+          sameMove &&
+          (next === null
+            ? current?.state === "pending"
+            : next.state === "pending"
+              ? eligible && initial && ownActive && next.requestCommandId === command.commandId
+              : next.state === "departing"
+                ? eligible &&
+                  !live &&
+                  ((initial && !queued) ||
+                    (current?.state === "pending" && current.handoffId === next.handoffId))
+                : (next.state === "departed" || next.state === "failed") &&
+                  current?.state === "departing" &&
+                  current.handoffId === next.handoffId);
+        if (!allowed)
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause:
+              "The thread handoff changed or the thread still has work; retry from its current state.",
+          });
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: yield* DateTime.now,
+          payload: {
+            ...projection.thread,
+            handoff: next,
+          },
+        });
+        break;
       }
       case "thread.archive":
       case "thread.unarchive":
@@ -11394,7 +11539,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
         ),
       );
-      if (command.type === "queue.resume") {
+      if (
+        command.type === "queue.resume" ||
+        ((command.type === "message.dispatch" ||
+          command.type === "queued-message.promote-to-steer") &&
+          storedEvents.some(
+            ({ event }) =>
+              event.type === "thread.metadata-updated" && event.payload.handoff === null,
+          )) ||
+        (command.type === "thread.handoff.update" &&
+          (command.handoff === null || command.handoff.state === "failed"))
+      ) {
         yield* mapDispatchError(command)(startNextQueuedRun(command.threadId));
       }
       return {
@@ -11527,7 +11682,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         detail: committed.receipt.error ?? "Previously rejected.",
       });
     }
-    if (command.type === "queue.resume") {
+    if (
+      command.type === "queue.resume" ||
+      ((command.type === "message.dispatch" ||
+        command.type === "queued-message.promote-to-steer") &&
+        plan.events.some(
+          (event) => event.type === "thread.metadata-updated" && event.payload.handoff === null,
+        )) ||
+      (command.type === "thread.handoff.update" &&
+        (command.handoff === null || command.handoff.state === "failed"))
+    ) {
       yield* mapDispatchError(command)(startNextQueuedRun(command.threadId));
     }
     if (command.type === "notification.delivery.accept") {

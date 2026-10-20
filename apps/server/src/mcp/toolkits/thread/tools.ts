@@ -1,5 +1,7 @@
 import {
   OrchestratorMcpEnvironmentTarget,
+  OrchestratorMcpThreadHandoffInput,
+  OrchestratorMcpThreadHandoffResult,
   ScheduledTaskId,
   ScheduledTask,
   OrchestrationSearchThreadsInput,
@@ -308,7 +310,23 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const ThreadHandoffTool = Tool.make("t3_thread_handoff", {
+  description:
+    "Move a thread's conversation and Git work to a linked environment. Omit threadId to move your own thread after its active turn fully finishes. New instructions cancel a pending move. Pass projectId from that environment or omit it to match the repository. Read current handoff metadata with t3_thread_read. Retry a departing move with its handoffId and saved environmentId/projectId, omitting continuationPrompt; retries preserve the original request. The same ID after departure returns its saved destination.",
+  parameters: OrchestratorMcpThreadHandoffInput,
+  success: OrchestratorMcpThreadHandoffResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+  ],
+})
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
+
 export const ThreadToolkit = Toolkit.make(
+  ThreadHandoffTool,
   ScheduledTaskRunTool,
   ThreadSearchTool,
   ThreadForkTool,

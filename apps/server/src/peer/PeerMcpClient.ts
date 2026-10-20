@@ -63,6 +63,7 @@ const isMcpFailure = Schema.is(OrchestratorMcpFailure);
 const Refusal = Schema.Struct({
   code: OrchestratorMcpFailure.fields.code,
   message: Schema.String,
+  handoffNotAccepted: OrchestratorMcpFailure.fields.handoffNotAccepted,
 });
 const decodeRefusal = Schema.decodeUnknownOption(Refusal);
 const decodeTextRefusal = Schema.decodeUnknownOption(Schema.fromJsonString(Refusal));
@@ -154,7 +155,7 @@ const make = Effect.gen(function* () {
         const refusal = decodeRefusal(decoded.value.error.data);
         if (Option.isSome(refusal))
           return yield* new OrchestratorMcpFailure({
-            code: refusal.value.code,
+            ...refusal.value,
             message: refusal.value.message.slice(0, 1000),
           });
         return yield* new OrchestratorMcpFailure({
@@ -278,7 +279,7 @@ const make = Effect.gen(function* () {
             : decodeRefusal(result.structuredContent);
         return yield* Option.isSome(refusal)
           ? new OrchestratorMcpFailure({
-              code: refusal.value.code,
+              ...refusal.value,
               message: refusal.value.message.slice(0, 1000),
             })
           : new OrchestratorMcpFailure({

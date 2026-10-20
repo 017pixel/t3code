@@ -87,6 +87,46 @@ describe("orchestrator MCP contracts", () => {
     },
   );
 
+  it.each([
+    { field: "handoffId", invalid: ["../../escape", "handoff:unsafe"] },
+    { field: "branch", invalid: ["feature/../escape"] },
+    { field: "tip", invalid: ["abc1234", "g".repeat(40)] },
+    { field: "snapshot", invalid: ["abc1234", "g".repeat(64)] },
+  ])("rejects malformed bundle $field at the import wire boundary", ({ field, invalid }) => {
+    const request = {
+      source: {
+        environmentId: "environment:source",
+        threadId: "thread:source",
+        handoffId: "handoff-one",
+      },
+      projectId: "project:import",
+      title: "Continue the investigation",
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      messages: [{ role: "user", text: "Earlier question", createdAt: "2026-10-06T10:00:00.000Z" }],
+      bundle: {
+        attachmentId: "pending/handoff-one.bundle",
+        branch: "feature/continue",
+        tip: "a".repeat(40),
+        snapshot: "b".repeat(64),
+        repository: { canonicalKey: null, sourceRoot: "/source/repo" },
+      },
+    };
+    expect(decodeThreadImportInput(request)).toEqual(request);
+    expect(
+      decodeThreadImportInput({
+        ...request,
+        bundle: { ...request.bundle, branch: null, tip: "a".repeat(64), snapshot: "b".repeat(40) },
+      }).bundle?.branch,
+    ).toBeNull();
+    for (const value of invalid) {
+      const malformed =
+        field === "handoffId"
+          ? { ...request, source: { ...request.source, handoffId: value } }
+          : { ...request, bundle: { ...request.bundle, [field]: value } };
+      expect(decodeThreadImportInputResult(malformed)._tag, field + ": " + value).toBe("Failure");
+    }
+  });
+
   it("accepts explicit worktree isolation and keeps shared delegation as the default", () => {
     expect(decodeDelegateTaskInput({ task: "Review changes" }).isolation).toBeUndefined();
     expect(

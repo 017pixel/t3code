@@ -14,6 +14,9 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  * even where they differ from the method prefix.
  */
 const RPC_AGGREGATES = {
+  [WS_METHODS.threadHandoffOptions]: "threadHandoff",
+  [WS_METHODS.threadHandoffStart]: "threadHandoff",
+  [WS_METHODS.threadHandoffCancel]: "threadHandoff",
   [WS_METHODS.peerLinksList]: "peerLinks",
   [WS_METHODS.peerLinksLink]: "peerLinks",
   [WS_METHODS.peerLinksUnlink]: "peerLinks",

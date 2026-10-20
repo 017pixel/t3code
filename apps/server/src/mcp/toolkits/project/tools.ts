@@ -24,12 +24,12 @@ import {
 import * as FileSystem from "effect/FileSystem";
 import * as ServerConfig from "../../../config.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
-import * as ThreadImportService from "../../../orchestration-v2/ThreadImportService.ts";
 import * as ThreadLaunchService from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 import * as ProjectService from "../../../project/ProjectService.ts";
+import * as RepositoryIdentityResolver from "../../../project/RepositoryIdentityResolver.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as SourceControlRepositoryService from "../../../sourceControl/SourceControlRepositoryService.ts";
@@ -49,12 +49,22 @@ const shared = {
 };
 const ProjectListTool = Tool.make("t3_project_list", {
   ...shared,
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+    ProjectService.ProjectService,
+    RepositoryIdentityResolver.RepositoryIdentityResolver,
+  ],
   description:
     "List registered projects locally or in a linked environment with environmentId. Pages use the current project snapshot and may shift between calls.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     cursor: Schema.optional(NonNegativeInt),
     limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
+    resolveRepositoryIdentity: Schema.optional(Schema.Boolean).annotate({
+      description:
+        "Wait for repository identities on this page when matching a handoff destination.",
+    }),
   }),
   success: Schema.Struct({
     projects: Schema.Array(Project),
@@ -65,6 +75,11 @@ const ProjectListTool = Tool.make("t3_project_list", {
   .annotate(Tool.Destructive, false);
 const ProjectReadTool = Tool.make("t3_project_read", {
   ...shared,
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+    ProjectService.ProjectService,
+  ],
   description:
     "Read a registered project locally or in a linked environment with environmentId, including its workspace and saved scripts.",
   parameters: Schema.Struct({
@@ -183,7 +198,10 @@ const ThreadImportTool = Tool.make("t3_thread_import", {
     environmentId: OrchestratorMcpEnvironmentTarget,
   }),
   success: OrchestratorMcpThreadImportResult,
-  dependencies: [...shared.dependencies, ThreadImportService.ThreadImportService],
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+  ],
 })
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);

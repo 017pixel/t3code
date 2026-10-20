@@ -58,3 +58,12 @@ export class PeerLinkError extends Schema.TaggedError<PeerLinkError>()("PeerLink
   message: Schema.String,
   cause: Schema.optionalKey(Schema.Defect()),
 }) {}
+
+export class ThreadHandoffError extends Schema.TaggedError<ThreadHandoffError>()(
+  "ThreadHandoffError",
+  {
+    reason: Schema.Literals(["not_found", "refused", "failed"]),
+    message: Schema.String,
+    cause: Schema.optionalKey(Schema.Defect()),
+  },
+) {}

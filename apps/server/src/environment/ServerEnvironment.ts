@@ -220,6 +220,7 @@ export const make = Effect.gen(function* () {
       mcpModeLimitHeader: true,
       linkFence: true,
       threadImport: true,
+      threadHandoff: true,
       connectionProbe: true,
       attachmentUploads: true,
       questionAttachments: true,

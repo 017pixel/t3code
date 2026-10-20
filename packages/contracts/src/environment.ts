@@ -83,6 +83,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   mcpModeLimitHeader: Schema.optionalKey(Schema.Boolean),
   linkFence: Schema.optionalKey(Schema.Boolean),
   threadImport: Schema.optionalKey(Schema.Boolean),
+  threadHandoff: Schema.optionalKey(Schema.Boolean),
   connectionProbe: Schema.optionalKey(Schema.Boolean),
   attachmentUploads: Schema.optionalKey(Schema.Boolean),
   questionAttachments: Schema.optionalKey(Schema.Boolean),

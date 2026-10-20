@@ -53,6 +53,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
@@ -199,6 +200,7 @@ function makeHarness(options: HarnessOptions = {}) {
               : Option.none(),
         ),
       getByWorkspaceRoot: () => Effect.succeed(Option.some(project)),
+      list: () => Effect.die("unused"),
       snapshot: Effect.die("unused"),
       getShell: () => Effect.die("unused"),
       listShells: () => Effect.die("unused"),
@@ -2065,6 +2067,7 @@ it.effect("replays MCP launches durably within each caller's request namespace",
       ),
       Layer.mock(GitVcsDriver.GitVcsDriver)({}),
       Layer.mock(ThreadImportService.ThreadImportService)({}),
+      Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
       Layer.mock(SourceControlRepositories.SourceControlRepositoryService)({}),
     );
     const layerToolkit = McpHttpServer.toolkitRegistration(

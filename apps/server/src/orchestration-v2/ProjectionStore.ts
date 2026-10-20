@@ -288,6 +288,12 @@ export interface ProjectionRuntimeResponseContext {
 }
 
 export interface ProjectionRecordFilter {
+  readonly messageTail?: {
+    readonly limit: number;
+    readonly maxTextLength: number;
+    readonly before?: { readonly createdAt: DateTime.Utc; readonly messageId: MessageId };
+    readonly throughRunId?: RunId;
+  };
   readonly messageRoles?: ReadonlyArray<OrchestrationV2ConversationMessage["role"]>;
   readonly turnItemRunId?: RunId;
   readonly messageIds?: ReadonlyArray<MessageId>;
@@ -1508,6 +1514,7 @@ export function threadShellFromProjection(
     interactionMode: projection.thread.interactionMode,
     branch: projection.thread.branch,
     worktreePath: projection.thread.worktreePath,
+    handoff: projection.thread.handoff,
     pullRequests: threadPullRequestsOf(projection.thread),
     ...(projection.thread.linkedPullRequest === undefined
       ? {}
@@ -1768,6 +1775,7 @@ function shellFromState(input: {
     interactionMode: input.state.thread.interactionMode,
     branch: input.state.thread.branch,
     worktreePath: input.state.thread.worktreePath,
+    handoff: input.state.thread.handoff,
     pullRequests: threadPullRequestsOf(input.state.thread),
     ...(input.state.thread.linkedPullRequest === undefined
       ? {}
@@ -3213,14 +3221,52 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             matchesNothing(filter?.messageIds, filter?.messageRoles, filter?.messageRunIds))
             ? Effect.succeed([])
             : window === undefined
-              ? sql<PayloadRow>`
-                SELECT payload_json FROM orchestration_v2_projection_messages
-                WHERE thread_id = ${threadId}
-                  ${filter?.messageIds === undefined ? sql`` : sql`AND message_id IN (SELECT value FROM json_each(${encodeIdList(filter.messageIds)}))`}
-                  ${filter?.messageRoles === undefined ? sql`` : sql`AND role IN (SELECT value FROM json_each(${encodeIdList(filter.messageRoles)}))`}
-                  ${filter?.messageRunIds === undefined ? sql`` : sql`AND run_id IN (SELECT value FROM json_each(${encodeIdList(filter.messageRunIds)}))`}
-                ORDER BY created_at ASC, message_id ASC
-              `
+              ? filter?.messageTail === undefined
+                ? sql<PayloadRow>`
+                  SELECT payload_json FROM orchestration_v2_projection_messages
+                  WHERE thread_id = ${threadId}
+                    ${filter?.messageIds === undefined ? sql`` : sql`AND message_id IN (SELECT value FROM json_each(${encodeIdList(filter.messageIds)}))`}
+                    ${filter?.messageRoles === undefined ? sql`` : sql`AND role IN (SELECT value FROM json_each(${encodeIdList(filter.messageRoles)}))`}
+                    ${filter?.messageRunIds === undefined ? sql`` : sql`AND run_id IN (SELECT value FROM json_each(${encodeIdList(filter.messageRunIds)}))`}
+                  ORDER BY created_at ASC, message_id ASC
+                `
+                : sql<PayloadRow>`
+                  SELECT payload_json FROM (
+                    SELECT json_set(payload_json, '$.text', substr(json_extract(payload_json, '$.text'), 1, ${filter.messageTail.maxTextLength})) AS payload_json
+                    FROM orchestration_v2_projection_messages
+                    WHERE thread_id = ${threadId}
+                      ${
+                        filter.messageTail.throughRunId === undefined
+                          ? sql``
+                          : sql`AND EXISTS (
+                        SELECT 1 FROM orchestration_v2_projection_runs AS boundary
+                        WHERE boundary.thread_id = ${threadId} AND boundary.run_id = ${filter.messageTail.throughRunId}
+                          AND (
+                            (orchestration_v2_projection_messages.run_id IS NULL AND json_extract(${threadRow.payload_json}, '$.historyOrigin') = 'v1_import')
+                            OR EXISTS (
+                              SELECT 1 FROM orchestration_v2_projection_runs AS source_run
+                              WHERE source_run.thread_id = ${threadId}
+                                AND source_run.run_id = orchestration_v2_projection_messages.run_id
+                                AND source_run.ordinal <= boundary.ordinal
+                            )
+                          )
+                      )`
+                      }
+                      ${
+                        filter.messageTail.before === undefined
+                          ? sql``
+                          : sql`AND (
+                        created_at < ${DateTime.formatIso(filter.messageTail.before.createdAt)} OR
+                        (created_at = ${DateTime.formatIso(filter.messageTail.before.createdAt)} AND message_id < ${filter.messageTail.before.messageId})
+                      )`
+                      }
+                      ${filter.messageIds === undefined ? sql`` : sql`AND message_id IN (SELECT value FROM json_each(${encodeIdList(filter.messageIds)}))`}
+                      ${filter.messageRoles === undefined ? sql`` : sql`AND role IN (SELECT value FROM json_each(${encodeIdList(filter.messageRoles)}))`}
+                      ${filter.messageRunIds === undefined ? sql`` : sql`AND run_id IN (SELECT value FROM json_each(${encodeIdList(filter.messageRunIds)}))`}
+                    ORDER BY created_at DESC, message_id DESC
+                    LIMIT ${filter.messageTail.limit}
+                  ) ORDER BY json_extract(payload_json, '$.createdAt') ASC, json_extract(payload_json, '$.id') ASC
+                `
               : sql<PayloadRow>`
                 SELECT payload_json FROM orchestration_v2_projection_messages AS message
                 WHERE message.thread_id = ${threadId}
@@ -3358,7 +3404,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           decodeRows(decodeContextTransferPayload, threadId)(contextTransferRows),
         ]);
         const messageOrdinals = new Map<string, number>();
-        if (fields !== undefined && fields.includes("messages") && messages.length > 1) {
+        if (
+          filter?.messageTail === undefined &&
+          fields !== undefined &&
+          fields.includes("messages") &&
+          messages.length > 1
+        ) {
           const rows = yield* sql<{ message_id: string; ordinal: number }>`
             SELECT json_extract(payload_json, '$.messageId') AS message_id, MIN(ordinal) AS ordinal
             FROM orchestration_v2_projection_turn_items
@@ -3367,7 +3418,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           `;
           for (const row of rows) messageOrdinals.set(row.message_id, row.ordinal);
         }
-        const orderedMessages = sortMessagesByTurnItemOrder(messages, turnItems, messageOrdinals);
+        const orderedMessages =
+          filter?.messageTail === undefined
+            ? sortMessagesByTurnItemOrder(messages, turnItems, messageOrdinals)
+            : // SQLite substr counts code points; the wire limits and replay store count UTF-16 units.
+              messages.map((message) => ({
+                ...message,
+                text: message.text.slice(0, filter.messageTail!.maxTextLength),
+              }));
         const projection = {
           thread,
           runs,
@@ -4820,6 +4878,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             const rows = yield* sql<{ readonly ready: number }>`
           SELECT 1 AS ready FROM orchestration_v2_projection_threads AS thread
           WHERE thread.thread_id = ${threadId} AND thread.archived_at IS NULL AND thread.deleted_at IS NULL
+            AND COALESCE(json_extract(thread.payload_json, '$.handoff.state'), '') NOT IN ('pending', 'departing', 'departed')
             AND EXISTS (SELECT 1 FROM orchestration_v2_projection_runs
               WHERE thread_id = ${threadId} AND status = 'queued')
             AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_runs
@@ -6438,13 +6497,53 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             return yield* new ProjectionStoreThreadNotFoundError({ threadId });
           const selected = {
             ...projection,
-            messages: projection.messages.filter(
-              (row) =>
-                (filter?.messageRunIds === undefined ||
-                  (row.runId !== null && filter.messageRunIds.includes(row.runId))) &&
-                (filter?.messageIds === undefined || filter.messageIds.includes(row.id)) &&
-                (filter?.messageRoles === undefined || filter.messageRoles.includes(row.role)),
-            ),
+            messages: (() => {
+              const throughRunId = filter?.messageTail?.throughRunId;
+              const boundary =
+                throughRunId === undefined
+                  ? undefined
+                  : projection.runs.find((run) => run.id === throughRunId);
+              const runOrdinals = new Map(
+                boundary === undefined ? [] : projection.runs.map((run) => [run.id, run.ordinal]),
+              );
+              const messages = projection.messages.filter(
+                (row) =>
+                  (throughRunId === undefined ||
+                    (boundary !== undefined &&
+                      isTurnItemAtOrBeforeRun({
+                        historyOrigin: projection.thread.historyOrigin,
+                        itemRunId: row.runId,
+                        runOrdinalById: runOrdinals,
+                        sourceRunOrdinal: boundary.ordinal,
+                      }))) &&
+                  (filter?.messageRunIds === undefined ||
+                    (row.runId !== null && filter.messageRunIds.includes(row.runId))) &&
+                  (filter?.messageIds === undefined || filter.messageIds.includes(row.id)) &&
+                  (filter?.messageRoles === undefined || filter.messageRoles.includes(row.role)),
+              );
+              return filter?.messageTail === undefined
+                ? messages
+                : messages
+                    .filter((message) => {
+                      const before = filter.messageTail?.before;
+                      if (before === undefined) return true;
+                      const time =
+                        DateTime.toEpochMillis(message.createdAt) -
+                        DateTime.toEpochMillis(before.createdAt);
+                      return time < 0 || (time === 0 && message.id < before.messageId);
+                    })
+                    .toSorted(
+                      (left, right) =>
+                        DateTime.toEpochMillis(left.createdAt) -
+                          DateTime.toEpochMillis(right.createdAt) ||
+                        (left.id < right.id ? -1 : left.id > right.id ? 1 : 0),
+                    )
+                    .slice(-filter.messageTail.limit)
+                    .map((message) => ({
+                      ...message,
+                      text: message.text.slice(0, filter.messageTail!.maxTextLength),
+                    }));
+            })(),
             runs:
               filter?.runIds === undefined
                 ? projection.runs
@@ -6635,6 +6734,10 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           return (
             projection.thread.archivedAt === null &&
             projection.thread.deletedAt === null &&
+            !(
+              projection.thread.handoff != null &&
+              ["pending", "departing", "departed"].includes(projection.thread.handoff.state)
+            ) &&
             projection.runs.some((run) => run.status === "queued") &&
             !projection.runs.some(
               (run) =>

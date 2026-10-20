@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as ThreadImport from "../../../orchestration-v2/ThreadImportService.ts";
+import * as HandoffImport from "../../../peer/handoff/HandoffImport.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
@@ -62,14 +63,36 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
     (input) => input,
     (input, modes) =>
       Effect.gen(function* () {
-        const imports = yield* ThreadImport.ThreadImportService;
-        return yield* imports.importThread({ ...input, ...modes }).pipe(
+        const handoff = yield* Effect.serviceOption(HandoffImport.HandoffImport);
+        const imports = yield* Effect.serviceOption(ThreadImport.ThreadImportService);
+        if (Option.isNone(handoff) && (input.bundle !== undefined || Option.isNone(imports)))
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "This server cannot receive handoff bundles.",
+          });
+        const accept = Option.isSome(handoff)
+          ? handoff.value.importThread({ ...input, ...modes })
+          : Option.isSome(imports)
+            ? imports.value.importThread({ ...input, ...modes })
+            : Effect.die("unreachable import service");
+        return yield* accept.pipe(
           Effect.mapError(
             (error) =>
               new OrchestratorMcpFailure({
                 code:
-                  error._tag === "ThreadImportError" ? "orchestration_error" : "invalid_request",
-                message: error.message,
+                  error._tag === "ThreadImportError" || error._tag === "HandoffImportOperationError"
+                    ? "orchestration_error"
+                    : "invalid_request",
+                message:
+                  error._tag === "HandoffImportGitRefusedError"
+                    ? error.cause.message
+                    : error.message,
+                ...(error._tag === "HandoffImportRefusedError"
+                  ? { handoffNotAccepted: error.notAccepted }
+                  : error._tag === "HandoffImportProviderDisabledError" ||
+                      error._tag === "HandoffImportGitRefusedError"
+                    ? { handoffNotAccepted: { source: error.source, projectId: error.projectId } }
+                    : {}),
               }),
           ),
         );
@@ -228,11 +251,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   t3_project_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const projects = yield* access;
-      const snapshot = yield* projects.snapshot.pipe(Effect.mapError(unavailable));
-      const rows = snapshot.projects.filter((project) => project.deletedAt === null);
-      const start = input.cursor ?? 0,
-        end = start + (input.limit ?? 20);
-      return { projects: rows.slice(start, end), nextCursor: end < rows.length ? end : null };
+      return yield* projects.list(input).pipe(Effect.mapError(unavailable));
     }),
   ),
   t3_project_read: McpToolAccess.reads((input) =>
