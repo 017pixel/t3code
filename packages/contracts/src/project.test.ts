@@ -21,6 +21,39 @@ import {
   ProjectWriteFileError,
 } from "./project.ts";
 
+import {
+  ProjectScriptMcpListInput,
+  ProjectScriptMcpRunInput,
+  ProjectScriptMcpStopInput,
+} from "./projectScriptMcp.ts";
+
+const decodeScriptList = Schema.decodeUnknownSync(ProjectScriptMcpListInput);
+const decodeScriptRun = Schema.decodeUnknownSync(ProjectScriptMcpRunInput, {
+  onExcessProperty: "error",
+});
+const decodeScriptStop = Schema.decodeUnknownSync(ProjectScriptMcpStopInput);
+
+it("bounds saved-script discovery without narrowing persisted IDs or accepting execution overrides", () => {
+  expect(decodeScriptList({ limit: 50, commandPreviewChars: 1000 })).toEqual({
+    limit: 50,
+    commandPreviewChars: 1000,
+  });
+  for (const input of [{ limit: 51 }, { commandPreviewChars: 1001 }, { cursor: -1 }]) {
+    expect(() => decodeScriptList(input)).toThrow();
+  }
+  const identity = { scriptId: "saved-" + "x".repeat(600), terminalId: "script" };
+  expect(decodeScriptRun(identity)).toEqual(identity);
+  expect(decodeScriptStop(identity)).toEqual(identity);
+  for (const extra of [
+    { command: "arbitrary" },
+    { cwd: "/" },
+    { env: { X: "1" } },
+    { previewUrl: "https://example.com" },
+  ]) {
+    expect(() => decodeScriptRun({ ...identity, ...extra })).toThrow();
+  }
+});
+
 const decodeProjectCreatePayload = Schema.decodeUnknownSync(ProjectCreatePayload);
 const decodeProjectUpdatePayload = Schema.decodeUnknownSync(ProjectUpdatePayload);
 const decodeProjectMutation = Schema.decodeUnknownSync(ProjectMutation);
