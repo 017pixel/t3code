@@ -11,7 +11,7 @@ agent can use this endpoint to:
 - create one or more ordinary top-level T3 threads;
 - list a project's threads and incrementally read any thread;
 - rename threads, regenerate titles, and link or unlink pull requests;
-- send or steer follow-up messages; and
+- send or steer follow-up messages;
 - wait for or interrupt ordinary thread runs; and
 - discover saved project scripts and run or stop them in dedicated terminals.
 
