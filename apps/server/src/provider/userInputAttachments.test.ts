@@ -298,6 +298,41 @@ describe("question answer paths", () => {
       const extracted = yield* Effect.promise(() => extractDocumentText(path, ".rtf"));
       expect(extracted).toContain("Hello\tworld\nUnicode α");
       expect(extracted).not.toContain("hidden");
+
+      for (const [name, content, expected] of [
+        [
+          "cyrillic-escaped",
+          String.raw`{\rtf1\ansi\ansicpg1251 \'cf\'f0\'e8\'e2\'e5\'f2 {\ansicpg1252 \'e9} \'cc\'ee\'f1\'ea\'e2\'e0}`,
+          "Привет é Москва",
+        ],
+        [
+          "cyrillic-raw",
+          Buffer.concat([
+            Buffer.from(String.raw`{\rtf1\ansi\ansicpg1251 `),
+            Buffer.from([0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2]),
+            Buffer.from("}"),
+          ]),
+          "Привет",
+        ],
+      ] as const) {
+        const encodedPath = NodePath.join(config.attachmentsDir, `${name}.rtf`);
+        NodeFS.writeFileSync(encodedPath, content);
+        expect(yield* Effect.promise(() => extractDocumentText(encodedPath, ".rtf"))).toBe(
+          expected,
+        );
+        const documents = yield* DocumentText.DocumentText;
+        expect(yield* documents.ensure(encodedPath)).toBe(encodedPath + ".txt");
+        expect(NodeFS.readFileSync(encodedPath + ".txt", "utf8")).toBe(expected);
+      }
+      const unsupportedPath = NodePath.join(config.attachmentsDir, "unsupported-codepage.rtf");
+      NodeFS.writeFileSync(unsupportedPath, String.raw`{\rtf1\ansi\ansicpg932 \'82\'a0}`);
+      yield* Effect.promise(async () => {
+        await expect(extractDocumentText(unsupportedPath, ".rtf")).rejects.toThrow(
+          "Unsupported RTF code page",
+        );
+      });
+      expect(yield* (yield* DocumentText.DocumentText).ensure(unsupportedPath)).toBeUndefined();
+      expect(NodeFS.existsSync(unsupportedPath + ".txt")).toBe(false);
       NodeFS.writeFileSync(path, String.raw`{\rtf1 ` + "x".repeat(1_000_100) + "}");
       expect(yield* Effect.promise(() => extractDocumentText(path, ".rtf"))).toContain(
         "[Extracted text truncated",

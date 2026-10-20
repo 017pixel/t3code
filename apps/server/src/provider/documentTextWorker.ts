@@ -220,11 +220,10 @@ function notebook(source: string): string {
 
 function rtf(source: string): string {
   if (!source.startsWith("{\\rtf")) throw new Error("Invalid RTF document");
-  const stack: Array<{ skip: boolean; uc: number }> = [];
-  let state = { skip: false, uc: 1 };
+  let state = { skip: false, uc: 1, decoder: new TextDecoder("windows-1252") };
+  const stack: Array<typeof state> = [];
   let fallback = 0;
   let result = "";
-  const decoder = new TextDecoder("windows-1252");
   for (let i = 0; i < source.length && result.length <= MAX_OUTPUT; i++) {
     const char = source[i]!;
     if (char === "{") {
@@ -237,7 +236,8 @@ function rtf(source: string): string {
       const word = /^([a-z]+)(-?\d+)? ?/i.exec(rest);
       if (hex) {
         if (fallback) fallback--;
-        else if (!state.skip) result += decoder.decode(Uint8Array.of(Number.parseInt(hex[1]!, 16)));
+        else if (!state.skip)
+          result += state.decoder.decode(Uint8Array.of(Number.parseInt(hex[1]!, 16)));
         i += 3;
       } else if (word) {
         i += word[0].length;
@@ -257,7 +257,12 @@ function rtf(source: string): string {
           ].includes(control)
         )
           state.skip = true;
-        if (control === "bin") {
+        if (control === "ansicpg") {
+          // Per-byte decoding only supports single-byte Windows code pages.
+          if (value !== 874 && (value < 1250 || value > 1258))
+            throw new Error("Unsupported RTF code page");
+          state.decoder = new TextDecoder(`windows-${value}`, { fatal: true });
+        } else if (control === "bin") {
           if (!Number.isSafeInteger(value) || value < 0)
             throw new Error("Invalid RTF binary length");
           i += value;
@@ -276,7 +281,9 @@ function rtf(source: string): string {
       }
     } else if (!state.skip && char !== "\n" && char !== "\r") {
       if (fallback) fallback--;
-      else result += char;
+      else
+        result +=
+          char.charCodeAt(0) < 128 ? char : state.decoder.decode(Uint8Array.of(char.charCodeAt(0)));
     }
   }
   return result;
@@ -288,7 +295,7 @@ export async function extractDocumentText(path: string, extension: string): Prom
   let outputTruncated = false;
   if (extension === ".ipynb") result = notebook(await NodeFSP.readFile(path, "utf8"));
   else if (extension === ".rtf") {
-    result = rtf(new TextDecoder("windows-1252").decode(await NodeFSP.readFile(path)));
+    result = rtf((await NodeFSP.readFile(path)).toString("latin1"));
     outputTruncated = result.length > MAX_OUTPUT;
   } else {
     const files = await archive(path);
