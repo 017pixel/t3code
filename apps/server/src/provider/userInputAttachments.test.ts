@@ -130,6 +130,14 @@ describe("question answer paths", () => {
           expected: ["## Report & totals", "North\t12 34"],
         },
         {
+          ext: "docx",
+          bounded: true,
+          parts: {
+            "word/document.xml": `<w:document><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>${"A".repeat(1_000_000)}</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Later cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>`,
+          },
+          expected: ["A".repeat(32), "[Extracted text truncated at 1,000,000 characters.]"],
+        },
+        {
           ext: "xlsx",
           parts: {
             "xl/workbook.xml":
@@ -177,9 +185,9 @@ describe("question answer paths", () => {
           ext: "odt",
           parts: {
             "content.xml":
-              '<office:document><text:h text:outline-level="2">Orchard</text:h><text:p>19 violet crates</text:p></office:document>',
+              '<office:document><text:h text:outline-level="2">Orchard</text:h><text:p>19<text:s text:c="3"/>violet<text:s/>crates</text:p></office:document>',
           },
-          expected: ["## Orchard", "19 violet crates"],
+          expected: ["## Orchard", "19   violet crates"],
         },
         {
           ext: "ods",
@@ -218,7 +226,7 @@ describe("question answer paths", () => {
             "OEBPS/book.opf":
               '<package><manifest><item id="a" href="a.xhtml"/><item id="b" href="b.xhtml"/></manifest><spine><itemref idref="b"/><itemref idref="a"/></spine></package>',
             "OEBPS/a.xhtml":
-              '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html><body><p>Last chapter</p></body></html>',
+              '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html><body><p>Last chapter</p><p>Price <s>10</s> 8</p></body></html>',
             "OEBPS/b.xhtml":
               "<!DOCTYPE html><html><body><h1>First chapter</h1><p>Larkspur</p><div>Direct div<section>Direct section<li>Direct item <em>emphasis</em> trailing</li></section></div><table><thead><tr><th>Heading</th><th>Total</th></tr></thead><tbody><tr><td>Important value</td><td>731</td></tr></tbody></table></body></html>",
           },
@@ -233,6 +241,7 @@ describe("question answer paths", () => {
             "Important value\t731",
             "## Chapter 2",
             "Last chapter",
+            "Price 10 8",
           ],
         },
       ];

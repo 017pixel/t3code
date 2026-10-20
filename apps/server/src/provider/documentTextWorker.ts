@@ -13,9 +13,10 @@ interface XmlNode {
   name: string;
   attrs: Record<string, string>;
   children: Array<XmlNode | string>;
+  spaceCount?: number;
 }
 
-function xml(source: string): XmlNode {
+function xml(source: string, odfSpaces = false): XmlNode {
   const root: XmlNode = { name: "root", attrs: {}, children: [] };
   const stack = [root];
   let nodes = 0;
@@ -32,6 +33,7 @@ function xml(source: string): XmlNode {
       ),
       children: [],
     };
+    if (odfSpaces && node.name === "s") node.spaceCount = Math.min(256, Number(node.attrs.c) || 1);
     stack.at(-1)!.children.push(node);
     stack.push(node);
   });
@@ -56,7 +58,7 @@ function text(node: XmlNode): string {
   if (["script", "style", "binary-data"].includes(node.name)) return "";
   if (["tab", "cell"].includes(node.name)) return "\t";
   if (["br", "line-break"].includes(node.name)) return "\n";
-  if (node.name === "s") return " ".repeat(Math.min(256, Number(node.attrs.c) || 1));
+  if (node.spaceCount !== undefined) return " ".repeat(node.spaceCount);
   return node.children.map((child) => (typeof child === "string" ? child : text(child))).join("");
 }
 function paragraphs(node: XmlNode): string {
@@ -307,7 +309,7 @@ export async function extractDocumentText(path: string, extension: string): Prom
     const read = (name: string) => {
       const data = files.get(name);
       if (!data) throw new Error("Missing document part");
-      return xml(data);
+      return xml(data, [".odt", ".ods", ".odp"].includes(extension));
     };
     if (extension === ".docx") result = paragraphs(read("word/document.xml"));
     else if ([".odt", ".ods", ".odp"].includes(extension)) {
@@ -410,6 +412,7 @@ export async function extractDocumentText(path: string, extension: string): Prom
         .join("\n\n");
     } else throw new Error("Unsupported document");
   }
+  outputTruncated ||= result.length > MAX_OUTPUT;
   result = result
     .replaceAll("\0", "")
     .replaceAll(/\n(?:[ \t]*\n){2,}/g, "\n\n")
