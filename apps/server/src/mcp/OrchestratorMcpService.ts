@@ -1966,6 +1966,7 @@ const make = Effect.gen(function* () {
             threadManagement: true,
             incrementalThreadRead: true,
             scheduledTasks: true,
+            savedProjectScripts: true,
             maxBatchThreads: 20,
           },
         };

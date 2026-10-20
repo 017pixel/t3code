@@ -42,6 +42,9 @@ import { PreviewControlsToolkit } from "./toolkits/previewControls/tools.ts";
 import * as PreviewControlsHandlers from "./toolkits/previewControls/handlers.ts";
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
+import * as ProjectScriptMcpService from "./ProjectScriptMcpService.ts";
+import { ProjectScriptToolkit } from "./toolkits/project_script/tools.ts";
+import * as ProjectScriptHandlers from "./toolkits/project_script/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
 import { AttachmentToolkit } from "./toolkits/attachment/tools.ts";
@@ -1016,6 +1019,10 @@ export const layerEnvironmentToolkit = toolkitRegistration(
 ).pipe(Layer.provide(ThreadCommandExecutor.layer));
 
 const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer);
+const layerProjectScriptRegistration = toolkitRegistration(
+  ProjectScriptToolkit,
+  ProjectScriptHandlers.layer,
+).pipe(Layer.provide(ProjectScriptMcpService.layer), Layer.provide(ThreadCommandExecutor.layer));
 
 export const layerAttachmentToolkit = toolkitRegistration(
   AttachmentToolkit,
@@ -1056,6 +1063,7 @@ export const layer = Layer.mergeAll(
   layerThreadToolkit,
   layerAttachmentToolkit,
   layerProjectRegistration,
+  layerProjectScriptRegistration,
   layerEnvironmentToolkit,
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,

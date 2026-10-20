@@ -12,7 +12,8 @@ agent can use this endpoint to:
 - list a project's threads and incrementally read any thread;
 - rename threads, regenerate titles, and link or unlink pull requests;
 - send or steer follow-up messages; and
-- wait for or interrupt ordinary thread runs.
+- wait for or interrupt ordinary thread runs; and
+- discover saved project scripts and run or stop them in dedicated terminals.
 
 These are T3 orchestration operations, not provider-native sub-agent APIs.
 Delegated tasks always create a T3 child thread and run. The child receives

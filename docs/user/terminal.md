@@ -28,3 +28,17 @@ To preserve those flags or enable queries with `query-term`, include them in
 `fish_features` in the environment that launches T3 Code. A shell export applies
 when you launch T3 Code from that shell; it does not configure a desktop app
 launched from the Dock or Finder. Enabling queries can restore the startup wait.
+
+## Saved scripts through agents
+
+Ask an agent to list or run your saved project scripts. `t3_project_script_list`
+returns bounded command previews and preview URLs. `t3_project_script_run` takes a
+saved `scriptId` and a fresh `terminalId`, using the target thread’s workspace.
+It reports whether terminal input was accepted, not whether the script succeeded.
+If input fails, inspect the terminal before retrying: some input may have arrived.
+Preview URLs are returned for discovery and never opened automatically.
+
+`t3_project_script_stop` stops that exact run, including after its saved definition
+is deleted or renamed. Closing, restarting, or exiting the terminal ends ownership.
+Run and stop require a live full-access/default caller and a full-access/default
+target thread. An external full-access MCP client can pass an explicit `threadId`.

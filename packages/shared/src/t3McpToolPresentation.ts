@@ -43,6 +43,9 @@ export type T3McpToolSummaryAction =
   | "worktree-handoff"
   | "worktree-list"
   | "worktree-status"
+  | "project-script-list"
+  | "project-script-run"
+  | "project-script-stop"
   | "project-list"
   | "project-read"
   | "project-create"
@@ -314,6 +317,15 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "environment-update",
   ),
   t3_thread_launch: tool(["Launch", "Launching", "Launched", "a project thread"], "thread-create"),
+  t3_project_script_list: tool(
+    ["List", "Listing", "Listed", "saved scripts"],
+    "project-script-list",
+  ),
+  t3_project_script_run: tool(["Run", "Running", "Ran", "a saved script"], "project-script-run"),
+  t3_project_script_stop: tool(
+    ["Stop", "Stopping", "Stopped", "a saved script"],
+    "project-script-stop",
+  ),
   t3_project_list: tool(["List", "Listing", "Listed", "projects"], "project-list"),
   t3_project_read: tool(["Read", "Reading", "Read", "a project"], "project-read"),
   t3_project_create: tool(["Register", "Registering", "Registered", "a project"], "project-create"),
