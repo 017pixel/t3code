@@ -1527,7 +1527,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
           ) : null}
           <div
             className={cn(
-              "h-full min-h-0 transition-opacity delay-150",
+              "h-full min-h-0 transition-opacity delay-150 motion-reduce:duration-0",
               composerOverlayHeight > 0 && "virtualized-scroll-fade timeline-scroll-bottom-fade",
               behind && "opacity-50",
             )}
