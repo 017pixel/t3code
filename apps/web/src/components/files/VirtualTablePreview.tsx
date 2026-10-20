@@ -394,7 +394,9 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
           style={{
             top:
               position.top +
-              (position.top > 0 && position.top >= scrollHeight - position.height - 1
+              (scrollHeight > position.height &&
+              position.top > 0 &&
+              position.top >= scrollHeight - position.height - 1
                 ? position.height - layout.height
                 : atStart
                   ? 0
