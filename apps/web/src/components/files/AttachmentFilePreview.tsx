@@ -354,8 +354,16 @@ export function AttachmentFilePreview(props: {
                 void copyToClipboard(content.text, undefined);
                 return;
               }
-              void copyContents
-                .current?.()
+              const copy = copyContents.current;
+              if (!copy) {
+                toastManager.add({
+                  type: "error",
+                  title: "Could not copy file",
+                  description: "Wait for the file to finish loading before copying.",
+                });
+                return;
+              }
+              void copy()
                 .then((text) => copyToClipboard(text, undefined))
                 .catch((cause: unknown) =>
                   toastManager.add({

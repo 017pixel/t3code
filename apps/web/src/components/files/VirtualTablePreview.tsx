@@ -176,8 +176,9 @@ function RowPage(
   // A page stays mounted while the worker fills it, preserving the scroll position.
   const { loadPage, page } = props;
   useEffect(() => {
-    if (!rows) loadPage?.(page);
-  }, [rows, page, loadPage]);
+    const expected = Math.min(PREVIEW_PAGE_ROWS, props.count - page * PREVIEW_PAGE_ROWS);
+    if (!rows || rows.length < expected) loadPage?.(page);
+  }, [rows, page, loadPage, props.count]);
   const start = props.page * PREVIEW_PAGE_ROWS;
   const count = Math.min(PREVIEW_PAGE_ROWS, props.count - start, props.limit ?? PREVIEW_PAGE_ROWS);
   return (

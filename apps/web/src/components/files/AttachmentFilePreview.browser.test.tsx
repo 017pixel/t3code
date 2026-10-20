@@ -1,4 +1,5 @@
 import { act, render, stubGlobal, type Screen } from "../../../test/render";
+import "~/index.css";
 import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -15,6 +16,44 @@ vi.mock(import("./ReadOnlySourcePreview"), () => ({
 }));
 
 import { AttachmentFilePreview } from "./AttachmentFilePreview";
+import LargeTextViewer from "./LargeTextViewer";
+import VirtualTablePreview from "./VirtualTablePreview";
+
+describe("large text preview recovery", () => {
+  it("recovers from a failed worker load when its source changes", async () => {
+    await using screen = await render(
+      <LargeTextViewer name="log.txt" text={"bad\0text"} delimiter={null} />,
+    );
+    await vi.waitFor(() =>
+      expect(screen.container.textContent).toContain("This file contains binary data."),
+    );
+    await screen.rerender(<LargeTextViewer name="log.txt" text="" delimiter={null} />);
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("This file is empty."));
+    expect(screen.container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("reloads a partial page when the indexed row count grows", async () => {
+    const load = vi.fn();
+    const rows = [["first"]];
+    const view = (count: number) => (
+      <div style={{ display: "flex", height: 400, width: 600 }}>
+        <VirtualTablePreview
+          name="log.txt"
+          count={count}
+          columns={1}
+          source
+          getRows={() => rows}
+          loadPage={load}
+        />
+      </div>
+    );
+    await using screen = await render(view(1));
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("first"));
+    expect(load).not.toHaveBeenCalled();
+    await screen.rerender(view(2));
+    await vi.waitFor(() => expect(load).toHaveBeenCalledWith(0));
+  });
+});
 
 describe("attachment HTML preview recovery", () => {
   const originalUrl = "data:text/html,original";
