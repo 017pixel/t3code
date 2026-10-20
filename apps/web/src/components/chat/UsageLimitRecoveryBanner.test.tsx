@@ -16,7 +16,7 @@ describe("usageLimitRecoveryBannerItem", () => {
     vi.useRealTimers();
   });
 
-  it.each(["12-hour", "24-hour"] as const)(
+  it.each(["locale", "12-hour", "24-hour"] as const)(
     "formats the reset time with the %s setting",
     (timestampFormat) => {
       const item = usageLimitRecoveryBannerItem({
