@@ -1137,16 +1137,17 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
         }
       });
     if (!(yield* signalGroup("SIGTERM"))) return;
-    // While the listener is still in the group, the group has not been reused, so SIGKILL goes
-    // only to the job that ignored SIGTERM.
-    const listenerInGroup = readProcessTable.pipe(
-      Effect.map((current) => current.get(input.pid)?.pgid === group),
+    // While one of the group's original members is still in it, the group has not been reused,
+    // so SIGKILL goes only to the job that ignored SIGTERM.
+    const members = [...table.values()].filter((row) => row.pgid === group).map((row) => row.pid);
+    const jobRunning = readProcessTable.pipe(
+      Effect.map((current) => members.some((pid) => current.get(pid)?.pgid === group)),
       Effect.orElseSucceed(() => false),
     );
     const deadline = (yield* Clock.currentTimeMillis) + STOP_GRACE_MS;
     while ((yield* Clock.currentTimeMillis) < deadline) {
       yield* Effect.sleep(STOP_POLL_INTERVAL);
-      if (!(yield* listenerInGroup)) return;
+      if (!(yield* jobRunning)) return;
     }
     yield* signalGroup("SIGKILL");
   });
