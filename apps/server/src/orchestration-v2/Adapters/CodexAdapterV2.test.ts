@@ -1320,7 +1320,10 @@ describe("CodexAdapterV2 native protocol logging", () => {
               code: "unauthorized",
               message: '{"message":"Unauthorized","Authorization":"Bearer secret-token"}',
             },
-            history: "x".repeat(128 * 1_024),
+            history: JSON.stringify({
+              padding: "x".repeat(128 * 1_024),
+              Authorization: "Bearer oversized-secret",
+            }),
           },
         },
       });
@@ -1329,6 +1332,8 @@ describe("CodexAdapterV2 native protocol logging", () => {
       assert.equal(writes.length, 1);
       assert.isBelow(serialized.length, 2_048);
       assert.notInclude(serialized, "secret-token");
+      assert.notInclude(serialized, "oversized-secret");
+      assert.nestedPropertyVal(writes[0], "event.payload.params.history", "[TRUNCATED]");
       assert.include(serialized, "[REDACTED]");
       assert.nestedPropertyVal(writes[0], "event.payload.params.error.code", "unauthorized");
       assert.nestedPropertyVal(writes[0], "event.payload.params.turnId", "native-turn");

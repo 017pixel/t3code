@@ -1504,6 +1504,7 @@ function redactCodexProtocolValue(
       return "[REDACTED]";
     }
     if (/^data:audio\//i.test(value)) return "[REDACTED AUDIO]";
+    if (value.length > 64 * 1_024) return "[TRUNCATED]";
     const trimmed = value.trim();
     if (
       !(
@@ -3215,8 +3216,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           },
         );
 
-        const supportsAudioInput = (model: string) =>
-          Effect.gen(function* () {
+        const supportsAudioInput = Effect.fn("CodexAdapterV2.supportsAudioInput")(
+          function* (model: string) {
             let cursor: string | undefined;
             do {
               const page: CodexSchema.V2ModelListResponse = yield* client.request(
@@ -3231,7 +3232,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               cursor = page.nextCursor ?? undefined;
             } while (cursor !== undefined);
             return false;
-          }).pipe(Effect.orElseSucceed(() => false));
+          },
+          Effect.orElseSucceed(() => false),
+        );
 
         const toCodexInput = Effect.fn("CodexAdapterV2.toCodexInput")(function* (
           turnInput: Pick<
