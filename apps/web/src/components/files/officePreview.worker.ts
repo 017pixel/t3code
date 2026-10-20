@@ -24,6 +24,10 @@ async function boundedArchive(bytes: ArrayBuffer, spreadsheet: boolean) {
     totalLimit: spreadsheet ? 128 * 1024 * 1024 : 50 * 1024 * 1024,
     xmlLimit: spreadsheet ? 64 * 1024 * 1024 : 8 * 1024 * 1024,
     ratioFloor: 8 * 1024 * 1024,
+  }).catch((error: unknown) => {
+    if (error instanceof Error && error.message === "This is not a readable ZIP archive.")
+      throw new Error("This file is damaged, encrypted, or not a valid Office document.");
+    throw error;
   });
   const archive = new JSZip();
   for (const [name, file] of files) {
