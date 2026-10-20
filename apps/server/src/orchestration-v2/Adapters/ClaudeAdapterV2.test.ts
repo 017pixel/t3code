@@ -37,7 +37,7 @@ import {
   type ModelSelection,
   NodeId,
   type OrchestrationV2AppThread,
-  type OrchestrationV2ProviderThread,
+  OrchestrationV2ProviderThread,
   OrchestrationV2UserInputQuestion,
   ProjectId,
   ProviderInstanceId,
@@ -1874,7 +1874,7 @@ describe("ClaudeAdapterV2 attachments", () => {
       budget: "none",
     },
     {
-      name: "resumed history with an unknown PDF budget",
+      name: "resumed history without persisted counters",
       prompt: "Inspect this file",
       expectedText: "Ultrathink:\nInspect this file",
       command: undefined,
@@ -2419,7 +2419,7 @@ describe("ClaudeAdapterV2 attachments", () => {
               typeof sent === "string" ? [] : sent.filter((block) => block.type === "document");
             assert.lengthOf(
               documents,
-              ["aggregate-pages", "delivery-failure"].includes(scenario) && !resumed ? 1 : 0,
+              ["aggregate-pages", "delivery-failure"].includes(scenario) ? 1 : 0,
               scenario,
             );
             if (scenario === "text-only")
@@ -2952,6 +2952,9 @@ describe("ClaudeAdapterV2 native session identity", () => {
 });
 
 const encodeJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const providerThreadJson = Schema.fromJsonString(Schema.toCodecJson(OrchestrationV2ProviderThread));
+const encodeProviderThreadJson = Schema.encodeEffect(providerThreadJson);
+const decodeProviderThreadJson = Schema.decodeUnknownEffect(providerThreadJson);
 
 describe("ClaudeAdapterV2 background wake turns", () => {
   const WAKE_NATIVE_SESSION = "native-thread-claude-wake";
@@ -3374,6 +3377,151 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
+
+  it.effect.each(["resume", "legacy", "compacted", "failed", "stopped"] as const)(
+    "restores retained attachment counters after %s",
+    (outcome) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const document = ChatFileAttachment.make({
+          type: "file",
+          id: ChatAttachmentId.make("budget-document"),
+          name: "budget.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 19 * 1024 * 1024,
+        });
+        const image = ChatImageAttachment.make({
+          type: "image",
+          id: ChatAttachmentId.make("budget-image"),
+          name: "budget.png",
+          mimeType: "image/png",
+          sizeBytes: 4 * 1024 * 1024,
+        });
+        const pages = Buffer.from(
+          `%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Count 100 >> endobj\n${Array.from({ length: 100 }, (_, i) => `${i + 3} 0 obj << /Type /Page /Parent 2 0 R >> endobj`).join("\n")}\n`,
+        );
+        const persisted = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeWakeHarness;
+            yield* fileSystem.writeFile(
+              path.join(harness.attachmentsDir, attachmentRelativePath(document)!),
+              Buffer.concat([
+                pages,
+                Buffer.alloc(document.sizeBytes - pages.length - 5, 32),
+                Buffer.from("%%EOF"),
+              ]),
+            );
+            yield* harness.runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now: yield* DateTime.now,
+                attemptId: RunAttemptId.make("spend-attachment-budget"),
+                text: "Read this PDF.",
+                attachments: [document],
+              }),
+            );
+            const first = harness.offeredMessages[0]?.message.content;
+            assert.isArray(first);
+            if (Array.isArray(first)) assert.equal(first[0]?.type, "document");
+            if (["compacted", "failed", "stopped"].includes(outcome)) {
+              yield* harness.offerAndWait(
+                claudeSdkFrame({
+                  type: "system",
+                  subtype: "status",
+                  status: "compacting",
+                  uuid: "00000000-0000-4000-8000-000000000801",
+                  session_id: WAKE_NATIVE_SESSION,
+                }),
+              );
+              yield* harness.offerAndWait(
+                claudeSdkFrame(
+                  outcome === "compacted"
+                    ? {
+                        type: "system",
+                        subtype: "compact_boundary",
+                        compact_metadata: { trigger: "auto", pre_tokens: 1500, post_tokens: 400 },
+                        uuid: "00000000-0000-4000-8000-000000000802",
+                        session_id: WAKE_NATIVE_SESSION,
+                      }
+                    : {
+                        type: "system",
+                        subtype: "status",
+                        status: null,
+                        ...(outcome === "failed"
+                          ? { compact_result: "failed", compact_error: "Could not compact." }
+                          : {}),
+                        uuid: "00000000-0000-4000-8000-000000000802",
+                        session_id: WAKE_NATIVE_SESSION,
+                      },
+                ),
+              );
+            }
+            yield* harness.offerAndWait(
+              makeResultFrame({
+                uuid: "00000000-0000-4000-8000-000000000803",
+                result: "Read.",
+              }),
+            );
+            yield* Queue.take(harness.terminalReceipts);
+            const event = harness.events.findLast(
+              (entry) => entry.type === "provider_thread.updated",
+            );
+            assert.equal(event?.type, "provider_thread.updated");
+            if (event?.type !== "provider_thread.updated")
+              return yield* Effect.die("Missing persisted thread");
+            const budget = event.providerThread.nativeMetadata?.claudeAttachmentBudget;
+            assert.isDefined(budget);
+            if (outcome === "compacted") assert.deepEqual(budget, { bytesUsed: 0, pagesUsed: 0 });
+            else {
+              assert.equal(budget?.pagesUsed, 100);
+              assert.isAbove(budget?.bytesUsed ?? 0, 25 * 1024 * 1024);
+            }
+            // Exercise the same schema boundary as the persisted provider thread.
+            return yield* decodeProviderThreadJson(
+              yield* encodeProviderThreadJson({
+                ...event.providerThread,
+                ...(outcome === "legacy" ? { nativeMetadata: null } : {}),
+              }),
+            );
+          }),
+        );
+        const resumed = yield* makeWakeHarness;
+        const providerThread = yield* resumed.runtime.resumeThread({ providerThread: persisted });
+        yield* fileSystem.writeFileString(
+          path.join(resumed.attachmentsDir, attachmentRelativePath(document)!),
+          "%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Count 1 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R >> endobj\n%%EOF",
+        );
+        yield* fileSystem.writeFile(
+          path.join(resumed.attachmentsDir, attachmentRelativePath(image)!),
+          Buffer.alloc(image.sizeBytes, 1),
+        );
+        yield* resumed.runtime.startTurn({
+          ...makeClaudeTestTurnInput({
+            threadId: resumed.threadId,
+            providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("resume-attachment-budget"),
+            text: "Read the PDF and both images.",
+            attachments: [document, image, image],
+          }),
+          nativeThreadHasTurns: true,
+        });
+        assert.equal(resumed.getOpenedOptions()?.resume, WAKE_NATIVE_SESSION);
+        const content = resumed.offeredMessages[0]?.message.content;
+        assert.isArray(content);
+        if (!Array.isArray(content)) return;
+        const native = outcome === "legacy" || outcome === "compacted";
+        assert.equal(content.filter((block) => block.type === "document").length, native ? 1 : 0);
+        assert.equal(content.filter((block) => block.type === "image").length, native ? 2 : 0);
+        assert.isBelow(Buffer.byteLength(encodeJsonString(content)), 32_000_000);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
 
   describe("Claude settings restrictions", () => {
     it.effect("resolves cached managed policy from the configured home through the real SDK", () =>

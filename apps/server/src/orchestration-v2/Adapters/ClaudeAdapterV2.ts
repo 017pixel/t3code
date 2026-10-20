@@ -1926,7 +1926,13 @@ const estimateClaudePdfPages = (bytes: Buffer): number | null => {
   return catalog && pageTree && pages > 0 && count === pages ? pages : null;
 };
 
-const reserveClaudePdfBudget = (budget: { remainingPages: number; remainingBytes: number }) =>
+const CLAUDE_ATTACHMENT_MAX_BYTES = 28 * 1024 * 1024;
+const CLAUDE_ATTACHMENT_MAX_PAGES = 100;
+
+const reserveClaudePdfBudget = (
+  budget: { remainingPages: number; remainingBytes: number },
+  persist: Effect.Effect<void>,
+) =>
   Effect.acquireRelease(
     Effect.sync(() => ({ budget, pages: 0, bytes: 0, delivered: false })),
     (reservation) =>
@@ -1934,7 +1940,7 @@ const reserveClaudePdfBudget = (budget: { remainingPages: number; remainingBytes
         if (reservation.delivered) return;
         budget.remainingPages += reservation.pages;
         budget.remainingBytes += reservation.bytes;
-      }),
+      }).pipe(Effect.andThen(persist)),
   );
 
 const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input: {
@@ -4178,8 +4184,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           );
         });
         const openedNativeThreads = yield* Ref.make(new Set<string>());
-        // The SDK owns prior resumed history. Account for bytes added here while
-        // keeping PDFs path-only when the prior page count is unknown.
         const pdfBudgets = new Map<string, { remainingPages: number; remainingBytes: number }>();
         const latestPlanByKind = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact>());
         // Claude 5 task tools edit one list per native session, across turns.
@@ -4403,8 +4407,44 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const runtimeContext = yield* Effect.context<never>();
         const runPromise = Effect.runPromiseWith(runtimeContext);
 
-        const emitProviderEvent = (event: ProviderAdapter.ProviderAdapterV2Event) =>
-          Queue.offer(events, event).pipe(Effect.asVoid);
+        const emitProviderEvent = (event: ProviderAdapter.ProviderAdapterV2Event) => {
+          if (event.type === "provider_thread.updated") {
+            const budget = pdfBudgets.get(event.providerThread.nativeThreadRef?.nativeId ?? "");
+            if (budget !== undefined) {
+              event = {
+                ...event,
+                providerThread: {
+                  ...event.providerThread,
+                  nativeMetadata: {
+                    ...event.providerThread.nativeMetadata,
+                    claudeAttachmentBudget: {
+                      bytesUsed: CLAUDE_ATTACHMENT_MAX_BYTES - budget.remainingBytes,
+                      pagesUsed: CLAUDE_ATTACHMENT_MAX_PAGES - budget.remainingPages,
+                    },
+                  },
+                },
+              };
+            }
+          }
+          return Queue.offer(events, event).pipe(Effect.asVoid);
+        };
+
+        const persistAttachmentBudget = Effect.fnUntraced(function* (nativeThreadId: string) {
+          const providerThread = (yield* Ref.get(lastProviderThreadByNativeThread)).get(
+            nativeThreadId,
+          );
+          if (providerThread === undefined) return;
+          const active = yield* Ref.get(activeTurn);
+          yield* emitProviderEvent({
+            type: "provider_thread.updated",
+            driver: CLAUDE_PROVIDER,
+            providerThread: {
+              ...providerThread,
+              status: active?.nativeThreadId === nativeThreadId ? "active" : providerThread.status,
+              updatedAt: yield* DateTime.now,
+            },
+          });
+        });
 
         // Reports one root request's usage as the current context. Usage
         // without input is a placeholder, never a measurement.
@@ -7892,6 +7932,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               });
               return;
             }
+            const budget = pdfBudgets.get(context.nativeThreadId);
+            if (budget !== undefined) {
+              budget.remainingPages = CLAUDE_ATTACHMENT_MAX_PAGES;
+              budget.remainingBytes = CLAUDE_ATTACHMENT_MAX_BYTES;
+              yield* persistAttachmentBudget(context.nativeThreadId);
+            }
             if (context.streamUsage !== null) context.streamUsage.usage = null;
             const postTokens = message.compact_metadata.post_tokens;
             const afterTokenCount =
@@ -9534,16 +9580,18 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               goalsByNativeThread.set(nativeThreadId, turnInput.providerThread.goal ?? null);
             }
             if (!pdfBudgets.has(nativeThreadId)) {
-              const resumed =
-                (turnInput.nativeThreadHasTurns ?? turnInput.providerTurnOrdinal > 1) ||
-                (yield* getNativeConversationHeadId(turnInput.providerThread)) !== undefined ||
-                (yield* Ref.get(openedNativeThreads)).has(nativeThreadId);
+              // Older sessions did not record retained attachments. Keep their
+              // existing native-image allowance rather than disabling images.
+              const used = turnInput.providerThread.nativeMetadata?.claudeAttachmentBudget;
               pdfBudgets.set(nativeThreadId, {
-                remainingPages: resumed ? 0 : 100,
-                remainingBytes: 28 * 1024 * 1024,
+                remainingPages: CLAUDE_ATTACHMENT_MAX_PAGES - (used?.pagesUsed ?? 0),
+                remainingBytes: CLAUDE_ATTACHMENT_MAX_BYTES - (used?.bytesUsed ?? 0),
               });
             }
-            const pdfReservation = yield* reserveClaudePdfBudget(pdfBudgets.get(nativeThreadId)!);
+            const pdfReservation = yield* reserveClaudePdfBudget(
+              pdfBudgets.get(nativeThreadId)!,
+              persistAttachmentBudget(nativeThreadId),
+            );
             const userMessage =
               promptUuid === null
                 ? null
@@ -9996,6 +10044,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             }
             const pdfReservation = yield* reserveClaudePdfBudget(
               pdfBudgets.get(existing.nativeThreadId) ?? { remainingPages: 0, remainingBytes: 0 },
+              persistAttachmentBudget(existing.nativeThreadId),
             );
             const userMessage = yield* makeClaudeUserMessageWithAttachments({
               text: applyClaudePromptEffortPrefix(
