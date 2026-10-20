@@ -206,6 +206,11 @@ describe("resolveMarkdownMediaPreview", () => {
     "report.tsv",
     "LICENSE",
     "Dockerfile",
+    "main.tf",
+    "schema.prisma",
+    "index.astro",
+    "main.zig",
+    "Containerfile",
   ])("routes text and table links and embeds to the file screen: %s", (name) => {
     for (const href of [name, "./" + name, "/tmp/" + name, "file:///tmp/" + name]) {
       for (const imageEmbed of [false, true]) {
@@ -218,20 +223,27 @@ describe("resolveMarkdownMediaPreview", () => {
     }
   });
 
-  it.each(["doc", "docx", "xls", "xlsx", "ppt", "pptx", "unknown"])(
-    "opens host %s links and embeds in the native viewer",
+  it.each(["doc", "docx", "xls", "xlsx", "ppt", "pptx", "unknown", "zip"])(
+    "keeps main's source reader for host %s links and embeds",
     (extension) => {
       const name = `report.${extension}`;
       for (const href of [name, `./${name}`, `/tmp/${name}`, `file:///tmp/${name}`]) {
         for (const imageEmbed of [false, true]) {
           expect(resolveMarkdownMediaPreview(href, { ...input, imageEmbed })).toMatchObject({
-            kind: "document",
+            kind: "file",
             source: {
-              kind: "document",
               name,
-              resource: { _tag: "media-file", threadId: input.threadId },
+              mimeType: "text/plain",
             },
           });
+          expect(
+            resolveMarkdownMediaPreview(href, {
+              ...input,
+              threadId: undefined,
+              imageEmbed,
+            })?.kind,
+          ).toBe("file");
+          expect(resolveMarkdownLinkPresentation(href)).toMatchObject({ kind: "file" });
         }
       }
     },

@@ -4,7 +4,6 @@ import {
 } from "@t3tools/client-runtime/markdown-images";
 import {
   audioMimeTypeFromExtension,
-  filePreviewKind,
   mediaMimeTypeFromExtension,
 } from "@t3tools/shared/filePreview";
 import { splitFilePathPosition } from "@t3tools/shared/fileLinks";
@@ -15,7 +14,7 @@ import {
   mediaReferenceFileName,
 } from "@t3tools/client-runtime/media-reference";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { normalizeNativeMarkdownUrl } from "./markdownLinks";
+import { normalizeNativeMarkdownUrl, resolveMarkdownLinkPresentation } from "./markdownLinks";
 import { resolveMobileMarkdownMediaSource } from "./markdownMediaSource";
 
 import type { FilePreviewSource } from "../components/FilePreviewModal";
@@ -72,17 +71,17 @@ export function resolveMarkdownMediaPreview(
         audioMimeTypeFromExtension(extension) !== null)
     ) {
       const audioMimeType = audioMimeTypeFromExtension(extension);
-      const previewKind = filePreviewKind({ name });
       const kind = audioMimeType
         ? "audio"
         : extension === ".pdf"
           ? "pdf"
-          : classified._tag === "WorkspaceFile" &&
-              (previewKind === "text" || previewKind === "markdown" || previewKind === "html")
+          : classified._tag === "WorkspaceFile"
             ? "file"
             : "document";
       const mimeType =
-        audioMimeType ?? DOCUMENT_MIME_TYPES[extension] ?? "application/octet-stream";
+        audioMimeType ??
+        (kind === "file" ? "text/plain" : DOCUMENT_MIME_TYPES[extension]) ??
+        "application/octet-stream";
       const common = {
         kind: kind === "pdf" ? ("pdf" as const) : ("document" as const),
         name,
@@ -157,4 +156,26 @@ export function resolveMarkdownMediaPreview(
   return kind === "video"
     ? { kind, source: { type: "media", name, mimeType, ...target, actionsSource } }
     : { kind, source: { kind, name, ...target, actionsSource } };
+}
+
+export function markdownFileEmbedLabel(
+  href: string,
+  input: Parameters<typeof resolveMarkdownMediaPreview>[1],
+  standalone: boolean,
+): string | null {
+  const media = resolveMarkdownMediaPreview(href, { ...input, imageEmbed: true });
+  if (media) {
+    if (
+      media.kind === "image" ||
+      ((media.kind === "video" || media.kind === "audio") && standalone)
+    )
+      return null;
+    return media.source.name ?? null;
+  }
+  const file = resolveMarkdownLinkPresentation(href);
+  if (file.kind === "file" && file.line === undefined) {
+    if (mediaMimeTypeFromExtension(file.path.slice(file.path.lastIndexOf("."))) !== null)
+      return null;
+  }
+  return file.kind === "file" ? file.label : null;
 }

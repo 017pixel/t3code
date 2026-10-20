@@ -16,7 +16,7 @@ import {
   ThreadMarkdownImageUnavailable,
 } from "../threads/ThreadMarkdownImage";
 import { ThreadMarkdownVideo } from "../threads/ThreadMarkdownVideo";
-import { resolveMarkdownMediaPreview } from "../../lib/markdownMedia";
+import { markdownFileEmbedLabel, resolveMarkdownMediaPreview } from "../../lib/markdownMedia";
 import {
   normalizeNativeMarkdownUrl,
   resolveMarkdownLinkPresentation,
@@ -237,6 +237,18 @@ export function FileMarkdownPreview(props: {
       <View className="mx-auto w-full max-w-[760px]">
         <SelectableMarkdownText
           markdown={props.markdown}
+          fileEmbedLabel={(href) =>
+            markdownFileEmbedLabel(
+              href,
+              {
+                environmentId: props.environmentId,
+                threadId: props.threadId ?? undefined,
+                workspaceRoot: markdownDirectory,
+                captured: props.captured,
+              },
+              false,
+            )
+          }
           onLinkPress={onLinkPress}
           renderImage={renderImage}
           resolveImageSource={resolveImageSource}

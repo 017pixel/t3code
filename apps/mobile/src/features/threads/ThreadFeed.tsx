@@ -133,7 +133,7 @@ import {
 import { AppText as Text } from "../../components/ui/AppText";
 import { VideoPreviewModal, type VideoPreviewSource } from "../../components/VideoPreviewModal";
 import { MediaVideoPlayer } from "../../components/MediaVideoPlayer";
-import { resolveMarkdownMediaPreview } from "../../lib/markdownMedia";
+import { markdownFileEmbedLabel, resolveMarkdownMediaPreview } from "../../lib/markdownMedia";
 import {
   attachmentVideoPreviewSource,
   mediaVideoPreviewUri,
@@ -731,6 +731,7 @@ interface MarkdownLinkHandlers {
   readonly onFileContextMenuAction: (href: string, actionId: string) => void;
   readonly onImagePress?: (href: string) => void;
   readonly resolveImageSource?: MarkdownImageSourceResolver;
+  readonly fileEmbedLabel?: (href: string, standalone: boolean) => string | null;
   readonly linkCustomization?: (href: string) => MarkdownLinkCustomization | undefined;
 }
 
@@ -1859,6 +1860,16 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     workspaceRoot: props.workspaceRoot ?? null,
   });
   const markdownLinkHandlers: MarkdownLinkHandlers = {
+    fileEmbedLabel: (href, standalone) =>
+      markdownFileEmbedLabel(
+        href,
+        {
+          environmentId: props.environmentId,
+          threadId: props.threadId,
+          workspaceRoot: props.workspaceRoot,
+        },
+        standalone,
+      ),
     onLinkPress: onMarkdownLinkPress,
     onImagePress: (href) => onMarkdownLinkPress(href, true),
     resolveImageSource,
