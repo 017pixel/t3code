@@ -211,73 +211,77 @@ const make = Effect.gen(function* () {
     return file;
   });
 
-  const tryRun: ProviderInstallLock["Service"]["tryRun"] = (lockKey, run) =>
-    Effect.gen(function* () {
-      const key = `${encodeURIComponent(lockKey)}.lock`;
-      const owner = yield* crypto.randomUUIDv4().pipe(Effect.mapError(toLockError));
-      const contents = `${process.pid}\n${owner}`;
-      // Written aside and renamed over the lock, so a failed write (disk full)
-      // leaves the previous complete record instead of an empty, held file.
-      const replace = (file: string, next: string) => {
-        const temporary = `${file}.${owner}.tmp`;
-        return fileSystem.writeFileString(temporary, next).pipe(
-          Effect.andThen(fileSystem.rename(temporary, file)),
-          Effect.onError(() => fileSystem.remove(temporary, { force: true }).pipe(Effect.ignore)),
-        );
-      };
-      return yield* Effect.acquireUseRelease(
-        acquire(key, contents, owner).pipe(
-          Effect.mapError(toLockError),
-          Effect.flatMap((acquired) =>
-            acquired !== undefined
-              ? Ref.make<{ file: string; pid: number | undefined; contents: string }>({
-                  file: acquired,
-                  pid: undefined,
-                  contents,
-                })
-              : Effect.succeed(undefined),
-          ),
-        ),
-        (ownerState) =>
-          ownerState === undefined
-            ? Effect.succeedNone
-            : run((pid) =>
-                Effect.gen(function* () {
-                  const state = yield* Ref.get(ownerState);
-                  if ((yield* fileSystem.readFileString(state.file)) !== state.contents) {
-                    return yield* toLockError(new Error("Provider install lock ownership changed"));
-                  }
-                  const next = `${process.pid} ${pid}\n${owner}`;
-                  yield* replace(state.file, next);
-                  yield* Ref.set(ownerState, { ...state, pid, contents: next });
-                  const generation = parseGeneration(path.basename(state.file))!;
-                  if (
-                    (yield* generations).some(
-                      (entry) => entry.key === key && entry.generation > generation.generation,
-                    )
-                  ) {
-                    return yield* toLockError(new Error("Provider install lock ownership expired"));
-                  }
-                }).pipe(Effect.mapError(toLockError), Effect.uninterruptible),
-              ).pipe(Effect.map(Option.some)),
-        (ownerState) =>
-          ownerState === undefined
-            ? Effect.void
-            : Ref.get(ownerState).pipe(
-                Effect.flatMap((state) =>
-                  Effect.gen(function* () {
-                    if ((yield* fileSystem.readFileString(state.file)) !== state.contents) return;
-                    // Once `run` ends, only a surviving detached installer keeps the lock held.
-                    yield* replace(
-                      state.file,
-                      `${state.pid !== undefined && isPidAlive(state.pid) ? state.pid : "released"}\n${owner}`,
-                    );
-                  }),
-                ),
-                Effect.ignore,
-              ),
+  const tryRun = Effect.fn("ProviderInstallLock.tryRun")(function* <A, E, R>(
+    lockKey: string,
+    run: (
+      recordChildPid: (pid: number) => Effect.Effect<void, ProviderInstallLockError>,
+    ) => Effect.Effect<A, E, R>,
+  ): Effect.fn.Return<Option.Option<A>, E | ProviderInstallLockError, R> {
+    const key = `${encodeURIComponent(lockKey)}.lock`;
+    const owner = yield* crypto.randomUUIDv4().pipe(Effect.mapError(toLockError));
+    const contents = `${process.pid}\n${owner}`;
+    // Written aside and renamed over the lock, so a failed write (disk full)
+    // leaves the previous complete record instead of an empty, held file.
+    const replace = (file: string, next: string) => {
+      const temporary = `${file}.${owner}.tmp`;
+      return fileSystem.writeFileString(temporary, next).pipe(
+        Effect.andThen(fileSystem.rename(temporary, file)),
+        Effect.onError(() => fileSystem.remove(temporary, { force: true }).pipe(Effect.ignore)),
       );
-    });
+    };
+    return yield* Effect.acquireUseRelease(
+      acquire(key, contents, owner).pipe(
+        Effect.mapError(toLockError),
+        Effect.flatMap((acquired) =>
+          acquired !== undefined
+            ? Ref.make<{ file: string; pid: number | undefined; contents: string }>({
+                file: acquired,
+                pid: undefined,
+                contents,
+              })
+            : Effect.succeed(undefined),
+        ),
+      ),
+      (ownerState) =>
+        ownerState === undefined
+          ? Effect.succeedNone
+          : run((pid) =>
+              Effect.gen(function* () {
+                const state = yield* Ref.get(ownerState);
+                if ((yield* fileSystem.readFileString(state.file)) !== state.contents) {
+                  return yield* toLockError(new Error("Provider install lock ownership changed"));
+                }
+                const next = `${process.pid} ${pid}\n${owner}`;
+                yield* replace(state.file, next);
+                yield* Ref.set(ownerState, { ...state, pid, contents: next });
+                const generation = parseGeneration(path.basename(state.file))!;
+                if (
+                  (yield* generations).some(
+                    (entry) => entry.key === key && entry.generation > generation.generation,
+                  )
+                ) {
+                  return yield* toLockError(new Error("Provider install lock ownership expired"));
+                }
+              }).pipe(Effect.mapError(toLockError), Effect.uninterruptible),
+            ).pipe(Effect.map(Option.some)),
+      (ownerState) =>
+        ownerState === undefined
+          ? Effect.void
+          : Ref.get(ownerState).pipe(
+              Effect.flatMap((state) =>
+                Effect.gen(function* () {
+                  if ((yield* fileSystem.readFileString(state.file)) !== state.contents) return;
+                  // Once `run` ends, only a surviving detached installer keeps the lock held.
+                  yield* replace(
+                    state.file,
+                    `${state.pid !== undefined && isPidAlive(state.pid) ? state.pid : "released"}\n${owner}`,
+                  );
+                }),
+              ),
+              Effect.ignore,
+            ),
+    );
+  });
 
   const anyHeld = Effect.gen(function* () {
     const names = yield* fileSystem.readDirectory(directory).pipe(ignoreNotFound([]));
