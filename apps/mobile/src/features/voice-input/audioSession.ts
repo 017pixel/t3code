@@ -3,6 +3,7 @@ import { setAudioModeAsync, setIsAudioActiveAsync } from "expo-audio";
 type AudioSessionToken = {
   readonly kind: "playback" | "recording";
   readonly onCancel?: () => void;
+  readonly onRelease?: () => void;
   released: boolean;
 };
 
@@ -20,8 +21,22 @@ function enqueue<T>(operation: () => Promise<T>): Promise<T> {
   return result;
 }
 
-export function acquireAudioSession(kind: AudioSessionToken["kind"], onCancel?: () => void) {
-  const token: AudioSessionToken = { kind, onCancel, released: false };
+export function disposeAudioPlayer(player: { pause(): void; release(): void }): void {
+  void enqueue(async () => {
+    try {
+      player.pause();
+    } finally {
+      player.release();
+    }
+  }).catch(() => {});
+}
+
+export function acquireAudioSession(
+  kind: AudioSessionToken["kind"],
+  onCancel?: () => void,
+  onRelease?: () => void,
+) {
+  const token: AudioSessionToken = { kind, onCancel, onRelease, released: false };
   if (kind === "playback" && owner?.kind === "recording" && !owner.released) return token;
   const previous = owner;
   owner = token;
@@ -33,9 +48,14 @@ export function isAudioSessionOwner(token: AudioSessionToken): boolean {
   return owner === token && !token.released;
 }
 
-export function activateAudioSession(token: AudioSessionToken): Promise<boolean> {
+export function activateAudioSession(
+  token: AudioSessionToken,
+  nativePlayback = false,
+): Promise<boolean> {
   return enqueue(async () => {
     if (!isAudioSessionOwner(token)) return false;
+    // Video configures and activates its own native session, including moviePlayback on iOS.
+    if (nativePlayback) return true;
     await setAudioModeAsync({
       allowsRecording: token.kind === "recording",
       interruptionMode: "doNotMix",
@@ -55,11 +75,72 @@ export function releaseAudioSession(token: AudioSessionToken): Promise<void> {
     try {
       if (token.kind === "recording") await setAudioModeAsync({ allowsRecording: false });
     } finally {
-      // Expo recorder/player teardown does not release an activation that never played.
       if (owner === token) {
-        await setIsAudioActiveAsync(false);
+        if (token.kind === "recording") await setIsAudioActiveAsync(false);
+        // Expo pause releases the native session without disabling its global playback gate.
+        // Repeat it after any pending activation, even if playback never started.
+        token.onRelease?.();
         if (owner === token) owner = null;
       }
     }
   });
+}
+
+export function createAudioPlaybackSession(
+  player: { play(): void; pause(): void },
+  nativePlayback = false,
+) {
+  let token: AudioSessionToken | null = null;
+  let started = false;
+  const stopPlayer = () => {
+    // useAudioPlayer/useVideoPlayer may have disposed the native ref during unmount.
+    try {
+      player.pause();
+    } catch {}
+  };
+  const pause = () => {
+    const previous = token;
+    token = null;
+    started = false;
+    stopPlayer();
+    if (previous) void releaseAudioSession(previous).catch(() => {});
+  };
+  const acquire = () => {
+    const next = acquireAudioSession("playback", pause, stopPlayer);
+    if (!isAudioSessionOwner(next)) {
+      stopPlayer();
+      return null;
+    }
+    token = next;
+    return next;
+  };
+  return {
+    pause,
+    get requested() {
+      return token !== null;
+    },
+    async play(prepare?: () => Promise<void>) {
+      const current = token ?? acquire();
+      if (!current) return;
+      try {
+        await prepare?.();
+        if (!(await activateAudioSession(current, nativePlayback))) return;
+        if (token !== current || !isAudioSessionOwner(current)) return;
+        started = true;
+        player.play();
+      } catch (error) {
+        if (token === current) pause();
+        throw error;
+      }
+    },
+    // Native video controls can start and stop playback without a JS play() call.
+    playingChanged(playing: boolean) {
+      if (playing) {
+        if (token === null && acquire() === null) return;
+        started = true;
+      } else if (started) {
+        pause();
+      }
+    },
+  };
 }

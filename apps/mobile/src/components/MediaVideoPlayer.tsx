@@ -1,7 +1,7 @@
 import { useIsFocused } from "@react-navigation/native";
 import { useEvent } from "expo";
 import { useVideoPlayer, VideoView } from "expo-video";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { AppState, Pressable, View } from "react-native";
 
 import { AppActivityIndicator } from "./ui/AppActivityIndicator";
@@ -12,6 +12,7 @@ import { useMediaActions } from "../state/mediaActions";
 import { type MediaActionsSource } from "../lib/mediaActionsSource";
 import { useFullscreenVideoOpen, useMediaAudioSessionHold } from "../lib/videoAudioSession";
 import { MediaActionsMenu } from "./MediaActionsMenu";
+import { createAudioPlaybackSession } from "../features/voice-input/audioSession";
 
 function LoadedMediaVideo(props: {
   readonly uri: string;
@@ -31,6 +32,17 @@ function LoadedMediaVideo(props: {
     player.staysActiveInBackground = false;
     player.bufferOptions = { preferredForwardBufferDuration: 5 };
   });
+  const playback = useMemo(() => createAudioPlaybackSession(player, true), [player]);
+  useEffect(() => {
+    const subscription = player.addListener("playingChange", ({ isPlaying }) => {
+      if (isPlaying && !active.current && !fullscreen.current) playback.pause();
+      else playback.playingChanged(isPlaying);
+    });
+    return () => {
+      subscription.remove();
+      playback.pause();
+    };
+  }, [player, playback]);
   const { status } = useEvent(player, "statusChange", { status: player.status });
   const { isPlaying } = useEvent(player, "playingChange", { isPlaying: player.playing });
   useMediaAudioSessionHold(isPlaying);
@@ -38,22 +50,22 @@ function LoadedMediaVideo(props: {
     const uri = props.resolvePlaybackUri ? await props.resolvePlaybackUri() : props.uri;
     if (signal.aborted) return;
     if (uri === null) throw new Error("Video unavailable");
-    player.pause();
+    playback.pause();
     await player.replaceAsync({ uri, contentType: "progressive" });
-    if (!signal.aborted && props.playRequested && active.current) player.play();
+    if (!signal.aborted && props.playRequested && active.current) await playback.play();
   });
 
   useEffect(() => {
     active.current = focused && !paused && AppState.currentState === "active";
-    if (!focused || paused || (!active.current && !fullscreen.current)) player.pause();
+    if (!focused || paused || (!active.current && !fullscreen.current)) playback.pause();
     // Native background handling distinguishes Android's fullscreen activity
     // from leaving the app; React Native reports both as background.
     const subscription = AppState.addEventListener("change", (state) => {
       active.current = focused && !paused && state === "active";
-      if (state === "inactive" || (state === "background" && !fullscreen.current)) player.pause();
+      if (state === "inactive" || (state === "background" && !fullscreen.current)) playback.pause();
     });
     return () => subscription.remove();
-  }, [focused, player, paused]);
+  }, [focused, playback, paused]);
 
   useEffect(() => {
     const controller = new AbortController();

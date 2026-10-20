@@ -64,10 +64,10 @@ describe("global voice input", () => {
   beforeEach(() => resetVoiceInputGlobalsForTests());
 
   it.each(["retry", "takeover"])(
-    "handles failed deactivation with %s without notifying a released playback owner",
+    "handles failed deactivation with %s without notifying a released owner",
     async (action) => {
       const pause = vi.fn();
-      const playback = acquireAudioSession("playback", pause);
+      const playback = acquireAudioSession("recording", pause);
       await activateAudioSession(playback);
       audio.setActive.mockRejectedValueOnce(new Error("Deactivation failed"));
       await expect(releaseAudioSession(playback)).rejects.toThrow("Deactivation failed");

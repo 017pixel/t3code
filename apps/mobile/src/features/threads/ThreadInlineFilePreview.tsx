@@ -1,6 +1,6 @@
 import { useIsFocused } from "@react-navigation/native";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
-import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
+import { useAudioPlayerStatus } from "expo-audio";
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { AppState, Pressable, View } from "react-native";
 import type { FilePreviewSource } from "../../components/FilePreviewModal";
@@ -17,6 +17,7 @@ import {
   isAudioSessionOwner,
   releaseAudioSession,
 } from "../voice-input/audioSession";
+import { usePlaybackAudioPlayer } from "../voice-input/usePlaybackAudioPlayer";
 
 type PreviewProps = {
   readonly source: FilePreviewSource;
@@ -58,7 +59,7 @@ function timestamp(seconds: number) {
 
 function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<string | null> }) {
   // An empty source keeps native buffering off until the user explicitly plays.
-  const player = useAudioPlayer(null, { updateInterval: 500, downloadFirst: false });
+  const player = usePlaybackAudioPlayer(null);
   const status = useAudioPlayerStatus(player);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
@@ -112,10 +113,18 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
       requestPlayback(false);
       return player.pause();
     }
-    const token = acquireAudioSession("playback", () => {
-      requestPlayback(false);
-      player.pause();
-    });
+    const token = acquireAudioSession(
+      "playback",
+      () => {
+        requestPlayback(false);
+        player.pause();
+      },
+      () => {
+        try {
+          player.pause();
+        } catch {}
+      },
+    );
     if (!isAudioSessionOwner(token)) return;
     audioToken.current = token;
     requestPlayback(true);

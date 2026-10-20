@@ -7,6 +7,7 @@ final class T3NativeVideoPresentation: NSObject, AVPlayerViewControllerDelegate,
   private let controller = AVPlayerViewController()
   private let completion: (Error?) -> Void
   private var itemObservation: NSKeyValueObservation?
+  private var playbackObservation: NSKeyValueObservation?
   private var backgroundObserver: NSObjectProtocol?
   private var playbackError: Error?
   private var presented = false
@@ -27,7 +28,8 @@ final class T3NativeVideoPresentation: NSObject, AVPlayerViewControllerDelegate,
   private weak var fullScreenController: UIViewController?
   private var embedded = false
 
-  init(identifier: String, url: URL, title: String, completion: @escaping (Error?) -> Void) {
+  init(identifier: String, url: URL, title: String,
+       onPlaybackChange: @escaping (Bool) -> Void, completion: @escaping (Error?) -> Void) {
     self.identifier = identifier
     self.completion = completion
     super.init()
@@ -38,6 +40,9 @@ final class T3NativeVideoPresentation: NSObject, AVPlayerViewControllerDelegate,
     metadata.value = title as NSString
     item.externalMetadata = [metadata]
     controller.player = AVPlayer(playerItem: item)
+    playbackObservation = controller.player?.observe(\.rate, options: [.new]) { player, _ in
+      onPlaybackChange(player.rate != 0)
+    }
     controller.delegate = self
     controller.overrideUserInterfaceStyle = .dark
     controller.allowsPictureInPicturePlayback = false
@@ -148,6 +153,7 @@ final class T3NativeVideoPresentation: NSObject, AVPlayerViewControllerDelegate,
       controller.removeFromParent()
     }
     itemObservation = nil
+    playbackObservation = nil
     controller.player = nil
     if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
     backgroundObserver = nil
