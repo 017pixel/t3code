@@ -254,7 +254,7 @@ export function ForkToMachineSheet({ route }: StaticScreenProps<ForkTarget>) {
             </Text>
           ) : (
             <Text className="text-sm text-foreground-muted">
-              Starts a new branch from {branchState.baseRef}.
+              Starts a new branch from {noteBaseRef ?? branchState.baseRef}.
             </Text>
           )}
           {status.data?.hasWorkingTreeChanges ? (

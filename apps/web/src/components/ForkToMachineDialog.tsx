@@ -272,7 +272,7 @@ function ForkToMachineDialog({ threadRef }: { threadRef: ScopedThreadRef }) {
               </div>
             ) : (
               <p className="text-muted-foreground">
-                Starts a new branch from {branchState.baseRef}.
+                Starts a new branch from {noteBaseRef ?? branchState.baseRef}.
               </p>
             )}
             {status.data?.hasWorkingTreeChanges ? (
