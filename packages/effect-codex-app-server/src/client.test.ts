@@ -1,3 +1,4 @@
+import * as Cause from "effect/Cause";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -156,3 +157,37 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
     }),
   );
 });
+
+it.live.each([
+  { label: "short", code: 1, paddingBytes: 0 },
+  { label: "oversized", code: 23, paddingBytes: 512 * 1024 },
+])(
+  "reports startup exit code and bounded $label stderr during initialize",
+  ({ code, paddingBytes }) =>
+    Effect.gen(function* () {
+      const diagnostic = "error: An internal error occurred (EPERM): issue-5943 startup fixture";
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const handle = yield* spawner.spawn(
+        ChildProcess.make(process.execPath, [
+          "-e",
+          `process.stderr.write("x".repeat(${paddingBytes}) + ${JSON.stringify(`\n${diagnostic}\n`)}, () => process.exit(${code}));`,
+        ]),
+      );
+      const exit = yield* Effect.gen(function* () {
+        const client = yield* CodexClient.CodexAppServerClient;
+        yield* client.request("initialize", {
+          clientInfo: { name: "startup-failure-test", version: "0.0.0" },
+          capabilities: null,
+        });
+      }).pipe(Effect.provide(CodexClient.layerChildProcess(handle)), Effect.exit);
+
+      assert.isTrue(Exit.isFailure(exit));
+      if (!Exit.isFailure(exit)) return;
+      const error = Cause.squash(exit.cause);
+      assert.instanceOf(error, Error);
+      if (!(error instanceof Error)) return;
+      assert.include(error.message, `code ${code}`);
+      assert.include(error.message, diagnostic);
+      assert.isAtMost(error.message.length, 8 * 1024);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);

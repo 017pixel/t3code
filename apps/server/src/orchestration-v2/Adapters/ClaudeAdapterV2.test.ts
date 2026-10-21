@@ -88,7 +88,10 @@ import { ClaudeExecutableFileCheck } from "../../provider/Drivers/ClaudeExecutab
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
-import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
+import {
+  makeProviderFailure,
+  MAX_PROVIDER_FAILURE_MESSAGE_LENGTH,
+} from "@t3tools/provider-core/server/failure";
 import * as ClaudeAdapterV2 from "./ClaudeAdapterV2.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { ClaudeOrchestratorReplayHarness } from "./ClaudeAdapterV2.testkit.ts";
@@ -1775,6 +1778,60 @@ describe("ClaudeAdapterV2 MCP credential channel", () => {
       assert.notInclude(spawned, "--mcp-config");
       assert.notInclude(spawned, "dummy-mcp-credential");
     }),
+  );
+});
+
+describe("ClaudeAdapterV2 startup failure diagnostics", () => {
+  it.live.each([
+    { label: "short", code: 1, paddingBytes: 0 },
+    { label: "oversized", code: 23, paddingBytes: 512 * 1024 },
+  ])("surfaces startup exit code and bounded $label stderr", ({ code, paddingBytes }) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-startup-" });
+      const cliPath = path.join(directory, "cli.cjs");
+      const diagnostic = "error: An internal error occurred (EPERM): issue-5943 startup fixture";
+      yield* fileSystem.writeFileString(
+        cliPath,
+        `process.stderr.write("x".repeat(${paddingBytes}) + ${JSON.stringify(`\n${diagnostic}\n`)}, () => process.exit(${code}));`,
+      );
+      const exit = yield* Effect.gen(function* () {
+        const runner = yield* ClaudeAdapterV2.ClaudeAgentSdkQueryRunner;
+        const session = yield* runner.open({
+          threadId: ThreadId.make("thread-claude-startup-failure"),
+          providerSessionId: ProviderSessionId.make("provider-session-claude-startup-failure"),
+          options: {
+            ...ClaudeAdapterV2.makeClaudeQueryOptions({
+              modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+              nativeThreadId: "native-thread-claude-startup-failure",
+              resume: false,
+              cwd: directory,
+              environment: {},
+            }),
+            pathToClaudeCodeExecutable: cliPath,
+          },
+        });
+        yield* Stream.runDrain(session.messages).pipe(
+          Effect.ensuring(session.close.pipe(Effect.ignore)),
+        );
+      }).pipe(Effect.provide(ClaudeAdapterV2.layerQueryRunner), Effect.exit);
+
+      assert.isTrue(Exit.isFailure(exit));
+      if (!Exit.isFailure(exit)) return;
+      const failure = makeProviderFailure({ cause: exit.cause, class: "provider_error" });
+      assert.include(failure.message, `code ${code}`);
+      assert.include(failure.message, diagnostic);
+      assert.isAtMost(failure.message.length, MAX_PROVIDER_FAILURE_MESSAGE_LENGTH);
+      assert.notInclude(failure.message, "fromAsyncIterable");
+      assert.notInclude(failure.message, "setMcpServers");
+    }).pipe(
+      Effect.provideService(
+        ProviderEventLoggers.ProviderEventLoggers,
+        ProviderEventLoggers.NoOpProviderEventLoggers,
+      ),
+      Effect.provide(NodeServices.layer),
+    ),
   );
 });
 
