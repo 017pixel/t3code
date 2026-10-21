@@ -252,12 +252,26 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
         }),
       );
 
-      const error = yield* runMigrateDevDb(
-        { baseDir: destDir, source, projects: 5, threadsPerProject: 10 },
-        { sharedHome: sourceDir },
-      ).pipe(Effect.flip);
-      assert.equal(error._tag, "MigrateDevDbLegacySourceError");
-      assert.equal(yield* fs.exists(path.join(destDir, "userdata", "statev2.sqlite")), false);
+      // A live destination connection keeps uncheckpointed rows in the WAL;
+      // the rejected run must leave those bytes alone.
+      const destination = yield* createFixtureSource(destDir);
+      yield* withDatabase(
+        destination,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql.unsafe("PRAGMA journal_mode = WAL").unprepared;
+          yield* sql`UPDATE projection_projects SET title = 'Edited' WHERE project_id = 'project-kept'`;
+          const walBefore = yield* fs.readFile(`${destination}-wal`);
+          assert.isAbove(walBefore.length, 0);
+
+          const error = yield* runMigrateDevDb(
+            { baseDir: destDir, source, projects: 5, threadsPerProject: 10 },
+            { sharedHome: sourceDir },
+          ).pipe(Effect.flip);
+          assert.equal(error._tag, "MigrateDevDbLegacySourceError");
+          assert.deepStrictEqual(yield* fs.readFile(`${destination}-wal`), walBefore);
+        }),
+      );
     }),
   );
 

@@ -496,6 +496,17 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
     }
   }
 
+  // Before ensureNotInUse, whose checkpoint already rewrites the destination.
+  yield* ensureSourceIsV2(sourcePath).pipe(
+    Effect.provide(NodeSqliteClient.layer({ filename: sourcePath, readonly: true })),
+    Effect.catchTags({
+      SqlError: (cause) =>
+        Effect.fail(
+          new MigrateDevDbPhaseError({ phase: "snapshot", databasePath: sourcePath, cause }),
+        ),
+    }),
+  );
+
   yield* fs.makeDirectory(stateDir, { recursive: true });
   yield* ensureNotInUse(databasePath);
 
@@ -507,16 +518,6 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
           (cause) => new MigrateDevDbPhaseError({ phase, databasePath: phaseDatabasePath, cause }),
         ),
       );
-
-  yield* ensureSourceIsV2(sourcePath).pipe(
-    Effect.provide(NodeSqliteClient.layer({ filename: sourcePath, readonly: true })),
-    Effect.catchTags({
-      SqlError: (cause) =>
-        Effect.fail(
-          new MigrateDevDbPhaseError({ phase: "snapshot", databasePath: sourcePath, cause }),
-        ),
-    }),
-  );
 
   yield* removeDatabaseFiles(snapshotPath);
   const { executedMigrations, pruned } = yield* Effect.gen(function* () {
