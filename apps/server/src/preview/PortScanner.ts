@@ -1108,6 +1108,14 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     if (hostPlatform === "win32") {
       return yield* new PreviewStopLocalServerError({ reason: "unsupported" });
     }
+    // A socket can outlive its cached owner. Wait for any in-flight scan before invalidating
+    // that owner, so the /proc fallback confirms who holds it before a signal is sent.
+    yield* scanSemaphore.withPermits(1)(
+      Ref.update(
+        socketOwnersRef,
+        (owners) => new Map([...owners].filter(([, owner]) => owner.pid !== input.pid)),
+      ),
+    );
     // The pid comes from a client, so only a server this scan attributes to a thread is signaled,
     // from its environment as read now.
     yield* Ref.update(agentThreadsRef, (threads) => {
