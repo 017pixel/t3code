@@ -394,6 +394,27 @@ describe("resolveAutoSettlementAt", () => {
         autoSettleKeepPullRequests: keepPullRequests,
       };
       expect(ThreadSettlementService.resolveAutoSettlementAt(input)).toEqual(expected);
+      // A merged layer does not settle the thread while another layer is open.
+      const merged = link(2);
+      expect(
+        ThreadSettlementService.resolveAutoSettlementAt({
+          ...input,
+          thread: {
+            ...input.thread,
+            pullRequests: [
+              link(1),
+              {
+                ...merged,
+                snapshot: {
+                  ...merged.snapshot,
+                  state: "merged" as const,
+                  mergedAt: DateTime.formatIso(at(-60 * 1_000)),
+                },
+              },
+            ],
+          },
+        }),
+      ).toEqual(expected);
       // A link whose state has not synced yet still holds the thread.
       expect(
         ThreadSettlementService.resolveAutoSettlementAt({
