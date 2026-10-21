@@ -2502,6 +2502,60 @@ it.effect("fails the run when its event stream ends without a root terminal", ()
   }),
 );
 
+it.effect("ends the root provider turn when event ingestion fails the run", () =>
+  Effect.gen(function* () {
+    const ids = backgroundScenarioIds("ingestion-failure:provider-turn");
+    const { finalEvents } = yield* captureRootRunTermination({
+      key: "ingestion-failure:provider-turn",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: () =>
+        Stream.make({
+          type: "provider_turn.updated",
+          driver,
+          threadId: ids.threadId,
+          providerTurn: {
+            id: ids.rootProviderTurnId,
+            providerThreadId: ids.providerThreadId,
+            nodeId: ids.rootNodeId,
+            runAttemptId: ids.attemptId,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "running",
+            startedAt: null,
+            completedAt: null,
+          },
+        } satisfies ProviderAdapter.ProviderAdapterV2Event).pipe(
+          Stream.concat(
+            Stream.fail(
+              new ProviderAdapter.ProviderAdapterEventStreamError({
+                driver,
+                providerSessionId: ProviderSessionId.make("session:ingestion-failure"),
+                cause: "provider event stream failed",
+              }),
+            ),
+          ),
+        ),
+    });
+    assert.deepEqual(
+      {
+        run: finalEvents.find((event) => event.type === "run.updated")?.payload.status,
+        root: finalEvents.find(
+          (event): event is Extract<OrchestrationV2DomainEvent, { type: "node.updated" }> =>
+            event.type === "node.updated" && event.payload.id === ids.rootNodeId,
+        )?.payload.status,
+        providerTurn: finalEvents.find(
+          (
+            event,
+          ): event is Extract<OrchestrationV2DomainEvent, { type: "provider-turn.updated" }> =>
+            event.type === "provider-turn.updated" && event.payload.id === ids.rootProviderTurnId,
+        )?.payload.status,
+      },
+      { run: "failed", root: "failed", providerTurn: "failed" },
+      "failure finalization ended the run and root but left their provider turn running",
+    );
+  }),
+);
+
 it.effect("leaves the run to restart recovery when shutdown interrupts its event stream", () =>
   Effect.gen(function* () {
     const { written, observed } = yield* captureRootRunTermination({
