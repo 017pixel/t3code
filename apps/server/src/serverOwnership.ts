@@ -78,7 +78,8 @@ export class ServerOwnershipLostError extends Schema.TaggedError<ServerOwnership
   }
 }
 
-// One stat per interval; it bounds how long two servers can share a home.
+// One stat per interval. It bounds how late a loss is noticed, not how long two
+// servers share a home: scheduling and graceful shutdown add to the overlap.
 const OWNERSHIP_CHECK_INTERVAL = Duration.seconds(5);
 
 const isSqliteBusy = (cause: unknown) =>
@@ -205,6 +206,19 @@ export const acquireServerOwnership = Effect.fn("acquireServerOwnership")(functi
   const ownerId = yield* crypto
     .randomUUIDv4()
     .pipe(Effect.mapError((cause) => new ServerOwnershipError({ stateDir, cause })));
+  // Only a missing or different file counts as lost: other stat failures
+  // prove nothing about the lock.
+  const verify = (lockFile: NodeFS.BigIntStats) =>
+    Effect.try({
+      try: () => NodeFS.statSync(lockPath, { bigint: true, throwIfNoEntry: false }),
+      catch: (cause) => new ServerOwnershipError({ stateDir, cause }),
+    }).pipe(
+      Effect.flatMap((current) =>
+        current !== undefined && current.dev === lockFile.dev && current.ino === lockFile.ino
+          ? Effect.void
+          : Effect.fail(new ServerOwnershipLostError({ stateDir })),
+      ),
+    );
   const { lockFile } = yield* Effect.acquireRelease(
     Effect.try({
       try: () => {
@@ -225,11 +239,16 @@ export const acquireServerOwnership = Effect.fn("acquireServerOwnership")(functi
           ? new ServerAlreadyRunningError({ stateDir })
           : new ServerOwnershipError({ stateDir, cause }),
     }),
-    ({ db }) =>
+    ({ db, lockFile }) =>
       readPersistedServerRuntimeState(statePath).pipe(
+        // Once the lock file is gone, a successor may publish its record at
+        // this path at any moment, so the record is left for it to replace.
         Effect.flatMap((state) =>
           Option.isSome(state) && state.value.ownerId === ownerId
-            ? clearPersistedServerRuntimeState(statePath)
+            ? verify(lockFile).pipe(
+                Effect.andThen(clearPersistedServerRuntimeState(statePath)),
+                Effect.catchTag("ServerOwnershipLostError", () => Effect.void),
+              )
             : Effect.void,
         ),
         Effect.ignore({ log: true }),
@@ -252,28 +271,15 @@ export const acquireServerOwnership = Effect.fn("acquireServerOwnership")(functi
     return yield* new OlderBootServiceError({ baseDir: olderServiceHome });
   }
 
-  // Other stat failures prove nothing about the lock, so only a missing or
-  // different file counts as lost.
-  const verify = Effect.try({
-    try: () => NodeFS.statSync(lockPath, { bigint: true, throwIfNoEntry: false }),
-    catch: (cause) => new ServerOwnershipError({ stateDir, cause }),
-  }).pipe(
-    Effect.flatMap((current) =>
-      current !== undefined && current.dev === lockFile.dev && current.ino === lockFile.ino
-        ? Effect.void
-        : Effect.fail(new ServerOwnershipLostError({ stateDir })),
-    ),
-  );
-
   return {
     publish: (state: PersistedServerRuntimeState) =>
-      verify.pipe(
+      verify(lockFile).pipe(
         Effect.andThen(
           persistServerRuntimeState({ path: statePath, state: { ...state, ownerId } }),
         ),
       ),
     /** Fails once the lock file is gone or replaced. Never reacquires it. */
-    awaitLoss: verify.pipe(
+    awaitLoss: verify(lockFile).pipe(
       Effect.catchTags({
         ServerOwnershipError: (error) =>
           Effect.logWarning("Could not check the server ownership lock", { cause: error }),

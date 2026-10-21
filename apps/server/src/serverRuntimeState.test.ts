@@ -2,12 +2,14 @@ import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Runtime from "effect/Runtime";
+import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
@@ -277,6 +279,28 @@ describe("server ownership", () => {
     }).pipe(Effect.provide(layerOwnership)),
   );
 
+  it.effect("stops a running owner once its lock file is replaced", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-owner-replaced-" });
+      const statePath = path.join(root, "server-runtime.json");
+      const lockPath = path.join(root, "server-owner.sqlite");
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const owner = yield* ServerOwnership.acquireServerOwnership(statePath);
+          const watch = yield* Effect.forkChild(owner.awaitLoss);
+          // A fresh file at the same path is a different inode, not this lock.
+          yield* fs.remove(lockPath);
+          yield* ServerOwnership.acquireServerOwnership(statePath);
+          yield* TestClock.adjust("1 minute");
+          const lost = yield* Fiber.join(watch).pipe(Effect.flip);
+          assert.equal(lost._tag, "ServerOwnershipLostError");
+        }),
+      );
+    }).pipe(Effect.provide(layerOwnership)),
+  );
+
   it.effect("never removes a runtime record another server published", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -296,6 +320,46 @@ describe("server ownership", () => {
       );
       const remaining = yield* ServerRuntimeState.readPersistedServerRuntimeState(statePath);
       assert.equal(Option.getOrThrow(remaining).ownerId, "other-owner");
+    }).pipe(Effect.provide(layerOwnership)),
+  );
+
+  it.effect("leaves the runtime record to a successor once its lock file is removed", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-owner-successor-" });
+      const statePath = path.join(root, "server-runtime.json");
+      const state = yield* makeState;
+      // Runs right after the old owner's shutdown reads its own record.
+      let afterRead: Effect.Effect<void> = Effect.void;
+      const gatedFs = FileSystem.FileSystem.of({
+        ...fs,
+        readFileString: (file, encoding) =>
+          fs.readFileString(file, encoding).pipe(
+            Effect.tap(() => {
+              if (file !== statePath) return Effect.void;
+              const hook = afterRead;
+              afterRead = Effect.void;
+              return hook;
+            }),
+          ),
+      });
+      const oldScope = yield* Scope.make();
+      const oldOwner = yield* ServerOwnership.acquireServerOwnership(statePath).pipe(
+        Scope.provide(oldScope),
+        Effect.provideService(FileSystem.FileSystem, gatedFs),
+      );
+      yield* oldOwner.publish(state);
+      yield* fs.remove(path.join(root, "server-owner.sqlite"));
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const successor = yield* ServerOwnership.acquireServerOwnership(statePath);
+          afterRead = successor.publish({ ...state, pid: state.pid + 1 }).pipe(Effect.orDie);
+          yield* Scope.close(oldScope, Exit.void);
+          const remaining = yield* ServerRuntimeState.readPersistedServerRuntimeState(statePath);
+          assert.equal(Option.getOrThrow(remaining).pid, state.pid + 1);
+        }),
+      );
     }).pipe(Effect.provide(layerOwnership)),
   );
 
