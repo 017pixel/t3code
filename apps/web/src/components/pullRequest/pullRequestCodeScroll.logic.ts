@@ -17,6 +17,13 @@ export class PullRequestCodeScrollRestoration {
     this.pending = false;
   }
 
+  restart(scrollTop: number, loadedPageCount: number) {
+    return new PullRequestCodeScrollRestoration({
+      scrollTop: this.pending ? this.saved.scrollTop : scrollTop,
+      loadedPageCount: Math.max(this.pending ? this.saved.loadedPageCount : 0, loadedPageCount),
+    });
+  }
+
   restore(
     surface: ScrollSurface | undefined,
     loadedPageCount: number,
@@ -81,7 +88,15 @@ export function pullRequestCodeScrollSurface(
   };
 }
 
-export function observePullRequestCodeScrollIntent(surface: EventTarget, cancel: () => void) {
+export function observePullRequestCodeScrollIntent(
+  surface: EventTarget,
+  cancel: () => void,
+  keyboardTarget: EventTarget = surface,
+) {
+  const cancelOnFind = (event: Event) => {
+    const key = event as KeyboardEvent;
+    if ((key.ctrlKey || key.metaKey) && key.key.toLowerCase() === "f") cancel();
+  };
   const cancelOnKey = (event: Event) => {
     if (
       event instanceof KeyboardEvent &&
@@ -102,11 +117,13 @@ export function observePullRequestCodeScrollIntent(surface: EventTarget, cancel:
   // Native scrollbar interactions can emit mouse events without a pointer event.
   surface.addEventListener("mousedown", cancel, { capture: true });
   surface.addEventListener("keydown", cancelOnKey);
+  keyboardTarget.addEventListener("keydown", cancelOnFind, { capture: true });
   return () => {
     surface.removeEventListener("wheel", cancel);
     surface.removeEventListener("touchmove", cancel);
     surface.removeEventListener("pointerdown", cancel, { capture: true });
     surface.removeEventListener("mousedown", cancel, { capture: true });
     surface.removeEventListener("keydown", cancelOnKey);
+    keyboardTarget.removeEventListener("keydown", cancelOnFind, { capture: true });
   };
 }

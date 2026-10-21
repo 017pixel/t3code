@@ -434,10 +434,10 @@ function PullRequestCodeTab({
     appliedRefreshToken.current = refreshToken;
     const saved = readPullRequestCodeView(codeViewKey);
     setScrollRestoration(
-      new PullRequestCodeScrollRestoration({
-        scrollTop: viewer?.getInstance()?.getScrollTop() ?? saved.scrollTop,
-        loadedPageCount: Math.max(loadedSlices.length, saved.loadedPageCount),
-      }),
+      scrollRestoration.restart(
+        viewer?.getInstance()?.getScrollTop() ?? saved.scrollTop,
+        Math.max(loadedSlices.length, saved.loadedPageCount),
+      ),
     );
     // Numeric cursors do not identify content: an unchanged first page says nothing
     // about later pages. Explicit refresh reloads the saved depth from page one.
@@ -459,6 +459,7 @@ function PullRequestCodeTab({
     refreshFilesViewed();
   }, [
     refreshToken,
+    scrollRestoration,
     refreshFilesViewed,
     codeViewKey,
     viewer,
@@ -1395,7 +1396,11 @@ function PullRequestCodeTab({
         savePullRequestCodeScroll(current, instance.getScrollTop(), loadedSlices.length),
       );
     };
-    const stopObservingIntent = observePullRequestCodeScrollIntent(surface, cancel);
+    const stopObservingIntent = observePullRequestCodeScrollIntent(
+      surface,
+      cancel,
+      surface.ownerDocument,
+    );
     restore();
     return () => {
       stopObserving();
@@ -1596,11 +1601,12 @@ function PullRequestCodeTab({
               renderHeaderMetadata={renderHeaderMetadata}
               renderAnnotation={renderAnnotation}
               // Find can ask again before the unfolded file arrives, so this unfolds and never folds.
-              onRevealSearchMatch={(item) =>
+              onRevealSearchMatch={(item) => {
+                scrollRestoration.cancel();
                 setToggledFiles((current) =>
                   toggleFileDiffFoldForViewed(item.id, false, effectiveFoldOverride, current),
-                )
-              }
+                );
+              }}
               unsafeCSSExtra={REPLACE_FILE_COUNTS_CSS}
             />
           </FileViewedToggleContext>

@@ -10,6 +10,7 @@ import {
   isFileDiffCollapsed,
   mergePullRequestDiffSlices,
   restartPullRequestDiffPagination,
+  toggleFileDiffFoldForViewed,
   type DiffSlice,
 } from "./pullRequestDiff.logic";
 import {
@@ -250,6 +251,51 @@ describe("pull request file keys", () => {
 });
 
 describe("pull request scroll restoration", () => {
+  it("keeps a pending target when refresh arrives before its saved pages", () => {
+    const initial = new PullRequestCodeScrollRestoration({ scrollTop: 1800, loadedPageCount: 3 });
+    const surface = { scrollTop: 0, scrollHeight: 600, clientHeight: 400 };
+    expect(initial.restore(surface, 1, true)).toBe("load-more");
+    const refreshed = initial.restart(surface.scrollTop, 1);
+    expect(refreshed.restore(surface, 1, true)).toBe("load-more");
+    surface.scrollHeight = 3000;
+    expect(refreshed.restore(surface, 3, false)).toBe("restored");
+    expect(surface.scrollTop).toBe(1800);
+    surface.scrollTop = 2000;
+    const later = refreshed.restart(surface.scrollTop, 3);
+    surface.scrollTop = 0;
+    expect(later.restore(surface, 3, false)).toBe("restored");
+    expect(surface.scrollTop).toBe(2000);
+  });
+
+  it.each(["expanded", "folded"] as const)(
+    "keeps a keyboard Find match in a %s file when saved pages arrive",
+    (foldOverride) => {
+      const restore = new PullRequestCodeScrollRestoration({ scrollTop: 1800, loadedPageCount: 3 });
+      const surface = Object.assign(new EventTarget(), {
+        scrollTop: 0,
+        scrollHeight: 600,
+        clientHeight: 400,
+      });
+      const keyboardTarget = new EventTarget();
+      const stop = observePullRequestCodeScrollIntent(
+        surface,
+        () => restore.cancel(),
+        keyboardTarget,
+      );
+      expect(restore.restore(surface, 1, true)).toBe("load-more");
+      keyboardTarget.dispatchEvent(
+        Object.assign(new Event("keydown"), { key: "f", ctrlKey: true }),
+      );
+      const toggled = toggleFileDiffFoldForViewed("match", false, foldOverride, new Set());
+      expect(isFileDiffCollapsed("match", foldOverride, toggled)).toBe(false);
+      surface.scrollTop = 120;
+      surface.scrollHeight = 3000;
+      expect(restore.restore(surface, 3, false)).toBe("waiting");
+      expect(surface.scrollTop).toBe(120);
+      stop();
+    },
+  );
+
   it.each([570, 20_000_000, 29_999_590])(
     "restores logical offset %s without sticky drift or physical window clamping",
     (savedTop) => {
