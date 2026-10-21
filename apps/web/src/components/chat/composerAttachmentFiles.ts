@@ -59,6 +59,20 @@ export function normalizeComposerImageFileMimeType(file: File): File {
   });
 }
 
+/**
+ * DNG raw photos cannot be sent or converted as images, but the original is
+ * still useful to the agent as a file. Browsers report them as the DNG types,
+ * or as `image/tiff` because DNG is TIFF-based.
+ */
+function isDngPhotoFile(file: Pick<File, "name" | "type">): boolean {
+  const mimeType = file.type.toLowerCase();
+  return (
+    mimeType === "image/x-adobe-dng" ||
+    mimeType === "image/dng" ||
+    (mimeType === "image/tiff" && file.name.toLowerCase().endsWith(".dng"))
+  );
+}
+
 export function classifyComposerAttachmentFile(
   file: Pick<File, "name" | "type">,
 ): ComposerAttachmentFileKind {
@@ -68,7 +82,7 @@ export function classifyComposerAttachmentFile(
   if (inferImageMimeTypeForUnknownFile(file)) {
     return "image";
   }
-  if (!file.type.toLowerCase().startsWith("image/")) {
+  if (!file.type.toLowerCase().startsWith("image/") || isDngPhotoFile(file)) {
     return "file";
   }
   return isProviderSendTurnSupportedImageMimeType(file.type) ? "image" : "unsupported-image";
