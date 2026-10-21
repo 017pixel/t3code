@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { CommandId, type Project, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -56,13 +57,14 @@ const layerTestFor = (
     | ProjectFaviconResolver.ProjectFaviconResolver
     | RepositoryIdentityResolver.RepositoryIdentityResolver
   >,
+  settingsOverrides: Parameters<typeof ServerSettings.layerTest>[0] = {},
 ) =>
   RuntimeLayer.layerProjectService.pipe(
     Layer.provideMerge(ProjectEnrichmentService.layer),
     Layer.provideMerge(layerWorkspacePaths),
     Layer.provideMerge(projectMetadataLayer),
     Layer.provideMerge(SqlitePersistence.layerMemory),
-    Layer.provideMerge(ServerSettings.layerTest()),
+    Layer.provideMerge(ServerSettings.layerTest(settingsOverrides)),
     Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "project-service-test-" })),
     Layer.provide(NodeServices.layer),
   );
@@ -669,3 +671,133 @@ it.effect("rejects an update that waited on the lock while its project was delet
     );
   }).pipe(Effect.provide(layerProjectServiceDependencies)),
 );
+
+it.layer(
+  layerTestFor(layerMetadata, { projectSettingsFolded: true, defaultThreadEnvMode: "local" }),
+)("ProjectService folded settings", (it) => {
+  it.effect.each([
+    {
+      field: "scripts",
+      setting: "defaultProjectScripts",
+      value: [
+        {
+          id: "setup",
+          name: "Setup",
+          command: "vp install",
+          icon: "configure",
+          runOnWorktreeCreate: true,
+        },
+      ],
+      reset: [],
+    },
+    {
+      field: "defaultModelSelection",
+      setting: "defaultModelSelection",
+      value: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6.1-sol" },
+      reset: null,
+    },
+    {
+      field: "defaultThreadEnvMode",
+      setting: "defaultThreadEnvMode",
+      value: "worktree",
+      reset: null,
+    },
+    { field: "autoPull", setting: "defaultAutoPull", value: true, reset: false },
+  ] as const)(
+    "updates $field in effective settings after project settings were folded",
+    ({ field, setting, value, reset }) =>
+      Effect.gen(function* () {
+        const service = yield* ProjectService.ProjectService;
+        const settingsService = yield* ServerSettings.ServerSettingsService;
+        const projectId = ProjectId.make(`project:folded:${field}`);
+        yield* service.create({
+          commandId: CommandId.make(`command:folded:${field}:create`),
+          projectId,
+          title: "Folded settings",
+          workspaceRoot: `/work/folded-${field}`,
+        });
+
+        const updated = yield* service.update({
+          commandId: CommandId.make(`command:folded:${field}:update`),
+          projectId,
+          [field]: value,
+        });
+        assert.deepEqual(updated[field], value);
+        const effective = resolveProjectSettings(
+          yield* settingsService.getSettings,
+          projectId,
+        ).settings;
+        assert.deepEqual(effective[setting], value);
+        assert.deepEqual(Option.getOrThrow(yield* service.getById(projectId))[field], value);
+
+        yield* service.update({
+          commandId: CommandId.make(`command:folded:${field}:rename`),
+          projectId,
+          title: "Renamed",
+        });
+        assert.deepEqual(
+          resolveProjectSettings(yield* settingsService.getSettings, projectId).settings[setting],
+          value,
+        );
+
+        const cleared = yield* service.update({
+          commandId: CommandId.make(`command:folded:${field}:reset`),
+          projectId,
+          [field]: reset,
+        });
+        const resetEffective = resolveProjectSettings(
+          yield* settingsService.getSettings,
+          projectId,
+        ).settings;
+        const expected = field === "defaultThreadEnvMode" ? "local" : reset;
+        assert.deepEqual(resetEffective[setting], expected);
+        assert.deepEqual(cleared[field], field === "defaultThreadEnvMode" ? null : expected);
+        assert.deepEqual(
+          Option.getOrThrow(yield* service.getById(projectId))[field],
+          cleared[field],
+        );
+      }),
+  );
+
+  it.effect("reads effective settings instead of stale persisted fields after folding", () =>
+    Effect.gen(function* () {
+      const service = yield* ProjectService.ProjectService;
+      const settingsService = yield* ServerSettings.ServerSettingsService;
+      const sql = yield* SqlClient.SqlClient;
+      const projectId = ProjectId.make("project:folded:stale");
+      yield* service.create({
+        commandId: CommandId.make("command:folded:stale:create"),
+        projectId,
+        title: "Previously updated",
+        workspaceRoot: "/work/folded-stale",
+      });
+      // These are values older project updates persisted without changing effective settings.
+      yield* sql`
+        UPDATE projection_projects
+        SET default_model_selection_json = ${JSON.stringify({ instanceId: "codex", model: "gpt-6.1-sol" })},
+          default_thread_env_mode = 'worktree', auto_pull = 1,
+          scripts_json = ${JSON.stringify([{ id: "setup", name: "Setup", command: "vp install", icon: "configure", runOnWorktreeCreate: true }])}
+        WHERE project_id = ${projectId}
+      `;
+      yield* settingsService.updateSettings({
+        projectSettingsOverrides: {
+          [projectId]: {
+            defaultModelSelection: null,
+            defaultThreadEnvMode: "local",
+            defaultAutoPull: false,
+            defaultProjectScripts: [],
+          },
+        },
+      });
+      const effective = resolveProjectSettings(
+        yield* settingsService.getSettings,
+        projectId,
+      ).settings;
+      const project = Option.getOrThrow(yield* service.getById(projectId));
+      assert.deepEqual(project.defaultModelSelection, effective.defaultModelSelection);
+      assert.equal(project.defaultThreadEnvMode, effective.defaultThreadEnvMode);
+      assert.equal(project.autoPull, effective.defaultAutoPull);
+      assert.deepEqual(project.scripts, effective.defaultProjectScripts);
+    }),
+  );
+});
