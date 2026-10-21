@@ -578,9 +578,15 @@ function collectStyledRanges(doc: ProseMirrorNode): StyledRange[] {
 /**
  * `- ` alone is not enough for a dash: it waits for the first character after the space, which it
  * carries into the new item. That is what lets the GFM task gesture `- [ ] ` or `- [x] ` be typed
- * whole and reach the task rule, instead of being cut off by an instant bullet.
+ * whole and reach the task rule, instead of being cut off by an instant bullet. When the line
+ * already has text after the caret, no character will follow, so `textAfter` lets the space alone
+ * convert it unless that text could still be a task marker.
  */
-function listMarkerInputRule(find: RegExp, listType: "bulletList" | "orderedList"): InputRule {
+function listMarkerInputRule(
+  find: RegExp,
+  listType: "bulletList" | "orderedList",
+  textAfter?: (text: string) => boolean,
+): InputRule {
   return new InputRule({
     find,
     handler: ({ state, range, match, chain }) => {
@@ -591,8 +597,19 @@ function listMarkerInputRule(find: RegExp, listType: "bulletList" | "orderedList
       // would nest under a line the stored draft writes flat.
       const $from = state.doc.resolve(range.from);
       if ($from.parent.type.name !== "paragraph" || $from.depth !== 1) return null;
+      if (textAfter) {
+        const $to = state.doc.resolve(range.to);
+        const rest = $to.parent.textBetween(
+          $to.parentOffset,
+          $to.parent.content.size,
+          "",
+          "\ufffc",
+        );
+        if (!textAfter(rest)) return null;
+      }
       const command = chain()
         .deleteRange(range)
+        .setTextSelection(range.from)
         .wrapInList(
           listType,
           listType === "orderedList" ? { start: Number.parseInt(marker, 10) || 1 } : {},
@@ -918,6 +935,11 @@ function createComposerExtensions(richText: boolean) {
                           listMarkerInputRule(
                             /^(?<marker>-)(?<space>[ \t]+)(?<carried>[^\s[])$/,
                             "bulletList",
+                          ),
+                          listMarkerInputRule(
+                            /^(?<marker>-)(?<space>[ \t])$/,
+                            "bulletList",
+                            (rest) => /^[^\s[]/.test(rest),
                           ),
                         ]
                       : [listMarkerInputRule(/^(?<marker>\d+[.)])(?<space>\s)$/, "orderedList")];
