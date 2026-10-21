@@ -18,6 +18,9 @@ t='2026-10-01T12:00:00.000Z';tid='proof-22181';pid='proof-project-22181';rid='pr
 root='/tmp/issue-22181-workspace';
 import shutil
 shutil.copytree(p/'workspace',root,dirs_exist_ok=True)
+# Stored as .txt so the repo's TS tooling (knip) never sees a fake source file.
+src=Path(root)/'packages/shared/src/markdownLinks.ts'
+src.with_name(src.name+'.txt').replace(src)
 model={'instanceId':'codex','model':'gpt-5.4'}
 c.execute('DELETE FROM projection_projects')
 for table in ['orchestration_v2_projection_threads','orchestration_v2_projection_runs','orchestration_v2_projection_messages','orchestration_v2_projection_turn_items']:
