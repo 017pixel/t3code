@@ -55,6 +55,10 @@ describe("t3code/no-frame-waits-in-browser-tests", () => {
     "rejects window.requestAnimationFrame",
     "window.requestAnimationFrame(() => undefined);",
   );
+  browserTest.valid(
+    "allows a pass-through frame executor inside a mock implementation",
+    "const paint = vi.fn(() => new Promise(requestAnimationFrame));",
+  );
   browserTest.invalid(
     "rejects setTimeout passed straight through as the promise executor",
     "await new Promise(setTimeout);",

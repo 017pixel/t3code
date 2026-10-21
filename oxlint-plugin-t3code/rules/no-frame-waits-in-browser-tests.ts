@@ -127,7 +127,7 @@ export default defineRule({
 
     return {
       NewExpression(node) {
-        if (!isPromiseConstructor(node)) return;
+        if (!isPromiseConstructor(node) || isInsideMock(node)) return;
         const executor = node.arguments[0];
         // `new Promise(setTimeout)` resolves on the next macrotask; `new Promise(requestAnimationFrame)`
         // on the next frame. Both are the same wait with the function passed straight through.
