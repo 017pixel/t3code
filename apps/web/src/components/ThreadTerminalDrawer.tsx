@@ -1878,7 +1878,13 @@ export default function ThreadTerminalDrawer({
       ) : null}
 
       {!hasTerminalSidebar && (
-        <div className="flex h-[22px] shrink-0 items-stretch justify-end border-b border-border/70">
+        <div
+          className={cn(
+            "flex shrink-0 items-stretch justify-end border-b border-border/70",
+            // The drawer's resize strip covers its top 6px; keep the buttons below it.
+            isPanel ? "h-[22px]" : "h-7 pt-1.5",
+          )}
+        >
           {terminalActions}
         </div>
       )}
