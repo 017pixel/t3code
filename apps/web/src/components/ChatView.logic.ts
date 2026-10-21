@@ -1670,7 +1670,7 @@ export function presentThreadShellFromProjection(
   };
 }
 
-const LIVE_RUN_STATUSES = new Set(["queued", "preparing", "starting", "running"]);
+const LIVE_RUN_STATUSES = new Set(["queued", "preparing", "starting", "running", "waiting"]);
 
 /**
  * Background work the provider still runs after an earlier run ended. It
