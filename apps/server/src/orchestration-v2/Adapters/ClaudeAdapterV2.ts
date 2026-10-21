@@ -54,6 +54,7 @@ import * as NodeChildProcess from "node:child_process";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import { AgentScope } from "@t3tools/shared/AgentScope";
+import * as ProviderProcesses from "../../process/providerProcesses.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { applyClaudePromptEffortPrefix } from "@t3tools/shared/model";
 import {
@@ -315,20 +316,61 @@ const BACKGROUND_MOVE_TIMEOUT_MS = 5_000;
  * reads (#3089). Those stay in the CLI's group, so the rest of the group gets SIGKILL once the
  * CLI exits for any reason.
  */
-function spawnClaudeProcessGroup(options: ClaudeSpawnOptions): ClaudeSpawnedProcess {
-  const child = NodeChildProcess.spawn(options.command, options.args, {
-    cwd: options.cwd,
-    env: options.env,
-    signal: options.signal,
-    stdio: ["pipe", "pipe", "ignore"],
-    detached: true,
-  });
+function spawnClaudeProcessGroup(
+  options: ClaudeSpawnOptions,
+  ownership: typeof ProviderProcesses.ProviderProcesses.Service,
+): ClaudeSpawnedProcess {
+  const register = ownership.register;
+  const child = NodeChildProcess.spawn(
+    register === undefined ? options.command : "/bin/sh",
+    register === undefined
+      ? options.args
+      : [
+          "-c",
+          'read -r ready <&3 || exit 1; exec 3<&-; exec "$@"',
+          "t3-provider",
+          options.command,
+          ...options.args,
+        ],
+    {
+      cwd: options.cwd,
+      env: options.env,
+      signal: options.signal,
+      stdio:
+        register === undefined ? ["pipe", "pipe", "ignore"] : ["pipe", "pipe", "ignore", "pipe"],
+      detached: true,
+    },
+  );
+  let forget: (() => void) | undefined;
   child.once("exit", () => {
     try {
       signalProcessGroup(child.pid ?? 0, "SIGKILL");
     } catch {}
+    try {
+      forget?.();
+    } catch {}
   });
-  return child;
+  if (register !== undefined && child.pid !== undefined) {
+    const gate = child.stdio[3];
+    try {
+      forget = register(child.pid);
+      if (gate === null || gate === undefined || !("end" in gate)) {
+        throw new Error("Provider launch gate is unavailable");
+      }
+      gate.on("error", () => child.kill("SIGKILL"));
+      gate.end("ready\n");
+    } catch (cause) {
+      child.kill("SIGKILL");
+      gate?.destroy();
+      throw cause;
+    }
+  }
+
+  if (child.stdin === null || child.stdout === null) {
+    child.kill("SIGKILL");
+    throw new Error("Provider pipes are unavailable");
+  }
+  return Object.assign(child, { stdin: child.stdin, stdout: child.stdout });
 }
 
 export const ClaudeProviderCapabilitiesV2 = {
@@ -871,6 +913,7 @@ export const layerQueryRunner: Layer.Layer<
     const path = yield* Path.Path;
     const { native: nativeEventLogger } = yield* ProviderEventLoggers.ProviderEventLoggers;
     const agentScope = yield* AgentScope;
+    const providerProcesses = yield* ProviderProcesses.ProviderProcesses;
     const platform = yield* HostProcess.Platform;
 
     return ClaudeAgentSdkQueryRunner.of({
@@ -925,7 +968,9 @@ export const layerQueryRunner: Layer.Layer<
         // Windows has no process groups, so there the SDK spawns the CLI itself.
         const spawnClaudeCodeProcess =
           options.spawnClaudeCodeProcess ??
-          (platform === "win32" ? undefined : spawnClaudeProcessGroup);
+          (platform === "win32"
+            ? undefined
+            : (options: ClaudeSpawnOptions) => spawnClaudeProcessGroup(options, providerProcesses));
         const queryRuntime = yield* Effect.uninterruptibleMask((restore) =>
           Effect.try({
             try: () =>
