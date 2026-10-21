@@ -127,7 +127,10 @@ const permissionRequestCount = Math.max(
   1,
   Number(process.env.T3_ACP_PERMISSION_REQUEST_COUNT ?? "1") || 1,
 );
-const sessionId = "mock-session-1";
+const sessionId =
+  process.env.T3_ACP_TIMELINE_FIXTURE_DIRECTORY === undefined
+    ? "mock-session-1"
+    : `timeline-fixture-${process.pid}`;
 
 let currentModeId = antigravityProfile ? "default" : "ask";
 let currentModelId = antigravityProfile ? "gemini-test-low" : "default";
