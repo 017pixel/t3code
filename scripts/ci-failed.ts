@@ -61,9 +61,10 @@ export function summarize(log: string): Array<string> {
       );
       continue;
     }
-    const ts = /(\S+\.[cm]?tsx?)\((\d+),\d+\): error (TS\d+): (.*)$/.exec(line);
+    // tsc prints "file(line,col): error" plain and "file:line:col - error" when pretty.
+    const ts = /(\S+\.[cm]?tsx?)(?:\((\d+),\d+\):|:(\d+):\d+ -) error (TS\d+): (.*)$/.exec(line);
     if (ts !== null) {
-      items.add(`${ts[1]}:${ts[2]} ${ts[3]} ${ts[4]!.slice(0, 100)}`);
+      items.add(`${ts[1]}:${ts[2] ?? ts[3]} ${ts[4]} ${ts[5]!.slice(0, 100)}`);
       continue;
     }
     // oxlint: "× rule(name): message", then "╭─[file:line:col]" a line or two later. "⚠" is a warning.

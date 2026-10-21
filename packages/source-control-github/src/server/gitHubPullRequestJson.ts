@@ -1274,14 +1274,14 @@ export function toBranchChecks(result: BranchCheckHistory.Result): ProviderBranc
   if (target?.__typename !== "Commit") return null;
   const verdicts = new Map<string, boolean>();
   for (const commit of nodesOf(target.history)) {
-    const contexts = nodesOf(commit.statusCheckRollup?.contexts).filter(
-      (context) => context.__typename === "CheckRun" || context.__typename === "StatusContext",
-    );
-    for (const check of toChecks(contexts)) {
-      if (verdicts.has(check.name)) continue;
-      if (check.status === "failure" || check.status === "success") {
-        verdicts.set(check.name, check.status === "failure");
-      }
+    // Only finished runs answer, so a rerun still going on a commit cannot hide its last result.
+    const finished = nodesOf(commit.statusCheckRollup?.contexts)
+      .filter(
+        (context) => context.__typename === "CheckRun" || context.__typename === "StatusContext",
+      )
+      .filter((context) => ["failure", "success"].includes(toCheckStatus(context)));
+    for (const check of toChecks(finished)) {
+      if (!verdicts.has(check.name)) verdicts.set(check.name, check.status === "failure");
     }
   }
   const named = (failing: boolean) =>

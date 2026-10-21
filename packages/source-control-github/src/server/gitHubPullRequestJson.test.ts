@@ -1674,7 +1674,7 @@ describe("pull request watch fingerprints", () => {
 });
 
 describe("branch check history", () => {
-  it("takes each check's newest finished run, past commits CI did not run on", () => {
+  it("takes each check's newest finished run, past reruns and commits CI did not run on", () => {
     const run = (name: string, status: string, conclusion: string | null) => ({
       __typename: "CheckRun",
       name,
@@ -1693,9 +1693,12 @@ describe("branch check history", () => {
               nodes: [
                 commit([run("lint", "IN_PROGRESS", null), run("test", "COMPLETED", "SUCCESS")]),
                 commit(null),
+                // A rerun still going must not hide the run that finished on the same commit.
+                commit([run("build", "IN_PROGRESS", null), run("build", "COMPLETED", "SUCCESS")]),
                 commit([
                   run("lint", "COMPLETED", "FAILURE"),
                   run("test", "COMPLETED", "FAILURE"),
+                  run("build", "COMPLETED", "FAILURE"),
                   run("deploy", "COMPLETED", "CANCELLED"),
                 ]),
               ],
@@ -1704,7 +1707,7 @@ describe("branch check history", () => {
         },
       },
     });
-    expect(toBranchChecks(result)).toEqual({ failing: ["lint"], passing: ["test"] });
+    expect(toBranchChecks(result)).toEqual({ failing: ["lint"], passing: ["test", "build"] });
     expect(
       toBranchChecks(Schema.decodeUnknownSync(BranchCheckHistory.result)({ repository: null })),
     ).toBeNull();
