@@ -80,3 +80,33 @@ export function pullRequestCodeScrollSurface(
     },
   };
 }
+
+export function observePullRequestCodeScrollIntent(surface: EventTarget, cancel: () => void) {
+  const cancelOnKey = (event: Event) => {
+    if (
+      event instanceof KeyboardEvent &&
+      ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key) &&
+      !event
+        .composedPath()
+        .some(
+          (node) =>
+            node instanceof HTMLElement &&
+            (node.isContentEditable || node.matches("input, textarea")),
+        )
+    )
+      cancel();
+  };
+  surface.addEventListener("wheel", cancel, { passive: true });
+  surface.addEventListener("touchmove", cancel, { passive: true });
+  surface.addEventListener("pointerdown", cancel, { capture: true });
+  // Native scrollbar interactions can emit mouse events without a pointer event.
+  surface.addEventListener("mousedown", cancel, { capture: true });
+  surface.addEventListener("keydown", cancelOnKey);
+  return () => {
+    surface.removeEventListener("wheel", cancel);
+    surface.removeEventListener("touchmove", cancel);
+    surface.removeEventListener("pointerdown", cancel, { capture: true });
+    surface.removeEventListener("mousedown", cancel, { capture: true });
+    surface.removeEventListener("keydown", cancelOnKey);
+  };
+}

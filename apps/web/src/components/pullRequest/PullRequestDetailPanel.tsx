@@ -332,11 +332,7 @@ export function PullRequestDetailPanel({
     onTabChange?.(next);
   };
   const [timelineOrder, setTimelineOrder] = useState<"newest" | "oldest">("newest");
-  const codeViewKey = pullRequestCodeViewKey(
-    environmentId,
-    context === "thread" ? (threadRef?.threadId ?? null) : null,
-    reference,
-  );
+  const codeViewKey = pullRequestCodeViewKey(environmentId, threadRef?.threadId ?? null, reference);
   const selectedCodeCommitOid = usePullRequestReviewStore(
     (store) => (store.codeViews[codeViewKey] ?? EMPTY_CODE_VIEW).selectedCommitOid,
   );

@@ -20,6 +20,7 @@ import {
 
 import {
   PullRequestCodeScrollRestoration,
+  observePullRequestCodeScrollIntent,
   savePullRequestCodeScroll,
   pullRequestCodeScrollSurface,
 } from "./pullRequestCodeScroll.logic";
@@ -313,6 +314,68 @@ describe("pull request scroll restoration", () => {
     expect(restore.restore(surface, 3, false)).toBe("waiting");
     expect(surface.scrollTop).toBe(120);
     expect(restore.pending).toBe(false);
+  });
+
+  it.each(["pointerdown", "mousedown"])(
+    "keeps the user's position when %s interrupts restoration before saved pages arrive",
+    (eventType) => {
+      const update = session();
+      const key = reviewKey();
+      update(key, (current) => ({ ...current, scrollTop: 1800, loadedPageCount: 3 }));
+      const restore = new PullRequestCodeScrollRestoration(
+        usePullRequestReviewStore.getState().codeViews[key]!,
+      );
+      const surface = Object.assign(new EventTarget(), {
+        scrollTop: 0,
+        scrollHeight: 600,
+        clientHeight: 400,
+      });
+      let loadedPageCount = 1;
+      const stopObserving = observePullRequestCodeScrollIntent(surface, () => {
+        restore.cancel();
+        update(key, (current) =>
+          savePullRequestCodeScroll(current, surface.scrollTop, loadedPageCount),
+        );
+      });
+      try {
+        expect(restore.restore(surface, loadedPageCount, true)).toBe("load-more");
+        // A native scrollbar targets the scrolling element itself.
+        surface.dispatchEvent(new Event(eventType));
+        surface.scrollTop = 120;
+        surface.scrollHeight = 3000;
+        loadedPageCount = 3;
+        expect(restore.restore(surface, loadedPageCount, false)).toBe("waiting");
+        expect(surface.scrollTop).toBe(120);
+        expect(restore.pending).toBe(false);
+        expect(usePullRequestReviewStore.getState().codeViews[key]?.loadedPageCount).toBe(1);
+      } finally {
+        stopObserving();
+      }
+      const before = usePullRequestReviewStore.getState();
+      surface.dispatchEvent(new Event(eventType));
+      expect(usePullRequestReviewStore.getState()).toBe(before);
+    },
+  );
+
+  it("preserves an explicit file reveal when the remaining saved pages arrive", () => {
+    let logicalTop = 0;
+    const viewer = {
+      getScrollTop: () => logicalTop,
+      getScrollHeight: () => 3000,
+      getHeight: () => 400,
+      getTopForItem: (id: string) => (id === "revealed-file" ? 300 : 0),
+      scrollTo: (target: { type: string; id?: string; offset?: number }) => {
+        logicalTop = viewer.getTopForItem(target.id ?? "first-file") - (target.offset ?? 0);
+      },
+      render: () => {},
+    };
+    const surface = pullRequestCodeScrollSurface(viewer, "first-file");
+    const restore = new PullRequestCodeScrollRestoration({ scrollTop: 1800, loadedPageCount: 3 });
+    expect(restore.restore(surface, 1, true)).toBe("load-more");
+    restore.cancel();
+    viewer.scrollTo({ type: "item", id: "revealed-file" });
+    expect(restore.restore(surface, 3, false)).toBe("waiting");
+    expect(viewer.getScrollTop()).toBe(300);
   });
 
   it("waits for saved pages without overwriting the offset with a first-page clamp", () => {

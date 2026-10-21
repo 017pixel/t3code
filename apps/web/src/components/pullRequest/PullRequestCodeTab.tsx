@@ -107,6 +107,7 @@ import {
 import { resolvePullRequestSelectionFile } from "./pullRequestSelection.logic";
 import {
   PullRequestCodeScrollRestoration,
+  observePullRequestCodeScrollIntent,
   savePullRequestCodeScroll,
   pullRequestCodeScrollSurface,
 } from "./pullRequestCodeScroll.logic";
@@ -329,6 +330,7 @@ function PullRequestCodeTab({
   const referenceKey = pullRequestReviewKey(reference);
   const commit = selectedCommitOid;
   const scopeKey = JSON.stringify([codeViewKey, commit]);
+  // A new controller restarts the restore effect when the review scope changes.
   const [scrollRestoration, setScrollRestoration] = useState(
     () => new PullRequestCodeScrollRestoration(readPullRequestCodeView(codeViewKey)),
   );
@@ -753,6 +755,7 @@ function PullRequestCodeTab({
   const revealFile = (path: string) => {
     const item = items.find((candidate) => resolveFileDiffPath(candidate.fileDiff) === path);
     if (item === undefined) return;
+    scrollRestoration.cancel();
     if (item.collapsed === true) toggleFile(item.id);
     requestTreeReveal(item.id);
   };
@@ -1392,28 +1395,11 @@ function PullRequestCodeTab({
         savePullRequestCodeScroll(current, instance.getScrollTop(), loadedSlices.length),
       );
     };
-    const cancelOnKey = (event: KeyboardEvent) => {
-      if (
-        ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key) &&
-        !event
-          .composedPath()
-          .some(
-            (node) =>
-              node instanceof HTMLElement &&
-              (node.isContentEditable || node.matches("input, textarea")),
-          )
-      )
-        cancel();
-    };
-    surface.addEventListener("wheel", cancel, { passive: true });
-    surface.addEventListener("touchmove", cancel, { passive: true });
-    surface.addEventListener("keydown", cancelOnKey);
+    const stopObservingIntent = observePullRequestCodeScrollIntent(surface, cancel);
     restore();
     return () => {
       stopObserving();
-      surface.removeEventListener("wheel", cancel);
-      surface.removeEventListener("touchmove", cancel);
-      surface.removeEventListener("keydown", cancelOnKey);
+      stopObservingIntent();
     };
   }, [
     viewer,
