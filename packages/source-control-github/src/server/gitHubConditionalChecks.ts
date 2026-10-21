@@ -1,7 +1,6 @@
 import * as Clock from "effect/Clock";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
-import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -24,7 +23,7 @@ const HeadSchema = Schema.Struct({
 });
 const decodeHead = Schema.decodeUnknownEffect(Schema.fromJsonString(HeadSchema));
 
-class ChecksUnavailable extends Data.TaggedError("ChecksUnavailable") {}
+class ChecksUnavailable extends Schema.TaggedError<ChecksUnavailable>()("ChecksUnavailable", {}) {}
 
 const WorkflowRunSchema = Schema.Struct({
   id: Schema.Int,
