@@ -2,6 +2,7 @@ import {
   type AuthEnvironmentScope,
   AuthStandardClientScopes,
   ExecutionEnvironmentDescriptor,
+  ORCHESTRATION_PROTOCOL_VERSION,
   PortSchema,
 } from "@t3tools/contracts";
 import { resolveWorktreeT3Home } from "@t3tools/shared/devHome";
@@ -128,6 +129,15 @@ export class ServePortOccupiedError extends Schema.TaggedError<ServePortOccupied
 ) {
   override get message(): string {
     return `HTTPS port ${String(this.servePort)} on the tailnet already serves something that is not a T3 Code server. Pass --tailscale-serve-port to publish this one on another port.`;
+  }
+}
+
+export class IncompatibleServerError extends Schema.TaggedError<IncompatibleServerError>()(
+  "IncompatibleServerError",
+  { serverVersion: Schema.String, protocolVersion: Schema.Number },
+) {
+  override get message(): string {
+    return `The running T3 Code server (${this.serverVersion}) uses orchestration protocol ${String(this.protocolVersion)}, but this CLI uses protocol ${String(ORCHESTRATION_PROTOCOL_VERSION)}, so its pairing token would not work. Pair with the server's own CLI: \`npx t3@${this.serverVersion} pair\`.`;
   }
 }
 
@@ -493,6 +503,15 @@ export const pairCommand = Command.make("pair", {
       const logLevel = Option.getOrElse(cliLogLevel, () => "Warn" as const);
 
       const target = yield* discoverPairTarget(Option.getOrUndefined(flags.baseDir));
+      // The token goes into this CLI's database, which a server on another
+      // protocol never reads. Servers shipped before negotiation use protocol 1.
+      const protocolVersion = target.descriptor.orchestrationProtocolVersion ?? 1;
+      if (protocolVersion !== ORCHESTRATION_PROTOCOL_VERSION) {
+        return yield* new IncompatibleServerError({
+          serverVersion: target.descriptor.serverVersion,
+          protocolVersion,
+        });
+      }
 
       const notes: Array<string> = [];
       let pairingBaseUrl: string;

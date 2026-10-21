@@ -5,7 +5,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { AuthStandardClientScopes } from "@t3tools/contracts";
+import { AuthStandardClientScopes, ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, describe, expect, it } from "@effect/vitest";
@@ -89,19 +89,21 @@ const testDescriptor = {
   label: "pair-test",
   platform: { os: "linux", arch: "x64" },
   serverVersion: "0.0.1",
+  orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
   capabilities: { repositoryIdentity: true },
 };
 
 const withDescriptorServer = <A, E, R>(
   run: (origin: string) => Effect.Effect<A, E, R>,
   host = "127.0.0.1",
+  descriptor: object = testDescriptor,
 ) =>
   Effect.acquireUseRelease(
     Effect.callback<NodeHttp.Server>((resume) => {
       const server = NodeHttp.createServer((request, response) => {
         if (request.url === "/.well-known/t3/environment") {
           response.writeHead(200, { "content-type": "application/json" });
-          response.end(JSON.stringify(testDescriptor));
+          response.end(JSON.stringify(descriptor));
           return;
         }
         response.writeHead(404);
@@ -259,6 +261,41 @@ describe("t3 pair", () => {
 
         assert.include(output, "Pairing URL: http://localhost:5733/pair#token=");
       }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each([
+    { label: "without a protocol version", orchestrationProtocolVersion: undefined },
+    { label: "on protocol 1", orchestrationProtocolVersion: 1 },
+    {
+      label: "on a newer protocol",
+      orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION + 1,
+    },
+  ])("refuses to pair with a server $label", ({ orchestrationProtocolVersion }) =>
+    withDescriptorServer(
+      (origin) =>
+        Effect.gen(function* () {
+          const baseDir = NodeFS.mkdtempSync(
+            NodePath.join(NodeOS.tmpdir(), "t3-pair-protocol-test-"),
+          );
+          yield* persistServerRuntimeState({
+            path: NodePath.join(baseDir, "userdata", "server-runtime.json"),
+            state: yield* makePersistedServerRuntimeState({
+              config: { host: "127.0.0.1", devUrl: undefined },
+              port: Number(new URL(origin).port),
+            }),
+          });
+
+          const error = yield* provideCliTestLayers(
+            runCli(["pair", "--base-dir", baseDir]).pipe(Effect.flip),
+          );
+
+          assert.include(String(error), `protocol ${String(orchestrationProtocolVersion ?? 1)}`);
+          assert.include(String(error), "npx t3@0.0.1 pair");
+          assert.isFalse(NodeFS.existsSync(NodePath.join(baseDir, "userdata", "statev2.sqlite")));
+        }),
+      "127.0.0.1",
+      { ...testDescriptor, orchestrationProtocolVersion },
     ).pipe(Effect.provide(NodeServices.layer)),
   );
 
