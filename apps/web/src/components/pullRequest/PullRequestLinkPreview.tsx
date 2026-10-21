@@ -57,7 +57,7 @@ export function PullRequestLinkPreview({
         })
       : null,
   );
-  // The hover card shares this query; refreshing keeps a failed hover from failing the click.
+  // The hover card shares this query, so a click must not inherit a failed hover read.
   const readPreview = useAtomQueryRunner(pullRequestEnvironment.preview, {
     reportFailure: false,
     reportDefect: false,
@@ -71,9 +71,13 @@ export function PullRequestLinkPreview({
             event.preventDefault();
             event.stopPropagation();
             if (resolvingClick) return;
+            const joinedHoverRead = previewQuery.isPending;
             setOpen(false);
             setResolvingClick(true);
             void readPreview(target)
+              .then((result) =>
+                joinedHoverRead && result._tag === "Failure" ? readPreview(target) : result,
+              )
               .then(async (result) => {
                 if (isAtomCommandInterrupted(result)) return;
                 if (result._tag === "Success" && onOpenPullRequest?.(result.value.url)) return;
