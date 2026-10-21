@@ -294,22 +294,16 @@ export const make = Effect.gen(function* () {
         now,
       });
       if (Result.isSuccess(planned)) {
-        const { receipt, committed } = yield* eventSink.commitProjectCommand({
+        const { receipt } = yield* eventSink.commitProjectCommand({
           commandId: command.commandId,
           projectId,
           commandType: command.type,
           acceptedAt: now,
           event: planned.success,
+          ...(command.type === "project.meta.update"
+            ? { beforeCommit: updateProjectSettings(command) }
+            : {}),
         });
-        if (
-          committed &&
-          command.type === "project.meta.update" &&
-          receipt.status === "accepted" &&
-          receipt.projectId === projectId &&
-          receipt.commandType === command.type
-        ) {
-          yield* updateProjectSettings(command);
-        }
         return receipt;
       }
       return yield* eventSink.commitRejectedProjectCommand({

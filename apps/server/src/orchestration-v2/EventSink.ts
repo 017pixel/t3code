@@ -177,6 +177,7 @@ export interface EventSinkV2Shape {
     readonly commandType: string;
     readonly acceptedAt: DateTime.Utc;
     readonly event: UnsequencedProjectEvent;
+    readonly beforeCommit?: Effect.Effect<void, unknown>;
   }) => Effect.Effect<
     { readonly receipt: CommandReceiptStore.ProjectCommandReceiptV2; readonly committed: boolean },
     EventSinkV2Error
@@ -734,6 +735,9 @@ const layerBase: Layer.Layer<
             }
             const event = yield* eventStore.appendProjectEvent(input.event);
             yield* projectStore.apply(event);
+            // A failed settings write must leave no accepted receipt to suppress its retry.
+            // Existing receipts return above, so successful replays never rerun this write.
+            if (input.beforeCommit !== undefined) yield* input.beforeCommit;
             const receipt = { ...reserved, resultSequence: event.sequence };
             yield* commandReceipts.upsert(receipt);
             return { receipt, event };

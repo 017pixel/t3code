@@ -1,6 +1,12 @@
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { CommandId, type Project, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  CommandId,
+  type Project,
+  ProjectId,
+  ProviderInstanceId,
+  ServerSettingsError,
+} from "@t3tools/contracts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -465,6 +471,64 @@ it.layer(layerTest)("ProjectService", (it) => {
     }),
   );
 });
+
+it.effect("retries a failed settings write without accepting an incomplete project update", () =>
+  Effect.gen(function* () {
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const failWrite = yield* Ref.make(true);
+    const service = yield* ProjectService.make.pipe(
+      Effect.provideService(ServerSettings.ServerSettingsService, {
+        ...settings,
+        getSettings: settings.getSettings.pipe(
+          Effect.map((current) => ({ ...current, projectSettingsFolded: true })),
+        ),
+        updateSettings: (patch) =>
+          Ref.getAndSet(failWrite, false).pipe(
+            Effect.flatMap((fail) =>
+              fail
+                ? Effect.fail(
+                    new ServerSettingsError({
+                      settingsPath: "/test/settings.json",
+                      operation: "write-file",
+                      cause: "injected transient write failure",
+                    }),
+                  )
+                : settings.updateSettings(patch),
+            ),
+          ),
+      }),
+    );
+    const sql = yield* SqlClient.SqlClient;
+    const projectId = ProjectId.make("project:settings-retry");
+    yield* service.create({
+      commandId: CommandId.make("command:settings-retry:create"),
+      projectId,
+      title: "Settings retry",
+      workspaceRoot: "/work/settings-retry",
+    });
+    const input = {
+      commandId: CommandId.make("command:settings-retry:update"),
+      projectId,
+      autoPull: true,
+    };
+    assert.equal((yield* service.update(input).pipe(Effect.flip))._tag, "ProjectOperationError");
+    const leftovers = yield* sql<{ readonly count: number }>`
+      SELECT
+        (SELECT COUNT(*) FROM orchestration_events WHERE command_id = ${input.commandId}) +
+        (SELECT COUNT(*) FROM orchestration_command_receipts WHERE command_id = ${input.commandId}) AS count
+    `;
+    assert.equal(leftovers[0]?.count, 0);
+    assert.isFalse(Option.getOrThrow(yield* service.getById(projectId)).autoPull);
+    assert.isTrue((yield* service.update(input)).autoPull);
+    assert.isTrue(
+      (yield* settings.getSettings).projectSettingsOverrides[projectId]?.defaultAutoPull,
+    );
+    yield* settings.updateSettings({
+      projectSettingsOverrides: { [projectId]: { defaultAutoPull: false } },
+    });
+    assert.isFalse((yield* service.update(input)).autoPull);
+  }).pipe(Effect.provide(layerProjectServiceDependencies)),
+);
 
 it.effect("keeps project snapshots available when optional metadata enrichment fails", () =>
   Effect.gen(function* () {
