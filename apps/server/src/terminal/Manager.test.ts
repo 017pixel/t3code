@@ -25,6 +25,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
+import { TestClock } from "effect/testing";
 import { expect, vi } from "vite-plus/test";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -732,6 +733,93 @@ it.layer(
       expect(snapshot?.history).toBe("aa😀\rEND");
       expect(snapshot?.sequence).toBe(reopened.sequence);
     }),
+  );
+
+  it.effect("persists sustained output without rewriting the whole history every batch", () =>
+    Effect.gen(function* () {
+      const historyByteLimit = 64 * 1024;
+      const line = `${"x".repeat(1023)}\n`;
+      const realFs = yield* FileSystem.FileSystem;
+      const bytesWritten = yield* Ref.make(0);
+      const persisted = yield* Ref.make(yield* Deferred.make<void>());
+      const counted = <A, E>(bytes: number, write: Effect.Effect<A, E>) =>
+        write.pipe(
+          Effect.tap(() => Ref.update(bytesWritten, (total) => total + bytes)),
+          Effect.tap(() =>
+            Effect.flatMap(Ref.get(persisted), (done) => Deferred.succeed(done, undefined)),
+          ),
+        );
+      const countingFs = FileSystem.FileSystem.of({
+        ...realFs,
+        writeFile: (path, data, options) =>
+          counted(data.byteLength, realFs.writeFile(path, data, options)),
+        writeFileString: (path, data, options) =>
+          counted(Buffer.byteLength(data), realFs.writeFileString(path, data, options)),
+        open: (path, options) =>
+          realFs.open(path, options).pipe(
+            Effect.map(
+              (file) =>
+                // A spread would drop the getters File keeps on its prototype, such as stat.
+                new Proxy(file, {
+                  get: (target, key) =>
+                    key === "write" || key === "writeAll"
+                      ? (buffer: Uint8Array) => counted(buffer.byteLength, target[key](buffer))
+                      : Reflect.get(target, key, target),
+                }),
+            ),
+          ),
+      });
+      const { manager, ptyAdapter } = yield* createManager(5_000, {
+        historyByteLimit,
+        subprocessInspector: () =>
+          Effect.succeed({ hasRunningSubprocess: false, childCommand: null, processIds: [] }),
+      }).pipe(Effect.provideService(FileSystem.FileSystem, countingFs));
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      const published = yield* Ref.make(yield* Deferred.make<void>());
+      const unsubscribe = yield* manager.subscribe((event) =>
+        event.type === "output"
+          ? Effect.flatMap(Ref.get(published), (done) => Deferred.succeed(done, undefined))
+          : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+
+      // Each batch lands in its own debounce window, like a command printing a line at a time.
+      const emitBatches = Effect.fn(function* (count: number) {
+        yield* Ref.set(bytesWritten, 0);
+        for (let index = 0; index < count; index += 1) {
+          const outputPublished = yield* Deferred.make<void>();
+          const historyPersisted = yield* Deferred.make<void>();
+          yield* Ref.set(published, outputPublished);
+          yield* Ref.set(persisted, historyPersisted);
+          process.emitData(line);
+          yield* Deferred.await(outputPublished);
+          yield* TestClock.adjust("1 second");
+          yield* Deferred.await(historyPersisted);
+        }
+        return yield* Ref.get(bytesWritten);
+      });
+      const batchesToCap = historyByteLimit / line.length;
+      const emittedPerPhase = batchesToCap * line.length;
+      // Linear in the output, plus room to compact a file that has grown past the cap.
+      const writeBudget = 8 * emittedPerPhase + 2 * historyByteLimit;
+
+      const fillingWrites = yield* emitBatches(batchesToCap);
+      const cappedWrites = yield* emitBatches(batchesToCap);
+      // Closing lets each shell's kill escalation finish on the test clock before teardown.
+      const closeTerminal = manager
+        .close({ threadId: "thread-1" })
+        .pipe(Effect.andThen(TestClock.adjust("1 second")));
+      yield* closeTerminal;
+      const reopened = yield* manager.open(openInput());
+      yield* closeTerminal;
+
+      expect(reopened.history).toBe(line.repeat(batchesToCap));
+      expect
+        .soft(fillingWrites, "bytes written while filling to the cap")
+        .toBeLessThanOrEqual(writeBudget);
+      expect(cappedWrites, "bytes written at the cap").toBeLessThanOrEqual(writeBudget);
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
   it.effect("retains plain Unicode and control characters around a split query", () =>
