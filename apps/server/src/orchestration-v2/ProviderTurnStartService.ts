@@ -166,6 +166,7 @@ export const layer: Layer.Layer<
             ),
             Effect.catchCause(() => Effect.succeed(input.inheritedBackgroundTurnItems)),
           ),
+        loadRunOwnedTools: () => projectionStore.getRuntimeRecoveryProjection(input.threadId),
         shouldStartProviderTurn: () => isCurrentAttemptInStatus("running"),
         shouldFinalizeRun: () =>
           projectionStore.getRuntimeRecoveryProjection(input.threadId).pipe(
@@ -1233,6 +1234,7 @@ export const layer: Layer.Layer<
         attempt: runningAttempt,
         attemptId: attempt.id,
         loadInheritedBackgroundTurnItems: runControls.loadInheritedBackgroundTurnItems,
+        loadRunOwnedTools: runControls.loadRunOwnedTools,
         relatedThreadIds: routableSubagents.flatMap((subagent) =>
           subagent.childThreadId === null ? [] : [subagent.childThreadId],
         ),

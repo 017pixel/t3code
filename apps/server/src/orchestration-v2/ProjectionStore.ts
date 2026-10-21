@@ -1,4 +1,5 @@
 import { applyThreadPullRequestLinkUpdate } from "@t3tools/shared/threadPullRequests";
+import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
 import { makeThreadFind, findProjectedThreadItems } from "./ThreadFind.ts";
@@ -896,11 +897,20 @@ export function applyToProjection(
         ...base,
         messages: upsertById(base.messages, event.payload),
       };
-    case "turn-item.updated":
+    case "turn-item.updated": {
+      const previous = base.turnItems.find((item) => item.id === event.payload.id);
+      // A delayed tool_use frame cannot restart work cancelled before execution.
+      const item =
+        previous?.toolNonExecutionKind === "cancelled" &&
+        (previous.type === "command_execution" || previous.type === "dynamic_tool") &&
+        isOrchestrationV2WorkActive(event.payload.status)
+          ? previous
+          : event.payload;
       return withLocalVisibleTurnItems({
         ...base,
-        turnItems: upsertById(base.turnItems, event.payload),
+        turnItems: upsertById(base.turnItems, item),
       });
+    }
     case "plan.updated":
       return {
         ...base,
@@ -2578,6 +2588,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 status = excluded.status,
                 updated_at = excluded.updated_at,
                 payload_json = excluded.payload_json
+              WHERE NOT (
+                orchestration_v2_projection_turn_items.type IN ('command_execution', 'dynamic_tool')
+                AND json_extract(orchestration_v2_projection_turn_items.payload_json, '$.toolNonExecutionKind') IS 'cancelled'
+                AND excluded.status IN ('pending', 'running', 'waiting')
+              )
             `;
               break;
             }
