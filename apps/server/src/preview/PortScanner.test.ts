@@ -575,6 +575,7 @@ effectIt.effect.each(["linux", "darwin"] as const)(
     const otherListener = `p5000\ncpostgres\nn127.0.0.1:${otherPort}\n`;
     let lsofStdout = otherListener;
     let lsofFails = false;
+    let environmentFails = false;
     let lsofCalls = 0;
     let environmentReads = 0;
     const requests: string[] = [];
@@ -612,6 +613,15 @@ effectIt.effect.each(["linux", "darwin"] as const)(
               // A direct child of this process, so stop refuses it without signaling anything.
               if (input.args[0] === "-A") {
                 return Effect.succeed(processOutput(`4242 ${process.pid} 4242\n`));
+              }
+              if (environmentFails) {
+                return Effect.fail(
+                  new ProcessRunner.ProcessTimeoutError({
+                    command: input.command,
+                    argumentCount: input.args.length,
+                    timeoutMs: 5_000,
+                  }),
+                );
               }
               environmentReads += 1;
               return Effect.succeed(
@@ -651,6 +661,11 @@ effectIt.effect.each(["linux", "darwin"] as const)(
       lsofFails = true;
       expect(yield* scanner.scan()).toEqual([]);
       lsofFails = false;
+      if (platform === "darwin") {
+        environmentFails = true;
+        expect(yield* scanner.scan()).toEqual([]);
+        environmentFails = false;
+      }
       expect(yield* scanner.scan()).toMatchObject([
         { port: agentPort, pid: 4242, terminal: null, agent: { threadId: "thread-agent" } },
       ]);

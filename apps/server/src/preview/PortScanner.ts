@@ -553,7 +553,10 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
               })
               .pipe(
                 Effect.map((result) => parsePsEnvironmentThreads(result.stdout)),
-                Effect.orElseSucceed(() => new Map()),
+                Effect.orElseSucceed(() => {
+                  agentScanPending = true;
+                  return new Map();
+                }),
               );
     const next = new Map<number, ThreadId | null>();
     for (const pid of pids) {
