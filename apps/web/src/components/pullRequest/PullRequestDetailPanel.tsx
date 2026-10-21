@@ -1,3 +1,8 @@
+import {
+  EMPTY_CODE_VIEW,
+  pullRequestCodeViewKey,
+  usePullRequestReviewStore,
+} from "./pullRequestReviewStore";
 import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import { useAtomValue } from "@effect/atom-react";
 import { usePullRequestStack } from "~/state/usePullRequestStack";
@@ -327,14 +332,22 @@ export function PullRequestDetailPanel({
     onTabChange?.(next);
   };
   const [timelineOrder, setTimelineOrder] = useState<"newest" | "oldest">("newest");
-  const [codeCommitScope, setCodeCommitScope] = useState<{
-    readonly pullRequestKey: string;
-    readonly oid: string | null;
-  }>(() => ({ pullRequestKey, oid: null }));
-  const selectedCodeCommitOid =
-    codeCommitScope.pullRequestKey === pullRequestKey ? codeCommitScope.oid : null;
+  const codeViewKey = pullRequestCodeViewKey(
+    environmentId,
+    context === "thread" ? (threadRef?.threadId ?? null) : null,
+    reference,
+  );
+  const selectedCodeCommitOid = usePullRequestReviewStore(
+    (store) => (store.codeViews[codeViewKey] ?? EMPTY_CODE_VIEW).selectedCommitOid,
+  );
   const selectCodeCommit = (oid: string | null) => {
-    setCodeCommitScope({ pullRequestKey, oid });
+    usePullRequestReviewStore
+      .getState()
+      .updateCodeView(codeViewKey, (current) =>
+        current.selectedCommitOid === oid
+          ? current
+          : { ...EMPTY_CODE_VIEW, selectedCommitOid: oid },
+      );
   };
   const openCommit = (oid: string) => {
     selectCodeCommit(oid);
@@ -1778,6 +1791,7 @@ export function PullRequestDetailPanel({
                     environmentId={environmentId}
                     reference={reference}
                     detail={detail}
+                    codeViewKey={codeViewKey}
                     selectedCommitOid={selectedCodeCommitOid}
                     onSelectedCommitChange={selectCodeCommit}
                     pendingFinding={handoff}

@@ -4,7 +4,6 @@ import type {
   EnvironmentId,
   PullRequestDetailView,
   PullRequestDiffSide,
-  PullRequestOmittedFileStat,
   PullRequestRef,
   PullRequestReviewPosition,
   PullRequestReviewThread,
@@ -44,7 +43,7 @@ import { pullRequestFindingKey, type PullRequestFinding } from "./pullRequestDet
 import { canEditPullRequestComment, canResolvePullRequestThread } from "./pullRequestEditing.logic";
 import { orderDiffFiles } from "./pullRequestFileOrder.logic";
 import {
-  buildFileDiffRenderKey,
+  buildFileDiffIdentityKey,
   fnv1a32,
   getDiffLineStat,
   getRenderablePatch,
@@ -96,15 +95,17 @@ import {
   toViewerSide,
 } from "./PullRequestReviewAnnotation";
 import {
+  mergePullRequestDiffSlices,
+  type DiffSlice,
   isFileDiffCollapsed,
   isLineInFileDiff,
   toggleFileDiffFoldForViewed,
-  type DiffFoldOverride,
 } from "./pullRequestDiff.logic";
 import { PullRequestDiffStat, PullRequestMetaLine } from "./pullRequestPresentation";
 import { PullRequestDiffUnavailableState } from "./PullRequestDiffUnavailableState";
 import { usePullRequestFilesViewed } from "./usePullRequestFilesViewed";
 import {
+  EMPTY_CODE_VIEW,
   nextPendingReviewCommentId,
   pullRequestReviewKey,
   usePendingReviewComments,
@@ -123,14 +124,6 @@ type ReviewAnnotation = DiffLineAnnotation<ReviewAnnotationGroup>;
 const COMMIT_PAGE_SIZE = 10;
 
 const PULL_REQUEST_FILE_TREE_STORAGE_KEY = "t3code.pullRequestFileTreeOpen";
-
-interface DiffSlice {
-  readonly cursor: string | null;
-  readonly patch: string;
-  readonly truncated: boolean;
-  readonly nextCursor: string | null;
-  readonly omittedFileStats: ReadonlyArray<PullRequestOmittedFileStat>;
-}
 
 /**
  * The viewer's own per-file counts are hidden and drawn from this side of its shadow root
@@ -244,6 +237,7 @@ function PullRequestCodeTab({
   environmentId,
   reference,
   detail,
+  codeViewKey,
   selectedCommitOid,
   onSelectedCommitChange,
   pendingFinding,
@@ -259,6 +253,7 @@ function PullRequestCodeTab({
   environmentId: EnvironmentId;
   reference: PullRequestRef;
   detail: PullRequestDetailView;
+  codeViewKey: string;
   selectedCommitOid: string | null;
   onSelectedCommitChange: (oid: string | null) => void;
   pendingFinding?: string | null;
@@ -277,9 +272,19 @@ function PullRequestCodeTab({
     diffLayout: settings.diffLayout,
     wordWrap: settings.wordWrap,
   }));
-  const [toggledFiles, setToggledFiles] = useState<ReadonlySet<string>>(() => new Set());
+  const toggledFiles = usePullRequestReviewStore(
+    (store) => (store.codeViews[codeViewKey] ?? EMPTY_CODE_VIEW).toggledFiles,
+  );
+  const foldOverride = usePullRequestReviewStore(
+    (store) => (store.codeViews[codeViewKey] ?? EMPTY_CODE_VIEW).foldOverride,
+  );
+  const updateCodeView = usePullRequestReviewStore((store) => store.updateCodeView);
+  const setToggledFiles = (update: (current: ReadonlySet<string>) => ReadonlySet<string>) =>
+    updateCodeView(codeViewKey, (current) => ({
+      ...current,
+      toggledFiles: update(current.toggledFiles),
+    }));
   const [visibleCommitCount, setVisibleCommitCount] = useState(COMMIT_PAGE_SIZE);
-  const [foldOverride, setFoldOverride] = useState<DiffFoldOverride>(null);
   const effectiveFoldOverride =
     foldOverride ?? (settings.diffFilesCollapsed ? "folded" : "expanded");
   const diffLayout = settings.diffLayout;
@@ -308,9 +313,17 @@ function PullRequestCodeTab({
     null,
   );
 
+  useEffect(() => {
+    if (viewer === null) return;
+    const position = (
+      usePullRequestReviewStore.getState().codeViews[codeViewKey] ?? EMPTY_CODE_VIEW
+    ).scrollTop;
+    viewer.scrollTo({ type: "position", position });
+  }, [viewer, codeViewKey]);
+
   const referenceKey = pullRequestReviewKey(reference);
   const commit = selectedCommitOid;
-  const scopeKey = JSON.stringify([environmentId, referenceKey, commit]);
+  const scopeKey = JSON.stringify([codeViewKey, commit]);
   // The panel keeps this mounted across pull requests, so an open composer would otherwise
   // survive the switch and attach its comment to whichever one is on screen when it is sent.
   const [stateScopeKey, setStateScopeKey] = useState(scopeKey);
@@ -318,8 +331,6 @@ function PullRequestCodeTab({
     setStateScopeKey(scopeKey);
     setDraft(null);
     setSelectedLines(null);
-    setToggledFiles(new Set());
-    setFoldOverride(null);
     setVisibleCommitCount(COMMIT_PAGE_SIZE);
     setOrphansOpen(false);
     setSliceState({ key: scopeKey, cursor: null, slices: NO_SLICES });
@@ -361,32 +372,8 @@ function PullRequestCodeTab({
         nextCursor: data.nextCursor,
         omittedFileStats: data.omittedFileStats ?? [],
       };
-      const index = slices.findIndex((slice) => slice.cursor === cursor);
-      if (index === -1) {
-        return { key: scopeKey, cursor, slices: [...slices, next] };
-      }
-      const existing = slices[index];
-      if (
-        existing !== undefined &&
-        existing.patch === next.patch &&
-        existing.truncated === next.truncated &&
-        existing.nextCursor === next.nextCursor &&
-        existing.omittedFileStats.length === next.omittedFileStats.length &&
-        existing.omittedFileStats.every((file, index) => {
-          const refreshed = next.omittedFileStats[index];
-          return (
-            refreshed !== undefined &&
-            refreshed.path === file.path &&
-            refreshed.additions === file.additions &&
-            refreshed.deletions === file.deletions
-          );
-        })
-      ) {
-        return previous;
-      }
-      // A page that came back different means the diff moved under the review. The slices
-      // after it go with the replacement: their cursors were positions in the old diff.
-      return { key: scopeKey, cursor, slices: [...slices.slice(0, index), next] };
+      const merged = mergePullRequestDiffSlices(slices, next);
+      return merged === slices ? previous : { key: scopeKey, cursor, slices: merged };
     });
   }
   const refreshFirstDiffPage = useAtomRefresh(
@@ -430,16 +417,20 @@ function PullRequestCodeTab({
   useEffect(() => {
     if (appliedRefreshToken.current === refreshToken) return;
     appliedRefreshToken.current = refreshToken;
-    setSliceState({ key: scopeKey, cursor: null, slices: NO_SLICES });
+    setSliceState((previous) =>
+      previous.cursor === null ? previous : { ...previous, cursor: null },
+    );
     refreshFirstDiffPage();
     refreshFilesViewed();
-  }, [refreshToken, scopeKey, refreshFirstDiffPage, refreshFilesViewed]);
+  }, [refreshToken, refreshFirstDiffPage, refreshFilesViewed]);
   const appliedBackgroundRefreshToken = useRef(backgroundRefreshToken);
   useEffect(() => {
     if (appliedBackgroundRefreshToken.current === backgroundRefreshToken) return;
     appliedBackgroundRefreshToken.current = backgroundRefreshToken;
     // Keeping slices mounted preserves scroll; the page merge invalidates changed pages.
-    setSliceState((previous) => ({ ...previous, cursor: null }));
+    setSliceState((previous) =>
+      previous.cursor === null ? previous : { ...previous, cursor: null },
+    );
     refreshFirstDiffPage();
     refreshFilesViewed();
   }, [backgroundRefreshToken, refreshFirstDiffPage, refreshFilesViewed]);
@@ -491,7 +482,7 @@ function PullRequestCodeTab({
         ? parsed.files.map(
             (file, index) =>
               [
-                buildFileDiffRenderKey(file),
+                buildFileDiffIdentityKey(file),
                 getDiffLineStat([parsed.sourceFiles[index] ?? file]),
               ] as const,
           )
@@ -525,7 +516,7 @@ function PullRequestCodeTab({
   })();
 
   const annotatedFiles = files.map((fileDiff) => {
-    const fileKey = buildFileDiffRenderKey(fileDiff);
+    const fileKey = buildFileDiffIdentityKey(fileDiff);
     const path = resolveFileDiffPath(fileDiff);
     const groups = new Map<string, MutableAnnotationGroup>();
     const groupAt = (side: PullRequestDiffSide, line: number) => {
@@ -646,7 +637,10 @@ function PullRequestCodeTab({
         fileDiff,
         annotations,
         collapsed,
-        version: fnv1a32(`${collapsed ? "1" : "0"}:${viewedMark}:${annotationsVersion}`),
+        // File identity survives refresh; the parser key still invalidates changed content.
+        version: fnv1a32(
+          `${fileDiff.cacheKey}:${collapsed ? "1" : "0"}:${viewedMark}:${annotationsVersion}`,
+        ),
       };
     },
   );
@@ -697,8 +691,11 @@ function PullRequestCodeTab({
   };
 
   const toggleAllFiles = () => {
-    setFoldOverride(areAllDiffFilesCollapsed(fileKeys, collapsedFileKeys) ? "expanded" : "folded");
-    setToggledFiles(new Set());
+    updateCodeView(codeViewKey, (current) => ({
+      ...current,
+      foldOverride: areAllDiffFilesCollapsed(fileKeys, collapsedFileKeys) ? "expanded" : "folded",
+      toggledFiles: new Set(),
+    }));
   };
 
   const orderedCommits = // By instant, not by the text: GitLab keeps a commit's own UTC offset, so two commits
@@ -714,7 +711,7 @@ function PullRequestCodeTab({
     if (!range || !canSelectLines) return;
     const item = context.item;
     if (item.type !== "diff") return;
-    const file = files.find((candidate) => buildFileDiffRenderKey(candidate) === item.id);
+    const file = files.find((candidate) => buildFileDiffIdentityKey(candidate) === item.id);
     if (!file) return;
     // A range collapses to its last line: only GitHub carries a multi-line comment, and one
     // that silently lost its first line on the other hosts would be worse than one line.
@@ -742,7 +739,7 @@ function PullRequestCodeTab({
     text: string,
     onFinish: (comment: ReviewCommentContext) => void,
   ) => {
-    const file = files.find((candidate) => buildFileDiffRenderKey(candidate) === anchor.fileKey);
+    const file = files.find((candidate) => buildFileDiffIdentityKey(candidate) === anchor.fileKey);
     const comment =
       file === undefined
         ? null
@@ -1451,6 +1448,11 @@ function PullRequestCodeTab({
             <StyledDiffCodeView<ReviewAnnotationGroup>
               className="@container h-full overflow-auto [scrollbar-gutter:stable]"
               containerRef={scrollerRef}
+              onScroll={(scrollTop) =>
+                updateCodeView(codeViewKey, (current) =>
+                  current.scrollTop === scrollTop ? current : { ...current, scrollTop },
+                )
+              }
               viewerRef={setViewer}
               items={items}
               selectedLines={selectedLines}
