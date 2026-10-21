@@ -323,7 +323,7 @@ export interface ThreadFeedProps {
   readonly agentLabel: string;
   readonly latestRun: ThreadFeedLatestRun | null;
   readonly activeWorkStartedAt: string | null;
-  readonly isCompacting?: boolean;
+  readonly isCompacting: boolean;
   readonly runlessWorkActive?: boolean;
   readonly listRef: RefObject<LegendListRef | null>;
   readonly freeze: SharedValue<boolean>;
@@ -2337,7 +2337,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     props.feed,
     props.queuedMessages,
   );
-  const presentedFeed = hideThinkingWhileCompacting(derivedFeed, props.isCompacting === true);
+  const presentedFeed = hideThinkingWhileCompacting(derivedFeed, props.isCompacting);
   const setupAnchorIndex = presentedFeed.findIndex(
     (entry) => entry.type === "message" && entry.message.role === "user",
   );
