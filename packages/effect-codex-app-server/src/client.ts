@@ -1,6 +1,7 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stdio from "effect/Stdio";
@@ -270,6 +271,35 @@ export const layerChildProcess = (
 const makeChildProcessClient = Effect.fn(
   "effect-codex-app-server/CodexAppServerClient.makeChildProcessClient",
 )(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: CodexAppServerClientOptions) {
-  yield* Stream.runDrain(handle.stderr).pipe(Effect.ignore, Effect.forkScoped);
-  return yield* make(makeChildStdio(handle), options, makeTerminationError(handle));
+  let stderr = "";
+  const stderrReader = yield* handle.stderr.pipe(
+    Stream.decodeText(),
+    Stream.runForEach((chunk) =>
+      Effect.sync(() => {
+        stderr = (stderr + chunk).slice(-2_048);
+      }),
+    ),
+    Effect.ignore,
+    Effect.forkScoped,
+  );
+  const terminationError = makeTerminationError(handle).pipe(
+    // A descendant can inherit stderr after the app server exits. Give buffered
+    // diagnostics time to drain without holding pending requests open forever.
+    Effect.tap((error) =>
+      error._tag === "CodexAppServerProcessExitedError"
+        ? Fiber.join(stderrReader).pipe(Effect.timeoutOption("1 second"))
+        : Effect.void,
+    ),
+    Effect.map((error) =>
+      error._tag === "CodexAppServerProcessExitedError"
+        ? new CodexError.CodexAppServerProcessExitedError({
+            code: error.code,
+            pid: handle.pid,
+            cause: error.cause,
+            stderr: stderr.trim(),
+          })
+        : error,
+    ),
+  );
+  return yield* make(makeChildStdio(handle), options, terminationError);
 });

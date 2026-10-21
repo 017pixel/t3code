@@ -40,6 +40,32 @@ it("redacts credentials and URL secrets from provider failures", () => {
   assert.notInclude(failure.message, "sk-abcdefghijklmnop");
 });
 
+it.each(["ClaudeProcessExitedError", "CodexAppServerProcessExitedError"])(
+  "preserves and sanitizes wrapped %s diagnostics",
+  (_tag) => {
+    const failure = makeProviderFailure({
+      cause: Cause.fail({
+        _tag: "ProviderAdapterTurnStartError",
+        cause: {
+          _tag,
+          message:
+            'CLI process exited with code 23. stderr: EPERM Authorization: Bearer bearer-secret https://user:pass@example.test/path?token=url-secret {"token":"json-secret"}',
+          cause: new Error("private underlying defect"),
+        },
+      }),
+    });
+    assert.include(failure.message, "code 23");
+    assert.include(failure.message, "EPERM");
+    assert.include(failure.message, "[REDACTED]");
+    assert.include(failure.message, "https://example.test/path");
+    assert.notInclude(failure.message, "bearer-secret");
+    assert.notInclude(failure.message, "user:pass");
+    assert.notInclude(failure.message, "url-secret");
+    assert.notInclude(failure.message, "json-secret");
+    assert.notInclude(failure.message, "private underlying defect");
+  },
+);
+
 it("does not split a surrogate pair at the truncation boundary", () => {
   const failure = makeProviderFailure({
     message: `${"a".repeat(MAX_PROVIDER_FAILURE_MESSAGE_LENGTH - 2)}🚀tail`,

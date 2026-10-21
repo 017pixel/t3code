@@ -315,15 +315,23 @@ const BACKGROUND_MOVE_TIMEOUT_MS = 5_000;
  * reads (#3089). Those stay in the CLI's group, so the rest of the group gets SIGKILL once the
  * CLI exits for any reason.
  */
-function spawnClaudeProcessGroup(options: ClaudeSpawnOptions): ClaudeSpawnedProcess {
+function spawnClaudeProcessGroup(
+  options: ClaudeSpawnOptions,
+  platform: string,
+  onStderr: (chunk: string) => void,
+) {
   const child = NodeChildProcess.spawn(options.command, options.args, {
     cwd: options.cwd,
     env: options.env,
     signal: options.signal,
-    stdio: ["pipe", "pipe", "ignore"],
-    detached: true,
+    stdio: ["pipe", "pipe", "pipe"],
+    detached: platform !== "win32",
+    ...(platform === "win32" ? { windowsHide: true } : {}),
   });
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", onStderr);
   child.once("exit", () => {
+    if (platform === "win32") return;
     try {
       signalProcessGroup(child.pid ?? 0, "SIGKILL");
     } catch {}
@@ -509,6 +517,23 @@ export class ClaudeAgentSdkQueryRunnerError extends Schema.TaggedError<ClaudeAge
 ) {
   override get message(): string {
     return "Claude Agent SDK query failed.";
+  }
+}
+
+class ClaudeProcessExitedError extends Schema.TaggedError<ClaudeProcessExitedError>()(
+  "ClaudeProcessExitedError",
+  {
+    code: Schema.NullOr(Schema.Number),
+    signal: Schema.NullOr(Schema.String),
+    stderr: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    const status = this.signal
+      ? `Claude Code process terminated by signal ${this.signal}`
+      : `Claude Code process exited with code ${this.code}`;
+    return this.stderr ? `${status}. stderr: ${this.stderr}` : status;
   }
 }
 
@@ -922,19 +947,43 @@ export const layerQueryRunner: Layer.Layer<
                 pathToClaudeCodeExecutable: launch.command,
                 executableArgs: [...launch.args, ...(queryOptions.executableArgs ?? [])],
               };
-        // Windows has no process groups, so there the SDK spawns the CLI itself.
-        const spawnClaudeCodeProcess =
-          options.spawnClaudeCodeProcess ??
-          (platform === "win32" ? undefined : spawnClaudeProcessGroup);
+        let child: ClaudeSpawnedProcess | undefined;
+        let stderr = "";
+        let stderrClosed = Promise.resolve();
+        const spawnClaudeCodeProcess = (spawnOptions: ClaudeSpawnOptions) => {
+          if (options.spawnClaudeCodeProcess) {
+            child = options.spawnClaudeCodeProcess(spawnOptions);
+          } else {
+            const process = spawnClaudeProcessGroup(spawnOptions, platform, (chunk) => {
+              stderr = (stderr + chunk).slice(-2_048);
+            });
+            stderrClosed = new Promise<void>((resolve) => process.stderr.once("close", resolve));
+            child = process;
+          }
+          return child;
+        };
+        const processError = Effect.fn("ClaudeAgentSdkQueryRunner.processExitFailure")(function* (
+          error: ClaudeAgentSdkQueryRunnerError,
+        ) {
+          const code = child?.exitCode;
+          const signal = child?.signalCode ?? null;
+          // Node uses negative errno values when spawn fails, without a process exit.
+          if (code === undefined || ((code === null || code < 0) && signal === null)) {
+            return yield* error;
+          }
+          // Exit can precede the final stderr data; inherited pipes must not hold the turn open.
+          yield* Effect.promise(() => stderrClosed).pipe(Effect.timeoutOption("1 second"));
+          return yield* queryRunnerError(
+            new ClaudeProcessExitedError({ code, signal, stderr: stderr.trim(), cause: error }),
+            error.method,
+          );
+        });
         const queryRuntime = yield* Effect.uninterruptibleMask((restore) =>
           Effect.try({
             try: () =>
               query({
                 prompt,
-                options:
-                  spawnClaudeCodeProcess === undefined
-                    ? options
-                    : { ...options, spawnClaudeCodeProcess },
+                options: { ...options, spawnClaudeCodeProcess },
               }),
             catch: (cause) => queryRunnerError(cause, "query"),
           }).pipe(
@@ -992,6 +1041,9 @@ export const layerQueryRunner: Layer.Layer<
           messages: Stream.fromAsyncIterable(claudeQueryMessages(queryRuntime), (cause) =>
             queryRunnerError(cause, "fromAsyncIterable"),
           ).pipe(
+            Stream.catchTags({
+              ClaudeAgentSdkQueryRunnerError: (error) => Stream.fromEffect(processError(error)),
+            }),
             Stream.tap((message) =>
               logProtocolEvent({
                 direction: "incoming",

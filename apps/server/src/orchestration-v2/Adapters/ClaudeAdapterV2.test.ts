@@ -1790,7 +1790,7 @@ describe("ClaudeAdapterV2 startup failure diagnostics", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-startup-" });
-      const cliPath = path.join(directory, "cli.cjs");
+      const cliPath = path.join(directory, "cli.js");
       const diagnostic = "error: An internal error occurred (EPERM): issue-5943 startup fixture";
       yield* fileSystem.writeFileString(
         cliPath,
@@ -1807,7 +1807,7 @@ describe("ClaudeAdapterV2 startup failure diagnostics", () => {
               nativeThreadId: "native-thread-claude-startup-failure",
               resume: false,
               cwd: directory,
-              environment: {},
+              environment: { PATH: process.env.PATH ?? "" },
             }),
             pathToClaudeCodeExecutable: cliPath,
           },
