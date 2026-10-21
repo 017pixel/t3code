@@ -302,8 +302,8 @@ describe("ChatMarkdown content direction", () => {
           "rtl",
         );
       }
-      const listStyle = getComputedStyle(container.querySelector("ul")!);
-      expect(parseFloat(listStyle.paddingRight)).toBeGreaterThan(parseFloat(listStyle.paddingLeft));
+      const itemStyle = getComputedStyle(container.querySelector("li")!);
+      expect(parseFloat(itemStyle.marginRight)).toBeGreaterThan(parseFloat(itemStyle.marginLeft));
 
       // The final period belongs at the left end of this single-line RTL sentence.
       const text = container.querySelector("p")!.firstChild!;
@@ -347,6 +347,119 @@ describe("ChatMarkdown content direction", () => {
       expect(getComputedStyle(english!).direction).toBe("ltr");
       expect(getComputedStyle(hebrew!).direction).toBe("rtl");
     });
+  });
+
+  it.each(["-", "1."])(
+    "keeps mixed %s list marker gutters inside clipped lists",
+    async (marker) => {
+      setup();
+      await using screen = await renderText(`${marker} שלום.\n${marker} Hello.`);
+      const { container, rerender } = screen;
+      container.style.width = "300px";
+      container.style.overflow = "hidden";
+      for (const text of [
+        `${marker} שלום.\n${marker} Hello.`,
+        `${marker} Hello.\n${marker} שלום.`,
+        `${marker} שלום.\n\n${marker} Hello.`,
+      ]) {
+        await rerender(<ChatMarkdown cwd="/tmp/project" text={text} />);
+        const list = container.querySelector("ul, ol")!;
+        const listBox = list.getBoundingClientRect();
+        const clipBox = container.getBoundingClientRect();
+        for (const item of list.querySelectorAll("li")) {
+          const style = getComputedStyle(item);
+          const box = item.getBoundingClientRect();
+          const rtl = style.direction === "rtl";
+          const gutter = parseFloat(style.fontSize);
+          // Native outside markers have no DOM rect. Reserve a full font-sized
+          // marker gutter and prove that entire paint area survives clipping.
+          expect(style.listStylePosition).toBe("outside");
+          expect(style.listStyleType).not.toBe("none");
+          const left = rtl ? box.right : box.left - gutter;
+          const right = rtl ? box.right + gutter : box.left;
+          expect(left).toBeGreaterThanOrEqual(Math.max(listBox.left, clipBox.left) - 0.5);
+          expect(right).toBeLessThanOrEqual(Math.min(listBox.right, clipBox.right) + 0.5);
+        }
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "separates RTL task text from checkboxes (editable: %s)",
+    async (editable) => {
+      setup();
+      const onTaskListChange = editable ? vi.fn() : undefined;
+      await using screen = await renderText(
+        "- [ ] שלום עולם.\n- [x] مهمة عربية.\n- [ ] English task.",
+        {
+          onTaskListChange,
+        },
+      );
+      const { container } = screen;
+      container.style.width = "300px";
+      for (const item of container.querySelectorAll("li")) {
+        const checkbox = item.querySelector<HTMLInputElement>("input")!;
+        const label = document.createRange();
+        label.setStartAfter(checkbox);
+        label.setEndAfter(item.lastChild!);
+        const textBox = label.getBoundingClientRect();
+        const checkboxBox = checkbox.getBoundingClientRect();
+        const itemBox = item.getBoundingClientRect();
+        if (getComputedStyle(item).direction === "rtl") {
+          expect(checkboxBox.left).toBeGreaterThan(textBox.right);
+          expect(checkboxBox.right).toBeGreaterThan(itemBox.right);
+        } else {
+          expect(checkboxBox.right).toBeLessThan(textBox.left);
+          expect(checkboxBox.left).toBeLessThan(itemBox.left);
+        }
+        const listBox = item.parentElement!.getBoundingClientRect();
+        expect(checkboxBox.left).toBeGreaterThanOrEqual(listBox.left);
+        expect(checkboxBox.right).toBeLessThanOrEqual(listBox.right);
+      }
+      if (editable) {
+        await act(async () => container.querySelector<HTMLInputElement>("input")!.click());
+        expect(onTaskListChange).toHaveBeenCalledExactlyOnceWith({
+          markerOffset: 2,
+          checked: true,
+        });
+      }
+    },
+  );
+
+  it("aligns RTL table text to the right while retaining LTR columns", async () => {
+    setup();
+    await using screen = await renderText("| שם | Name |\n| --- | --- |\n| שלום. | Hello. |");
+    const { container } = screen;
+    container.style.width = "500px";
+    const table = container.querySelector("table")!;
+    expect(getComputedStyle(table).direction).toBe("ltr");
+    for (const row of table.rows) {
+      const [rtl, ltr] = row.cells;
+      expect(rtl!.getBoundingClientRect().left).toBeLessThan(ltr!.getBoundingClientRect().left);
+      for (const cell of row.cells) {
+        const range = document.createRange();
+        range.selectNodeContents(cell);
+        const textBox = range.getBoundingClientRect();
+        const box = cell.getBoundingClientRect();
+        const style = getComputedStyle(cell);
+        const leftGap = textBox.left - box.left - parseFloat(style.paddingLeft);
+        const rightGap = box.right - textBox.right - parseFloat(style.paddingRight);
+        if (style.direction === "rtl") expect(rightGap).toBeLessThan(leftGap);
+        else expect(leftGap).toBeLessThan(rightGap);
+      }
+    }
+  });
+
+  it("puts RTL alert quote chrome on the content side", async () => {
+    setup();
+    await using screen = await renderText("> [!NOTE]\n> שלום עולם.");
+    const note = screen.container.querySelector('[role="note"]')!;
+    const style = getComputedStyle(note);
+    expect(style.direction).toBe("rtl");
+    expect(parseFloat(style.borderRightWidth)).toBe(2);
+    expect(parseFloat(style.borderLeftWidth)).toBe(0);
+    expect(parseFloat(style.paddingRight)).toBeGreaterThan(0);
+    expect(parseFloat(style.paddingLeft)).toBe(0);
   });
 
   it("keeps loose ordered list markers on the paragraph's side", async () => {

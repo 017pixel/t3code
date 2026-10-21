@@ -1793,6 +1793,11 @@ code {
   direction: rtl;
 }
 
+.chat-markdown[data-auto-direction]
+  [data-markdown-alert]:has(> [data-thread-find-ignore] + :dir(rtl)) {
+  direction: rtl;
+}
+
 /* Code and table columns keep their order inside independently directed prose. */
 .chat-markdown[data-auto-direction] :is(pre, code, table) {
   direction: ltr;
@@ -1801,7 +1806,12 @@ code {
 
 .chat-markdown[data-auto-direction] :is(ul, ol) {
   padding-left: 0;
-  padding-inline-start: var(--list-gutter, 1.25rem);
+  padding-right: 0;
+}
+
+/* Each item owns its gutter because adjacent items can have opposite directions. */
+.chat-markdown[data-auto-direction] :is(ul, ol) > li {
+  margin-inline-start: var(--list-gutter, 1.25rem);
 }
 
 .chat-markdown[data-auto-direction] blockquote {
@@ -1966,7 +1976,8 @@ code {
 }
 
 .chat-markdown li.task-list-item input[type="checkbox"] {
-  margin: 0 0.35em 0.15em calc(-1 * var(--list-gutter, 1.25rem));
+  margin-block: 0 0.15em;
+  margin-inline: calc(-1 * var(--list-gutter, 1.25rem)) 0.35em;
   vertical-align: middle;
 }
 
@@ -2157,7 +2168,7 @@ code {
 .chat-markdown th,
 .chat-markdown td {
   padding: 0.45rem 0.75rem;
-  text-align: left;
+  text-align: start;
 }
 
 .chat-markdown thead th {
