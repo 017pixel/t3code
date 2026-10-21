@@ -18,7 +18,6 @@ interface DiffPanelStoreState {
   selectGitScope: (ref: ScopedThreadRef, scope: "branch" | "unstaged") => void;
   selectBranchBaseRef: (ref: ScopedThreadRef, baseRef: string | null) => void;
   selectTurn: (ref: ScopedThreadRef, turnId: RunId, filePath?: string) => void;
-  reconcileTurnSelection: (ref: ScopedThreadRef, availableTurnIds: ReadonlyArray<RunId>) => void;
   removeThread: (ref: ScopedThreadRef) => void;
 }
 
@@ -85,25 +84,6 @@ export const useDiffPanelStore = create<DiffPanelStoreState>()(
             },
           };
         }),
-      reconcileTurnSelection: (ref, availableTurnIds) =>
-        set((state) => {
-          const threadKey = scopedThreadKey(ref);
-          const previous = state.byThreadKey[threadKey];
-          const latestTurnId = availableTurnIds[0];
-          if (
-            previous?.kind !== "turn" ||
-            latestTurnId === undefined ||
-            availableTurnIds.includes(previous.turnId)
-          ) {
-            return state;
-          }
-          return {
-            byThreadKey: {
-              ...state.byThreadKey,
-              [threadKey]: { ...previous, turnId: latestTurnId },
-            },
-          };
-        }),
       removeThread: (ref) =>
         set((state) => {
           const threadKey = scopedThreadKey(ref);
@@ -159,4 +139,14 @@ export function selectThreadDiffPanelSelection(
 ): DiffPanelSelection {
   if (!ref) return DEFAULT_SELECTION;
   return byThreadKey[scopedThreadKey(ref)] ?? DEFAULT_SELECTION;
+}
+
+// An explicit turn selection never falls back to another run: a run without a
+// checkpoint yet (still running, or rolled back) resolves to nothing until it lands.
+export function findSelectedDiffPanelTurn<Turn extends { readonly runId: RunId }>(
+  selection: DiffPanelSelection,
+  turns: ReadonlyArray<Turn>,
+): Turn | undefined {
+  if (selection.kind !== "turn") return undefined;
+  return turns.find((turn) => turn.runId === selection.turnId);
 }

@@ -2,6 +2,7 @@ import type {
   EnvironmentId,
   OrchestrationV2ProjectedTurnItem,
   RunId,
+  ScopedThreadRef,
   ThreadId,
 } from "@t3tools/contracts";
 import {
@@ -20,6 +21,7 @@ import { useRenderedAppearance } from "../../hooks/useTheme";
 import { cn } from "../../lib/utils";
 import { resolveDiffThemeName } from "../../lib/diffRendering";
 import { getSyntaxHighlighterPromise } from "../../lib/syntaxHighlighting";
+import { useThreadCheckpointSummaries } from "../../state/entities";
 import { useTurnItemDetail } from "../../state/queries";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
@@ -35,6 +37,8 @@ import { ShellCommandBlock } from "./ShellCommandBlock";
 interface V2ItemInspectorProps {
   readonly projectedItem: OrchestrationV2ProjectedTurnItem;
   readonly environmentId: EnvironmentId;
+  /** The thread whose diff panel Open diff targets. */
+  readonly threadRef: ScopedThreadRef | null;
   readonly cwd?: string | undefined;
   readonly workspaceRoot?: string | undefined;
   readonly onOpenThread: (threadId: ThreadId) => void;
@@ -234,6 +238,28 @@ function ToolCallBody(
   );
 }
 
+// The diff panel can only show a run's diff once this thread holds its checkpoint.
+function OpenTurnDiffButton(props: {
+  readonly threadRef: ScopedThreadRef;
+  readonly runId: RunId;
+  readonly filePath: string;
+  readonly onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
+}) {
+  const hasCheckpoint = useThreadCheckpointSummaries(props.threadRef).some(
+    (summary) => summary.runId === props.runId,
+  );
+  if (!hasCheckpoint) return null;
+  return (
+    <Button
+      size="xs"
+      variant="outline"
+      onClick={() => props.onOpenTurnDiff(props.runId, props.filePath)}
+    >
+      Open diff
+    </Button>
+  );
+}
+
 export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspectorProps) {
   // Command rows stream their output, including the final output, from the server.
   const streamsOutput =
@@ -293,14 +319,15 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
                 <span className="text-diff-deletion">-{formatDiffCount(item.deletions ?? 0)}</span>
               </span>
             ) : null}
-            {item.runId !== null ? (
-              <Button
-                size="xs"
-                variant="outline"
-                onClick={() => props.onOpenTurnDiff(item.runId!, item.fileName)}
-              >
-                Open diff
-              </Button>
+            {item.runId !== null &&
+            props.threadRef !== null &&
+            props.projectedItem.sourceThreadId === props.threadRef.threadId ? (
+              <OpenTurnDiffButton
+                threadRef={props.threadRef}
+                runId={item.runId}
+                filePath={item.fileName}
+                onOpenTurnDiff={props.onOpenTurnDiff}
+              />
             ) : null}
           </div>
           {item.status === "failed" && item.diffStr?.trim() ? (

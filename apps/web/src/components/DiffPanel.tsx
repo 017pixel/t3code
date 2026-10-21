@@ -30,6 +30,7 @@ import { openDiffFilePrimaryAction } from "../diffFileActions";
 import { useCheckpointDiff } from "~/lib/checkpointDiffState";
 import { cn } from "~/lib/utils";
 import {
+  findSelectedDiffPanelTurn,
   selectThreadDiffPanelSelection,
   useDiffPanelSessionStore,
   useDiffPanelStore,
@@ -263,25 +264,13 @@ export default function DiffPanel({
     return right.completedAt.localeCompare(left.completedAt);
   });
 
-  useEffect(() => {
-    if (!routeThreadRef || diffSelection.kind !== "turn") return;
-    useDiffPanelStore.getState().reconcileTurnSelection(
-      routeThreadRef,
-      orderedTurnDiffSummaries.map((summary) => summary.runId),
-    );
-  }, [diffSelection, orderedTurnDiffSummaries, routeThreadRef]);
-
   const selectedRunId = diffSelection.kind === "turn" ? diffSelection.turnId : null;
   const selectedGitScope = diffSelection.kind === "unstaged" ? "unstaged" : "branch";
   const selectedBaseRef = diffSelection.kind === "branch" ? diffSelection.baseRef : null;
   const selectedFilePath = diffSelection.kind === "turn" ? diffSelection.filePath : null;
   const selectedFileRevealRequestId =
     diffSelection.kind === "turn" ? diffSelection.revealRequestId : 0;
-  const selectedTurn =
-    selectedRunId === null
-      ? undefined
-      : (orderedTurnDiffSummaries.find((summary) => summary.runId === selectedRunId) ??
-        orderedTurnDiffSummaries[0]);
+  const selectedTurn = findSelectedDiffPanelTurn(diffSelection, orderedTurnDiffSummaries);
   const selectedCheckpointTurnCount = selectedTurn?.checkpointTurnCount;
   const latestTurn = orderedTurnDiffSummaries[0];
   const selectedScopeLabel =
@@ -289,7 +278,7 @@ export default function DiffPanel({
       ? selectedGitScope === "unstaged"
         ? "Uncommitted"
         : "Changes"
-      : selectedTurn?.runId === latestTurn?.runId
+      : selectedTurn !== undefined && selectedTurn.runId === latestTurn?.runId
         ? "Latest turn"
         : `Turn ${selectedCheckpointTurnCount ?? "?"}`;
   const reviewSectionId = selectedTurn ? `turn:${selectedTurn.runId}` : selectedGitScope;
@@ -647,7 +636,7 @@ export default function DiffPanel({
   const selectedScopeValue =
     selectedRunId === null
       ? selectedGitScope
-      : selectedTurn?.runId === latestTurn?.runId
+      : selectedTurn !== undefined && selectedTurn.runId === latestTurn?.runId
         ? "latest"
         : selectedTurnValue;
   const selectScopeValue = (value: string) => {
@@ -980,9 +969,11 @@ export default function DiffPanel({
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
           Turn diffs are unavailable because this project is not a git repository.
         </div>
-      ) : selectedRunId !== null && orderedTurnDiffSummaries.length === 0 ? (
+      ) : selectedRunId !== null && selectedTurn === undefined ? (
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
-          No completed turns yet.
+          {orderedTurnDiffSummaries.length === 0
+            ? "No completed turns yet."
+            : "This turn's diff is not available yet."}
         </div>
       ) : selectedRunId === null && !canReadFiles ? (
         fileAccess.isPending ? (

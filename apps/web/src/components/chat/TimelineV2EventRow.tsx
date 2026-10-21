@@ -120,6 +120,7 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
             <V2ItemInspector
               projectedItem={row.projectedItem}
               environmentId={ctx.activeThreadEnvironmentId}
+              threadRef={ctx.threadRef}
               cwd={ctx.markdownCwd}
               workspaceRoot={ctx.workspaceRoot}
               onOpenThread={ctx.onOpenThread}
@@ -195,6 +196,7 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
             <V2ItemInspector
               projectedItem={row.projectedItem}
               environmentId={ctx.activeThreadEnvironmentId}
+              threadRef={ctx.threadRef}
               cwd={ctx.markdownCwd}
               workspaceRoot={ctx.workspaceRoot}
               onOpenThread={ctx.onOpenThread}

@@ -2,6 +2,7 @@ import { EnvironmentId, RunId, ThreadId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
+  findSelectedDiffPanelTurn,
   selectThreadDiffPanelSelection,
   useDiffPanelSessionStore,
   useDiffPanelStore,
@@ -58,12 +59,20 @@ describe("diffPanelStore", () => {
     const store = useDiffPanelStore.getState();
 
     store.selectTurn(threadRef, runningRunId, "src/notes.md");
-    // The running run has no checkpoint yet, so only the earlier turn is available.
-    store.reconcileTurnSelection(threadRef, [completedRunId]);
-    store.reconcileTurnSelection(threadRef, [runningRunId, completedRunId]);
+    const selection = selectThreadDiffPanelSelection(
+      useDiffPanelStore.getState().byThreadKey,
+      threadRef,
+    );
 
+    // The running run has no checkpoint yet, so only the earlier turn is available.
+    expect(findSelectedDiffPanelTurn(selection, [{ runId: completedRunId }])).toBeUndefined();
     expect(
-      selectThreadDiffPanelSelection(useDiffPanelStore.getState().byThreadKey, threadRef),
-    ).toMatchObject({ kind: "turn", turnId: runningRunId, filePath: "src/notes.md" });
+      findSelectedDiffPanelTurn(selection, [{ runId: runningRunId }, { runId: completedRunId }]),
+    ).toEqual({ runId: runningRunId });
+    expect(selection).toMatchObject({
+      kind: "turn",
+      turnId: runningRunId,
+      filePath: "src/notes.md",
+    });
   });
 });

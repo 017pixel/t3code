@@ -528,6 +528,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
             <V2ItemInspector
               projectedItem={workEntry.projectedItem}
               environmentId={ctx.activeThreadEnvironmentId}
+              threadRef={ctx.threadRef}
               cwd={ctx.markdownCwd}
               workspaceRoot={workspaceRoot}
               onOpenThread={ctx.onOpenThread}
