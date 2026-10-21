@@ -5,6 +5,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+import { overlayEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 const quotePath = Schema.encodeSync(Schema.fromJsonString(Schema.String));
@@ -35,15 +36,14 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
   const homePath = config.homePath.trim();
   if (homePath.length === 0) return resolvedBaseEnv;
   const resolvedHomePath = yield* resolveClaudeHomePath(config);
-  return {
-    ...resolvedBaseEnv,
+  return overlayEnvironment(resolvedBaseEnv, {
     // Overriding HOME also relocates the macOS login keychain lookup
     // ($HOME/Library/Keychains), so the spawned CLI can't find its stored
     // OAuth credentials and reports "Not logged in". CLAUDE_CONFIG_DIR points
     // Claude Code at its config dir directly while leaving HOME (and the
     // keychain) intact.
     CLAUDE_CONFIG_DIR: resolvedHomePath,
-  };
+  });
 });
 
 /**

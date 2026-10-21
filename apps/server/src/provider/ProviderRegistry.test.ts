@@ -2,6 +2,11 @@ import { vi } from "vite-plus/test";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Stand in for the login-shell PATH probe without launching the user's shell.
 import * as NodeChildProcess from "node:child_process";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import {
+  LoginShellEnvironment,
+  LoginShellEnvironmentError,
+  type LoginShellEnvironmentReader,
+} from "@t3tools/shared/shell";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as CodexInstallation from "./CodexInstallation.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -1955,8 +1960,13 @@ it.layer(
           const originalShell = process.env.SHELL;
           yield* Effect.addFinalizer(() =>
             Effect.sync(() => {
-              process.env.PATH = originalPath;
-              process.env.SHELL = originalShell;
+              for (const [name, value] of [
+                ["PATH", originalPath],
+                ["SHELL", originalShell],
+              ] as const) {
+                if (value === undefined) delete process.env[name];
+                else process.env[name] = value;
+              }
             }),
           );
           process.env.PATH = "/usr/bin:/bin";
@@ -1971,6 +1981,12 @@ it.layer(
             return `__T3CODE_ENV_PATH_START__\n${userBin}:/usr/bin:/bin\n__T3CODE_ENV_PATH_END__\n`;
           });
           yield* Effect.addFinalizer(() => Effect.sync(() => shellProbe.mockRestore()));
+          const readRecoveredShell: LoginShellEnvironmentReader = () =>
+            shellRecovered
+              ? Effect.succeed({ PATH: `${userBin}:/usr/bin:/bin` })
+              : Effect.fail(
+                  new LoginShellEnvironmentError({ shell: "/bin/bash", detail: "timed out" }),
+                );
 
           yield* fixPath().pipe(Effect.provideService(HostProcess.Platform, "linux"));
           assert.strictEqual(process.env.PATH, "/usr/bin:/bin");
@@ -2052,6 +2068,7 @@ it.layer(
 
             shellRecovered = true;
             claudeLaunchPaths.length = 0;
+            yield* TestClock.adjust("1 minute");
             yield* registry.refresh();
 
             const launches = claudeLaunchPaths.map(({ instance, path }) => ({
@@ -2062,7 +2079,10 @@ it.layer(
               new Set(["bare", "override"]),
             );
             expect(launches.filter((launch) => !launch.sawUserBin)).toEqual([]);
-          }).pipe(Effect.provide(runtimeServices));
+          }).pipe(
+            Effect.provide(runtimeServices),
+            Effect.provideService(LoginShellEnvironment, readRecoveredShell),
+          );
         }).pipe(Effect.provide(NodeServices.layer)),
     );
 

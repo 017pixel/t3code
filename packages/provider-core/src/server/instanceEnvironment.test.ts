@@ -71,4 +71,28 @@ describe("mergeProviderInstanceEnvironment", () => {
       });
     }),
   );
+
+  it.effect("follows host PATH repairs made after the merge unless the instance sets PATH", () =>
+    Effect.gen(function* () {
+      const host: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
+      const inherited = yield* mergeProviderInstanceEnvironment(
+        [{ name: "CUSTOM_VALUE", value: "x", sensitive: false }],
+        host,
+      );
+      const pinned = yield* mergeProviderInstanceEnvironment(
+        [{ name: "PATH", value: "/pinned", sensitive: false }],
+        host,
+      );
+
+      host.PATH = "/home/ada/.local/bin:/usr/bin";
+      host.__MISE_DIFF = "mise-diff";
+
+      expect({ ...inherited }).toEqual({
+        PATH: "/home/ada/.local/bin:/usr/bin",
+        __MISE_DIFF: "mise-diff",
+        CUSTOM_VALUE: "x",
+      });
+      expect(pinned.PATH).toBe("/pinned");
+    }),
+  );
 });

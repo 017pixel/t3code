@@ -1,14 +1,20 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it as effectIt } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { CommandAvailability, WindowsShellEnvironment } from "@t3tools/shared/shell";
+import {
+  CommandAvailability,
+  LoginShellEnvironment,
+  LoginShellEnvironmentError,
+  WindowsShellEnvironment,
+} from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Observe the existing synchronous shell probe without launching the user's login shell.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeOS from "node:os";
 import { assert, it, vi } from "vite-plus/test";
 
-import { fixPath, hydratePosixHome } from "./os-jank.ts";
+import { fixPath, hydratePosixHome, recoverLoginShellPath } from "./os-jank.ts";
 
 vi.mock("node:child_process", { spy: true });
 
@@ -150,4 +156,58 @@ effectIt.effect("replaces a Path-spelled Windows PATH instead of adding a second
 
     assert.deepEqual(env, { PATH: "C:\\Tools;C:\\Windows" });
   }),
+);
+
+effectIt.effect("retries a timed-out startup login shell at most once per interval", () =>
+  Effect.acquireUseRelease(
+    Effect.sync(() =>
+      vi.spyOn(NodeChildProcess, "execFileSync").mockImplementation(() => {
+        throw new Error("spawnSync /bin/bash ETIMEDOUT");
+      }),
+    ),
+    () =>
+      Effect.gen(function* () {
+        const env: NodeJS.ProcessEnv = { SHELL: "/bin/bash", PATH: "/usr/bin" };
+        const probes: Array<string> = [];
+        let recovered = false;
+        const recover = recoverLoginShellPath().pipe(
+          Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.provideService(HostProcess.Environment, env),
+          Effect.provideService(LoginShellEnvironment, (shell) => {
+            probes.push(shell);
+            return recovered
+              ? Effect.succeed({ PATH: "/home/me/.local/bin", __MISE_DIFF: "mise-diff" })
+              : Effect.fail(new LoginShellEnvironmentError({ shell, detail: "timed out" }));
+          }),
+        );
+
+        yield* fixPath().pipe(
+          Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.provideService(HostProcess.Environment, env),
+          Effect.provide(NodeServices.layer),
+        );
+        yield* recover;
+        assert.deepEqual(probes, []);
+
+        yield* TestClock.adjust("1 minute");
+        yield* recover;
+        yield* recover;
+        assert.isAbove(probes.length, 0);
+        const failedProbes = probes.length;
+        assert.equal(env.PATH, "/usr/bin");
+
+        recovered = true;
+        yield* TestClock.adjust("1 minute");
+        yield* recover;
+        assert.equal(env.PATH, "/home/me/.local/bin:/usr/bin");
+        assert.equal(env.__MISE_DIFF, "mise-diff");
+
+        const probesAfterRecovery = probes.length;
+        assert.isAbove(probesAfterRecovery, failedProbes);
+        yield* TestClock.adjust("1 minute");
+        yield* recover;
+        assert.equal(probes.length, probesAfterRecovery);
+      }),
+    (probe) => Effect.sync(() => probe.mockRestore()),
+  ),
 );

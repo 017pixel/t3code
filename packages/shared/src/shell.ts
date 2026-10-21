@@ -12,6 +12,7 @@ import * as Path from "effect/Path";
 
 import * as HostProcess from "./HostProcess.ts";
 import * as Context from "effect/Context";
+import * as Data from "effect/Data";
 const SHELL_ENV_NAME_PATTERN = /^[A-Z0-9_]+$/;
 const WINDOWS_PATH_DELIMITER = ";";
 const POSIX_PATH_DELIMITER = ":";
@@ -319,6 +320,73 @@ export const readEnvironmentFromLoginShell: ShellEnvironmentReader = (
 
   return environment;
 };
+
+export class LoginShellEnvironmentError extends Data.TaggedError("LoginShellEnvironmentError")<{
+  readonly shell: string;
+  readonly detail: string;
+}> {
+  override get message(): string {
+    return `${this.shell}: ${this.detail}`;
+  }
+}
+
+export type LoginShellEnvironmentReader = (
+  shell: string,
+  names: ReadonlyArray<string>,
+) => Effect.Effect<Partial<Record<string, string>>, LoginShellEnvironmentError>;
+
+// The same probe as `readEnvironmentFromLoginShell`, for callers that must not
+// hold the event loop while a slow profile loads.
+const readEnvironmentFromLoginShellAsync: LoginShellEnvironmentReader = (shell, names) =>
+  Effect.callback<string, LoginShellEnvironmentError>((resume) => {
+    const child = NodeChildProcess.spawn(
+      shell,
+      ["-ilc", buildEnvironmentCaptureCommand(shell, names)],
+      { detached: true, stdio: ["ignore", "pipe", "ignore"] },
+    );
+    let output = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      output += chunk;
+    });
+    child.once("error", (error) =>
+      resume(Effect.fail(new LoginShellEnvironmentError({ shell, detail: error.message }))),
+    );
+    child.once("close", (code, signal) =>
+      resume(
+        code === 0
+          ? Effect.succeed(output)
+          : Effect.fail(
+              new LoginShellEnvironmentError({ shell, detail: `exited with ${signal ?? code}` }),
+            ),
+      ),
+    );
+    return Effect.sync(() => {
+      child.kill();
+    });
+  }).pipe(
+    Effect.timeoutOrElse({
+      duration: "5 seconds",
+      orElse: () => Effect.fail(new LoginShellEnvironmentError({ shell, detail: "timed out" })),
+    }),
+    Effect.map((output) => {
+      const environment: Partial<Record<string, string>> = {};
+      for (const name of names) {
+        const value = extractEnvironmentValue(output, name);
+        if (value !== undefined) {
+          environment[name] = value;
+        }
+      }
+      return environment;
+    }),
+  );
+
+export const LoginShellEnvironment = Context.Reference<LoginShellEnvironmentReader>(
+  "@t3tools/shared/shell/LoginShellEnvironment",
+  {
+    defaultValue: () => readEnvironmentFromLoginShellAsync,
+  },
+);
 
 export type WindowsShellEnvironmentReader = (
   names: ReadonlyArray<string>,
