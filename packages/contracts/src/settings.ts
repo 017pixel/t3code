@@ -654,9 +654,12 @@ export type IdleCompactionMode = typeof IdleCompactionMode.Type;
 
 // The mode replaced `compactIdleThreads`, a beta on/off switch for compacting before the
 // cache expires. Clients that predate the mode decode that key as a boolean, so the mode
-// lives under its own key and the old one stays off the wire.
-export const legacyCompactIdleThreadsMode = (enabled: boolean): IdleCompactionMode =>
-  enabled ? "beforeCacheExpires" : "onReturn";
+// lives under its own key and the switch stays on the wire as a mirror of it. Builds from
+// shortly after the change send the mode itself under the old key.
+export const legacyCompactIdleThreadsMode = (
+  value: boolean | IdleCompactionMode,
+): IdleCompactionMode =>
+  value === true ? "beforeCacheExpires" : value === false ? "onReturn" : value;
 
 const INSTANCE_IDLE_COMPACTION_MODES = [
   { value: "default", label: "Use default" },
@@ -1199,6 +1202,11 @@ export const ServerSettings = Schema.Struct({
   idleCompaction: IdleCompactionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("onReturn" as const)),
   ),
+  /**
+   * True when `idleCompaction` is "beforeCacheExpires", for clients that predate it.
+   * Servers that predate `idleCompaction` send only this.
+   */
+  compactIdleThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   snoozeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   autoResumeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarAutoSettleKeepPullRequests: Schema.Boolean.pipe(
@@ -1374,8 +1382,13 @@ export const resolveProjectProviderInstanceEnabled = (
 
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 
+export const resolveDefaultIdleCompaction = (
+  settings: Pick<ServerSettings, "idleCompaction" | "compactIdleThreads">,
+): IdleCompactionMode =>
+  settings.compactIdleThreads ? "beforeCacheExpires" : settings.idleCompaction;
+
 export const resolveIdleCompaction = (
-  settings: Pick<ServerSettings, "providerInstances" | "idleCompaction">,
+  settings: Pick<ServerSettings, "providerInstances" | "idleCompaction" | "compactIdleThreads">,
   instanceId: ProviderInstanceId,
 ): IdleCompactionMode => {
   const instance = Object.hasOwn(settings.providerInstances, instanceId)
@@ -1385,7 +1398,7 @@ export const resolveIdleCompaction = (
     Option.map((config) => config.idleCompaction),
     Option.getOrElse(() => "default" as const),
   );
-  return override === "default" ? settings.idleCompaction : override;
+  return override === "default" ? resolveDefaultIdleCompaction(settings) : override;
 };
 
 export const ServerSettingsOperation = Schema.Literals([
@@ -1530,8 +1543,8 @@ export const ServerSettingsPatch = Schema.Struct({
   easDeviceHosts: Schema.optionalKey(EasDeviceHostConfigs),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   idleCompaction: Schema.optionalKey(IdleCompactionMode),
-  // Sent by clients that predate `idleCompaction`.
-  compactIdleThreads: Schema.optionalKey(Schema.Boolean),
+  // Sent by clients that predate `idleCompaction`, and by current clients for older servers.
+  compactIdleThreads: Schema.optionalKey(Schema.Union([Schema.Boolean, IdleCompactionMode])),
   sidebarAutoSettleKeepPullRequests: Schema.optionalKey(Schema.Boolean),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),

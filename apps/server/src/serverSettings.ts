@@ -276,25 +276,13 @@ const PersistedResponseStreamingMode = Schema.Union([
     }),
   ),
 );
-// Files written before `idleCompaction` keep the mode under `compactIdleThreads`: the beta
-// switch, or for a short while the mode itself.
-const PersistedCompactIdleThreads = Schema.Union([
-  IdleCompactionMode,
-  Schema.Boolean.pipe(
-    Schema.decodeTo(
-      IdleCompactionMode,
-      SchemaTransformation.transform({
-        decode: legacyCompactIdleThreadsMode,
-        encode: (mode) => mode === "beforeCacheExpires",
-      }),
-    ),
-  ),
-]);
 const ServerSettingsJson = fromLenientJson(
   Schema.Struct({
     ...ServerSettings.fields,
+    // Files written before `idleCompaction` keep the mode under `compactIdleThreads`: the
+    // beta switch, or for a short while the mode itself.
     idleCompaction: Schema.optionalKey(IdleCompactionMode),
-    compactIdleThreads: Schema.optionalKey(PersistedCompactIdleThreads),
+    compactIdleThreads: Schema.optionalKey(Schema.Union([Schema.Boolean, IdleCompactionMode])),
     responseStreamingMode: PersistedResponseStreamingMode.pipe(
       Schema.withDecodingDefault(Effect.succeed("paragraph" as const)),
     ),
@@ -701,10 +689,15 @@ const make = Effect.gen(function* () {
         }
       } else {
         const { idleCompaction, compactIdleThreads, ...decodedSettings } = decoded.value;
+        const mode =
+          idleCompaction ??
+          (compactIdleThreads === undefined
+            ? DEFAULT_SERVER_SETTINGS.idleCompaction
+            : legacyCompactIdleThreadsMode(compactIdleThreads));
         settings = {
           ...decodedSettings,
-          idleCompaction:
-            idleCompaction ?? compactIdleThreads ?? DEFAULT_SERVER_SETTINGS.idleCompaction,
+          idleCompaction: mode,
+          compactIdleThreads: mode === "beforeCacheExpires",
         };
       }
     }

@@ -7,8 +7,10 @@ import { useEffect, useRef, useState } from "react";
 import {
   type DesktopUpdateChannel,
   IDLE_COMPACTION_MODES,
+  type IdleCompactionMode,
   ProviderDriverKind,
   type ProviderInstanceId,
+  resolveDefaultIdleCompaction,
   type SidebarProjectGroupingMode,
 } from "@t3tools/contracts";
 import {
@@ -790,6 +792,10 @@ export function GeneralSettingsPanel() {
   const isEnvironmentScope = scope.environmentIds.length === 1 && environmentId !== null;
   const hasServerTargets = connectedEnvironments.length > 0;
   const mixedResponseStreamingMode = useScopedSettingsMixed(["responseStreamingMode"]);
+  const idleCompaction = resolveDefaultIdleCompaction(settings);
+  // Servers that predate `idleCompaction` only read the beta switch.
+  const updateIdleCompaction = (mode: IdleCompactionMode) =>
+    updateSettings({ idleCompaction: mode, compactIdleThreads: mode === "beforeCacheExpires" });
   const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
     readLastEnabledProjectGroupingMode(),
   );
@@ -996,35 +1002,28 @@ export function GeneralSettingsPanel() {
 
         <SettingsRow
           serverScoped
-          settingKeys={["idleCompaction"]}
+          settingKeys={["idleCompaction", "compactIdleThreads"]}
           {...searchableSetting("compact-idle-threads")}
           description="When to compact an idle Claude thread over 200,000 tokens: after you return, just before its prompt cache expires, or never. Each Claude provider can override this."
           resetAction={
-            settings.idleCompaction !== DEFAULT_UNIFIED_SETTINGS.idleCompaction ? (
+            idleCompaction !== DEFAULT_UNIFIED_SETTINGS.idleCompaction ? (
               <SettingResetButton
                 label="compact idle threads"
-                onClick={() =>
-                  updateSettings({
-                    idleCompaction: DEFAULT_UNIFIED_SETTINGS.idleCompaction,
-                  })
-                }
+                onClick={() => updateIdleCompaction(DEFAULT_UNIFIED_SETTINGS.idleCompaction)}
               />
             ) : null
           }
           control={
             <Select
-              value={settings.idleCompaction}
+              value={idleCompaction}
               onValueChange={(value) => {
                 const mode = IDLE_COMPACTION_MODES.find((candidate) => candidate.value === value);
-                if (mode) updateSettings({ idleCompaction: mode.value });
+                if (mode) updateIdleCompaction(mode.value);
               }}
             >
               <SelectTrigger size="sm" className="w-full sm:w-56" aria-label="Compact idle threads">
                 <SelectValue>
-                  {
-                    IDLE_COMPACTION_MODES.find((mode) => mode.value === settings.idleCompaction)
-                      ?.label
-                  }
+                  {IDLE_COMPACTION_MODES.find((mode) => mode.value === idleCompaction)?.label}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>

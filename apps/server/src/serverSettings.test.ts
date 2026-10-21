@@ -213,21 +213,23 @@ it.layer(NodeServices.layer)("server settings", (it) => {
   );
 
   it.effect.each([
-    { saved: true, mode: "beforeCacheExpires" },
-    { saved: false, mode: "onReturn" },
-    { saved: "off", mode: "off" },
-  ] as const)("reads idle compaction saved as compactIdleThreads: $saved", ({ saved, mode }) =>
+    { saved: { compactIdleThreads: true }, mode: "beforeCacheExpires" },
+    { saved: { compactIdleThreads: false }, mode: "onReturn" },
+    { saved: { compactIdleThreads: "off" }, mode: "off" },
+    { saved: { idleCompaction: "off", compactIdleThreads: true }, mode: "off" },
+  ] as const)("reads idle compaction saved as $saved", ({ saved, mode }) =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
       const fs = yield* FileSystem.FileSystem;
       const service = yield* ServerSettingsModule.ServerSettingsService;
       yield* fs.writeFileString(
         config.settingsPath,
-        JSON.stringify({ compactIdleThreads: saved, enableAgentBrowserAccess: false }),
+        JSON.stringify({ ...saved, enableAgentBrowserAccess: false }),
       );
 
       const settings = yield* service.getSettings;
       assert.equal(settings.idleCompaction, mode);
+      assert.equal(settings.compactIdleThreads, mode === "beforeCacheExpires");
       assert.isFalse(settings.enableAgentBrowserAccess);
     }).pipe(Effect.provide(layerServerSettings())),
   );

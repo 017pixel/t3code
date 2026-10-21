@@ -479,6 +479,7 @@ export function applyServerSettingsPatch(
   });
   const nextWithReplacementsBase = {
     ...next,
+    compactIdleThreads: next.idleCompaction === "beforeCacheExpires",
     favorites,
     providerModelPreferences: nextModelPreferences,
     ...(worktreeCleanupPatch === undefined
