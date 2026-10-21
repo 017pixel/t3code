@@ -8,6 +8,7 @@ import {
   OrchestratorMcpTarget,
   type OrchestrationV2ThreadShell,
   type ScheduledTask,
+  type ScheduledTaskUpsertInput,
   ScheduledTaskId,
   ProjectId,
   ProviderDriverKind,
@@ -1926,6 +1927,126 @@ describe("OrchestratorMcpService provider resolution", () => {
           ),
         ),
       );
+
+    describe("scheduled task workspace strategies", () => {
+      it.effect.each([
+        { operation: "create", defaultBranch: "master", bound: false },
+        { operation: "create", defaultBranch: "main", bound: false },
+        { operation: "update", defaultBranch: "master", bound: false },
+        { operation: "update", defaultBranch: "main", bound: false },
+      ] as const)(
+        "$operation uses the project's $defaultBranch default branch when unbound",
+        ({ operation, defaultBranch, bound }) =>
+          checkWorkspaceStrategy(operation, defaultBranch, bound),
+      );
+
+      it.effect.each(["create", "update"] as const)(
+        "%s keeps bound tasks in the project root",
+        (operation) => checkWorkspaceStrategy(operation, "master", true),
+      );
+
+      it.effect("preserves an explicit workspace when updating only the prompt", () =>
+        checkWorkspaceStrategy("update", "master", undefined),
+      );
+
+      const checkWorkspaceStrategy = Effect.fn("test.checkScheduledTaskWorkspace")(function* (
+        operation: "create" | "update",
+        defaultBranch: string,
+        bindToCurrentThread: boolean | undefined,
+      ) {
+        const shell = {
+          ...liveThreadShell(boundThreadId, { runtimeMode: "approval-required" }),
+          projectId,
+        };
+        const explicitWorkspace = {
+          type: "worktree",
+          baseRef: "release/custom-base",
+          startFromOrigin: false,
+        } as const;
+        const existing = task({
+          threadId: bindToCurrentThread === undefined ? null : boundThreadId,
+          workspaceStrategy:
+            bindToCurrentThread === undefined ? explicitWorkspace : { type: "root" },
+        });
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const scope: McpInvocationScope = {
+          ...supervisedClient,
+          client: undefined,
+          thread: {
+            threadId: boundThreadId,
+            providerSessionId: "provider:scheduled",
+            providerInstanceId: shell.providerInstanceId,
+          },
+        };
+        const dependencies = Layer.mergeAll(
+          NodeServices.layer,
+          Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+          Layer.mock(GitVcsDriver.GitVcsDriver)({
+            resolvePrimaryRemoteName: () => Effect.succeed("origin"),
+            resolveDefaultBranchName: (cwd, remoteName) => {
+              assert.equal(cwd, "/projects/scheduled");
+              assert.equal(remoteName, "origin");
+              return Effect.succeed(defaultBranch);
+            },
+          }),
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getThreadShell: () => Effect.succeed(shell),
+            getThreadRecords: () => Effect.succeed(idleThreadProjection(shell)),
+          }),
+          ServerSettings.layerTest(),
+          Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+          Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+            list: () => Effect.succeed([]),
+          }),
+          Layer.mock(ProjectService.ProjectService)({
+            getById: () =>
+              Effect.succeedSome({
+                id: projectId,
+                title: "Scheduled project",
+                workspaceRoot: "/projects/scheduled",
+                defaultModelSelection: existing.modelSelection,
+                scripts: [],
+                createdAt: existing.createdAt,
+                updatedAt: existing.updatedAt,
+                deletedAt: null,
+              }),
+          }),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+            list: () => Effect.succeed({ tasks: [existing] }),
+            upsert: (input) =>
+              Ref.update(saved, (inputs) => [...inputs, input]).pipe(Effect.as({ task: existing })),
+          }),
+        );
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))),
+        );
+        if (operation === "create") {
+          yield* mcp.scheduleTask(scope, {
+            prompt: "Check the project",
+            schedule: { type: "interval", everyMs: 60_000 },
+            bindToCurrentThread,
+          });
+        } else {
+          yield* mcp.updateScheduledTask(scope, {
+            scheduledTaskId: existing.id,
+            prompt: "Check the project again",
+            ...(bindToCurrentThread === undefined ? {} : { bindToCurrentThread }),
+          });
+        }
+        const inputs = yield* Ref.get(saved);
+        assert.equal(inputs.length, 1);
+        assert.equal(inputs[0]!.threadId, bindToCurrentThread ? boundThreadId : null);
+        assert.deepEqual(
+          inputs[0]!.workspaceStrategy,
+          bindToCurrentThread === undefined
+            ? explicitWorkspace
+            : bindToCurrentThread
+              ? { type: "root" }
+              : { type: "worktree", baseRef: defaultBranch, startFromOrigin: true },
+        );
+      });
+    });
 
     it.effect("hides a webhook URL from a caller below the task's modes", () =>
       Effect.gen(function* () {
