@@ -52,11 +52,10 @@ const isNumericLiteral = (node: unknown) =>
     (expression) => expression.type === "Literal" && typeof expression.value === "number",
   );
 
-const isFunction = (node: unknown) =>
+const isStringLiteral = (node: unknown) =>
   Option.exists(
     unwrapExpression(node),
-    (expression) =>
-      expression.type === "ArrowFunctionExpression" || expression.type === "FunctionExpression",
+    (expression) => expression.type === "Literal" && typeof expression.value === "string",
   );
 
 const enclosingStatement = (node: ESTree.Node): ESTree.Node => {
@@ -115,7 +114,7 @@ export default defineRule({
         if (
           isNumericLiteral(third) ||
           hasOption(third, TIMEOUT_OPTIONS) ||
-          (isFunction(third) && hasOption(second, TIMEOUT_OPTIONS))
+          hasOption(second, TIMEOUT_OPTIONS)
         ) {
           context.report({ node, message: TIMEOUT_MESSAGE });
         }
@@ -130,7 +129,9 @@ export default defineRule({
         if (!Option.exists(getPropertyName(node.property), (n) => FOCUS_OR_SKIP_MODIFIERS.has(n))) {
           return;
         }
-        if (node.computed || !isTestChain(node.object)) return;
+        // `it["skip"](...)` is the same registration; only a dynamic key is unknowable here.
+        if (node.computed && !isStringLiteral(node.property)) return;
+        if (!isTestChain(node.object)) return;
         reportUnlessQuarantined(node);
       },
     };

@@ -118,6 +118,24 @@ describe(RULE, () => {
       assert.equal(output.match(/no-test-timeout-or-unreasoned-skip/g)?.length, 4);
     },
   );
+  rule.invalid(
+    "flags an options-object timeout when the callback is a reference",
+    `
+      import { it } from "vitest";
+      const run = async () => {};
+      it("slow", { timeout: 30_000 }, run);
+    `,
+    assertTimeoutMessage,
+  );
+
+  rule.invalid(
+    "flags a bracket-access skip without a quarantine issue",
+    `
+      import { it } from "vitest";
+      it["skip"]("later", () => {});
+    `,
+    assertSkipMessage,
+  );
 });
 
 createOxlintRuleHarness(RULE, { filename: "Provider.live.test.ts" }).valid(
