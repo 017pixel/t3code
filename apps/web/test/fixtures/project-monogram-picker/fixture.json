@@ -20,7 +20,7 @@
   "seed": [
     "Create workspaceRoot, then use Add project in the real app to add it and name it projectName.",
     "Open Settings, select projectName, choose Project, then Choose icon.",
-    "Evaluate project-monogram-picker.js in that browser tab. The first icon mutation pins its project id.",
+    "Evaluate browser.mjs in that browser tab. The first icon mutation pins its project id.",
     "Before each sequence, use Reset project icon to restore Automatic, then Choose icon; choose blue for non-emoji modes.",
     "Set monogramEvidence.mode to pass, hold, server-reject, or reject before Save icon.",
     "Use identical UI inputs and checkpoints on both revisions. Collect full viewport screenshots and environment().",
