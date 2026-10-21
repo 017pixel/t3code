@@ -138,6 +138,7 @@ describe("thread execution presentation", () => {
       failure: {
         class: "usage_limit" as const,
         message: "Plan limit reached",
+        resetAt: DateTime.formatIso(DateTime.add(now, { minutes: 1 })),
         code: "usageLimitExceeded",
         retryable: null,
       },
@@ -186,6 +187,19 @@ describe("thread execution presentation", () => {
       summary: "Background work finished",
     };
     const woke = { ...projection, runs: [failed, wake], turnItems: [item, notification] };
+    expect(
+      deriveThreadRuntime({
+        ...woke,
+        runs: [failed, { ...wake, completedAt: DateTime.add(now, { minutes: 2 }) }],
+      }),
+    ).toMatchObject({ status: "completed", lastErrorClass: null });
+    expect(
+      usageLimitBlockedRun(
+        [failed, { ...wake, completedAt: DateTime.add(now, { minutes: 1 }) }],
+        woke.turnItems,
+        null,
+      )?.id,
+    ).toBe(failed.id);
     expect(deriveThreadRuntime(woke)).toMatchObject({
       status: "failed",
       lastErrorClass: "usage_limit",

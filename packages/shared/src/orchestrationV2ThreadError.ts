@@ -80,7 +80,12 @@ export function usageLimitBlockedRun(
   turnItems: ReadonlyArray<OrchestrationV2TurnItem>,
   sessionError: string | null,
 ): OrchestrationV2Run | null {
-  // A completed notification wake does not continue the work stopped by a limit.
+  const failed = latestExecutedRun(runs.filter((run) => run.status === "failed"));
+  const failure = latestRootProviderFailure(failed, turnItems);
+  if (failure?.class !== "usage_limit") return null;
+  const resetAt = failure.resetAt == null ? NaN : Date.parse(failure.resetAt);
+  // Before reset, a completed notification wake cannot supersede the limited work.
+  // After reset, success is authoritative even when the input was a notification.
   const firstInputs = new Map<
     NonNullable<OrchestrationV2TurnItem["nodeId"]>,
     Extract<OrchestrationV2TurnItem, { type: "user_message" | "notification" }>
@@ -95,6 +100,8 @@ export function usageLimitBlockedRun(
     runs.filter(
       (run) =>
         run.status !== "completed" ||
+        run.completedAt === null ||
+        !(DateTime.toEpochMillis(run.completedAt) <= resetAt) ||
         run.rootNodeId === null ||
         firstInputs.get(run.rootNodeId)?.type !== "notification",
     ),

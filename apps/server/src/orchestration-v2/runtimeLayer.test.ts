@@ -1,3 +1,7 @@
+import {
+  latestExecutedRun,
+  usageLimitBlockedRun,
+} from "@t3tools/shared/orchestrationV2ThreadError";
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
@@ -5471,7 +5475,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("shared application data plane", (
 });
 
 it.layer(layerTest)("usage-limit recovery", (it) => {
-  it.effect.each(["interrupted", "usage_limit"] as const)(
+  it.effect.each(["interrupted", "usage_limit", "usage_limit_wake"] as const)(
     "manually resumes an %s run ahead of its queued message only once",
     (reason) =>
       Effect.gen(function* () {
@@ -5554,7 +5558,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           ],
         });
         let scheduledResume: ReturnType<typeof limitRecoveryCommand> = null;
-        if (reason === "usage_limit") {
+        if (reason !== "interrupted") {
           const resetAt = DateTime.formatIso(DateTime.add(now, { minutes: 1 }));
           yield* events.write({
             events: [
@@ -5590,24 +5594,97 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
               },
             ],
           });
+          if (reason === "usage_limit_wake") {
+            yield* TestClock.adjust("2 seconds");
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make("manual-resume:wake"),
+              threadId,
+              messageId: MessageId.make("manual-resume:wake"),
+              text: "Background task finished.",
+              attachments: [],
+              notification: {
+                source: { kind: "background_task" },
+                outcome: "completed",
+                summary: "Background task finished",
+              },
+              dispatchMode: { type: "queue_after_active" },
+              createdBy: "agent",
+              creationSource: "provider",
+            });
+            const wake = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+            const completedAt = yield* DateTime.now;
+            yield* events.write({
+              events: [
+                {
+                  id: EventId.make("manual-resume:wake-running"),
+                  type: "run.updated",
+                  threadId,
+                  occurredAt: completedAt,
+                  payload: {
+                    ...wake,
+                    status: "running",
+                    startedAt: completedAt,
+                    completedAt: null,
+                  },
+                },
+              ],
+            });
+            const activeWakeResume = yield* orchestrator
+              .dispatch({
+                type: "message.dispatch",
+                commandId: CommandId.make("manual-resume:active-wake"),
+                threadId,
+                messageId: MessageId.make("manual-resume:active-wake"),
+                manualContinuationOfRunId: source.id,
+                text: "Continue where you left off.",
+                attachments: [],
+                dispatchMode: { type: "start_immediately" },
+                createdBy: "user",
+                creationSource: "web",
+              })
+              .pipe(Effect.exit);
+            assert.equal(activeWakeResume._tag, "Failure");
+            yield* events.write({
+              events: [
+                {
+                  id: EventId.make("manual-resume:wake-completed"),
+                  type: "run.updated",
+                  threadId,
+                  occurredAt: completedAt,
+                  payload: { ...wake, status: "completed", startedAt: completedAt, completedAt },
+                },
+              ],
+            });
+          }
           const shell = (yield* orchestrator.getShellSnapshot()).threads.find(
             (thread) => thread.id === threadId,
           )!;
-          yield* orchestrator.dispatch(
-            limitRecoveryCommand(shell, true, DateTime.toEpochMillis(now))!,
-          );
-          const armed = (yield* orchestrator.getShellSnapshot()).threads.find(
-            (thread) => thread.id === threadId,
-          )!;
-          scheduledResume = limitRecoveryCommand(armed, true, Date.parse(resetAt));
-          assert.isNotNull(scheduledResume);
+          if (reason === "usage_limit_wake") {
+            assert.isNull(limitRecoveryCommand(shell, false, DateTime.toEpochMillis(now)));
+            yield* TestClock.adjust("1 minute");
+          } else {
+            yield* orchestrator.dispatch(
+              limitRecoveryCommand(shell, true, DateTime.toEpochMillis(now))!,
+            );
+            const armed = (yield* orchestrator.getShellSnapshot()).threads.find(
+              (thread) => thread.id === threadId,
+            )!;
+            scheduledResume = limitRecoveryCommand(armed, true, Date.parse(resetAt));
+            assert.isNotNull(scheduledResume);
+          }
         }
+        const current = yield* orchestrator.getThreadProjection(threadId);
+        const selected =
+          usageLimitBlockedRun(current.runs, current.turnItems, null) ??
+          latestExecutedRun(current.runs);
+        assert.equal(selected?.id, source.id);
         const resume = (suffix: string) => ({
           type: "message.dispatch" as const,
           commandId: CommandId.make(`manual-resume:${suffix}:${reason}`),
           threadId,
           messageId: MessageId.make(`manual-resume:${suffix}:${reason}`),
-          manualContinuationOfRunId: source.id,
+          manualContinuationOfRunId: selected!.id,
           text: "Continue where you left off.",
           attachments: [],
           dispatchMode: { type: "start_immediately" as const },
@@ -5616,9 +5693,11 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         });
         yield* orchestrator.dispatch(resume("first"));
         const after = yield* orchestrator.getThreadProjection(threadId);
-        assert.lengthOf(after.runs, 3);
+        const expectedRuns = reason === "usage_limit_wake" ? 4 : 3;
+        assert.lengthOf(after.runs, expectedRuns);
         assert.equal(after.runs[1]?.status, "queued");
-        assert.equal(after.runs[2]?.status, "starting");
+        assert.isFalse(after.runs[1]?.queueHeld ?? false);
+        assert.equal(after.runs.at(-1)?.status, "starting");
         assert.equal(
           (yield* orchestrator.dispatch(resume("second")).pipe(Effect.exit))._tag,
           "Failure",
@@ -5627,7 +5706,18 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           yield* TestClock.adjust("1 minute");
           yield* orchestrator.dispatch(scheduledResume);
         }
-        assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 3);
+        assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, expectedRuns);
+        if (reason === "usage_limit_wake") {
+          yield* orchestrator.dispatch({
+            type: "queue.resume",
+            commandId: CommandId.make("manual-resume:release-queue"),
+            threadId,
+          });
+          const released = yield* orchestrator.getThreadProjection(threadId);
+          assert.equal(released.runs[1]?.id, queued.id);
+          assert.equal(released.runs[1]?.status, "queued");
+          assert.isFalse(released.runs[1]?.queueHeld ?? false);
+        }
       }),
   );
 
@@ -5647,6 +5737,8 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
     "stop",
     "completed-wake-before-arm",
     "completed-wake-after-arm",
+    "completed-wake-stop-before-arm",
+    "completed-wake-postreset",
     "stop-before-arm",
     "stop-before-arm-mismatched-recovery",
   ] as const)("guards a scheduled usage-limit continuation against %s", (scenario) =>
@@ -5776,8 +5868,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         assert.equal(resumeHeldQueue._tag, "Failure");
         assert.isTrue((yield* orchestrator.getThreadProjection(threadId)).runs[1]?.queueHeld);
       }
-      const completedWake =
-        scenario === "completed-wake-before-arm" || scenario === "completed-wake-after-arm";
+      const completedWake = scenario.startsWith("completed-wake-");
       const finishBackgroundWake = Effect.fnUntraced(function* () {
         yield* TestClock.adjust("2 seconds");
         yield* orchestrator.dispatch({
@@ -5823,8 +5914,14 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
                 ...itemBase,
                 id: TurnItemId.make(`recovery:wake-notice:${scenario}`),
                 ordinal: 2,
-                type: "system_notice",
-                message: "No further work is needed.",
+                ...(scenario === "completed-wake-postreset"
+                  ? {
+                      type: "assistant_message" as const,
+                      messageId: MessageId.make(`recovery:wake-output:${scenario}`),
+                      text: "Finished the remaining implementation and verified the result.",
+                      streaming: false,
+                    }
+                  : { type: "system_notice" as const, message: "No further work is needed." }),
               },
             },
             {
@@ -5852,7 +5949,8 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           ],
         });
       });
-      if (scenario === "completed-wake-before-arm") yield* finishBackgroundWake();
+      if (scenario === "completed-wake-before-arm" || scenario === "completed-wake-stop-before-arm")
+        yield* finishBackgroundWake();
       const projections = yield* ProjectionStore.ProjectionStoreV2;
       const shell = completedWake
         ? (yield* projections.getLimitRecoveryCandidates({
@@ -5890,7 +5988,9 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         limitRecovery: arm.limitRecovery,
       };
       const stopBeforeArm =
-        scenario === "stop-before-arm" || scenario === "stop-before-arm-mismatched-recovery";
+        scenario === "stop-before-arm" ||
+        scenario === "stop-before-arm-mismatched-recovery" ||
+        scenario === "completed-wake-stop-before-arm";
       if (stopBeforeArm) {
         if (scenario === "stop-before-arm-mismatched-recovery") {
           const current = yield* orchestrator.getThreadProjection(threadId);
@@ -5955,6 +6055,39 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         snooze,
         requestId: armCommand.commandId,
       });
+      if (scenario === "completed-wake-postreset") {
+        const staleResume = limitRecoveryCommand(armedShell, true, Date.parse(resetAt));
+        assert(staleResume?.type === "message.dispatch");
+        yield* TestClock.adjust("1 minute");
+        yield* finishBackgroundWake();
+        assert.isUndefined(
+          (yield* projections.getLimitRecoveryCandidates({
+            now: yield* DateTime.now,
+            autoResume: true,
+            snooze: false,
+          })).find((row) => row.id === threadId),
+        );
+        const successful = (yield* orchestrator.getShellSnapshot()).threads.find(
+          (thread) => thread.id === threadId,
+        )!;
+        assert.equal(successful.status, "completed");
+        assert.isNull(successful.lastErrorClass);
+        yield* orchestrator.dispatch(staleResume);
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        assert.lengthOf(after.runs, 2);
+        assert.isNull(usageLimitBlockedRun(after.runs, after.turnItems, null));
+        const rejected = yield* orchestrator
+          .dispatch({
+            ...staleResume,
+            commandId: CommandId.make("recovery:stale-manual-postreset"),
+            messageId: MessageId.make("recovery:stale-manual-postreset"),
+            usageLimitContinuationOfRunId: undefined,
+            manualContinuationOfRunId: run.id,
+          })
+          .pipe(Effect.exit);
+        assert.equal(rejected._tag, "Failure");
+        return;
+      }
       if (scenario === "completed-wake-after-arm") {
         yield* finishBackgroundWake();
         armedShell = (yield* orchestrator.getShellSnapshot()).threads.find(
