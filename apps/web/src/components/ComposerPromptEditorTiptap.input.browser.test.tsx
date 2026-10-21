@@ -218,6 +218,27 @@ it("keeps the caret inside unknown dollar text across rich and plain remounts", 
   expect(serializeEditorDoc(editor.state.doc).value).toBe("echo $HOXYME now");
 });
 
+it.each([
+  { label: "adds a space after an existing dash", value: "-get md\nnext", at: 2, typed: [" "] },
+  {
+    label: "types a dash and space before its text",
+    value: "get md\nnext",
+    at: 1,
+    typed: ["-", " "],
+  },
+])("turns a line into a bullet when it $label", async ({ value, at, typed }) => {
+  await using screen = await mountEditor(value);
+  const { editor } = screen;
+  await act(async () => {
+    editor.commands.focus();
+    typed.forEach((text, index) => typeText(editor, at + index, at + index, text));
+    editor.commands.focus("end");
+  });
+  expect(serializeEditorDoc(editor.state.doc).value).toBe("- get md\nnext");
+  expect(editor.state.doc.firstChild?.type.name).toBe("bulletList");
+  expect(editor.state.doc.firstChild?.textContent).toBe("get md");
+});
+
 const file = {
   type: "file",
   id: "file-1",
