@@ -660,6 +660,18 @@ export const legacyCompactIdleThreadsMode = (
   value: boolean | IdleCompactionMode,
 ): IdleCompactionMode =>
   value === true ? "beforeCacheExpires" : value === false ? "onReturn" : value;
+const CompactIdleThreadsSwitch = Schema.Union([
+  Schema.Boolean,
+  IdleCompactionMode.pipe(
+    Schema.decodeTo(
+      Schema.Boolean,
+      SchemaTransformation.transform({
+        decode: (mode) => mode === "beforeCacheExpires",
+        encode: legacyCompactIdleThreadsMode,
+      }),
+    ),
+  ),
+]);
 
 const INSTANCE_IDLE_COMPACTION_MODES = [
   { value: "default", label: "Use default" },
@@ -1206,7 +1218,9 @@ export const ServerSettings = Schema.Struct({
    * True when `idleCompaction` is "beforeCacheExpires", for clients that predate it.
    * Servers that predate `idleCompaction` send only this.
    */
-  compactIdleThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  compactIdleThreads: CompactIdleThreadsSwitch.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   snoozeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   autoResumeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarAutoSettleKeepPullRequests: Schema.Boolean.pipe(
