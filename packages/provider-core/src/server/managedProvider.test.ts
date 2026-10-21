@@ -13,6 +13,7 @@ import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ProviderHost from "./ProviderHost.ts";
 import { makeManagedServerProvider } from "./managedProvider.ts";
@@ -460,6 +461,67 @@ describe("makeManagedServerProvider", () => {
         const switched = yield* provider.refresh;
         assert.strictEqual(switched.auth.workspaceId, "ws-b");
         assert.strictEqual(switched.usageLimits?.unavailable?.reason, "probeFailed");
+      }),
+    ).pipe(Effect.provide(layerAlwaysRunTest)),
+  );
+
+  // Mirrors the snapshot ClaudeProvider builds when `--version` exceeds its deadline.
+  const timedOutSnapshot: ServerProvider = {
+    ...initialSnapshot,
+    status: "error",
+    checkedAt: "2026-04-10T00:00:01.000Z",
+    message: "Claude Agent CLI is installed but failed to run. Timed out while running command.",
+  };
+  // Just under DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL, so the periodic refresh cannot be what recovers.
+  const beforePeriodicRefresh = "299 seconds";
+
+  it.effect("recovers from a timed-out probe before the next periodic refresh", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const checkCalls = yield* Ref.make(0);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Ref.updateAndGet(checkCalls, (count) => count + 1).pipe(
+            Effect.map((count) => (count === 1 ? timedOutSnapshot : refreshedSnapshot)),
+          ),
+        });
+        yield* Stream.take(provider.streamChanges, 1).pipe(Stream.runDrain);
+        assert.strictEqual((yield* provider.getSnapshot).status, "error");
+
+        yield* TestClock.adjust(beforePeriodicRefresh);
+
+        assert.deepStrictEqual(yield* provider.getSnapshot, refreshedSnapshot);
+        assert.strictEqual(yield* Ref.get(checkCalls), 2);
+      }),
+    ).pipe(Effect.provide(layerAlwaysRunTest)),
+  );
+
+  it.effect("stops retrying a probe that keeps timing out", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const checkCalls = yield* Ref.make(0);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
+            Effect.as(timedOutSnapshot),
+          ),
+        });
+        yield* Stream.take(provider.streamChanges, 1).pipe(Stream.runDrain);
+
+        yield* TestClock.adjust(beforePeriodicRefresh);
+
+        const calls = yield* Ref.get(checkCalls);
+        assert.isAtLeast(calls, 2);
+        assert.isAtMost(calls, 4);
+        assert.strictEqual((yield* provider.getSnapshot).status, "error");
       }),
     ).pipe(Effect.provide(layerAlwaysRunTest)),
   );
