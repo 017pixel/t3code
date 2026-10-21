@@ -1467,7 +1467,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
           style={authoredSizeStyle}
           workspaceRoot={cwd}
           workspaceMutationId={workspaceMutationId}
-          mediaRevision={mediaRevision}
+          mediaRevision={kind === "image" ? mediaRevision : undefined}
           onImageExpand={imageExpand}
         />
       );
