@@ -5,6 +5,7 @@ import {
   buildFileDiffContentVersion,
   buildFileDiffIdentityKey,
   buildFileDiffRenderKey,
+  buildLazyFileDiffIdentityKey,
   getDiffLineStat,
   getRenderablePatch,
   resolveFileDiffPath,
@@ -309,8 +310,8 @@ describe("diff file reconciliation", () => {
       isPartial: true,
       cacheKey: `scope:${loaded.name}:pending`,
     }));
-    expect(parsed.files.map(buildFileDiffIdentityKey)).toEqual(
-      placeholders.map(buildFileDiffIdentityKey),
+    expect(parsed.files.map(buildLazyFileDiffIdentityKey)).toEqual(
+      placeholders.map(buildLazyFileDiffIdentityKey),
     );
   });
 

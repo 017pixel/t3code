@@ -219,6 +219,14 @@ export function buildFileDiffIdentityKey(fileDiff: FileDiffMetadata): string {
   return `${resolveFileDiffPreviousPath(fileDiff)}\u0000${resolveFileDiffPath(fileDiff)}\u0000${fileDiff.type}`;
 }
 
+/**
+ * A lazily loaded review file shows a placeholder with a provisional change type until its
+ * patch arrives, and each source path renders one file, so the path pair alone identifies it.
+ */
+export function buildLazyFileDiffIdentityKey(fileDiff: FileDiffMetadata): string {
+  return `${resolveFileDiffPreviousPath(fileDiff)}\u0000${resolveFileDiffPath(fileDiff)}`;
+}
+
 export function buildFileDiffRenderKey(fileDiff: FileDiffMetadata): string {
   const cacheKey = fileDiff.cacheKey;
   if (!cacheKey) return `${fileDiff.prevName ?? "none"}:${fileDiff.name}`;

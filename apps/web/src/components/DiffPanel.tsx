@@ -40,6 +40,7 @@ import { useStableCallback } from "../hooks/useStableCallback";
 import {
   buildFileDiffContentVersion,
   buildFileDiffIdentityKey,
+  buildLazyFileDiffIdentityKey,
   getDiffCollapseIconClassName,
   getDiffLineStat,
   getRenderablePatch,
@@ -504,7 +505,10 @@ export default function DiffPanel({
   }, [canRefreshGitDiff, refreshBranchDiffPreview]);
 
   const isRefreshingDiff = branchDiffPreview.isPending || areFilePatchesPending;
-  const renderableFileEntries = renderableFiles.map(getCachedFileEntry);
+  const renderableFileEntries = renderableFiles.map((fileDiff) => {
+    const entry = getCachedFileEntry(fileDiff);
+    return lazySource ? { ...entry, fileKey: buildLazyFileDiffIdentityKey(fileDiff) } : entry;
+  });
   const diffFileKeys = renderableFileEntries.map((file) => file.fileKey);
   const defaultCollapsedDiffFileKeys = settings.diffFilesCollapsed
     ? new Set(diffFileKeys)
