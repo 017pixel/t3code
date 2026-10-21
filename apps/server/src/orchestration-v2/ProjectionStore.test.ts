@@ -1121,16 +1121,23 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         query.includes("AS blocking_failure_payload_json"),
       );
       assert.isDefined(statement);
-      const plan = yield* sql.unsafe<{ readonly detail: string }>(
-        `EXPLAIN QUERY PLAN ${statement}`,
-      );
-      assert.isTrue(
-        plan.some((row) =>
-          row.detail.includes(
-            "SEARCH candidate USING INDEX orchestration_v2_projection_runs_last_executed_idx (thread_id=?)",
-          ),
+      const plan = yield* sql.unsafe<{
+        readonly id: number;
+        readonly parent: number;
+        readonly detail: string;
+      }>(`EXPLAIN QUERY PLAN ${statement}`);
+      const candidate = plan.find((row) =>
+        row.detail.includes(
+          "SEARCH candidate USING INDEX orchestration_v2_projection_runs_last_executed_idx (thread_id=?)",
         ),
-        JSON.stringify(plan),
+      );
+      assert.isDefined(candidate, JSON.stringify(plan));
+      const subquery = plan.find((row) => row.id === candidate!.parent);
+      assert.include(subquery?.detail ?? "", "CORRELATED SCALAR SUBQUERY");
+      const subquerySteps = plan.filter((row) => row.parent === subquery!.id);
+      assert.isFalse(
+        subquerySteps.some((row) => row.detail.includes("TEMP B-TREE")),
+        JSON.stringify(subquerySteps),
       );
     }),
   );
@@ -5674,52 +5681,63 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
   );
 });
 
-const projectionLookupIndexes = [
-  {
-    name: "orchestration_v2_projection_runs_last_executed_idx",
-    table: "orchestration_v2_projection_runs",
-    columns: ["thread_id", null, "completed_at", "ordinal", "run_id"],
-    descending: [0, 1, 1, 1, 1],
-    definition:
-      "(thread_id, (completed_at IS NULL) DESC, completed_at DESC, ordinal DESC, run_id DESC) WHERE status <> 'queued' AND NOT(status='cancelled' AND json_extract(payload_json,'$.startedAt') IS NULL)",
-    query:
-      "WHERE thread_id = 'lookup-thread' AND status <> 'queued' AND NOT(status='cancelled' AND json_extract(payload_json,'$.startedAt') IS NULL) ORDER BY completed_at IS NULL DESC, completed_at DESC, ordinal DESC, run_id DESC LIMIT 1",
-    expected: ["run-4"],
-    id: "run_id",
-  },
-] as const;
+const lastExecutedIndexName = "orchestration_v2_projection_runs_last_executed_idx";
+const lastExecutedLookup =
+  "WHERE thread_id = 'lookup-thread' AND status <> 'queued' AND NOT(status='cancelled' AND json_extract(payload_json,'$.startedAt') IS NULL) ORDER BY completed_at IS NULL DESC, completed_at DESC, ordinal DESC, run_id DESC LIMIT 1";
 
 const normalizeIndexSql = (sql: string) => sql.toLowerCase().replace(/\s+/g, "");
 
-const assertProjectionLookupIndexes = Effect.fn("test.assertProjectionLookupIndexes")(function* () {
+const assertThreadShellIndexes = Effect.fn("test.assertThreadShellIndexes")(function* () {
   const sql = yield* SqlClient.SqlClient;
-  for (const index of projectionLookupIndexes) {
-    const definitions = yield* sql<{ readonly sql: string }>`
-      SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ${index.name}
-    `;
-    assert.lengthOf(definitions, 1, index.name);
-    assert.include(
-      normalizeIndexSql(definitions[0]!.sql),
-      normalizeIndexSql(`ON ${index.table}${index.definition}`),
-      index.name,
-    );
-    const columns = yield* sql.unsafe<{
-      readonly name: string | null;
-      readonly desc: number;
-      readonly key: number;
-    }>(`PRAGMA index_xinfo('${index.name}')`);
-    const keys = columns.filter((column) => column.key === 1);
-    assert.deepEqual(
-      keys.map((column) => column.name),
-      [...index.columns],
-      index.name,
-    );
-    assert.deepEqual(
-      keys.map((column) => column.desc),
-      [...index.descending],
-      index.name,
-    );
-  }
+  const definitions = yield* sql<{ readonly sql: string }>`
+    SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ${lastExecutedIndexName}
+  `;
+  assert.lengthOf(definitions, 1);
+  assert.include(
+    normalizeIndexSql(definitions[0]!.sql),
+    normalizeIndexSql(
+      "ON orchestration_v2_projection_runs(thread_id, (completed_at IS NULL) DESC, completed_at DESC, ordinal DESC, run_id DESC) WHERE status <> 'queued' AND NOT(status='cancelled' AND json_extract(payload_json,'$.startedAt') IS NULL)",
+    ),
+  );
+  const columns = yield* sql.unsafe<{
+    readonly name: string | null;
+    readonly desc: number;
+    readonly key: number;
+  }>(`PRAGMA index_xinfo('${lastExecutedIndexName}')`);
+  const keys = columns.filter((column) => column.key === 1);
+  assert.deepEqual(
+    keys.map((column) => column.name),
+    ["thread_id", null, "completed_at", "ordinal", "run_id"],
+  );
+  assert.deepEqual(
+    keys.map((column) => column.desc),
+    [0, 1, 1, 1, 1],
+  );
+  const interruptDefinitions = yield* sql<{ readonly sql: string }>`
+    SELECT sql FROM sqlite_master
+    WHERE type = 'index' AND name = 'orchestration_v2_projection_turn_items_interrupt_idx'
+  `;
+  assert.lengthOf(interruptDefinitions, 1);
+  assert.include(
+    normalizeIndexSql(interruptDefinitions[0]!.sql),
+    normalizeIndexSql(
+      "ON orchestration_v2_projection_turn_items(thread_id, run_id) WHERE type='run_interrupt_request'",
+    ),
+  );
+  const interruptColumns = yield* sql<{
+    readonly name: string | null;
+    readonly desc: number;
+    readonly key: number;
+  }>`PRAGMA index_xinfo('orchestration_v2_projection_turn_items_interrupt_idx')`;
+  const interruptKeys = interruptColumns.filter((column) => column.key === 1);
+  assert.deepEqual(
+    interruptKeys.map((column) => column.name),
+    ["thread_id", "run_id"],
+  );
+  assert.deepEqual(
+    interruptKeys.map((column) => column.desc),
+    [0, 0],
+  );
 });
 
 const seedProjectionLookupRows = Effect.fn("test.seedProjectionLookupRows")(function* () {
@@ -5741,13 +5759,24 @@ const seedProjectionLookupRows = Effect.fn("test.seedProjectionLookupRows")(func
   yield* sql`INSERT INTO orchestration_v2_projection_runs
     (run_id, thread_id, ordinal, provider, status, requested_at, completed_at, payload_json)
     VALUES ('other-run', 'other-thread', 99, 'codex', 'running', '2026-01-01', NULL, '{}')`;
+  for (const [id, threadId, runId, type] of [
+    ["interrupt-1", "lookup-thread", "run-4", "run_interrupt_request"],
+    ["interrupt-2", "lookup-thread", "run-4", "run_interrupt_request"],
+    ["other-run-interrupt", "lookup-thread", "run-3", "run_interrupt_request"],
+    ["other-thread-interrupt", "other-thread", "run-4", "run_interrupt_request"],
+    ["ordinary-item", "lookup-thread", "run-4", "assistant_message"],
+  ]) {
+    yield* sql`INSERT INTO orchestration_v2_projection_turn_items
+      (turn_item_id, thread_id, run_id, ordinal, type, status, updated_at, payload_json)
+      VALUES (${id}, ${threadId}, ${runId}, 1, ${type}, 'completed', '2026-01-01', '{}')`;
+  }
 });
 
-describe("ProjectionStoreV2 migration 68 lookup indexes", () => {
-  it.effect("creates the lookup indexes on a fresh database", () =>
+describe("ProjectionStoreV2 migration 68 thread-shell indexes", () => {
+  it.effect("creates the thread-shell indexes on a fresh database", () =>
     Effect.gen(function* () {
       yield* runMigrations({ toMigrationInclusive: 68 });
-      yield* assertProjectionLookupIndexes();
+      yield* assertThreadShellIndexes();
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
@@ -5756,34 +5785,43 @@ describe("ProjectionStoreV2 migration 68 lookup indexes", () => {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 67 });
       yield* seedProjectionLookupRows();
-      const before = [];
-      for (const index of projectionLookupIndexes) {
-        const rows = yield* sql.unsafe<Record<string, unknown>>(
-          `SELECT * FROM ${index.table} NOT INDEXED ${index.query}`,
-        );
-        assert.deepEqual(
-          rows.map((row) => row[index.id]),
-          [...index.expected],
-          index.name,
-        );
-        before.push(rows);
-      }
+      const before = yield* sql.unsafe<{ readonly run_id: string }>(
+        `SELECT * FROM orchestration_v2_projection_runs NOT INDEXED ${lastExecutedLookup}`,
+      );
+      assert.deepEqual(
+        before.map((row) => row.run_id),
+        ["run-4"],
+      );
+      const interruptLookup =
+        "WHERE thread_id = 'lookup-thread' AND run_id = 'run-4' AND type = 'run_interrupt_request' ORDER BY turn_item_id";
+      const interruptsBefore = yield* sql.unsafe<{ readonly turn_item_id: string }>(
+        `SELECT * FROM orchestration_v2_projection_turn_items NOT INDEXED ${interruptLookup}`,
+      );
+      assert.deepEqual(
+        interruptsBefore.map((row) => row.turn_item_id),
+        ["interrupt-1", "interrupt-2"],
+      );
       yield* runMigrations({ toMigrationInclusive: 68 });
-      yield* assertProjectionLookupIndexes();
-      for (const [position, index] of projectionLookupIndexes.entries()) {
-        const indexed = yield* sql.unsafe(
-          `SELECT * FROM ${index.table} INDEXED BY ${index.name} ${index.query}`,
-        );
-        const unindexed = yield* sql.unsafe(
-          `SELECT * FROM ${index.table} NOT INDEXED ${index.query}`,
-        );
-        assert.deepEqual(indexed, before[position], index.name);
-        assert.deepEqual(indexed, unindexed, index.name);
-      }
-      const [index] = projectionLookupIndexes;
+      yield* assertThreadShellIndexes();
+      const interruptsIndexed = yield* sql.unsafe(
+        `SELECT * FROM orchestration_v2_projection_turn_items INDEXED BY orchestration_v2_projection_turn_items_interrupt_idx ${interruptLookup}`,
+      );
+      const interruptsUnindexed = yield* sql.unsafe(
+        `SELECT * FROM orchestration_v2_projection_turn_items NOT INDEXED ${interruptLookup}`,
+      );
+      assert.deepEqual(interruptsIndexed, interruptsBefore);
+      assert.deepEqual(interruptsIndexed, interruptsUnindexed);
+      const indexed = yield* sql.unsafe(
+        `SELECT * FROM orchestration_v2_projection_runs INDEXED BY ${lastExecutedIndexName} ${lastExecutedLookup}`,
+      );
+      const unindexed = yield* sql.unsafe(
+        `SELECT * FROM orchestration_v2_projection_runs NOT INDEXED ${lastExecutedLookup}`,
+      );
+      assert.deepEqual(indexed, before);
+      assert.deepEqual(indexed, unindexed);
       for (const runId of ["run-4", "run-3", "run-7", "run-1", "run-2"]) {
         const rows = yield* sql.unsafe<{ readonly run_id: string }>(
-          `SELECT run_id FROM ${index.table} ${index.query}`,
+          `SELECT run_id FROM orchestration_v2_projection_runs ${lastExecutedLookup}`,
         );
         assert.deepEqual(
           rows.map((row) => row.run_id),
@@ -5791,7 +5829,12 @@ describe("ProjectionStoreV2 migration 68 lookup indexes", () => {
         );
         yield* sql`DELETE FROM orchestration_v2_projection_runs WHERE run_id = ${runId}`;
       }
-      assert.deepEqual(yield* sql.unsafe(`SELECT run_id FROM ${index.table} ${index.query}`), []);
+      assert.deepEqual(
+        yield* sql.unsafe(
+          `SELECT run_id FROM orchestration_v2_projection_runs ${lastExecutedLookup}`,
+        ),
+        [],
+      );
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
@@ -5803,10 +5846,12 @@ describe("ProjectionStoreV2 migration 68 lookup indexes", () => {
       const definitions =
         yield* sql`SELECT name, sql FROM sqlite_master WHERE type = 'index' ORDER BY name`;
       const runs = yield* sql`SELECT * FROM orchestration_v2_projection_runs ORDER BY run_id`;
+      const items =
+        yield* sql`SELECT * FROM orchestration_v2_projection_turn_items ORDER BY turn_item_id`;
       yield* ThreadShellLookupIndexes;
       yield* ThreadShellLookupIndexes;
       assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 68 }), []);
-      yield* assertProjectionLookupIndexes();
+      yield* assertThreadShellIndexes();
       assert.deepEqual(
         yield* sql`SELECT name, sql FROM sqlite_master WHERE type = 'index' ORDER BY name`,
         definitions,
@@ -5814,6 +5859,10 @@ describe("ProjectionStoreV2 migration 68 lookup indexes", () => {
       assert.deepEqual(
         yield* sql`SELECT * FROM orchestration_v2_projection_runs ORDER BY run_id`,
         runs,
+      );
+      assert.deepEqual(
+        yield* sql`SELECT * FROM orchestration_v2_projection_turn_items ORDER BY turn_item_id`,
+        items,
       );
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

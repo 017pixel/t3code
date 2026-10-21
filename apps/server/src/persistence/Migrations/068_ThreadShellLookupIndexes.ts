@@ -12,4 +12,9 @@ export default Effect.gen(function* () {
     WHERE status <> 'queued'
       AND NOT(status='cancelled' AND json_extract(payload_json,'$.startedAt') IS NULL)
   `;
+  yield* sql`
+    CREATE INDEX IF NOT EXISTS orchestration_v2_projection_turn_items_interrupt_idx
+    ON orchestration_v2_projection_turn_items(thread_id, run_id)
+    WHERE type='run_interrupt_request'
+  `;
 });
