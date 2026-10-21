@@ -74,8 +74,7 @@
                 driver: "codex",
                 displayName: "Public fixture",
                 config: {
-                  binaryPath:
-                    "/home/ubuntu/wt/issue-20883/apps/server/scripts/issue-20883-proof/provider.mjs",
+                  binaryPath: "/tmp/issue-20883-evidence/fixture/provider.mjs",
                 },
               },
             },

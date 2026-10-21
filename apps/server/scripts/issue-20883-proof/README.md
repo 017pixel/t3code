@@ -11,9 +11,11 @@ From the worktree, with the existing dev server stopped:
 mkdir -p /tmp/issue-20883-public-project
 git init /tmp/issue-20883-public-project
 git -C /tmp/issue-20883-public-project -c user.name=Proof -c user.email=proof@example.invalid commit --allow-empty -m 'Public evidence fixture'
+mkdir -p /tmp/issue-20883-evidence/fixture
+cp apps/server/scripts/issue-20883-proof/{provider.mjs,wire.json,clock.mjs,browser.js,diff.py} /tmp/issue-20883-evidence/fixture/
 printf '1792670400000' > /tmp/issue-20883-clock
 T3_PROOF_CLOCK=/tmp/issue-20883-clock \
-NODE_OPTIONS="--import=$PWD/apps/server/scripts/issue-20883-proof/clock.mjs" \
+NODE_OPTIONS="--import=/tmp/issue-20883-evidence/fixture/clock.mjs" \
 T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD=false \
 ./node_modules/.bin/vp run dev --home-dir /tmp/issue-20883-capture-home
 ```
@@ -56,3 +58,52 @@ resizing or cropping. Diff0 amplifies absolute per-channel deltas 16×, clipped 
 255; Diff8 marks pixels magenta when maximum channel delta >8/255, black otherwise.
 Always report actual differences and all unverified matrix subcases. Restore
 `fix/issue-20883` after base captures and stop only retained server sessions.
+
+The exact provider override on **both** SHAs is the supported
+`server.updateSettings` patch in `browser.js`:
+
+```js
+{ patch: { providerInstances: { proof: {
+  driver: "codex", displayName: "Public fixture",
+  config: { binaryPath: "/tmp/issue-20883-evidence/fixture/provider.mjs" }
+} } } }
+```
+
+Keep `wire.json` beside that external executable. The base checkout does not
+contain this script directory. Copy all fixture files outside the worktree first;
+use the same external binaryPath and NODE_OPTIONS for base and head. Seed each
+fresh environment separately through the normal client RPC commands. The second
+environment uses the same thread IDs; pair it through Settings > Connections >
+Add environment against its backend port, then target its environmentId in the
+same commands. Never publish pairing codes or the fixture home.
+
+`capture.mjs` exports a T3 tools orchestration function. Pass the exposed T3
+preview tools as `tools`, your owned `tabId`, and `config` containing phase, full
+SHA, cell, kind, title, prefix, clock, row and action. The file records the native
+provider release, real sidebar/native keyboard interaction, UTC action markers,
+pre/post PNGs and MP4 into `/tmp/issue-20883-evidence`. It does not mock routing or
+toasts. Example config for one reproducible row:
+
+```js
+{phase:"before",sha:"a12d6ed9428d8e64d76ca86d178abbf564b57cee",
+ cell:"1440-light",kind:"complete",prefix:"Public completion fixture",
+ title:"Thread completed",clock:1792670401000,row:"F1-sidebar",action:"sidebar"}
+```
+
+Canonical core sequence per restored baseline/cell: complete, input, approval,
+failed, limited at clock epoch +1/2/3/4/5 seconds; complete keyboard at +6.
+Archive proof-input, create proof-input-kb with the same input title, then input-kb
+at +7; archive proof-approval, create proof-approval-kb, then approval-kb at +8.
+Configure the actual keyboard command with supported `server.upsertKeybinding`
+`{key:"ctrl+alt+shift+9",command:"thread.jump.N"}`, where N is the visible sidebar
+row index plus one. Sidebar is a DIV role=button; narrow layout requires opening
+the drawer. The native click uses the row's exposed left edge when the toast
+covers its center. Hover expands the stack; it does **not** pause the separate
+thread visible-time timeout. Tool stalls can invalidate a post checkpoint. Do not
+count an expired Before as proof of route-driven closure.
+
+Measured capture environment: Chrome 154.0.0.0 headless shell on Linux X11, T3
+preview freeform (no device emulation), DPR 2, visualViewport.scale 1, root 16px,
+text-size-adjust 100%. CSS 1440x900 saves PNG 1280x800 due preview's automatic
+raster downsample; CSS 390x844 saves PNG 780x1688. Record measured viewport and
+PNG dimensions; never resize or crop the images manually.

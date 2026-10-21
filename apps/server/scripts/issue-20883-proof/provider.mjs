@@ -82,9 +82,13 @@ lines.on("line", (line) => {
           params: {
             ...common,
             itemId: `question-${counter}`,
+            isBlocking: true,
+            autoResolutionMs: null,
             questions: [
               {
                 id: "public-question",
+                isOther: true,
+                isSecret: false,
                 header: "Fixture",
                 question: "Which public fixture choice?",
                 options: [
@@ -102,6 +106,12 @@ lines.on("line", (line) => {
           params: {
             ...common,
             itemId: `approval-${counter}`,
+            kind: "command",
+            startedAtMs: Date.now(),
+            environmentId: "local",
+            commandActions: [{ type: "unknown", command: "printf public-proof" }],
+            proposedExecpolicyAmendment: null,
+            availableDecisions: ["accept", "cancel"],
             command: "printf public-proof",
             cwd: process.cwd(),
             reason: "Public no-op fixture approval",
