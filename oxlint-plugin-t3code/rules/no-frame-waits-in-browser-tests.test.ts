@@ -56,6 +56,10 @@ describe("t3code/no-frame-waits-in-browser-tests", () => {
     "window.requestAnimationFrame(() => undefined);",
   );
   browserTest.invalid(
+    "rejects setTimeout passed straight through as the promise executor",
+    "await new Promise(setTimeout);",
+  );
+  browserTest.invalid(
     "rejects setTimeout inside a promise executor",
     "await new Promise((resolve) => setTimeout(resolve, 50));",
   );
