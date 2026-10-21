@@ -72,6 +72,7 @@ import { GitOverviewSheet } from "./features/threads/git/GitOverviewSheet";
 import { ThreadPullRequestsSheet } from "./features/threads/ThreadPullRequestsSheet";
 import { ThreadAgentsSheet } from "./features/threads/ThreadAgentsSheet";
 import { ThreadBackgroundWorkSheet } from "./features/threads/ThreadBackgroundWorkSheet";
+import { ForkToMachineSheet } from "./features/threads/ForkToMachineSheet";
 import { ThreadQueueSheet } from "./features/threads/ThreadQueueControl";
 import { ThreadRouteScreen } from "./features/threads/ThreadRouteScreen";
 import { McpAppFullscreenScreen } from "./features/threads/McpAppFullscreenScreen";
@@ -560,6 +561,7 @@ const WORKSPACE_OVERLAY_ROUTES = new Set([
   "SettingsSheet",
   "ThreadAgents",
   "ThreadBackgroundWork",
+  "ThreadForkToMachine",
   "ThreadPullRequests",
   "ThreadQueue",
   "ThreadReviewComment",
@@ -904,6 +906,15 @@ const RootStackConfig = createWorkspaceStackNavigator({
       options: {
         ...FORM_SHEET_PRESENTATION_OPTIONS,
         sheetAllowedDetents: [0.55, 0.92],
+        sheetGrabberVisible: true,
+      },
+    }),
+    ThreadForkToMachine: createNativeStackScreen({
+      screen: ForkToMachineSheet,
+      options: {
+        ...(Platform.OS === "ios" ? SHEET_GLASS_HEADER_OPTIONS : undefined),
+        ...FORM_SHEET_PRESENTATION_OPTIONS,
+        sheetAllowedDetents: [0.8, 0.92],
         sheetGrabberVisible: true,
       },
     }),

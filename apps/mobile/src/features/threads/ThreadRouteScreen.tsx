@@ -75,6 +75,9 @@ import { useThreadComposerState } from "../../state/use-thread-composer-state";
 import { resolveMergeBackTargetThreadId } from "@t3tools/client-runtime/state/thread-relationships";
 import { resolveLatestMergeBackRun } from "@t3tools/client-runtime/state/thread-workflows";
 import { threadEnvironment } from "../../state/threads";
+import { threadListEnvironmentsAtom } from "../../state/server";
+import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
+import { useAtomValue } from "@effect/atom-react";
 import { projectThreadContentPresentation } from "./threadContentPresentation";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import {
@@ -317,6 +320,7 @@ function ThreadRouteContent(
     };
   })();
   const navigation = useNavigation();
+  const { forkToMachineEnvironmentIds } = useAtomValue(threadListEnvironmentsAtom);
   const openPullRequest = useOpenPullRequest();
   const mergeBack = useAtomCommand(threadEnvironment.mergeBack, "merge thread back");
   const mergeBackTargetThreadId = resolveMergeBackTargetThreadId(selectedThreadDetail);
@@ -709,6 +713,17 @@ function ThreadRouteContent(
     onMergeBack:
       mergeBackTargetThreadId !== null && mergeBackRun !== null
         ? () => void handleMergeBack()
+        : undefined,
+    onForkToMachine:
+      selectedThread !== null &&
+      selectedThread.branch !== null &&
+      threadRuntimeCanArchive(selectedThread.runtime) &&
+      forkToMachineEnvironmentIds.has(selectedThread.environmentId)
+        ? () =>
+            navigation.navigate("ThreadForkToMachine", {
+              environmentId: selectedThread.environmentId,
+              threadId: selectedThread.id,
+            })
         : undefined,
     currentBranch: selectedThread?.branch ?? null,
     gitStatus: gitStatus.data,

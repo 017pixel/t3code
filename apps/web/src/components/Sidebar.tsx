@@ -8,6 +8,7 @@ import {
 } from "./chat/threadContextDrag";
 import { discardComposerDraft } from "../lib/discardComposerDraft";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
+import { openForkToMachine } from "./ForkToMachineDialog";
 import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
@@ -2291,6 +2292,11 @@ export default function Sidebar() {
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
               isRegeneratingTitle,
               isRunning: !threadRuntimeCanArchive(thread.runtime),
+              canForkToMachine:
+                thread.branch != null &&
+                serverConfigs.size > 1 &&
+                serverConfigs.get(thread.environmentId)?.environment.capabilities.threadForkNote ===
+                  true,
               supports: {
                 settlement: supportsSettlement,
                 autoSettleOptOut: supportsAutoSettleOptOut,
@@ -2329,6 +2335,9 @@ export default function Sidebar() {
                 environmentId: threadRef.environmentId,
                 projectId: thread.projectId,
               });
+            return;
+          case "fork-to-machine":
+            openForkToMachine(threadRef);
             return;
           case "new-thread-on-branch": {
             const result = await settlePromise(() =>

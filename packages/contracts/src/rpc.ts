@@ -217,6 +217,7 @@ import {
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2RpcSchemas,
   OrchestrationV2ThreadLaunchError,
+  OrchestrationV2WriteForkNoteError,
 } from "./orchestrationV2.ts";
 import {
   ProjectCreateNewInput,
@@ -1708,6 +1709,12 @@ const WsOrchestrationV2LaunchThreadRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.la
   error: Schema.Union([OrchestrationV2ThreadLaunchError, EnvironmentAuthorizationError]),
 });
 
+const WsOrchestrationV2WriteForkNoteRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.writeForkNote, {
+  payload: OrchestrationV2RpcSchemas.writeForkNote.input,
+  success: OrchestrationV2RpcSchemas.writeForkNote.output,
+  error: Schema.Union([OrchestrationV2WriteForkNoteError, EnvironmentAuthorizationError]),
+});
+
 const WsOrchestrationV2SubscribeArchivedShellRpc = Rpc.make(
   ORCHESTRATION_V2_WS_METHODS.subscribeArchivedShell,
   {
@@ -2074,6 +2081,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2GetArchivedShellSnapshotRpc,
   WsOrchestrationV2GetThreadProjectionRpc,
   WsOrchestrationV2LaunchThreadRpc,
+  WsOrchestrationV2WriteForkNoteRpc,
   WsOrchestrationV2SubscribeArchivedShellRpc,
   WsOrchestrationV2SubscribeShellRpc,
   WsOrchestrationV2SubscribeThreadRpc,
