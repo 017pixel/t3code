@@ -471,7 +471,14 @@ const make = Effect.gen(function* () {
   const pendingTabs = new Map<string, Promise<ServerTab>>();
 
   const closedPendingTabs = new Set<string>();
-  const adoptedPages = new Map<string, { readonly page: Page; readonly openerTabId: string }>();
+  const adoptedPages = new Map<
+    string,
+    {
+      readonly page: Page;
+      readonly openerTabId: string;
+      readonly desktopFallback: ServerTab["desktopFallback"];
+    }
+  >();
   const closedSessions = new Set<string>();
   let hostConnectionId: string | null = null;
   let viewerResizeOrder = 0;
@@ -767,7 +774,8 @@ const make = Effect.gen(function* () {
       isolatedContext,
       desktop: desktop === null ? null : { close: desktop.close },
       desktopFallback:
-        desktopChannel.available && !adopted && !desktop ? "attach-timeout" : undefined,
+        adopted?.desktopFallback ??
+        (desktopChannel.available && !adopted && !desktop ? "attach-timeout" : undefined),
       profileId: snapshot.profileId,
       openerTabId: adopted?.openerTabId,
       downloads: [],
@@ -1212,6 +1220,7 @@ const make = Effect.gen(function* () {
           adoptedPages.set(tabKey(snapshot.threadId, snapshot.tabId), {
             page: popup,
             openerTabId: opener.tabId,
+            desktopFallback: opener.desktopFallback,
           }),
       }),
     ).then(

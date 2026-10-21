@@ -86,7 +86,7 @@ export const PreviewAutomationStatus = Schema.Struct({
   desktopFallback: Schema.optional(
     Schema.Literals(["attach-timeout", "late-attach"]).annotate({
       description:
-        "Automation uses a headless page with a cookie store distinct from the desktop browser. attach-timeout means the desktop did not attach in time; late-attach means it attached later, but automation still uses the headless page. To retry desktop attachment, call preview_open with open:true and reuseExistingTab:false.",
+        "Automation uses a headless page with a cookie store distinct from the desktop browser. attach-timeout means the desktop did not attach in time; late-attach means the desktop attached at some point after the timeout, but automation still uses the headless page. To retry desktop attachment, first close the fallback tab using t3_preview_close, then call preview_open with open:true and reuseExistingTab:false while the desktop is showing the thread.",
     }),
   ),
   available: Schema.Boolean,

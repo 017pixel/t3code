@@ -45,6 +45,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     async contextFor(profileId: string, isolationKey?: string) {
       contextRequests.push({ profileId, isolated: isolationKey !== undefined });
       if (contextFailure) throw contextFailure;
+      contextRequested?.resolve();
       await contextGate?.promise;
       const context = makeContext(this.onClose);
       contexts.push(context);
@@ -217,6 +218,7 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
 const contexts: ReturnType<typeof makeContext>[] = [];
 const contextRequests: Array<{ profileId: string; isolated: boolean }> = [];
 let contextGate: PromiseWithResolvers<void> | null = null;
+let contextRequested: PromiseWithResolvers<void> | null = null;
 let pageCopy = "";
 let keyCopy = "";
 let focusedFrame: ReturnType<typeof makeFrame> | null = null;
@@ -226,6 +228,7 @@ let desktopRendersNext = false;
 let desktopAttachWait: DesktopChannel.DesktopBrowserChannel["Service"]["awaitAttached"] | null =
   null;
 let desktopAttachHandled: PromiseWithResolvers<void> | null = null;
+let desktopAttachReceived: PromiseWithResolvers<void> | null = null;
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
@@ -293,7 +296,12 @@ const dependencies = Layer.mergeAll(
     ).pipe(
       Stream.flatMap((key) =>
         Stream.concat(
-          Stream.succeed(key),
+          Stream.fromEffect(
+            Effect.sync(() => {
+              desktopAttachReceived?.resolve();
+              return key;
+            }),
+          ),
           // The next pull acknowledges that ServerBrowser finished handling this attach.
           Stream.fromEffect(Effect.sync(() => desktopAttachHandled?.resolve())).pipe(Stream.drain),
         ),
@@ -336,6 +344,7 @@ beforeEach(() => {
   contexts.length = 0;
   contextRequests.length = 0;
   contextGate = null;
+  contextRequested = null;
   contextFailure = null;
   initialNavigation = null;
   pageCopy = "";
@@ -345,6 +354,7 @@ beforeEach(() => {
   desktopRendersNext = false;
   desktopAttachWait = null;
   desktopAttachHandled = null;
+  desktopAttachReceived = null;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
@@ -440,6 +450,88 @@ it.effect("surfaces a late desktop attach without swapping the headless page", (
       }
     }),
   ).pipe(Effect.provide(layer)),
+);
+
+it.effect("preserves a late attach while fallback context creation is still pending", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const manager = yield* Manager.PreviewManager;
+      contextGate = Promise.withResolvers<void>();
+      contextRequested = Promise.withResolvers<void>();
+      const opening = yield* openAfterDesktopAttachTimeout.pipe(Effect.forkScoped);
+      yield* Effect.promise(() => contextRequested!.promise);
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      const pending = sessions[0]!;
+      desktopAttachHandled = Promise.withResolvers<void>();
+      desktopAttachReceived = Promise.withResolvers<void>();
+      desktopTabs.add(pending.tabId);
+      desktopDetaches.emit("attach", {
+        threadId: pending.threadId,
+        tabId: pending.tabId,
+      });
+      yield* Effect.promise(() => desktopAttachReceived!.promise);
+      contextGate.resolve();
+      const { broker, tabId } = yield* Fiber.join(opening);
+      yield* Effect.promise(() => desktopAttachHandled!.promise);
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.desktopFallback).toBe("late-attach");
+      expect(contexts).toHaveLength(1);
+      expect(desktopConnections).toHaveLength(0);
+      expect(contexts[0]!.page.close).not.toHaveBeenCalled();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect.each(["attach-timeout", "late-attach"] as const)(
+  "adopted popups inherit the opener's %s fallback and cookie context",
+  (fallback) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* ServerBrowser.ServerBrowser;
+        const { broker, key } = yield* openAfterDesktopAttachTimeout;
+        if (fallback === "late-attach") {
+          desktopAttachHandled = Promise.withResolvers<void>();
+          desktopTabs.add(key.tabId);
+          desktopDetaches.emit("attach", key);
+          yield* Effect.promise(() => desktopAttachHandled!.promise);
+        }
+        const opener = contexts[0]!;
+        const popup = makeContext().page;
+        popup.context = () => opener;
+        const newSession = opener.newCDPSession;
+        vi.spyOn(opener, "newCDPSession").mockImplementation((target) =>
+          newSession(target === popup ? opener.page : target),
+        );
+        yield* Effect.promise(() => opener.page.emitAsync("popup", popup));
+        const manager = yield* Manager.PreviewManager;
+        const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+        const adopted = sessions.find((session) => session.tabId !== key.tabId)!;
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId: PreviewTabId.make(adopted.tabId),
+          operation: "open",
+          input: { open: false },
+        });
+        const snapshot = yield* broker.invoke<PreviewAutomationSnapshot>({
+          scope,
+          tabId: PreviewTabId.make(adopted.tabId),
+          operation: "snapshot",
+          input: {},
+        });
+        expect(status.desktopFallback).toBe(fallback);
+        expect(snapshot.desktopFallback).toBe(fallback);
+        expect(contexts).toHaveLength(1);
+        expect(desktopConnections).toHaveLength(0);
+        expect(popup.context()).toBe(opener);
+        expect(popup.evaluate).toHaveBeenCalled();
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live.each(["desktop" as const, undefined])(
