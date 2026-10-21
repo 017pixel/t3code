@@ -215,7 +215,7 @@ else
   else
     if "$interactive"; then printf '\n' >&2; fi
     cat "${staging}/version.errors" >&2
-    if [ "$platform" = linux ] && grep -Fq 'error while loading shared libraries: libatomic.so.1: cannot open shared object file: No such file or directory' "${staging}/version.errors"; then
+    if [ "$platform" = linux ] && grep -Fq 'libatomic.so.1: cannot open shared object file' "${staging}/version.errors"; then
       printf '%s\n' \
         '' \
         't3 install: the downloaded executable requires libatomic.so.1' \
