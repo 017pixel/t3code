@@ -1,7 +1,7 @@
 import type { SensorProps } from "@dnd-kit/core";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { fakeTimers } from "../../test/render";
-import { SidebarPointerSensor } from "./Sidebar.pointer";
+import { SidebarPointerSensor, guardSidebarStalePress } from "./Sidebar.pointer";
 
 const sensors: SidebarPointerSensor[] = [];
 
@@ -84,5 +84,57 @@ describe("sidebar pointer lifecycle", () => {
     expect(drag.onCancel).toHaveBeenCalledOnce();
     expect(drag.onEnd).not.toHaveBeenCalled();
     expect(drag.onFinish).toHaveBeenCalledExactlyOnceWith(true);
+  });
+});
+
+describe("sidebar stale press guard", () => {
+  function list() {
+    const stack = new DisposableStack();
+    const node = document.createElement("ul");
+    const rows = ["alpha", "beta"].map((name) => {
+      const row = node.appendChild(document.createElement("li"));
+      row.textContent = name;
+      return row;
+    });
+    document.body.append(node);
+    stack.defer(() => node.remove());
+    stack.defer(guardSidebarStalePress(node));
+    const clicked: string[] = [];
+    node.addEventListener("click", (event) => {
+      clicked.push((event.target as HTMLElement).textContent ?? "");
+    });
+    const press = (row: HTMLElement) => {
+      row.dispatchEvent(pointer("pointerdown", { pointerType: "mouse" }));
+      row.dispatchEvent(pointer("pointerup", { pointerType: "mouse", buttons: 0 }));
+      row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }));
+    };
+    return { stack, rows, clicked, press };
+  }
+
+  it("swallows the first press on a row another client slid under the mouse", () => {
+    const { stack, rows, clicked, press } = list();
+    using _list = stack;
+    const [alpha, beta] = rows;
+    alpha!.dispatchEvent(pointer("pointermove", { pointerType: "mouse", buttons: 0 }));
+    alpha!.remove();
+
+    press(beta!);
+    press(beta!);
+
+    expect(clicked).toEqual(["beta"]);
+  });
+
+  // regression: settling a row must not swallow the deliberate click on the row that replaces it
+  it("trusts the row that slides in after the user's own click", () => {
+    const { stack, rows, clicked, press } = list();
+    using _list = stack;
+    const [alpha, beta] = rows;
+    alpha!.dispatchEvent(pointer("pointermove", { pointerType: "mouse", buttons: 0 }));
+    press(alpha!);
+    alpha!.remove();
+
+    press(beta!);
+
+    expect(clicked).toEqual(["alpha", "beta"]);
   });
 });

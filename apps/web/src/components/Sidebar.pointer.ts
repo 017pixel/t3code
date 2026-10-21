@@ -195,7 +195,9 @@ export function guardSidebarStalePress(list: HTMLElement) {
     event.stopPropagation();
   };
   const click = (event: MouseEvent) => {
-    if (!swallowClick) return;
+    // The user's own click can remove the row it acted on and slide the next one under the
+    // mouse; trust that row rather than swallowing the follow-up press.
+    if (!swallowClick) return forget();
     swallowClick = false;
     // A keyboard activation (detail 0) is never the stale press.
     if (event.detail === 0) return;
