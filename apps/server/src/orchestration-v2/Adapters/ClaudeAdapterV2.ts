@@ -2599,6 +2599,10 @@ function webSearchResultsFromClaudeOutput(
   });
 }
 
+function boundText(value: string, limit = 2_000): string {
+  return value.length <= limit ? value : `${value.slice(0, limit)}…`;
+}
+
 function summarizeClaudeToolRequest(toolName: string, input: ClaudeNativeToolInput): string {
   const command = firstStringInputField(input, ["command", "cmd", "script"]);
   if (command !== undefined) {
@@ -6347,7 +6351,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly nativeRequestId: string;
           readonly requestKind: OrchestrationV2RuntimeRequest["kind"];
           readonly prompt?: string;
-          readonly title?: string;
           readonly questions?: ReadonlyArray<OrchestrationV2UserInputQuestion>;
         }) {
           const createdAt = yield* DateTime.now;
@@ -6422,7 +6425,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             parentItemId: null,
             ordinal,
             status: "waiting",
-            title: input.title ?? null,
+            title: null,
             startedAt: createdAt,
             completedAt: null,
             updatedAt: createdAt,
@@ -8911,15 +8914,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const prompt =
             callbackOptions.title ??
             callbackOptions.description ??
-            callbackOptions.decisionReason ??
             summarizeClaudeToolRequest(toolName, nativeToolInput);
+          const liveQuery = yield* Ref.get(queryContext);
           const reason = callbackOptions.decisionReason?.trim();
+          const blockedPath = callbackOptions.blockedPath?.trim();
           const detail = reason
             ? `${prompt}\n\n${
-                context.queryPolicy.permissionMode === "bypassPermissions"
+                liveQuery?.permissionMode === "bypassPermissions"
                   ? "Full access is on, but Claude still requires approval: "
                   : ""
-              }${reason}`
+              }${boundText(reason)}${blockedPath ? `\n\nPath: ${boundText(blockedPath)}` : ""}`
             : prompt;
           const artifacts = yield* buildApprovalRequestArtifacts({
             context,
@@ -8927,7 +8931,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             nativeRequestId,
             requestKind,
             prompt: detail,
-            ...(reason ? { title: prompt } : {}),
           });
           const decision = yield* Deferred.make<ProviderApprovalDecision, never>();
           yield* Ref.update(pendingRuntimeRequests, (current) => {

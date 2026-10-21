@@ -2815,12 +2815,79 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     };
 
     it.effect.each([
-      { runtimeMode: "full-access", withReason: true },
-      { runtimeMode: "approval-required", withReason: true },
-      { runtimeMode: "full-access", withReason: false },
+      {
+        name: "bypass",
+        runtimeMode: "full-access",
+        reason: "reason",
+        description: true,
+        mode: undefined,
+      },
+      {
+        name: "non-bypass",
+        runtimeMode: "approval-required",
+        reason: "reason",
+        description: true,
+        mode: undefined,
+      },
+      {
+        name: "absent reason",
+        runtimeMode: "full-access",
+        reason: undefined,
+        description: true,
+        mode: undefined,
+      },
+      {
+        name: "whitespace reason",
+        runtimeMode: "full-access",
+        reason: "   \n ",
+        description: true,
+        mode: undefined,
+      },
+      {
+        name: "reason only",
+        runtimeMode: "full-access",
+        reason: "reason",
+        description: false,
+        mode: undefined,
+      },
+      {
+        name: "absent reason and description",
+        runtimeMode: "full-access",
+        reason: undefined,
+        description: false,
+        mode: undefined,
+      },
+      {
+        name: "long reason and path",
+        runtimeMode: "full-access",
+        reason: "r".repeat(20_000),
+        description: true,
+        mode: undefined,
+      },
+      {
+        name: "CLI init downgrade",
+        runtimeMode: "full-access",
+        reason: "reason",
+        description: true,
+        mode: "init",
+      },
+      {
+        name: "CLI status downgrade",
+        runtimeMode: "full-access",
+        reason: "reason",
+        description: true,
+        mode: "status",
+      },
+      {
+        name: "CLI status bypass",
+        runtimeMode: "approval-required",
+        reason: "reason",
+        description: true,
+        mode: "bypass",
+      },
     ] as const)(
-      "renders callback reason=$withReason in $runtimeMode without replacing the tool title",
-      ({ runtimeMode, withReason }) =>
+      "renders $name with the action preserved and timeline title unchanged",
+      ({ runtimeMode, reason, description, mode }) =>
         Effect.gen(function* () {
           const harness = yield* makeWakeHarness;
           yield* harness.runtime.startTurn(
@@ -2838,18 +2905,34 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               }),
             }),
           );
-          assert.equal(
-            harness.getOpenedOptions()?.permissionMode,
-            runtimeMode === "full-access" ? "bypassPermissions" : "default",
-          );
-          const { decisionReason, ...options } = callbackPayload.options;
+          if (mode !== undefined) {
+            yield* harness.offerAndWait(
+              claudeSdkFrame({
+                type: "system",
+                subtype: mode === "init" ? "init" : "status",
+                ...(mode === "init" ? {} : { status: null }),
+                permissionMode: mode === "bypass" ? "bypassPermissions" : "default",
+                uuid: "approval-mode-transition",
+                session_id: WAKE_NATIVE_SESSION,
+              }),
+            );
+          }
+          const decisionReason =
+            reason === "reason" ? callbackPayload.options.decisionReason : reason;
+          const blockedPath =
+            reason?.length === 20_000
+              ? "/" + "p".repeat(20_000)
+              : callbackPayload.options.blockedPath;
           const decision = yield* Effect.promise((signal) =>
             harness.getOpenedOptions()!.canUseTool!(
               callbackPayload.toolName,
               callbackPayload.input,
               {
-                ...options,
-                ...(withReason ? { decisionReason } : {}),
+                toolUseID: callbackPayload.options.toolUseID,
+                requestId: callbackPayload.options.requestId,
+                ...(description ? { description: callbackPayload.options.description } : {}),
+                ...(decisionReason === undefined ? {} : { decisionReason }),
+                blockedPath,
                 signal,
               },
             ),
@@ -2869,28 +2952,27 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               candidate.turnItem.type === "approval_request" &&
               candidate.turnItem.requestId === event.runtimeRequest.id,
           );
-          assert.isDefined(itemEvent);
           if (
             itemEvent?.type !== "turn_item.updated" ||
             itemEvent.turnItem.type !== "approval_request"
-          )
-            return;
-          const item = itemEvent.turnItem;
-          if (withReason) {
-            assert.include(item.prompt ?? "", decisionReason);
-            assert.equal(item.title, callbackPayload.options.description);
-            if (runtimeMode === "full-access") {
-              assert.include(
-                item.prompt ?? "",
-                "Full access is on, but Claude still requires approval",
-              );
-            } else {
-              assert.notInclude(item.prompt ?? "", "Full access is on");
-            }
-          } else {
-            assert.isNull(item.title);
-            assert.equal(item.prompt, callbackPayload.options.description);
+          ) {
+            throw new Error("Expected an approval request item");
           }
+          const item = itemEvent.turnItem;
+          const action = description
+            ? callbackPayload.options.description
+            : "Edit: /workspace/.claude/settings.json";
+          const bound = (value: string) =>
+            value.length <= 2_000 ? value : `${value.slice(0, 2_000)}…`;
+          const trimmedReason = decisionReason?.trim();
+          const bypass = mode === "bypass" || (mode === undefined && runtimeMode === "full-access");
+          assert.isNull(item.title);
+          assert.equal(
+            item.prompt,
+            trimmedReason
+              ? `${action}\n\n${bypass ? "Full access is on, but Claude still requires approval: " : ""}${bound(trimmedReason)}\n\nPath: ${bound(blockedPath)}`
+              : action,
+          );
           yield* harness.runtime.respondToRuntimeRequest({
             requestId: event.runtimeRequest.id,
             decision: "decline",
