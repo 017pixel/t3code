@@ -65,6 +65,8 @@ import {
 import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
+  gitHubApiHostForRemote,
+  parseFetchRemotes,
   parseGitHubRepositorySelector,
   resolveGitHubRepository,
 } from "@t3tools/source-control-github/server/gitHubRepositoryResolution";
@@ -2056,24 +2058,82 @@ export const make = Effect.gen(function* () {
     });
     let missingRemoteBase: string | null = null;
     if (recordedBase) {
-      const pushRemote =
+      const publishedRemote =
+        (upstreamRef && headContext.remoteName !== "." ? headContext.remoteName : null) ??
         (yield* gitCore.readConfigValue(cwd, `branch.${branch}.pushRemote`)) ??
         (yield* gitCore.readConfigValue(cwd, "remote.pushDefault")) ??
         headContext.remoteName ??
         "origin";
-      const baseRemote = headContext.isCrossRepository ? "origin" : pushRemote;
-      const remoteRef = recordedBase.baseRef.startsWith("refs/remotes/")
-        ? recordedBase.baseRef
-        : `refs/remotes/${baseRemote}/${recordedBase.baseRef.replace(/^refs\/heads\//, "")}`;
-      const remoteBranch = yield* gitCore.resolveBranchName(cwd, remoteRef);
-      if (remoteBranch) {
-        return {
-          baseBranch: recordedBase.baseBranch ?? remoteBranch,
-          baseRef: recordedBase.baseBranch ? recordedBase.baseRef : remoteRef,
-          message: null,
-        };
+      let baseRemotes = [publishedRemote];
+      let targetRepository: string | null = null;
+      if (!recordedBase.baseRef.startsWith("refs/remotes/")) {
+        const handle = yield* sourceControlProviders.resolveHandle({ cwd });
+        const remotesResult = yield* gitCore.execute({
+          operation: "GitManager.resolvePrBase.remotes",
+          cwd,
+          args: ["remote", "-v"],
+        });
+        const remotes = parseFetchRemotes(remotesResult.stdout);
+        if (handle.provider.kind === "github") {
+          const hostHint = handle.context
+            ? (urlHost(handle.context.provider.baseUrl) ?? undefined)
+            : undefined;
+          const defaultHost = hostHint ?? environment.GH_HOST ?? "github.com";
+          const resolved = yield* gitCore.execute({
+            operation: "GitManager.resolvePrBase.resolved",
+            cwd,
+            args: ["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"],
+            allowNonZeroExit: true,
+          });
+          const target =
+            parseGitHubRepositorySelector(environment.GH_REPO ?? "", defaultHost) ??
+            resolveGitHubRepository({
+              remotes: remotesResult.stdout,
+              resolved: resolved.stdout,
+              hostHint,
+              defaultHost,
+            }).locator;
+          if (target) {
+            targetRepository = `${target.host}/${target.owner}/${target.name}`.toLowerCase();
+          }
+        } else if (headContext.isCrossRepository && handle.context) {
+          targetRepository = normalizeGitRemoteUrl(handle.context.remoteUrl);
+        }
+        if (targetRepository) {
+          baseRemotes = remotes
+            .filter((remote) => {
+              const key = normalizeGitRemoteUrl(remote.url);
+              const host =
+                handle.provider.kind === "github" ? gitHubApiHostForRemote(remote.url) : null;
+              return (
+                (host ? `${host}/${key.split("/").slice(1).join("/")}` : key) === targetRepository
+              );
+            })
+            .map((remote) => remote.name)
+            .toSorted((left, right) =>
+              left === publishedRemote ? -1 : right === publishedRemote ? 1 : 0,
+            );
+        }
       }
-      missingRemoteBase = remoteRef.slice("refs/remotes/".length);
+      const remoteRefs = recordedBase.baseRef.startsWith("refs/remotes/")
+        ? [recordedBase.baseRef]
+        : baseRemotes.map(
+            (remote) =>
+              `refs/remotes/${remote}/${recordedBase.baseRef.replace(/^refs\/heads\//, "")}`,
+          );
+      for (const remoteRef of remoteRefs) {
+        const remoteBranch = yield* gitCore.resolveBranchName(cwd, remoteRef);
+        if (remoteBranch) {
+          return {
+            baseBranch: recordedBase.baseBranch ?? remoteBranch,
+            baseRef: recordedBase.baseBranch ? recordedBase.baseRef : remoteRef,
+            message: null,
+          };
+        }
+      }
+      missingRemoteBase =
+        remoteRefs[0]?.slice("refs/remotes/".length) ??
+        `${targetRepository}/${recordedBase.baseRef.replace(/^refs\/heads\//, "")}`;
     }
 
     if (!missingRemoteBase && upstreamRef && !headContext.isCrossRepository) {
@@ -2100,7 +2160,7 @@ export const make = Effect.gen(function* () {
       baseBranch,
       baseRef: baseBranch,
       message: missingRemoteBase
-        ? `Recorded base ${missingRemoteBase} is unavailable in this checkout. Using default branch ${baseBranch}.`
+        ? `Base ${missingRemoteBase} is unavailable in this checkout. Using default branch ${baseBranch}.`
         : null,
     };
   });
@@ -2318,22 +2378,10 @@ export const make = Effect.gen(function* () {
       });
     }
 
-    let headContext = yield* resolveBranchHeadContext(cwd, {
+    const headContext = yield* resolveBranchHeadContext(cwd, {
       branch,
       upstreamRef: details.upstreamRef,
     });
-
-    const pushRemote =
-      (yield* gitCore.readConfigValue(cwd, `branch.${branch}.pushRemote`)) ??
-      (yield* gitCore.readConfigValue(cwd, "remote.pushDefault"));
-    if (pushRemote && pushRemote !== headContext.remoteName) {
-      const publishingContext = yield* resolveBranchHeadContext(cwd, {
-        branch,
-        upstreamRef: null,
-        remoteName: pushRemote,
-      });
-      if (publishingContext.isCrossRepository) headContext = publishingContext;
-    }
 
     const existing = yield* findOpenPr(cwd, headContext);
     if (existing) {
