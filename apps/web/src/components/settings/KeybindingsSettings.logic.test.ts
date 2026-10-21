@@ -91,10 +91,10 @@ describe("KeybindingsSettings.logic", () => {
   });
 
   it.each([
-    ["@", "Digit2", "mod+shift+2"],
-    ['"', "Digit2", "mod+shift+2"],
-    ["@", "Quote", "mod+shift+'"],
-  ])("captures %s at %s by physical key", (key, code, expected) => {
+    ["@", "Digit2", "mod+shift+@"],
+    ['"', "Digit2", 'mod+shift+"'],
+    ["@", "Quote", "mod+shift+@"],
+  ])("captures %s at %s by layout key", (key, code, expected) => {
     expect(
       keybindingFromKeyboardEvent(
         {
@@ -110,23 +110,21 @@ describe("KeybindingsSettings.logic", () => {
     ).toBe(expected);
   });
 
-  it("records layout punctuation while preserving physical Alt shortcuts; saved bindings still trigger", () => {
-    for (const { key, code, altKey = false, shiftKey, expected, defaultInput } of [
-      { key: "#", code: "Backslash", shiftKey: false, expected: "#", defaultInput: "\\" },
+  it("records layout punctuation and Option glyphs that trigger saved bindings", () => {
+    for (const { key, code, altKey = false, shiftKey, expected } of [
+      { key: "#", code: "Backslash", shiftKey: false, expected: "#" },
       {
         key: "'",
         code: "Backslash",
         shiftKey: true,
         expected: "shift+'",
-        defaultInput: "shift+\\",
       },
       {
         key: "¡",
         code: "Digit1",
         altKey: true,
         shiftKey: false,
-        expected: "alt+1",
-        defaultInput: "alt+1",
+        expected: "alt+¡",
       },
     ]) {
       const pressed = {
@@ -137,8 +135,7 @@ describe("KeybindingsSettings.logic", () => {
         altKey,
         shiftKey,
       };
-      expect(keybindingFromKeyboardEvent(pressed, "MacIntel")).toBe(defaultInput);
-      const input = keybindingFromKeyboardEvent(pressed, "MacIntel", { layoutCharacter: true });
+      const input = keybindingFromKeyboardEvent(pressed, "MacIntel");
       expect(input).toBe(expected);
       assert(input);
       const shortcut = parseKeybindingShortcut(input);
@@ -149,6 +146,22 @@ describe("KeybindingsSettings.logic", () => {
         }),
       ).toBe("chat.new");
     }
+  });
+
+  it.each([
+    ["German plus", "+", "BracketRight", false, "mod++"],
+    ["German umlaut", "ü", "BracketLeft", false, "mod+ü"],
+    ["German slash", "/", "Digit7", true, "mod+shift+/"],
+    ["AZERTY ampersand", "&", "Digit1", false, "mod+&"],
+    ["AZERTY accented digit", "é", "Digit2", false, "mod+é"],
+    ["AZERTY shifted digit", "1", "Digit1", true, "mod+shift+1"],
+    ["AZERTY M", "m", "Semicolon", false, "mod+m"],
+  ] as const)("round trips a recorded %s shortcut", (_name, key, code, shiftKey, expected) => {
+    const pressed = { key, code, shiftKey, metaKey: false, ctrlKey: true, altKey: false };
+    const input = keybindingFromKeyboardEvent(pressed, "Linux");
+    expect(input).toBe(expected);
+    const bindings = compileResolvedKeybindingsConfig([{ key: input!, command: "chat.new" }]);
+    expect(resolveShortcutCommand(pressed, bindings, { platform: "Linux" })).toBe("chat.new");
   });
 
   it("captures Latin layout keys instead of their punctuation position", () => {

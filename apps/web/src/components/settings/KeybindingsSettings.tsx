@@ -742,9 +742,7 @@ function useKeybindingRowEditor({
       setDraft({ keyDraft: row.key, isRecording: false });
       return;
     }
-    const next = keybindingFromKeyboardEvent(event.nativeEvent, navigator.platform, {
-      layoutCharacter: true,
-    });
+    const next = keybindingFromKeyboardEvent(event.nativeEvent, navigator.platform);
     if (!next) return;
     setDraft({ keyDraft: next, isRecording: false });
   };
@@ -1054,9 +1052,7 @@ function useNewKeybindingDraft({
       setDraft({ keyDraft: "", isRecording: false });
       return;
     }
-    const next = keybindingFromKeyboardEvent(event.nativeEvent, navigator.platform, {
-      layoutCharacter: true,
-    });
+    const next = keybindingFromKeyboardEvent(event.nativeEvent, navigator.platform);
     if (!next) return;
     setDraft({ keyDraft: next, isRecording: false });
   };

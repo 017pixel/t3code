@@ -9,7 +9,6 @@ import {
 import {
   DEFAULT_RESOLVED_KEYBINDINGS,
   parseKeybindingWhenExpression,
-  US_SHIFTED_TO_UNSHIFTED_KEYS,
 } from "@t3tools/shared/keybindings";
 
 import { shortcutKeyFromEvent } from "../../keybindings";
@@ -390,18 +389,6 @@ function titleCaseCommandSegment(segment: string): string {
   return words.join(" ");
 }
 
-function recordedLayoutShortcutKey(
-  event: Pick<KeyboardEvent, "key" | "code" | "shiftKey" | "altKey">,
-): string {
-  const physicalKey = shortcutKeyFromEvent(event);
-  const layoutKey = event.key.toLowerCase();
-  if (event.altKey || layoutKey.length !== 1) return physicalKey;
-  // Normalize only US shifted glyphs at their US position. Other layouts can
-  // produce the same glyph without Shift or at a different position.
-  const unshiftedKey = event.shiftKey ? US_SHIFTED_TO_UNSHIFTED_KEYS.get(layoutKey) : undefined;
-  return unshiftedKey === physicalKey ? physicalKey : layoutKey;
-}
-
 function normalizeShortcutKeyToken(key: string): string | null {
   const normalized = key.toLowerCase();
   if (
@@ -435,13 +422,8 @@ function normalizeShortcutKeyToken(key: string): string | null {
 export function keybindingFromKeyboardEvent(
   event: Pick<KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey">,
   platform: string,
-  options?: {
-    readonly layoutCharacter?: boolean;
-  },
 ): string | null {
-  const keyToken = normalizeShortcutKeyToken(
-    options?.layoutCharacter ? recordedLayoutShortcutKey(event) : shortcutKeyFromEvent(event),
-  );
+  const keyToken = normalizeShortcutKeyToken(shortcutKeyFromEvent(event));
   if (!keyToken) return null;
 
   const parts: string[] = [];

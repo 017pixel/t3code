@@ -181,6 +181,8 @@ export function HtmlRenderDocument(props: {
         !blocked.some(matches) &&
         (key.key.length === 1 ||
           key.key === "Dead" ||
+          key.key === "Unidentified" ||
+          key.key === "" ||
           allowed.some((shortcut) => shortcut.key === normalizeEventKey(key.key)))
       );
     },

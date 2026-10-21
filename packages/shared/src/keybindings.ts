@@ -29,30 +29,6 @@ export interface ShortcutModifierStateLike {
   altKey: boolean;
 }
 
-export const EVENT_CODE_SHORTCUT_KEYS: Readonly<Record<string, string>> = {
-  Backquote: "`",
-  Backslash: "\\",
-  BracketLeft: "[",
-  BracketRight: "]",
-  Comma: ",",
-  Digit0: "0",
-  Digit1: "1",
-  Digit2: "2",
-  Digit3: "3",
-  Digit4: "4",
-  Digit5: "5",
-  Digit6: "6",
-  Digit7: "7",
-  Digit8: "8",
-  Digit9: "9",
-  Equal: "=",
-  Minus: "-",
-  Period: ".",
-  Quote: "'",
-  Semicolon: ";",
-  Slash: "/",
-};
-
 export const US_SHIFTED_TO_UNSHIFTED_KEYS: ReadonlyMap<string, string> = new Map([
   ["!", "1"],
   ["@", "2"],
@@ -77,73 +53,105 @@ export const US_SHIFTED_TO_UNSHIFTED_KEYS: ReadonlyMap<string, string> = new Map
   ["?", "/"],
 ]);
 
-export function isMacPlatform(platform: string): boolean {
-  return /mac|iphone|ipad|ipod/i.test(platform);
-}
+// The HTML frame embeds this factory, so it must not capture module bindings.
+export function createKeybindingMatcher() {
+  const eventCodeShortcutKeys: Readonly<Record<string, string>> = {
+    Backquote: "`",
+    Backslash: "\\",
+    BracketLeft: "[",
+    BracketRight: "]",
+    Comma: ",",
+    Digit0: "0",
+    Digit1: "1",
+    Digit2: "2",
+    Digit3: "3",
+    Digit4: "4",
+    Digit5: "5",
+    Digit6: "6",
+    Digit7: "7",
+    Digit8: "8",
+    Digit9: "9",
+    Equal: "=",
+    Minus: "-",
+    Period: ".",
+    Quote: "'",
+    Semicolon: ";",
+    Slash: "/",
+  };
 
-export function normalizeEventKey(key: string): string {
-  const normalized = key.toLowerCase();
-  if (normalized === "esc") return "escape";
-  return normalized;
-}
-
-export function shortcutKeyFromEvent(event: Pick<ShortcutEventLike, "key" | "code">): string {
-  const layoutKey = normalizeEventKey(event.key);
-  if (/^[a-z]$/.test(layoutKey)) return layoutKey;
-  const physicalKey = event.code ? EVENT_CODE_SHORTCUT_KEYS[event.code] : undefined;
-  return physicalKey ?? layoutKey;
-}
-
-export function resolveEventKeys(event: ShortcutEventLike): Set<string> {
-  const layoutKey = normalizeEventKey(event.key);
-  const keys = new Set([layoutKey]);
-  const letterCode = event.code?.match(/^Key([A-Z])$/)?.[1];
-  if (letterCode && !/^[a-z]$/.test(layoutKey)) {
-    keys.add(letterCode.toLowerCase());
+  function isMacPlatform(platform: string): boolean {
+    return /mac|iphone|ipad|ipod/i.test(platform);
   }
-  const physicalKey = shortcutKeyFromEvent(event);
-  // Printable punctuation follows the layout, except for modifier-produced
-  // glyphs and US shifted keys such as Shift+] producing }.
-  if (
-    layoutKey.length !== 1 ||
-    event.altKey ||
-    (event.shiftKey && US_SHIFTED_TO_UNSHIFTED_KEYS.get(layoutKey) === physicalKey)
-  ) {
-    keys.add(physicalKey);
+
+  function normalizeEventKey(key: string): string {
+    const normalized = key.toLowerCase();
+    return normalized === "esc" ? "escape" : normalized;
   }
-  return keys;
+
+  function shortcutKeyFromEvent(event: Pick<ShortcutEventLike, "key" | "code">): string {
+    const key = normalizeEventKey(event.key);
+    // Dead keys and missing key values carry no layout character to match.
+    if (key !== "" && key !== "unidentified" && key !== "dead") return key;
+    const code = event.code ?? "";
+    if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
+    return Object.hasOwn(eventCodeShortcutKeys, code) ? eventCodeShortcutKeys[code]! : key;
+  }
+
+  function resolveEventKeys(event: ShortcutEventLike): Set<string> {
+    return new Set([shortcutKeyFromEvent(event)]);
+  }
+
+  function matchesKeybindingShortcutModifiers(
+    event: ShortcutModifierStateLike,
+    shortcut: KeybindingShortcut,
+    platform: string,
+  ): boolean {
+    const useMetaForMod = isMacPlatform(platform);
+    const expectedMeta = shortcut.metaKey || (shortcut.modKey && useMetaForMod);
+    const expectedCtrl = shortcut.ctrlKey || (shortcut.modKey && !useMetaForMod);
+    return (
+      event.metaKey === expectedMeta &&
+      event.ctrlKey === expectedCtrl &&
+      event.shiftKey === shortcut.shiftKey &&
+      event.altKey === shortcut.altKey
+    );
+  }
+
+  function matchesKeybindingShortcut(
+    event: ShortcutEventLike,
+    shortcut: KeybindingShortcut,
+    platform: string,
+  ): boolean {
+    if (
+      !isMacPlatform(platform) &&
+      event.getModifierState?.("AltGraph") &&
+      !/^[a-z0-9]$/i.test(event.key)
+    )
+      return false;
+    return (
+      matchesKeybindingShortcutModifiers(event, shortcut, platform) &&
+      shortcutKeyFromEvent(event) === shortcut.key
+    );
+  }
+
+  return {
+    isMacPlatform,
+    normalizeEventKey,
+    shortcutKeyFromEvent,
+    resolveEventKeys,
+    matchesKeybindingShortcutModifiers,
+    matchesKeybindingShortcut,
+  };
 }
 
-export function matchesKeybindingShortcutModifiers(
-  event: ShortcutModifierStateLike,
-  shortcut: KeybindingShortcut,
-  platform: string,
-): boolean {
-  const useMetaForMod = isMacPlatform(platform);
-  const expectedMeta = shortcut.metaKey || (shortcut.modKey && useMetaForMod);
-  const expectedCtrl = shortcut.ctrlKey || (shortcut.modKey && !useMetaForMod);
-  return (
-    event.metaKey === expectedMeta &&
-    event.ctrlKey === expectedCtrl &&
-    event.shiftKey === shortcut.shiftKey &&
-    event.altKey === shortcut.altKey
-  );
-}
-
-export function matchesKeybindingShortcut(
-  event: ShortcutEventLike,
-  shortcut: KeybindingShortcut,
-  platform: string,
-): boolean {
-  if (
-    !isMacPlatform(platform) &&
-    event.getModifierState?.("AltGraph") &&
-    !/^[a-z0-9]$/i.test(event.key)
-  )
-    return false;
-  if (!matchesKeybindingShortcutModifiers(event, shortcut, platform)) return false;
-  return resolveEventKeys(event).has(shortcut.key);
-}
+export const {
+  isMacPlatform,
+  normalizeEventKey,
+  shortcutKeyFromEvent,
+  resolveEventKeys,
+  matchesKeybindingShortcutModifiers,
+  matchesKeybindingShortcut,
+} = createKeybindingMatcher();
 
 type WhenToken =
   | { type: "identifier"; value: string }
@@ -217,6 +225,9 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+shift+arrowup", command: "modelPicker.previousProvider", when: "modelPickerOpen" },
   { key: "mod+shift+arrowdown", command: "modelPicker.nextProvider", when: "modelPickerOpen" },
   { key: "mod+o", command: "editor.openFavorite" },
+  // Shifted US glyphs are explicit bindings, never aliases inferred from event.code.
+  { key: "mod+shift+{", command: "thread.previous" },
+  { key: "mod+shift+}", command: "thread.next" },
   { key: "mod+shift+[", command: "thread.previous" },
   { key: "mod+shift+]", command: "thread.next" },
   { key: "mod+shift+c", command: "thread.copyReference", when: "!terminalFocus" },
@@ -236,6 +247,10 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "c", command: "usage.cost", when: "usagePageOpen" },
   { key: "t", command: "usage.tokens", when: "usagePageOpen" },
   { key: "l", command: "usage.limits", when: "usagePageOpen" },
+  { key: "mod+shift+!", command: "usage.period.day", when: "usagePageOpen" },
+  { key: "mod+shift+@", command: "usage.period.week", when: "usagePageOpen" },
+  { key: "mod+shift+#", command: "usage.period.month", when: "usagePageOpen" },
+  { key: "mod+shift+$", command: "usage.period.quarter", when: "usagePageOpen" },
   { key: "mod+shift+1", command: "usage.period.day", when: "usagePageOpen" },
   { key: "mod+shift+2", command: "usage.period.week", when: "usagePageOpen" },
   { key: "mod+shift+3", command: "usage.period.month", when: "usagePageOpen" },
