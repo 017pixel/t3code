@@ -95,10 +95,10 @@ const ACTIVITY_TOKEN_REREGISTER_INTERVAL_MS = 60_000;
 const LIVE_ACTIVITY_STALE_AFTER_MS = 10 * 60_000;
 const liveActivityStaleDate = () => new Date(Date.now() + LIVE_ACTIVITY_STALE_AFTER_MS);
 const registeredActivityPushTokens = new Map<string, number>();
-// Set while the widget shows the signed-out or loading state instead of the
-// active account's rows. A failed read replaces only those; otherwise it keeps
-// the rows on screen, including ones persisted from before a cold start.
-let widgetAwaitsAccountRead = false;
+// What the widget shows, as far as this process knows. A failed read keeps
+// only rows this process painted for the current account; after a cold start
+// the persisted timeline could be any state, so it is "unknown".
+let widgetShows: "unknown" | "placeholder" | "account-rows" = "unknown";
 // Refreshes can overlap (sign-in, foreground, retry); only the newest read may
 // repaint, so a slow older response never overwrites newer rows.
 let widgetSnapshotReads = 0;
@@ -197,10 +197,10 @@ export function setAgentAwarenessRelayTokenProvider(
       clearAndroidAgentNotifications();
     }
     // Sign-in, including an account switch after the old account signed out,
-    // shows loading until the first read. A cold start keeps the persisted
-    // rows, which belong to the last account that was signed in.
-    if (provider && identity && (relayTokenProviderIdentity || widgetAwaitsAccountRead)) {
-      widgetAwaitsAccountRead = true;
+    // shows loading until the first read. A cold start doesn't, so a launch
+    // never flashes it over the persisted timeline.
+    if (provider && identity && (relayTokenProviderIdentity || widgetShows === "placeholder")) {
+      widgetShows = "placeholder";
       publishWidget({ kind: "loading" });
     }
     androidDeviceReplayedAt = null;
@@ -224,7 +224,7 @@ export function setAgentAwarenessRelayTokenProvider(
     // Without a signed-in user the relay can no longer update or end these
     // activities, so they would sit orphaned on the lock screen.
     endLocalLiveActivities("live activity cleanup after cloud sign-out failed");
-    widgetAwaitsAccountRead = true;
+    widgetShows = "placeholder";
     publishWidget({ kind: "signed-out" });
     setRegistrationStatus("unknown");
     void clearAgentAwarenessRegistrationRecord().catch((error: unknown) => {
@@ -935,7 +935,7 @@ export function __resetAgentAwarenessRemoteRegistrationForTest(): void {
   registrationStatusListeners.clear();
   registeredActivityPushTokens.clear();
   activityPushTokenLocks.clear();
-  widgetAwaitsAccountRead = false;
+  widgetShows = "unknown";
   widgetSnapshotReads = 0;
 }
 
@@ -1089,9 +1089,10 @@ export const refreshActiveLiveActivityRemoteRegistration = Effect.fn(
       return undefined;
     }
     if (snapshot) {
-      widgetAwaitsAccountRead = false;
+      widgetShows = "account-rows";
       publishWidget({ kind: "snapshot", aggregate: snapshot.aggregate });
-    } else if (widgetAwaitsAccountRead) {
+    } else if (widgetShows !== "account-rows") {
+      widgetShows = "placeholder";
       publishWidget({ kind: "unavailable" });
     }
     return { snapshot };

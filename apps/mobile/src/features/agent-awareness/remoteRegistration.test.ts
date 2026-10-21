@@ -858,7 +858,7 @@ describe("makeRelayDeviceRegistrationRequest", () => {
       }).pipe(Effect.provide(relay));
     });
 
-    it.effect("a failed read keeps the shown rows, but never the signed-out state", () => {
+    it.effect("a failed read keeps rows painted this session, but never a placeholder", () => {
       const relayDown = new ManagedRelay.ManagedRelayRequestFailedError({
         action: "read relay agent activity snapshot",
         transportFailed: true,
@@ -871,12 +871,7 @@ describe("makeRelayDeviceRegistrationRequest", () => {
       setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
 
       return Effect.gen(function* () {
-        // A cold start keeps the rows the widget persisted before the app quit.
-        yield* refreshActiveLiveActivityRemoteRegistration();
-        expect(publishWidgetMock).not.toHaveBeenCalled();
-
-        setAgentAwarenessRelayTokenProvider(null);
-        setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
+        // After a cold start the persisted timeline may be a placeholder.
         yield* refreshActiveLiveActivityRemoteRegistration();
         expect(publishWidgetMock).toHaveBeenLastCalledWith({ kind: "unavailable" });
 
