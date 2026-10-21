@@ -1096,6 +1096,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     };
   };
 
+  // Fails when `ps` does, so an empty table never reads as every process having exited.
   const readProcessTable = Effect.suspend(() =>
     processRunner.run({
       command: "ps",
@@ -1103,7 +1104,14 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
       timeout: Duration.millis(PS_TIMEOUT_MS),
       maxOutputBytes: PS_MAX_OUTPUT_BYTES,
     }),
-  ).pipe(Effect.map((result) => parseProcessTable(result.stdout)));
+  ).pipe(
+    Effect.mapError((cause) => new PreviewStopLocalServerError({ reason: "signal-failed", cause })),
+    Effect.filterOrFail(
+      (result) => !exitedWithError(result),
+      () => new PreviewStopLocalServerError({ reason: "signal-failed" }),
+    ),
+    Effect.map((result) => parseProcessTable(result.stdout)),
+  );
 
   const signalUntilStopped = Effect.fn("PortDiscovery.signalUntilStopped")(function* (
     input: PreviewStopLocalServerInput,
@@ -1131,11 +1139,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
       (server) => server.pid === input.pid && server.port === input.port && isOwned(server),
     );
     if (!listed) return yield* new PreviewStopLocalServerError({ reason: "not-found" });
-    const table = yield* readProcessTable.pipe(
-      Effect.mapError(
-        (cause) => new PreviewStopLocalServerError({ reason: "signal-failed", cause }),
-      ),
-    );
+    const table = yield* readProcessTable;
     // It exited after the scan, so there is nothing left to stop.
     if (!table.has(input.pid)) return;
     const group = stoppableProcessGroup(table, input.pid, process.pid);
