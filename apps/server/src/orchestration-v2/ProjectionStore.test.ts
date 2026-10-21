@@ -1,4 +1,4 @@
-import { assert, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import {
   EnvironmentId,
   EventId,
@@ -34,6 +34,10 @@ import * as Tracer from "effect/Tracer";
 import * as SqlClient from "effect/sql/SqlClient";
 import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+
+import { runMigrations } from "../persistence/Migrations.ts";
+import ThreadShellLookupIndexes from "../persistence/Migrations/068_ThreadShellLookupIndexes.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -1106,6 +1110,31 @@ const assertProjectScopedShells = Effect.fn("assertProjectScopedShells")(functio
 });
 
 it.layer(layerTest)("ProjectionStoreV2", (it) => {
+  it.effect("uses the last-executed index in the thread-shell list query", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      yield* addRolledBackRecoveryCandidate("shell-lookup-index");
+      const { statements, tracer } = traceSqlStatements();
+      yield* projectionStore.getShellSnapshot().pipe(Effect.withTracer(tracer));
+      const statement = statements.find((query) =>
+        query.includes("AS blocking_failure_payload_json"),
+      );
+      assert.isDefined(statement);
+      const plan = yield* sql.unsafe<{ readonly detail: string }>(
+        `EXPLAIN QUERY PLAN ${statement}`,
+      );
+      assert.isTrue(
+        plan.some((row) =>
+          row.detail.includes(
+            "SEARCH candidate USING INDEX orchestration_v2_projection_runs_last_executed_idx (thread_id=?)",
+          ),
+        ),
+        JSON.stringify(plan),
+      );
+    }),
+  );
+
   // regression: #21969 keep corrupt plan JSON in the typed read error
   it.effect("returns a typed read error for malformed stored plan JSON", () =>
     Effect.gen(function* () {
@@ -5642,5 +5671,150 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         [runId, newerRunId],
       );
     }),
+  );
+});
+
+const projectionLookupIndexes = [
+  {
+    name: "orchestration_v2_projection_runs_last_executed_idx",
+    table: "orchestration_v2_projection_runs",
+    columns: ["thread_id", null, "completed_at", "ordinal", "run_id"],
+    descending: [0, 1, 1, 1, 1],
+    definition:
+      "(thread_id, (completed_at IS NULL) DESC, completed_at DESC, ordinal DESC, run_id DESC) WHERE status <> 'queued' AND NOT(status='cancelled' AND json_extract(payload_json,'$.startedAt') IS NULL)",
+    query:
+      "WHERE thread_id = 'lookup-thread' AND status <> 'queued' AND NOT(status='cancelled' AND json_extract(payload_json,'$.startedAt') IS NULL) ORDER BY completed_at IS NULL DESC, completed_at DESC, ordinal DESC, run_id DESC LIMIT 1",
+    expected: ["run-4"],
+    id: "run_id",
+  },
+] as const;
+
+const normalizeIndexSql = (sql: string) => sql.toLowerCase().replace(/\s+/g, "");
+
+const assertProjectionLookupIndexes = Effect.fn("test.assertProjectionLookupIndexes")(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  for (const index of projectionLookupIndexes) {
+    const definitions = yield* sql<{ readonly sql: string }>`
+      SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ${index.name}
+    `;
+    assert.lengthOf(definitions, 1, index.name);
+    assert.include(
+      normalizeIndexSql(definitions[0]!.sql),
+      normalizeIndexSql(`ON ${index.table}${index.definition}`),
+      index.name,
+    );
+    const columns = yield* sql.unsafe<{
+      readonly name: string | null;
+      readonly desc: number;
+      readonly key: number;
+    }>(`PRAGMA index_xinfo('${index.name}')`);
+    const keys = columns.filter((column) => column.key === 1);
+    assert.deepEqual(
+      keys.map((column) => column.name),
+      [...index.columns],
+      index.name,
+    );
+    assert.deepEqual(
+      keys.map((column) => column.desc),
+      [...index.descending],
+      index.name,
+    );
+  }
+});
+
+const seedProjectionLookupRows = Effect.fn("test.seedProjectionLookupRows")(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  for (const [ordinal, status, completedAt, startedAt] of [
+    [1, "completed", "2026-01-03", "2026-01-01"],
+    [2, "failed", "2026-01-02", "2026-01-01"],
+    [3, "waiting", null, "2026-01-01"],
+    [4, "running", null, "2026-01-01"],
+    [5, "cancelled", null, null],
+    [6, "queued", null, null],
+    [7, "cancelled", "2026-01-04", "2026-01-01"],
+  ] as const) {
+    yield* sql`INSERT INTO orchestration_v2_projection_runs
+      (run_id, thread_id, ordinal, provider, status, requested_at, completed_at, payload_json)
+      VALUES (${`run-${ordinal}`}, 'lookup-thread', ${ordinal}, 'codex', ${status},
+        '2026-01-01', ${completedAt}, ${JSON.stringify({ startedAt })})`;
+  }
+  yield* sql`INSERT INTO orchestration_v2_projection_runs
+    (run_id, thread_id, ordinal, provider, status, requested_at, completed_at, payload_json)
+    VALUES ('other-run', 'other-thread', 99, 'codex', 'running', '2026-01-01', NULL, '{}')`;
+});
+
+describe("ProjectionStoreV2 migration 68 lookup indexes", () => {
+  it.effect("creates the lookup indexes on a fresh database", () =>
+    Effect.gen(function* () {
+      yield* runMigrations({ toMigrationInclusive: 68 });
+      yield* assertProjectionLookupIndexes();
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("upgrades a populated migration 67 database without changing lookup results", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 67 });
+      yield* seedProjectionLookupRows();
+      const before = [];
+      for (const index of projectionLookupIndexes) {
+        const rows = yield* sql.unsafe<Record<string, unknown>>(
+          `SELECT * FROM ${index.table} NOT INDEXED ${index.query}`,
+        );
+        assert.deepEqual(
+          rows.map((row) => row[index.id]),
+          [...index.expected],
+          index.name,
+        );
+        before.push(rows);
+      }
+      yield* runMigrations({ toMigrationInclusive: 68 });
+      yield* assertProjectionLookupIndexes();
+      for (const [position, index] of projectionLookupIndexes.entries()) {
+        const indexed = yield* sql.unsafe(
+          `SELECT * FROM ${index.table} INDEXED BY ${index.name} ${index.query}`,
+        );
+        const unindexed = yield* sql.unsafe(
+          `SELECT * FROM ${index.table} NOT INDEXED ${index.query}`,
+        );
+        assert.deepEqual(indexed, before[position], index.name);
+        assert.deepEqual(indexed, unindexed, index.name);
+      }
+      const [index] = projectionLookupIndexes;
+      for (const runId of ["run-4", "run-3", "run-7", "run-1", "run-2"]) {
+        const rows = yield* sql.unsafe<{ readonly run_id: string }>(
+          `SELECT run_id FROM ${index.table} ${index.query}`,
+        );
+        assert.deepEqual(
+          rows.map((row) => row.run_id),
+          [runId],
+        );
+        yield* sql`DELETE FROM orchestration_v2_projection_runs WHERE run_id = ${runId}`;
+      }
+      assert.deepEqual(yield* sql.unsafe(`SELECT run_id FROM ${index.table} ${index.query}`), []);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("re-running migration 68 preserves index definitions and rows", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 68 });
+      yield* seedProjectionLookupRows();
+      const definitions =
+        yield* sql`SELECT name, sql FROM sqlite_master WHERE type = 'index' ORDER BY name`;
+      const runs = yield* sql`SELECT * FROM orchestration_v2_projection_runs ORDER BY run_id`;
+      yield* ThreadShellLookupIndexes;
+      yield* ThreadShellLookupIndexes;
+      assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 68 }), []);
+      yield* assertProjectionLookupIndexes();
+      assert.deepEqual(
+        yield* sql`SELECT name, sql FROM sqlite_master WHERE type = 'index' ORDER BY name`,
+        definitions,
+      );
+      assert.deepEqual(
+        yield* sql`SELECT * FROM orchestration_v2_projection_runs ORDER BY run_id`,
+        runs,
+      );
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });
