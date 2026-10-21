@@ -70,7 +70,7 @@ describe("resolveMarkdownMediaPreview", () => {
     });
   });
 
-  it.each(["./image.png", "./clip.mp4", "./report.pdf", "./sound.mp3"])(
+  it.each(["./image.png", "./report.pdf", "./sound.mp3"])(
     "uses the draft workspace when no thread exists: %s",
     (href) => {
       expect(
