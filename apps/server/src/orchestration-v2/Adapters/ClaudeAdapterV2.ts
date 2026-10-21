@@ -10259,9 +10259,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               const upToMessageId = yield* resolveClaudeForkUpToMessageId(forkInput);
               // A moved project still has its transcript under the original cwd.
               // Let the SDK find the session by ID within this Claude home.
-              const forkOptions: ForkSessionOptions = {
-                ...(upToMessageId === undefined ? {} : { upToMessageId }),
-              };
+              const forkOptions: ForkSessionOptions =
+                upToMessageId === undefined ? {} : { upToMessageId };
               const forked = yield* queryRunner.forkSession({
                 sessionId: sourceNativeThreadId,
                 options: forkOptions,
