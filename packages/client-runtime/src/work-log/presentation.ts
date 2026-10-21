@@ -511,6 +511,7 @@ export function resolveViewedImageAsset(
   input: {
     readonly threadId: ThreadId;
     readonly workspaceRoot?: string | null | undefined;
+    readonly entryId?: string | undefined;
   },
 ): ViewedImageAsset | null {
   const imageSource = classifyMarkdownImageSource(source, input.workspaceRoot ?? ".");
