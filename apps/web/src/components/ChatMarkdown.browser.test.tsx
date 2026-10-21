@@ -277,3 +277,77 @@ describe("ChatMarkdown Windows file links", () => {
     }
   });
 });
+
+describe("ChatMarkdown content direction", () => {
+  it.each([
+    {
+      language: "Hebrew",
+      heading: "כותרת בעברית",
+      sentence: "זהו משפט בעברית.",
+      item: "פריט ראשון",
+    },
+    {
+      language: "Arabic",
+      heading: "عنوان بالعربية",
+      sentence: "هذه جملة عربية.",
+      item: "العنصر الأول",
+    },
+  ])("lays out $language prose and bullets from the right", async ({ heading, sentence, item }) => {
+    setup();
+    await using screen = await renderText(`## ${heading}\n\n${sentence}\n\n- ${item}`);
+    const { container } = screen;
+    await vi.waitFor(() => {
+      for (const selector of ["h2", "p", "ul", "li"]) {
+        expect(getComputedStyle(container.querySelector(selector)!).direction, selector).toBe(
+          "rtl",
+        );
+      }
+      const listStyle = getComputedStyle(container.querySelector("ul")!);
+      expect(parseFloat(listStyle.paddingRight)).toBeGreaterThan(parseFloat(listStyle.paddingLeft));
+
+      // The final period belongs at the left end of this single-line RTL sentence.
+      const text = container.querySelector("p")!.firstChild!;
+      const first = document.createRange();
+      first.setStart(text, 0);
+      first.setEnd(text, 1);
+      const period = document.createRange();
+      period.setStart(text, sentence.length - 1);
+      period.setEnd(text, sentence.length);
+      expect(period.getBoundingClientRect().right).toBeLessThanOrEqual(
+        first.getBoundingClientRect().left,
+      );
+    });
+  });
+
+  it("keeps mainly Hebrew prose RTL even when it starts with an English term", async () => {
+    setup();
+    await using screen = await renderText(
+      "React מאפשר לבנות ממשק בעברית עם `const value = 1` בתוך המשפט.\n\nEnglish prose stays left to right.",
+    );
+    const { container } = screen;
+    await vi.waitFor(() => {
+      const [hebrew, english] = container.querySelectorAll("p");
+      expect(getComputedStyle(hebrew!).direction).toBe("rtl");
+      expect(getComputedStyle(hebrew!.querySelector("code")!).direction).toBe("ltr");
+      expect(getComputedStyle(english!).direction).toBe("ltr");
+    });
+  });
+
+  it("keeps code blocks and English tables LTR within a Hebrew response", async () => {
+    setup();
+    await using screen = await renderText(
+      'הנה דוגמה של קוד וטבלה בעברית.\n\n```js\nconst message = "שלום";\n```\n\n| Name | Value |\n| --- | --- |\n| message | hello |',
+    );
+    const { container } = screen;
+    await vi.waitFor(() => {
+      expect(getComputedStyle(container.querySelector("p")!).direction).toBe("rtl");
+      for (const selector of ["pre", "pre code", "table", "th", "td"]) {
+        const elements = container.querySelectorAll(selector);
+        expect(elements.length, selector).toBeGreaterThan(0);
+        for (const element of elements) {
+          expect(getComputedStyle(element).direction, selector).toBe("ltr");
+        }
+      }
+    });
+  });
+});
