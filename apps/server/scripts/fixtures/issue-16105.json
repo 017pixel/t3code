@@ -7,12 +7,12 @@
     {
       "fixture": "F1",
       "role": "user",
-      "text": "Install ~/folder-a/skills/x, then read (~/folder-a/guide.md).\nKeep ~solo~ and ~~old~~ with **bold** and [guide](https://example.com).\n> Quote ~/quote/a then (~/quote/b).\n- List ~/list/a then (~/list/b).\n| A | B |\n| - | - |\n| ~/table/a | (~/table/b) |"
+      "text": "Install ~/folder-a/skills/x, then read (~/folder-a/guide.md).\nKeep ~solo~ and ~~old~~ with **bold** and [guide](https://example.com).\n> Quote ~/quote/a then (~/quote/b).\n- List ~/list/a then (~/list/b).\n\n| A | B |\n| - | - |\n| ~/table/a | (~/table/b) |"
     },
     {
       "fixture": "F1A",
       "role": "assistant",
-      "text": "Install ~/folder-a/skills/x, then read (~/folder-a/guide.md).\nKeep ~solo~ and ~~old~~ with **bold** and [guide](https://example.com).\n> Quote ~/quote/a then (~/quote/b).\n- List ~/list/a then (~/list/b).\n| A | B |\n| - | - |\n| ~/table/a | (~/table/b) |"
+      "text": "Install ~/folder-a/skills/x, then read (~/folder-a/guide.md).\nKeep ~solo~ and ~~old~~ with **bold** and [guide](https://example.com).\n> Quote ~/quote/a then (~/quote/b).\n- List ~/list/a then (~/list/b).\n\n| A | B |\n| - | - |\n| ~/table/a | (~/table/b) |"
     },
     {
       "fixture": "F2",
