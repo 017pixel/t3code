@@ -137,7 +137,11 @@ export class IncompatibleServerError extends Schema.TaggedError<IncompatibleServ
   { serverVersion: Schema.String, protocolVersion: Schema.Number },
 ) {
   override get message(): string {
-    return `The running T3 Code server (${this.serverVersion}) uses orchestration protocol ${String(this.protocolVersion)}, but this CLI uses protocol ${String(ORCHESTRATION_PROTOCOL_VERSION)}, so its pairing token would not work. Pair with the server's own CLI: \`npx t3@${this.serverVersion} pair\`.`;
+    // serverVersion comes from the network, so only put a plain version into a copyable command.
+    const command = /^[\w.+-]+$/.test(this.serverVersion)
+      ? `: \`npx t3@${this.serverVersion} pair\``
+      : "";
+    return `The running T3 Code server (${this.serverVersion}) uses orchestration protocol ${String(this.protocolVersion)}, but this CLI uses protocol ${String(ORCHESTRATION_PROTOCOL_VERSION)}, so its pairing token would not work. Pair with the server's own CLI${command}.`;
   }
 }
 

@@ -30,7 +30,11 @@ import {
   persistServerRuntimeState,
   type PersistedServerRuntimeState,
 } from "../serverRuntimeState.ts";
-import { DevServerNotProxiableError, resolveTailscaleLocalTarget } from "./pair.ts";
+import {
+  DevServerNotProxiableError,
+  IncompatibleServerError,
+  resolveTailscaleLocalTarget,
+} from "./pair.ts";
 
 import packageJson from "../../package.json" with { type: "json" };
 
@@ -298,6 +302,16 @@ describe("t3 pair", () => {
       { ...testDescriptor, orchestrationProtocolVersion },
     ).pipe(Effect.provide(NodeServices.layer)),
   );
+
+  it("does not suggest a command built from an unsafe server version", () => {
+    const message = new IncompatibleServerError({
+      serverVersion: "0.0.45; rm -rf ~",
+      protocolVersion: 1,
+    }).message;
+
+    expect(message).toContain("Pair with the server's own CLI.");
+    expect(message).not.toContain("npx t3@");
+  });
 
   it.effect("ignores runtime state whose recorded pid is no longer alive", () =>
     withDescriptorServer((origin) =>
