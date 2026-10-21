@@ -230,13 +230,25 @@ it.each([
   await using screen = await mountEditor(value);
   const { editor } = screen;
   await act(async () => {
-    editor.commands.focus();
-    typed.forEach((text, index) => typeText(editor, at + index, at + index, text));
-    editor.commands.focus("end");
+    editor.commands.focus(at);
+    for (const text of typed) {
+      const { from, to } = editor.state.selection;
+      typeText(editor, from, to, text);
+    }
   });
   expect(serializeEditorDoc(editor.state.doc).value).toBe("- get md\nnext");
   expect(editor.state.doc.firstChild?.type.name).toBe("bulletList");
   expect(editor.state.doc.firstChild?.textContent).toBe("get md");
+  const { $from, empty } = editor.state.selection;
+  expect({ empty, line: $from.parent.textContent, offset: $from.parentOffset }).toEqual({
+    empty: true,
+    line: "get md",
+    offset: 0,
+  });
+  await act(async () => {
+    editor.commands.focus("end");
+  });
+  expect(serializeEditorDoc(editor.state.doc).value).toBe("- get md\nnext");
 });
 
 const file = {

@@ -609,7 +609,6 @@ function listMarkerInputRule(
       }
       const command = chain()
         .deleteRange(range)
-        .setTextSelection(range.from)
         .wrapInList(
           listType,
           listType === "orderedList" ? { start: Number.parseInt(marker, 10) || 1 } : {},
