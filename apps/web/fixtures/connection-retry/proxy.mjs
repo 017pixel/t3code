@@ -17,7 +17,8 @@ const server = http.createServer((req, res) => {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "authorization, content-type",
+      "Access-Control-Allow-Headers":
+        req.headers["access-control-request-headers"] ?? "authorization, content-type",
       "Access-Control-Allow-Private-Network": "true",
     });
     res.end();

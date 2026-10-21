@@ -5,7 +5,6 @@
   "threadTitle": "Reconnect a stopped thread",
   "workspaceRoot": "/tmp/issue-22024-workspace",
   "remoteLabel": "Synthetic remote connection proof server",
-  "clock": "2026-10-21T12:00:00.000Z",
   "environmentIds": {
     "before": "1eebfd89-969b-4301-8e93-2dc67c47d7bf",
     "after": "09122c6a-0c89-468c-9388-fa744ea0eeb4",
