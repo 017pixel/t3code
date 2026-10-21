@@ -9186,7 +9186,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               existing.openedPermissionMode === queryPolicy.permissionMode)
           ) {
             const live = existing;
-            yield* live.query.setModel(compiledSelection.apiModelId).pipe(
+            // Resending an unchanged model can override one a wrapper picked (#22265). An
+            // empty identity marks a failed update, which leaves the live model unknown.
+            const modelKnown =
+              live.selection.queryIdentity !== "" &&
+              live.selection.apiModelId === compiledSelection.apiModelId;
+            yield* (
+              modelKnown ? Effect.void : live.query.setModel(compiledSelection.apiModelId)
+            ).pipe(
               Effect.andThen(
                 live.query.applyFlagSettings(claudeLiveSelectionFlagSettings(compiledSelection)),
               ),

@@ -2138,6 +2138,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly close?: (sdkMessages: Queue.Queue<SDKMessage>) => Effect.Effect<void>;
     readonly interrupt?: Effect.Effect<void>;
     readonly setPermissionMode?: ClaudeAdapterV2.ClaudeAgentSdkQuerySession["setPermissionMode"];
+    readonly applyFlagSettings?: ClaudeAdapterV2.ClaudeAgentSdkQuerySession["applyFlagSettings"];
     readonly stopTask?: (
       taskId: string,
     ) => Effect.Effect<void, ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError>;
@@ -2281,7 +2282,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 applyFlagSettings: (settings) =>
                   Effect.sync(() => {
                     liveSelectionChanges.push(settings);
-                  }),
+                  }).pipe(
+                    Effect.andThen(() => options?.applyFlagSettings?.(settings) ?? Effect.void),
+                  ),
                 setPermissionMode: (mode) =>
                   Effect.sync(() => {
                     permissionModeChanges.push(mode);
@@ -3261,6 +3264,64 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
         ),
       ),
+  );
+
+  it.effect("resends the model after a live selection change fails", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let failFlags = true;
+        const harness = yield* makeWakeHarnessWithOptions({
+          applyFlagSettings: () =>
+            failFlags
+              ? Effect.fail(
+                  new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+                    method: "applyFlagSettings",
+                    cause: new Error("transport closed"),
+                  }),
+                )
+              : Effect.void,
+        });
+        const now = yield* DateTime.now;
+        const normal = {
+          instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
+          model: "claude-opus-5-5",
+        } satisfies ModelSelection;
+        const extraHigh = {
+          ...normal,
+          options: [{ id: "effort", value: "xhigh" }],
+        } satisfies ModelSelection;
+        const turn = (ordinal: number, modelSelection: ModelSelection) =>
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make(`attempt-failed-live-selection:${ordinal}`),
+            text: `Request ${ordinal}`,
+            attachments: [],
+            providerTurnOrdinal: ordinal,
+            modelSelection,
+          });
+        yield* harness.runtime.startTurn(turn(1, normal));
+        yield* harness.offerAndWait(turnOneResult);
+        yield* Queue.take(harness.terminalReceipts);
+
+        const failed = yield* harness.runtime.startTurn(turn(2, extraHigh)).pipe(Effect.result);
+        assert.equal(failed._tag, "Failure");
+        failFlags = false;
+        yield* harness.runtime.startTurn(turn(3, extraHigh));
+
+        // The failed update may have left the process on any model, so the retry sets it again.
+        assert.deepEqual(harness.liveSelectionChanges, [
+          { effortLevel: "xhigh", fastMode: false, ultracode: null },
+          { model: "claude-opus-5-5" },
+          { effortLevel: "xhigh", fastMode: false, ultracode: null },
+        ]);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
   );
 
   it.effect.each(["completed", "interrupted"] as const)(
