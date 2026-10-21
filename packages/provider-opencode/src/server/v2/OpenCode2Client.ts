@@ -151,6 +151,61 @@ const basicAuthorization = (password: string | Redacted.Redacted) => {
   return `Basic ${Buffer.from(`${OPENCODE_USERNAME}:${plain}`, "utf8").toString("base64")}`;
 };
 
+const MESSAGE_LIST_URL = /\/api\/session\/[^/?#]+\/message(?:[?#]|$)/;
+
+/** Reads only the page's shape; each message stays opaque for the real schema to judge. */
+const MessagePage = Schema.fromJsonString(
+  Schema.StructWithRest(Schema.Struct({ data: Schema.Array(Schema.Unknown) }), [
+    Schema.Record(Schema.String, Schema.Unknown),
+  ]),
+);
+const decodePage = Schema.decodeUnknownOption(MessagePage);
+const encodePage = Schema.encodeSync(MessagePage);
+
+const LegacyCompaction = Schema.Struct({
+  type: Schema.Literal("compaction"),
+  metadata: Schema.Struct({ recent: Schema.String }),
+});
+const isLegacyCompaction = Schema.is(LegacyCompaction);
+
+const liftCompactionRecent = (message: unknown) =>
+  isLegacyCompaction(message) && !("recent" in message)
+    ? { ...message, recent: message.metadata.recent }
+    : message;
+
+/**
+ * OpenCode 2.1 moved a compaction's `recent` into `metadata`, while the
+ * bundled 2.0.28 schema still requires it at the top level. Lifting it keeps
+ * history pages from either server decodable; any other shape still fails
+ * downstream as before.
+ */
+const liftCompactionRecents = HttpClient.transformResponse(
+  Effect.fnUntraced(function* (
+    pending: Effect.Effect<HttpClientResponse.HttpClientResponse, HttpClientError.HttpClientError>,
+  ) {
+    const response = yield* pending;
+    const { request } = response;
+    if (
+      request.method !== "GET" ||
+      response.status !== 200 ||
+      !MESSAGE_LIST_URL.test(request.url)
+    ) {
+      return response;
+    }
+    const text = yield* response.text;
+    const page = decodePage(text);
+    // The response caches its body, so the untouched one still decodes downstream.
+    if (Option.isNone(page)) return response;
+    const lifted = encodePage({ ...page.value, data: page.value.data.map(liftCompactionRecent) });
+    // The lifted body is longer than the one the server measured.
+    const { "content-length": _, ...headers } = response.headers;
+    return HttpClientResponse.fromWeb(
+      request,
+      new Response(lifted, { status: response.status, headers }),
+    );
+  }),
+);
+
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient;
@@ -161,7 +216,7 @@ export const make = Effect.gen(function* () {
         HttpClientRequest.setHeader("Authorization", basicAuthorization(password)),
       );
       return OpenCode.make({ baseUrl }).pipe(
-        Effect.provideService(HttpClient.HttpClient, authenticated),
+        Effect.provideService(HttpClient.HttpClient, liftCompactionRecents(authenticated)),
         Effect.map((client) => ({
           client,
           events: readEvents.pipe(

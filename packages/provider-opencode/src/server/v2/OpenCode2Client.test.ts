@@ -3,6 +3,7 @@ import { Session } from "@opencode/client/effect";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import { describe } from "vite-plus/test";
@@ -111,5 +112,46 @@ describe("OpenCode2Client message history", () => {
           summary: compaction.summary,
         });
       }),
+  );
+
+  it.effect("keeps a compaction without any recent an error", () =>
+    Effect.gen(function* () {
+      const compaction = {
+        type: "compaction",
+        id: "msg_repro089",
+        time: { created: 1089 },
+        status: "completed",
+        reason: "manual",
+        summary: "Fixture compaction",
+        metadata: {},
+      };
+      const transport = Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              new Response(JSON.stringify({ data: [compaction], cursor: {} }), {
+                headers: { "content-type": "application/json" },
+              }),
+            ),
+          ),
+        ),
+      );
+      const opencode = yield* OpenCode2Client.OpenCode2Client.pipe(
+        Effect.provide(OpenCode2Client.layer.pipe(Layer.provide(transport))),
+      );
+      const { client } = yield* opencode.connect({
+        baseUrl: "http://127.0.0.1:4096",
+        password: "test-password",
+      });
+      const error = yield* client.message
+        .list({ sessionID: Session.ID.make("ses_repro"), order: "asc" })
+        .pipe(Effect.flip);
+
+      assert.strictEqual(error._tag, "ClientError");
+      assert.isTrue(Schema.isSchemaError(error.cause));
+      assert.include(String(error.cause), "recent");
+    }),
   );
 });
