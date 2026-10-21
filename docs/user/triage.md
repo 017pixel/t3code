@@ -7,9 +7,10 @@ before it changes anything or posts anything.
 
 ## In the app
 
-Open the command palette and choose **Triage an issue**. T3 Code gets the source
-for the server's version, then opens a new thread with no project. Choose any
-provider, describe what went wrong below the prompt, and send.
+Open the command palette and choose **Triage an issue**. A new thread with no
+project opens, with the triage playbook linked in the message. Choose any
+provider, describe what went wrong after the link, and send. T3 Code gets the
+source for the server's version while you write.
 
 Triage runs on the machine that you are looking at: the machine of the current
 thread, or else your primary machine. The agent runs inside that T3 Code

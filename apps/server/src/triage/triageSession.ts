@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeOS from "node:os";
 
+import { TRIAGE_PROMPT_FILE_NAME } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -40,7 +41,7 @@ export const triageSourceCacheDir = (baseDir: string, path: Path.Path) =>
   path.join(baseDir, "source");
 
 /**
- * Writes `context.md` and `prompt.md` into a fresh `<stateDir>/triage/<time>`
+ * Writes `context.md` and the playbook prompt into a fresh `<stateDir>/triage/<time>`
  * folder. Both `t3 triage` and the in-app entry point start from these files.
  */
 export const writeTriageSession = Effect.fn("triage.writeTriageSession")(function* (input: {
@@ -89,7 +90,7 @@ export const writeTriageSession = Effect.fn("triage.writeTriageSession")(functio
     }),
   );
 
-  const promptFilePath = path.join(sessionDir, "prompt.md");
+  const promptFilePath = path.join(sessionDir, TRIAGE_PROMPT_FILE_NAME);
   yield* fs.writeFileString(
     promptFilePath,
     buildTriageSeedPrompt({ contextFilePath, entry: input.entry }),

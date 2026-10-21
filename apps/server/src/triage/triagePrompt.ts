@@ -1,3 +1,5 @@
+import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
+
 /**
  * `TRIAGE_PLAYBOOK` must stay byte-identical to `.github/triage/PLAYBOOK.md`
  * (only backticks and backslashes are escaped here).
@@ -157,18 +159,19 @@ export type TriageEntry =
 
 /**
  * The one-line argument the agent session is launched with. The real
- * instructions live in `prompt.md` on disk: Windows `.cmd` shims run through
+ * instructions live in the prompt file on disk: Windows `.cmd` shims run through
  * cmd.exe, which cannot carry a multiline, multi-kilobyte argv string.
  */
 export const buildTriageLaunchPrompt = (promptFilePath: string) =>
   `Read the file "${promptFilePath}" and follow its instructions exactly: it is your T3 Code triage playbook, and it starts with asking the user what went wrong.`;
 
 /**
- * The composer text an in-app session opens with. The user writes what went
- * wrong below it, so the first turn already carries the description.
+ * The composer text an in-app session opens with. The file link renders as a
+ * chip, and the user writes what went wrong after it, so the first turn
+ * already carries the description.
  */
 export const buildTriageAppPrompt = (promptFilePath: string) =>
-  `Read the file "${promptFilePath}" and follow its instructions exactly: it is your T3 Code triage playbook. What went wrong, in my words:\n\n`;
+  `Read ${serializeComposerFileLink(promptFilePath)} and follow it. `;
 
 export const buildTriageSeedPrompt = (input: {
   readonly contextFilePath: string;

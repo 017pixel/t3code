@@ -4,7 +4,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId } from "@t3tools/contracts";
+import { type EnvironmentId, TRIAGE_PROMPT_FILE_NAME } from "@t3tools/contracts";
 
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { useComposerDraftStore } from "~/composerDraftStore";
@@ -16,17 +16,18 @@ import { writeTextToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useScratchProject } from "./useScratchProject";
 
-const CLI_COMMAND = "npx t3 triage";
+export const TRIAGE_CLI_COMMAND = "npx t3 triage";
 
-const copyCliCommandAction = {
-  children: "Copy command",
-  onClick: () => void writeTextToClipboard(CLI_COMMAND, "command"),
-};
+const copyTriageCliCommand = () => writeTextToClipboard(TRIAGE_CLI_COMMAND, "command");
+
+/** A draft is a triage draft while its message still links the playbook file. */
+export const isTriagePrompt = (prompt: string) => prompt.includes(`[${TRIAGE_PROMPT_FILE_NAME}](`);
 
 /**
- * In-app `t3 triage`: the server writes the session files and clones the
- * matching source, then a No project draft opens with the prompt filled in.
- * The user picks the provider in the composer and describes the problem.
+ * In-app `t3 triage`: the server writes the session files and starts cloning
+ * the matching source, then a No project draft opens with the playbook linked.
+ * The draft hero explains the rest; the user picks a provider and describes
+ * the problem.
  */
 export function useStartTriage() {
   const { scratchWorkspaceRootFor } = useScratchProject();
@@ -34,35 +35,30 @@ export function useStartTriage() {
   const prepare = useAtomCommand(serverEnvironment.prepareTriage, { reportFailure: false });
   const openScratch = useAtomCommand(projectEnvironment.openScratch, { reportFailure: false });
 
-  return async (environmentId: EnvironmentId) => {
-    const toastId = toastManager.add({ type: "loading", title: "Preparing triage…" });
-    const fail = (description: string) =>
-      toastManager.update(
-        toastId,
-        stackedThreadToast({
-          type: "error",
-          title: "Could not start triage",
-          description: `${description} Run ${CLI_COMMAND} in a terminal instead.`,
-          timeout: 0,
-          actionProps: copyCliCommandAction,
-        }),
-      );
+  // With no draft to show, a toast is the only place to point at the CLI.
+  const fail = (description: string) =>
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: "Could not start triage",
+        description: `${description} Run ${TRIAGE_CLI_COMMAND} in a terminal instead.`,
+        timeout: 0,
+        actionProps: { children: "Copy command", onClick: () => void copyTriageCliCommand() },
+      }),
+    );
+  const failWith = (
+    result: Extract<AtomCommandResult<unknown, unknown>, { readonly _tag: "Failure" }>,
+  ) => {
+    if (isAtomCommandInterrupted(result)) return;
+    const error = squashAtomCommandFailure(result);
+    fail(error instanceof Error ? error.message : "An error occurred.");
+  };
 
+  return async (environmentId: EnvironmentId) => {
     if (scratchWorkspaceRootFor(environmentId) === null) {
       fail("This environment cannot start threads without a project.");
       return;
     }
-    const failWith = (
-      result: Extract<AtomCommandResult<unknown, unknown>, { readonly _tag: "Failure" }>,
-    ) => {
-      if (isAtomCommandInterrupted(result)) {
-        toastManager.close(toastId);
-        return;
-      }
-      const error = squashAtomCommandFailure(result);
-      fail(error instanceof Error ? error.message : "An error occurred.");
-    };
-
     const prepared = await prepare({
       environmentId,
       input: { client: currentClientMetadata() },
@@ -78,12 +74,5 @@ export function useStartTriage() {
       return;
     }
     useComposerDraftStore.getState().setPrompt(opened.draftId, prepared.value.prompt);
-    toastManager.update(toastId, {
-      type: "info",
-      title: "Describe what went wrong, then send",
-      description: `Pick any provider. If triage does not work here, run ${CLI_COMMAND} in a terminal.`,
-      timeout: 10_000,
-      actionProps: copyCliCommandAction,
-    });
   };
 }

@@ -166,7 +166,7 @@ export const triageCommand = Command.make("triage", {
         selected = yield* pickAgent(installed);
       }
 
-      // The agent is launched with a one-line pointer at prompt.md: Windows
+      // The agent is launched with a one-line pointer at the prompt file: Windows
       // `.cmd` shims run through cmd.exe, which cannot carry the multiline
       // playbook as an argv string, and with no agent installed the same file
       // is the paste-anywhere fallback.
