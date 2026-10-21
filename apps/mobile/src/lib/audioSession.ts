@@ -1,4 +1,4 @@
-import { setAudioModeAsync, setIsAudioActiveAsync } from "expo-audio";
+import { AudioModule, setAudioModeAsync, setIsAudioActiveAsync } from "expo-audio";
 
 type AudioSessionToken = {
   readonly kind: "playback" | "recording";
@@ -49,6 +49,8 @@ export function acquireAudioSession(
   const token: AudioSessionToken = { kind, onCancel, onRelease, released: false };
   if (kind === "playback" && owner?.kind === "recording" && !owner.released) return token;
   const previous = owner;
+  // Publish before cancelling the old player, including callbacks already queued by Expo.
+  AudioModule.setAudioSessionOwner?.(true);
   owner = token;
   if (previous && !previous.released) previous.onCancel?.();
   return token;
@@ -90,7 +92,10 @@ export function releaseAudioSession(token: AudioSessionToken): Promise<void> {
         // Expo pause releases the native session without disabling its global playback gate.
         // Repeat it after any pending activation, even if playback never started.
         token.onRelease?.();
-        if (owner === token) owner = null;
+        if (owner === token) {
+          AudioModule.setAudioSessionOwner?.(false);
+          owner = null;
+        }
       }
     }
   });

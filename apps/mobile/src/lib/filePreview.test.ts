@@ -29,6 +29,8 @@ const audio = vi.hoisted(() => ({
   refresh: vi.fn<() => Promise<string | null>>(),
   setAudioMode: vi.fn(async (_mode: unknown) => {}),
   setActive: vi.fn(async (_active: boolean) => {}),
+  setSessionOwner: vi.fn((_owned: boolean) => {}),
+  sessionOwned: false,
   enabled: true,
   played: vi.fn(),
   video: {
@@ -46,6 +48,7 @@ const audio = vi.hoisted(() => ({
   videoRequestListeners: new Set<(event: { isPlaybackRequested: boolean }) => void>(),
 }));
 vi.mock("expo-audio", () => ({
+  AudioModule: { setAudioSessionOwner: audio.setSessionOwner },
   useAudioPlayer: () => audio.player,
   createAudioPlayer: () => audio.player,
   useAudioPlayerStatus: () => audio.status,
@@ -120,6 +123,10 @@ vi.mock("../features/threads/ThreadMarkdownVideo", async () => {
 describe("ThreadInlineFilePreview playback", () => {
   let root: ReturnType<typeof createRoot> | undefined;
   beforeEach(() => {
+    audio.sessionOwned = false;
+    audio.setSessionOwner.mockImplementation((owned) => {
+      audio.sessionOwned = owned;
+    });
     audio.player.pause.mockReset();
     audio.enabled = true;
     audio.setActive.mockImplementation(async (enabled) => {
@@ -191,99 +198,135 @@ describe("ThreadInlineFilePreview playback", () => {
     };
   });
 
-  it.each([
-    ["inline", "video"],
-    ["viewer", "video"],
-    ["inline", "native video controls"],
-    ["viewer", "native video controls"],
-    ["inline", "recording"],
-    ["viewer", "recording"],
-  ])("keeps the shared session active when %s audio yields to %s", async (source, successor) => {
-    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-    audio.status = { ...audio.status, isLoaded: true };
-    const container = document.createElement("div");
-    root = createRoot(container);
-    const render = (playVideo = false, showAudio = true) =>
-      root!.render(
-        createElement(
-          "div",
-          null,
-          showAudio
-            ? source === "inline"
-              ? createElement(ThreadInlineFilePreview, {
-                  source: {
-                    kind: "document",
-                    name: "sound.mp3",
+  it.each(
+    ["takeover", "pause", "finish"].flatMap((release) => [
+      ["inline", "video", release],
+      ["viewer", "video", release],
+      ["inline", "native video controls", release],
+      ["viewer", "native video controls", release],
+      ["inline", "recording", release],
+      ["viewer", "recording", release],
+    ]),
+  )(
+    "keeps the shared session active when %s audio yields to %s after %s",
+    async (source, successor, release) => {
+      (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+      audio.status = { ...audio.status, isLoaded: true };
+      const container = document.createElement("div");
+      root = createRoot(container);
+      const render = (playVideo = false, showAudio = true) =>
+        root!.render(
+          createElement(
+            "div",
+            null,
+            showAudio
+              ? source === "inline"
+                ? createElement(ThreadInlineFilePreview, {
+                    source: {
+                      kind: "document",
+                      name: "sound.mp3",
+                      uri: "https://example.com/sound.mp3",
+                    },
+                    onOpen() {},
+                  })
+                : createElement(AudioFilePreview, {
                     uri: "https://example.com/sound.mp3",
-                  },
-                  onOpen() {},
-                })
-              : createElement(AudioFilePreview, {
-                  uri: "https://example.com/sound.mp3",
-                  onRetry() {},
-                })
-            : null,
-          createElement(MediaVideoPlayer, {
-            uri: "https://example.com/clip.mp4",
-            name: "clip.mp4",
-            thumbnailKey: "clip",
-            expanded: true,
-            autoPlay: playVideo,
-          }),
-        ),
+                    onRetry() {},
+                  })
+              : null,
+            createElement(MediaVideoPlayer, {
+              uri: "https://example.com/clip.mp4",
+              name: "clip.mp4",
+              thumbnailKey: "clip",
+              expanded: true,
+              autoPlay: playVideo,
+            }),
+          ),
+        );
+      await act(async () => render());
+      await act(async () =>
+        [...container.querySelectorAll("button")]
+          .find(
+            (button) =>
+              button.getAttribute("aria-label") === "Play audio" || button.textContent === "Play",
+          )!
+          .click(),
       );
-    await act(async () => render());
-    await act(async () =>
-      [...container.querySelectorAll("button")]
-        .find(
-          (button) =>
-            button.getAttribute("aria-label") === "Play audio" || button.textContent === "Play",
-        )!
-        .click(),
-    );
-    expect(audio.played).toHaveBeenCalledOnce();
-    let sessionActive = true;
-    const deactivated = vi.fn();
-    // Match expo-audio iOS: pause releases the session after 100 ms unless disabled.
-    audio.player.pause.mockImplementation((deactivateSession) => {
-      if (deactivateSession !== false) {
+      expect(audio.played).toHaveBeenCalledOnce();
+      let sessionActive = true;
+      const deactivated = vi.fn();
+      // Match expo-audio iOS: the queued callback checks ownership at execution time.
+      const queueDeactivation = () =>
         setTimeout(() => {
+          if (audio.sessionOwned) return;
           sessionActive = false;
           audio.video.playing = false;
           deactivated();
         }, 100);
-      }
-    });
-    vi.useFakeTimers();
-    let recording: ReturnType<typeof acquireAudioSession> | undefined;
-    try {
-      await act(async () => {
-        if (successor === "recording") {
-          recording = acquireAudioSession("recording");
-          await activateAudioSession(recording);
-        } else if (successor === "native video controls") audio.video.play();
-        else render(true);
+      audio.setSessionOwner.mockImplementation((owned) => {
+        audio.sessionOwned = owned;
+        if (!owned) queueDeactivation();
       });
-      if (successor !== "recording") expect(audio.video.playing).toBe(true);
-      expect(audio.player.pause).toHaveBeenCalled();
-      // Cleanup of the old native ref must not interrupt the successor either.
-      await act(async () => render(successor === "video", false));
-      await vi.advanceTimersByTimeAsync(200);
-      expect(sessionActive).toBe(true);
-      expect(deactivated).not.toHaveBeenCalled();
-      expect(audio.setActive).not.toHaveBeenCalledWith(false);
-      if (successor !== "recording") expect(audio.video.playing).toBe(true);
-      else
-        expect(audio.setAudioMode).toHaveBeenLastCalledWith(
-          expect.objectContaining({ allowsRecording: true }),
-        );
-    } finally {
-      if (recording) await releaseAudioSession(recording);
-      vi.clearAllTimers();
-      vi.useRealTimers();
-      audio.player.pause.mockReset();
-    }
-  });
+      audio.player.pause.mockImplementation((deactivateSession) => {
+        if (deactivateSession !== false) queueDeactivation();
+      });
+      vi.useFakeTimers();
+      let recording: ReturnType<typeof acquireAudioSession> | undefined;
+      try {
+        if (release === "pause") {
+          await act(async () =>
+            [...container.querySelectorAll("button")]
+              .find(
+                (button) =>
+                  button.getAttribute("aria-label") === "Pause audio" ||
+                  button.textContent === "Pause",
+              )!
+              .click(),
+          );
+        } else if (release === "finish") {
+          // Native completion queues deactivation before JS receives didJustFinish.
+          queueDeactivation();
+          audio.status = { ...audio.status, playing: false, didJustFinish: true };
+          await act(async () => render());
+        }
+        if (release !== "takeover") {
+          expect(vi.getTimerCount()).toBeGreaterThan(0);
+          await vi.advanceTimersByTimeAsync(50);
+        }
+        await act(async () => {
+          if (successor === "recording") {
+            recording = acquireAudioSession("recording");
+            await activateAudioSession(recording);
+          } else if (successor === "native video controls") audio.video.play();
+          else render(true);
+        });
+        if (successor !== "recording") expect(audio.video.playing).toBe(true);
+        expect(audio.player.pause).toHaveBeenCalled();
+        // Cleanup of the old native ref must not interrupt the successor either.
+        await act(async () => render(successor === "video", false));
+        await vi.advanceTimersByTimeAsync(200);
+        expect(sessionActive).toBe(true);
+        expect(deactivated).not.toHaveBeenCalled();
+        expect(audio.setActive).not.toHaveBeenCalledWith(false);
+        if (successor !== "recording") expect(audio.video.playing).toBe(true);
+        else
+          expect(audio.setAudioMode).toHaveBeenLastCalledWith(
+            expect.objectContaining({ allowsRecording: true }),
+          );
+        await act(async () => root!.unmount());
+        root = undefined;
+        if (recording) await releaseAudioSession(recording);
+        recording = undefined;
+        await vi.advanceTimersByTimeAsync(200);
+        expect(sessionActive).toBe(false);
+      } finally {
+        if (recording) await releaseAudioSession(recording);
+        vi.clearAllTimers();
+        vi.useRealTimers();
+        audio.player.pause.mockReset();
+      }
+    },
+  );
 
   it.each(["inline", "viewer"])("stops video before starting %s audio", async (source) => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

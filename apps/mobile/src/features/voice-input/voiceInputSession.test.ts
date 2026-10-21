@@ -14,6 +14,7 @@ const audio = vi.hoisted(() => ({
   setActive: vi.fn(async (_active: boolean) => {}),
 }));
 vi.mock("expo-audio", () => ({
+  AudioModule: {},
   setAudioModeAsync: audio.setMode,
   setIsAudioActiveAsync: audio.setActive,
 }));
