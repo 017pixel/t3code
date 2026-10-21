@@ -46,6 +46,17 @@ function updateFailureMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Server update failed.";
 }
 
+// Sessions paired before environment:maintain existed lack it and must pair again.
+const MISSING_UPDATE_PERMISSION = "Pair this client again with permission to update servers.";
+
+function toastMissingUpdatePermission(serverLabel: string) {
+  toastManager.add({
+    type: "error",
+    title: `Cannot update ${serverLabel}`,
+    description: MISSING_UPDATE_PERMISSION,
+  });
+}
+
 export interface ServerUpdateTarget {
   readonly environmentId: EnvironmentId;
   readonly serverLabel: string;
@@ -74,11 +85,11 @@ export function useServerUpdate() {
     { quiet = false }: { readonly quiet?: boolean } = {},
   ): Promise<ServerUpdateOutcome> => {
     const { environmentId, serverLabel, selfUpdate, targetVersion } = target;
-    if (
-      !canUpdateServer(appAtomRegistry.get(environmentSession.sessionStateAtom(environmentId))) ||
-      pendingUpdateEnvironmentIds.has(environmentId)
-    )
+    if (pendingUpdateEnvironmentIds.has(environmentId)) return { status: "skipped" };
+    if (!canUpdateServer(appAtomRegistry.get(environmentSession.sessionStateAtom(environmentId)))) {
+      if (!quiet) toastMissingUpdatePermission(serverLabel);
       return { status: "skipped" };
+    }
     pendingUpdateEnvironmentIds.add(environmentId);
     const result = await updateServer({
       environmentId,
@@ -247,10 +258,9 @@ export function ServerUpdateAction({
   });
 
   const handleUpdate = async () => {
-    if (
-      !canUpdateServer(appAtomRegistry.get(sessionStateAtom)) ||
-      pendingUpdateEnvironmentIds.has(environmentId)
-    ) {
+    if (pendingUpdateEnvironmentIds.has(environmentId)) return;
+    if (!canUpdateServer(appAtomRegistry.get(sessionStateAtom))) {
+      toastMissingUpdatePermission(serverLabel);
       return;
     }
     if (isDesktopAppUpdate) {
@@ -262,7 +272,6 @@ export function ServerUpdateAction({
         return;
       }
     }
-    if (!canUpdateServer(appAtomRegistry.get(sessionStateAtom))) return;
     await update({
       environmentId,
       serverLabel,
@@ -294,6 +303,9 @@ export function ServerUpdateAction({
     manualCommand !== null
       ? () => copyToClipboard(manualCommand, { command: manualCommand })
       : () => void handleUpdate();
+  // aria-disabled instead of disabled: a disabled button gets no pointer events, so its tooltip
+  // could never explain why.
+  const blocked = manualCommand === null && !canUpdate;
 
   if (appearance === "icon") {
     return (
@@ -305,28 +317,35 @@ export function ServerUpdateAction({
               variant="ghost-muted"
               className={className}
               aria-label={`${actionLabel} for ${serverLabel}`}
-              disabled={manualCommand === null && !canUpdate}
+              aria-disabled={blocked || undefined}
               onClick={onClick}
             />
           }
         >
           <CircleArrowUpIcon className="size-3.5" />
         </TooltipTrigger>
-        <TooltipPopup side="top">{actionLabel}</TooltipPopup>
+        <TooltipPopup side="top">{blocked ? MISSING_UPDATE_PERMISSION : actionLabel}</TooltipPopup>
       </Tooltip>
     );
   }
 
-  return (
+  const button = (
     <Button
       size={size}
       variant={variant}
       className={className}
-      disabled={manualCommand === null && !canUpdate}
+      aria-disabled={blocked || undefined}
       onClick={onClick}
     >
       {actionLabel}
     </Button>
+  );
+  if (!blocked) return button;
+  return (
+    <Tooltip>
+      <TooltipTrigger render={button} />
+      <TooltipPopup side="top">{MISSING_UPDATE_PERMISSION}</TooltipPopup>
+    </Tooltip>
   );
 }
 

@@ -164,20 +164,25 @@ describe("ServerUpdateAction", () => {
       testState.updateServer.mockResolvedValue(success());
 
       await using screen = await renderAction();
-      expect(button(screen, "Update")!.disabled).toBe(!allowed);
+      expect(button(screen, "Update")!.getAttribute("aria-disabled")).toBe(allowed ? null : "true");
       await click(screen, "Update");
 
       expect(testState.updateServer).toHaveBeenCalledTimes(allowed ? 1 : 0);
     },
   );
 
-  it("disables the action once maintenance access is removed", async () => {
+  it("tells the user to pair again once maintenance access is removed", async () => {
     using _state = setup();
     await using screen = await renderAction();
     await act(() => setSession(AsyncResult.success({ ...currentSession, scopes: [] })));
-    expect(button(screen, "Update")!.disabled).toBe(true);
+    expect(button(screen, "Update")!.getAttribute("aria-disabled")).toBe("true");
     await click(screen, "Update");
     expect(testState.updateServer).not.toHaveBeenCalled();
+    expect(testState.toast).toHaveBeenCalledWith({
+      type: "error",
+      title: "Cannot update Test server",
+      description: "Pair this client again with permission to update servers.",
+    });
   });
 });
 
@@ -227,5 +232,25 @@ describe("ServerUpdatesAction", () => {
       expect.objectContaining({ type: "success", title: "Office updated" }),
     );
     expect(button(screen, "Update all")!.disabled).toBe(false);
+  });
+
+  // regression: #17034
+  it("reports machines it skips for missing update permission", async () => {
+    using _state = setup();
+    // Nothing subscribes to the session here, so a set value would not survive until the click.
+    testState.sessionAtom = Atom.make<SessionResult>(
+      AsyncResult.success(
+        decodeSessionState({ ...currentSession, scopes: ["orchestration:operate"] }),
+      ),
+    );
+    await using screen = await mount();
+    await click(screen, "Update all");
+
+    expect(testState.updateServer).not.toHaveBeenCalled();
+    expect(testState.toast).toHaveBeenCalledWith({
+      type: "error",
+      title: "Cannot update Laptop",
+      description: "Pair this client again with permission to update servers.",
+    });
   });
 });
