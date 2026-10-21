@@ -759,6 +759,84 @@ it.layer(
       }),
   );
 
+  it.effect(
+    "preserves other overrides and restores file inheritance when clearing the workspace default",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* ProjectService.ProjectService;
+        const settingsService = yield* ServerSettings.ServerSettingsService;
+        const projectId = ProjectId.make("project:folded:preserve");
+        yield* service.create({
+          commandId: CommandId.make("command:folded:preserve:create"),
+          projectId,
+          title: "Preserve settings",
+          workspaceRoot: "/work/folded-preserve",
+        });
+        const model = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6.1-sol" };
+        yield* settingsService.updateSettings({
+          projectSettingsOverrides: {
+            [projectId]: {
+              defaultModelSelection: model,
+              defaultThreadEnvMode: "local",
+              branchNamePrefix: "feature/",
+            },
+          },
+        });
+        yield* service.update({
+          commandId: CommandId.make("command:folded:preserve:update"),
+          projectId,
+          autoPull: true,
+          defaultThreadEnvMode: null,
+        });
+        const settings = yield* settingsService.getSettings;
+        assert.deepEqual(settings.projectSettingsOverrides[projectId], {
+          defaultModelSelection: model,
+          branchNamePrefix: "feature/",
+          defaultAutoPull: true,
+        });
+        // File-backed defaults only apply when the environment also inherits the file.
+        yield* settingsService.updateSettings({ defaultThreadEnvMode: null });
+        const project = Option.getOrThrow(yield* service.getById(projectId));
+        assert.isNull(project.defaultThreadEnvMode);
+        assert.deepEqual(project.defaultModelSelection, model);
+        assert.equal(
+          resolveProjectSettings(yield* settingsService.getSettings, projectId, project, {
+            defaultThreadEnvMode: "worktree",
+          }).settings.defaultThreadEnvMode,
+          "worktree",
+        );
+      }),
+  );
+
+  it.effect("does not reapply a replayed command over newer Settings edits", () =>
+    Effect.gen(function* () {
+      const service = yield* ProjectService.ProjectService;
+      const settingsService = yield* ServerSettings.ServerSettingsService;
+      const projectId = ProjectId.make("project:folded:replay");
+      yield* service.create({
+        commandId: CommandId.make("command:folded:replay:create"),
+        projectId,
+        title: "Replay settings",
+        workspaceRoot: "/work/folded-replay",
+      });
+      const update = {
+        commandId: CommandId.make("command:folded:replay:update"),
+        projectId,
+        autoPull: true,
+      };
+      yield* service.update(update);
+      yield* settingsService.updateSettings({
+        projectSettingsOverrides: { [projectId]: { defaultAutoPull: false } },
+      });
+      const replayed = yield* service.update(update);
+      assert.isFalse(replayed.autoPull);
+      assert.isFalse(
+        resolveProjectSettings(yield* settingsService.getSettings, projectId).settings
+          .defaultAutoPull,
+      );
+    }),
+  );
+
   it.effect("reads effective settings instead of stale persisted fields after folding", () =>
     Effect.gen(function* () {
       const service = yield* ProjectService.ProjectService;

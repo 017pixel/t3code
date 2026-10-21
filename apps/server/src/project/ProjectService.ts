@@ -8,6 +8,8 @@ import {
   type ProjectSnapshot,
   type ThreadId,
 } from "@t3tools/contracts";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { resolveProjectScripts } from "@t3tools/shared/projectScripts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -93,6 +95,8 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "list-threads",
       "delete-thread",
       "dispatch-project-command",
+      "read-settings",
+      "update-settings",
     ]),
     projectId: Schema.optional(ProjectId),
     workspaceRoot: Schema.optional(Schema.String),
@@ -177,7 +181,27 @@ export const make = Effect.gen(function* () {
       row.deletedAt === null
         ? yield* projectEnrichment.getAvailable(row.workspaceRoot)
         : yield* projectEnrichment.peek(row.workspaceRoot);
-    return toProject(row, enrichment);
+    const project = toProject(row, enrichment);
+    const settings = yield* serverSettings.getSettings.pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProjectOperationError({
+            operation: "read-settings",
+            projectId: row.projectId,
+            cause,
+          }),
+      ),
+    );
+    if (!settings.projectSettingsFolded) return project;
+    const resolved = resolveProjectSettings(settings, row.projectId).settings;
+    return {
+      ...project,
+      defaultModelSelection: resolved.defaultModelSelection,
+      defaultThreadEnvMode:
+        settings.projectSettingsOverrides[row.projectId]?.defaultThreadEnvMode ?? null,
+      autoPull: resolved.defaultAutoPull,
+      scripts: resolveProjectScripts(settings, project),
+    };
   });
 
   const readRow = (projectId: ProjectId, options?: { readonly includeDeleted?: boolean }) =>
@@ -210,6 +234,40 @@ export const make = Effect.gen(function* () {
         ),
       );
 
+  const updateProjectSettings = Effect.fn("ProjectService.updateProjectSettings")(function* (
+    input: ProjectUpdateInput,
+  ) {
+    if (
+      input.defaultModelSelection === undefined &&
+      input.defaultThreadEnvMode === undefined &&
+      input.autoPull === undefined &&
+      input.scripts === undefined
+    )
+      return;
+    yield* serverSettings
+      .updateSettings((settings) => {
+        const overrides = { ...settings.projectSettingsOverrides[input.projectId] };
+        if (input.defaultModelSelection !== undefined)
+          overrides.defaultModelSelection = input.defaultModelSelection;
+        if (input.defaultThreadEnvMode === null) delete overrides.defaultThreadEnvMode;
+        else if (input.defaultThreadEnvMode !== undefined)
+          overrides.defaultThreadEnvMode = input.defaultThreadEnvMode;
+        if (input.autoPull !== undefined) overrides.defaultAutoPull = input.autoPull;
+        if (input.scripts !== undefined) overrides.defaultProjectScripts = input.scripts;
+        return { projectSettingsOverrides: { [input.projectId]: overrides } };
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProjectOperationError({
+              operation: "update-settings",
+              projectId: input.projectId,
+              cause,
+            }),
+        ),
+      );
+  });
+
   const commit = Effect.fn("ProjectService.commit")(function* (command: ProjectCommand) {
     const { projectId } = command;
     const dispatchError = (cause: unknown) =>
@@ -236,13 +294,22 @@ export const make = Effect.gen(function* () {
         now,
       });
       if (Result.isSuccess(planned)) {
-        const { receipt } = yield* eventSink.commitProjectCommand({
+        const { receipt, committed } = yield* eventSink.commitProjectCommand({
           commandId: command.commandId,
           projectId,
           commandType: command.type,
           acceptedAt: now,
           event: planned.success,
         });
+        if (
+          committed &&
+          command.type === "project.meta.update" &&
+          receipt.status === "accepted" &&
+          receipt.projectId === projectId &&
+          receipt.commandType === command.type
+        ) {
+          yield* updateProjectSettings(command);
+        }
         return receipt;
       }
       return yield* eventSink.commitRejectedProjectCommand({
@@ -260,7 +327,11 @@ export const make = Effect.gen(function* () {
           ? planAndCommit
           : workspaceLocks.withLock(workspaceRoot, planAndCommit),
       )
-      .pipe(Effect.mapError(dispatchError));
+      .pipe(
+        Effect.mapError((cause) =>
+          cause._tag === "ProjectOperationError" ? cause : dispatchError(cause),
+        ),
+      );
     if (receipt.projectId !== projectId || receipt.commandType !== command.type) {
       return yield* dispatchError(
         `Command ${command.commandId} was already used by ${receipt.commandType} for ${receipt.projectId}.`,
