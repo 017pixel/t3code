@@ -1,0 +1,3 @@
+# Vercel's CLI ignores `.pnp*` by default (for Yarn PnP), which drops our
+# pnpm hook file and fails remote installs on the lockfile's pnpmfileChecksum.
+!.pnpmfile.cjs
