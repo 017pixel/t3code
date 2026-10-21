@@ -41,7 +41,7 @@ export function timelineFollowFixture(kind: "long" | "short") {
       phase: "entry",
       updates:
         kind === "long"
-          ? Array.from({ length: 100 }, (_, i) => say(paragraph(i + 1)))
+          ? [say(Array.from({ length: 100 }, (_, i) => paragraph(i + 1)).join(""))]
           : [say("The harbor is quiet.\n\n")],
     },
     { phase: "tool-start", updates: [tool("in_progress")] },
@@ -50,7 +50,7 @@ export function timelineFollowFixture(kind: "long" | "short") {
       phase: "prose",
       updates:
         kind === "long"
-          ? Array.from({ length: 20 }, (_, i) => say(paragraph(i + 101)))
+          ? [say(Array.from({ length: 20 }, (_, i) => paragraph(i + 101)).join(""))]
           : [say("The lantern is ready.\n\n")],
     },
     {
