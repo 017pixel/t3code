@@ -1,0 +1,9 @@
+{
+  "projectId": "connection-proof",
+  "threadId": "connection-retry-proof",
+  "projectTitle": "Connection proof",
+  "threadTitle": "Reconnect a stopped thread",
+  "workspaceRoot": "/tmp/issue-22024-workspace",
+  "remoteLabel": "Synthetic remote connection proof server",
+  "clock": "2026-10-21T12:00:00.000Z"
+}
