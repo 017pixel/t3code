@@ -19,6 +19,37 @@ describe("t3code/no-polling-loop-in-tests", () => {
   );
 
   rule.valid(
+    "allows a fixed-N while flush with a counter bound",
+    `
+      import * as Effect from "effect/Effect";
+
+      export const flush = Effect.gen(function* () {
+        let i = 0;
+        while (i < 3) {
+          yield* Effect.yieldNow;
+          i++;
+        }
+      });
+    `,
+  );
+
+  rule.valid(
+    "allows a fixed-N do-while flush against a named bound",
+    `
+      import * as Effect from "effect/Effect";
+
+      export const flush = (turns: number) =>
+        Effect.gen(function* () {
+          let i = 0;
+          do {
+            yield* Effect.yieldNow;
+            i += 1;
+          } while (i < turns);
+        });
+    `,
+  );
+
+  rule.valid(
     "allows a loop that takes from a queue",
     `
       import * as Effect from "effect/Effect";
@@ -78,6 +109,46 @@ describe("t3code/no-polling-loop-in-tests", () => {
       export const wait = (turns: Array<number>) =>
         Effect.gen(function* () {
           while (turns.length === 0) yield* Effect.yieldNow;
+        });
+    `,
+  );
+
+  rule.invalid(
+    "reports a while loop bounded by a length predicate",
+    `
+      import * as Effect from "effect/Effect";
+
+      export const wait = (events: Array<number>) =>
+        Effect.gen(function* () {
+          while (events.length < 1) yield* Effect.yieldNow;
+        });
+    `,
+  );
+
+  rule.invalid(
+    "reports a comparison against an identifier the loop never advances",
+    `
+      import * as Effect from "effect/Effect";
+
+      export const wait = (state: { count: number }) =>
+        Effect.gen(function* () {
+          let seen = state.count;
+          while (seen < 3) {
+            yield* Effect.yieldNow;
+            seen = state.count;
+          }
+        });
+    `,
+  );
+
+  rule.invalid(
+    "reports a for loop bounded by a length predicate",
+    `
+      import * as Effect from "effect/Effect";
+
+      export const wait = (events: Array<number>) =>
+        Effect.gen(function* () {
+          for (; events.length < 1; ) yield* Effect.yieldNow;
         });
     `,
   );

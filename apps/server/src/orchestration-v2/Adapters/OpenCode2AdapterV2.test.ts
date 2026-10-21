@@ -4357,6 +4357,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
           offer: (request) =>
             Effect.sync(() => void offers.push(request)).pipe(
               Effect.andThen(Deferred.succeed(offered, undefined)),
+              Effect.asVoid,
             ),
           take: Effect.never,
         }),
@@ -4875,6 +4876,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
           offer: (request) =>
             Effect.sync(() => void offers.push(request)).pipe(
               Effect.andThen(Deferred.succeed(offered, undefined)),
+              Effect.asVoid,
             ),
           take: Effect.never,
         }),

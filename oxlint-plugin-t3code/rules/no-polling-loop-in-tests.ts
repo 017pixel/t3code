@@ -113,14 +113,47 @@ const hasConditionalExit = (body: ESTree.Node): boolean =>
       ),
   );
 
-// A bare counter (`i < 3`, `attempt < max`) bounds the loop without asking
-// anything about the system under test.
-const isCounterTest = (test: ESTree.Expression | null | undefined): boolean => {
-  if (test == null) return false;
-  const expression = unwrapExpression(test);
+const isNumericBound = (node: unknown): boolean => {
+  const expression = unwrapExpression(node);
+  if (Option.isNone(expression)) return false;
+  const value = expression.value;
+  return (
+    value.type === "Identifier" || (value.type === "Literal" && typeof value.value === "number")
+  );
+};
+
+const updatesCounter = (node: unknown, name: string): boolean =>
+  someDescendant(
+    node,
+    (child) =>
+      (child.type === "UpdateExpression" && isIdentifier(unwrapExpression(child.argument), name)) ||
+      (child.type === "AssignmentExpression" &&
+        (child.operator === "+=" || child.operator === "-=") &&
+        isIdentifier(unwrapExpression(child.left), name)),
+  );
+
+// A bare counter (`i < 3`, `attempt < max`) that the loop itself advances
+// bounds the loop without asking anything about the system under test.
+// `events.length < 1` or a counter nobody increments is a predicate.
+const isCounterTest = (loop: LoopNode): boolean => {
+  if (loop.test == null) return false;
+  const expression = unwrapExpression(loop.test);
   if (Option.isNone(expression) || expression.value.type !== "BinaryExpression") return false;
   if (!COUNTER_OPERATORS.has(expression.value.operator)) return false;
-  return !someDescendant(expression.value, (node) => node.type === "CallExpression");
+  const { left, right } = expression.value;
+  const advances = [loop.body, loop.type === "ForStatement" ? loop.update : null];
+  return [
+    [left, right],
+    [right, left],
+  ].some(([counter, bound]) => {
+    const name = unwrapExpression(counter);
+    return (
+      Option.isSome(name) &&
+      name.value.type === "Identifier" &&
+      isNumericBound(bound) &&
+      updatesCounter(advances, name.value.name)
+    );
+  });
 };
 
 const isTrueLiteral = (test: ESTree.Expression): boolean => {
@@ -144,11 +177,8 @@ const failsAfterLoop = (loop: LoopNode): boolean => {
 
 const hasPredicateExit = (loop: LoopNode): boolean => {
   if (hasConditionalExit(loop.body)) return true;
-  if (loop.type === "ForStatement") {
-    if (loop.test != null && !isCounterTest(loop.test)) return true;
-    return failsAfterLoop(loop);
-  }
-  return !isTrueLiteral(loop.test);
+  if (loop.test != null && !isTrueLiteral(loop.test) && !isCounterTest(loop)) return true;
+  return failsAfterLoop(loop);
 };
 
 export default defineRule({
