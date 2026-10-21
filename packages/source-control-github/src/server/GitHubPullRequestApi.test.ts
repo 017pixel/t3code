@@ -3223,6 +3223,78 @@ layer("GitHubPullRequestApi.layer", (it) => {
   );
 
   it.effect.each([false, true])(
+    "handles combined detail denials without masking unrelated errors: %s",
+    (unrelatedError) =>
+      Effect.gen(function* () {
+        mockedExecute.mockReturnValueOnce(
+          Effect.succeed(
+            output(
+              encodeJson({
+                data: null,
+                errors: [
+                  refusedReviewer,
+                  {
+                    type: "FORBIDDEN",
+                    message: "Resource not accessible by personal access token",
+                    path: [
+                      "repository",
+                      "pullRequest",
+                      "commits",
+                      "nodes",
+                      0,
+                      "commit",
+                      "statusCheckRollup",
+                      "contexts",
+                    ],
+                  },
+                  ...(unrelatedError
+                    ? [{ type: "INTERNAL", message: "Internal server error" }]
+                    : []),
+                ],
+              }),
+            ),
+          ),
+        );
+        mockedExecute.mockReturnValueOnce(
+          Effect.succeed(
+            output(
+              encodeJson(
+                coreResponse({
+                  body: "Preserved after combined refusal",
+                  commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+                }),
+              ),
+            ),
+          ),
+        );
+        const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+        const result = yield* Effect.result(cli.getPullRequestDetail(pullRequestInput));
+        if (unrelatedError) {
+          expect(result._tag).toBe("Failure");
+          expect(mockedExecute).toHaveBeenCalledOnce();
+        } else {
+          assert.ok(result._tag === "Success");
+          expect(result.success).toMatchObject({
+            body: "Preserved after combined refusal",
+            checksUnavailable: expect.stringMatching(/\S/),
+            checksState: "passing",
+            checks: [{ name: "Overall check status", status: "success" }],
+          });
+          expect(
+            variablesOf("PullRequestCore").map((v) => [
+              v["detailedChecks"],
+              v["requestedReviewers"],
+            ]),
+          ).toEqual([
+            [true, 100],
+            [false, 0],
+          ]);
+          expect(mockedExecute).toHaveBeenCalledTimes(2);
+        }
+      }),
+  );
+
+  it.effect.each([false, true])(
     "recovers a paginated checks refusal and preserves reviewer fallback: %s",
     (reviewerRefused) =>
       Effect.gen(function* () {

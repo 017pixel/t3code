@@ -321,45 +321,60 @@ const isGraphQlClientError = (error: unknown): error is GraphQLClientError.Graph
 
 const { isNotFoundOnly } = GitHubGraphQlClient;
 
+type GraphQlResponseError = Extract<
+  GraphQLClientError.GraphQLClientError["reason"],
+  { readonly _tag: "ResponseError" }
+>["errors"][number];
+
+const isRefusedRequestedReviewer = ({ path, type }: GraphQlResponseError) =>
+  type === "FORBIDDEN" &&
+  path?.length === 6 &&
+  path[0] === "repository" &&
+  path[1] === "pullRequest" &&
+  path[2] === "reviewRequests" &&
+  path[3] === "nodes" &&
+  typeof path[4] === "number" &&
+  Number.isInteger(path[4]) &&
+  path[4] >= 0 &&
+  path[5] === "requestedReviewer";
+
+const isRefusedCheckContext = ({ path, type, message }: GraphQlResponseError) =>
+  type === "FORBIDDEN" &&
+  (message === "Resource not accessible by personal access token" ||
+    message === "Resource not accessible by integration") &&
+  path?.length === 8 &&
+  path[0] === "repository" &&
+  path[1] === "pullRequest" &&
+  path[2] === "commits" &&
+  path[3] === "nodes" &&
+  typeof path[4] === "number" &&
+  Number.isInteger(path[4]) &&
+  path[4] >= 0 &&
+  path[5] === "commit" &&
+  path[6] === "statusCheckRollup" &&
+  path[7] === "contexts";
+
 const isRefusedRequestedReviewersOnly = (error: unknown): boolean =>
   isGraphQlClientError(error) &&
   error.reason._tag === "ResponseError" &&
   error.reason.status === 200 &&
-  error.reason.errors.every(
-    ({ path, type }) =>
-      type === "FORBIDDEN" &&
-      path?.length === 6 &&
-      path[0] === "repository" &&
-      path[1] === "pullRequest" &&
-      path[2] === "reviewRequests" &&
-      path[3] === "nodes" &&
-      typeof path[4] === "number" &&
-      Number.isInteger(path[4]) &&
-      path[4] >= 0 &&
-      path[5] === "requestedReviewer",
-  );
+  error.reason.errors.every(isRefusedRequestedReviewer);
 
 const isRefusedCheckContextsOnly = (error: unknown): boolean =>
   isGraphQlClientError(error) &&
   error.reason._tag === "ResponseError" &&
   (error.reason.status === 200 || error.reason.status === 403) &&
   error.reason.errors.length > 0 &&
+  error.reason.errors.every(isRefusedCheckContext);
+
+const isRefusedDetailFieldsOnly = (error: unknown): boolean =>
+  isGraphQlClientError(error) &&
+  error.reason._tag === "ResponseError" &&
+  error.reason.status === 200 &&
+  error.reason.errors.some(isRefusedRequestedReviewer) &&
+  error.reason.errors.some(isRefusedCheckContext) &&
   error.reason.errors.every(
-    ({ path, type, message }) =>
-      type === "FORBIDDEN" &&
-      (message === "Resource not accessible by personal access token" ||
-        message === "Resource not accessible by integration") &&
-      path?.length === 8 &&
-      path[0] === "repository" &&
-      path[1] === "pullRequest" &&
-      path[2] === "commits" &&
-      path[3] === "nodes" &&
-      typeof path[4] === "number" &&
-      Number.isInteger(path[4]) &&
-      path[4] >= 0 &&
-      path[5] === "commit" &&
-      path[6] === "statusCheckRollup" &&
-      path[7] === "contexts",
+    (error) => isRefusedRequestedReviewer(error) || isRefusedCheckContext(error),
   );
 
 /** A large pull request can produce a multi-megabyte patch; past this it is truncated. */
@@ -1478,6 +1493,18 @@ export const make = Effect.gen(function* () {
               detailedChecks,
             }),
           ),
+          Effect.catchIf(isRefusedDetailFieldsOnly, () => {
+            detailedChecks = false;
+            return client.PullRequestCore({
+              owner,
+              name,
+              number: input.number,
+              headRef: `refs/pull/${input.number}/head`,
+              required: asksRequired(input.host),
+              requestedReviewers: 0,
+              detailedChecks,
+            });
+          }),
           Effect.map((result) => toPullRequestCore(result, detailedChecks)),
           Effect.flatMap(found({ ...input, operation })),
         );
