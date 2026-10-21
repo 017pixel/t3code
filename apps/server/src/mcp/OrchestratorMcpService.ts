@@ -257,14 +257,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function scheduledTaskWorkspaceStrategy(
-  boundToThread: boolean,
-): ScheduledTask["workspaceStrategy"] {
-  return boundToThread
-    ? { type: "root" }
-    : { type: "worktree", baseRef: "main", startFromOrigin: true };
-}
-
 function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): OrchestratorMcpScheduledTask {
   return {
     scheduledTaskId: task.id,
@@ -999,6 +991,28 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
+
+  const scheduledTaskWorkspaceStrategy = Effect.fn(
+    "OrchestratorMcpService.scheduledTaskWorkspaceStrategy",
+  )(function* (
+    projectId: ProjectId,
+    boundToThread: boolean,
+  ): Effect.fn.Return<ScheduledTask["workspaceStrategy"], OrchestratorMcpFailure> {
+    if (boundToThread) return { type: "root" };
+    const project = yield* requireProject(projectId);
+    const baseRef = yield* gitDriver.resolvePrimaryRemoteName(project.workspaceRoot).pipe(
+      Effect.flatMap((remoteName) =>
+        gitDriver.resolveDefaultBranchName(project.workspaceRoot, remoteName),
+      ),
+      Effect.mapError(() =>
+        failure("orchestration_error", "Could not detect the project's default branch."),
+      ),
+    );
+    if (baseRef === null) {
+      return yield* failure("invalid_request", "The project's remote default branch is unknown.");
+    }
+    return { type: "worktree", baseRef, startFromOrigin: true };
+  });
 
   const projectDefaultModelSelection = (
     project: Effect.Success<ReturnType<typeof requireProject>>,
@@ -1748,7 +1762,7 @@ const make = Effect.gen(function* () {
         schedule: input.schedule,
         projectId,
         threadId: bindToCurrentThread && parent !== undefined ? parent.thread.id : null,
-        workspaceStrategy: scheduledTaskWorkspaceStrategy(bindToCurrentThread),
+        workspaceStrategy: yield* scheduledTaskWorkspaceStrategy(projectId, bindToCurrentThread),
         modelSelection,
         runtimeMode: limits.runtimeMode,
         interactionMode: limits.interactionMode,
@@ -1822,7 +1836,7 @@ const make = Effect.gen(function* () {
         const workspaceStrategy =
           input.bindToCurrentThread === undefined
             ? existing.workspaceStrategy
-            : scheduledTaskWorkspaceStrategy(input.bindToCurrentThread);
+            : yield* scheduledTaskWorkspaceStrategy(existing.projectId, input.bindToCurrentThread);
         const upsertInput: ScheduledTaskUpsertInput = {
           id: existing.id,
           title: input.title ?? existing.title,

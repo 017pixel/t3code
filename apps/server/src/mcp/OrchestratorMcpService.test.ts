@@ -3,6 +3,7 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   CommandId,
   EnvironmentId,
+  GitCommandError,
   MessageId,
   NodeId,
   OrchestratorMcpTarget,
@@ -1949,10 +1950,21 @@ describe("OrchestratorMcpService provider resolution", () => {
         checkWorkspaceStrategy("update", "master", undefined),
       );
 
+      it.effect.each(["create", "update"] as const)(
+        "%s refuses an unbound task when the remote HEAD is missing",
+        (operation) => checkWorkspaceStrategy(operation, null, false),
+      );
+
+      it.effect.each(["create", "update"] as const)(
+        "%s refuses an unbound task when no remote is configured",
+        (operation) => checkWorkspaceStrategy(operation, null, false, false),
+      );
+
       const checkWorkspaceStrategy = Effect.fn("test.checkScheduledTaskWorkspace")(function* (
         operation: "create" | "update",
-        defaultBranch: string,
+        defaultBranch: string | null,
         bindToCurrentThread: boolean | undefined,
+        hasRemote = true,
       ) {
         const shell = {
           ...liveThreadShell(boundThreadId, { runtimeMode: "approval-required" }),
@@ -1982,7 +1994,17 @@ describe("OrchestratorMcpService provider resolution", () => {
           NodeServices.layer,
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(GitVcsDriver.GitVcsDriver)({
-            resolvePrimaryRemoteName: () => Effect.succeed("origin"),
+            resolvePrimaryRemoteName: () =>
+              hasRemote
+                ? Effect.succeed("origin")
+                : Effect.fail(
+                    new GitCommandError({
+                      operation: "GitVcsDriver.resolvePrimaryRemoteName",
+                      command: "git",
+                      cwd: "/projects/scheduled",
+                      detail: "No git remote is configured for this repository.",
+                    }),
+                  ),
             resolveDefaultBranchName: (cwd, remoteName) => {
               assert.equal(cwd, "/projects/scheduled");
               assert.equal(remoteName, "origin");
@@ -2021,19 +2043,25 @@ describe("OrchestratorMcpService provider resolution", () => {
         const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
           Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))),
         );
-        if (operation === "create") {
-          yield* mcp.scheduleTask(scope, {
-            prompt: "Check the project",
-            schedule: { type: "interval", everyMs: 60_000 },
-            bindToCurrentThread,
-          });
-        } else {
-          yield* mcp.updateScheduledTask(scope, {
-            scheduledTaskId: existing.id,
-            prompt: "Check the project again",
-            ...(bindToCurrentThread === undefined ? {} : { bindToCurrentThread }),
-          });
+        const mutation =
+          operation === "create"
+            ? mcp.scheduleTask(scope, {
+                prompt: "Check the project",
+                schedule: { type: "interval", everyMs: 60_000 },
+                bindToCurrentThread,
+              })
+            : mcp.updateScheduledTask(scope, {
+                scheduledTaskId: existing.id,
+                prompt: "Check the project again",
+                ...(bindToCurrentThread === undefined ? {} : { bindToCurrentThread }),
+              });
+        if (defaultBranch === null) {
+          const error = yield* mutation.pipe(Effect.flip);
+          assert.equal(error.code, hasRemote ? "invalid_request" : "orchestration_error");
+          assert.deepEqual(yield* Ref.get(saved), []);
+          return;
         }
+        yield* mutation;
         const inputs = yield* Ref.get(saved);
         assert.equal(inputs.length, 1);
         assert.equal(inputs[0]!.threadId, bindToCurrentThread ? boundThreadId : null);
