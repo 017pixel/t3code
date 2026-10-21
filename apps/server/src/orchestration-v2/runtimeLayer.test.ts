@@ -9,6 +9,7 @@ import {
   type ApplicationStoredEvent,
   CheckpointId,
   CheckpointRef,
+  CheckpointScopeId,
   CommandId,
   ContextTransferId,
   EventId,
@@ -5644,6 +5645,8 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
     "expired-snooze",
     "wake",
     "stop",
+    "completed-wake-before-arm",
+    "completed-wake-after-arm",
     "stop-before-arm",
     "stop-before-arm-mismatched-recovery",
   ] as const)("guards a scheduled usage-limit continuation against %s", (scenario) =>
@@ -5773,9 +5776,94 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         assert.equal(resumeHeldQueue._tag, "Failure");
         assert.isTrue((yield* orchestrator.getThreadProjection(threadId)).runs[1]?.queueHeld);
       }
-      const shell = (yield* orchestrator.getShellSnapshot()).threads.find(
-        (thread) => thread.id === threadId,
-      )!;
+      const completedWake =
+        scenario === "completed-wake-before-arm" || scenario === "completed-wake-after-arm";
+      const finishBackgroundWake = Effect.fnUntraced(function* () {
+        yield* TestClock.adjust("2 seconds");
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`recovery:background-wake:${scenario}`),
+          threadId,
+          messageId: MessageId.make(`recovery:background-wake:${scenario}`),
+          text: "Background task finished; no further work is needed.",
+          attachments: [],
+          notification: {
+            source: { kind: "background_task" },
+            outcome: "completed",
+            summary: "Background task finished",
+          },
+          dispatchMode: { type: "queue_after_active" },
+          createdBy: "agent",
+          creationSource: "provider",
+        });
+        const wake = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+        const completedAt = yield* DateTime.now;
+        const itemBase = {
+          threadId,
+          runId: wake.id,
+          nodeId: wake.rootNodeId,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          status: "completed" as const,
+          title: null,
+          startedAt: completedAt,
+          completedAt,
+          updatedAt: completedAt,
+        };
+        yield* events.write({
+          events: [
+            {
+              id: EventId.make(`recovery:wake-notice:${scenario}`),
+              type: "turn-item.updated",
+              threadId,
+              occurredAt: completedAt,
+              payload: {
+                ...itemBase,
+                id: TurnItemId.make(`recovery:wake-notice:${scenario}`),
+                ordinal: 2,
+                type: "system_notice",
+                message: "No further work is needed.",
+              },
+            },
+            {
+              id: EventId.make(`recovery:wake-checkpoint:${scenario}`),
+              type: "turn-item.updated",
+              threadId,
+              occurredAt: completedAt,
+              payload: {
+                ...itemBase,
+                id: TurnItemId.make(`recovery:wake-checkpoint:${scenario}`),
+                ordinal: 3,
+                type: "checkpoint",
+                checkpointId: CheckpointId.make(`recovery:wake-checkpoint:${scenario}`),
+                scopeId: CheckpointScopeId.make(`recovery:wake-scope:${scenario}`),
+                files: [],
+              },
+            },
+            {
+              id: EventId.make(`recovery:wake-completed:${scenario}`),
+              type: "run.updated",
+              threadId,
+              occurredAt: completedAt,
+              payload: { ...wake, status: "completed", startedAt: completedAt, completedAt },
+            },
+          ],
+        });
+      });
+      if (scenario === "completed-wake-before-arm") yield* finishBackgroundWake();
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const shell = completedWake
+        ? (yield* projections.getLimitRecoveryCandidates({
+            now: yield* DateTime.now,
+            autoResume: true,
+            snooze: false,
+          })).find((row) => row.id === threadId)!
+        : (yield* orchestrator.getShellSnapshot()).threads.find(
+            (thread) => thread.id === threadId,
+          )!;
+      assert.isDefined(shell, "a completed background wake must leave the limited run armable");
       assert.isNull(limitRecoveryCommand(shell, false, DateTime.toEpochMillis(now)));
       if (scenario === "invalid-snooze") {
         const result = yield* orchestrator
@@ -5867,6 +5955,13 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         snooze,
         requestId: armCommand.commandId,
       });
+      if (scenario === "completed-wake-after-arm") {
+        yield* finishBackgroundWake();
+        armedShell = (yield* orchestrator.getShellSnapshot()).threads.find(
+          (thread) => thread.id === threadId,
+        )!;
+        assert.equal(armedShell.limitRecovery?.runId, run.id);
+      }
       if (snooze)
         assert.equal(DateTime.toEpochMillis(armedShell.snoozedUntil!), Date.parse(resetAt));
       if (scenario === "cancel-resume-keep-snooze") {
@@ -5981,14 +6076,26 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       });
       assert.lengthOf(
         (yield* orchestrator.getThreadProjection(threadId)).runs,
-        scenario === "queued-resume" ? 2 : 1,
+        scenario === "queued-resume" || completedWake ? 2 : 1,
       );
       yield* TestClock.adjust("1 minute");
+      const resumeSource = completedWake
+        ? (yield* projections.getLimitRecoveryCandidates({
+            now: yield* DateTime.now,
+            autoResume: true,
+            snooze: false,
+          })).find((row) => row.id === threadId)!
+        : armedShell;
+      assert.isDefined(resumeSource, "a completed background wake must remain due for recovery");
       const resume = limitRecoveryCommand(
-        armedShell,
+        resumeSource,
         true,
         DateTime.toEpochMillis(yield* DateTime.now),
       );
+      if (completedWake) {
+        assert(resume?.type === "message.dispatch");
+        assert.equal(resume.usageLimitContinuationOfRunId, run.id);
+      }
       if (autoResume && scenario !== "cancel-resume-keep-snooze") assert.isNotNull(resume);
       else assert.isNull(resume);
       if (scenario === "snooze-race") {
@@ -6114,6 +6221,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         after.runs,
         before.runs.length +
           (scenario === "resume" ||
+          completedWake ||
           stopBeforeArm ||
           scenario === "queued-resume" ||
           scenario === "independent-patches" ||
@@ -6125,6 +6233,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         after.messages,
         before.messages.length +
           (scenario === "resume" ||
+          completedWake ||
           stopBeforeArm ||
           scenario === "queued-resume" ||
           scenario === "independent-patches" ||
