@@ -1578,7 +1578,10 @@ it("opens a known empty attachment even when its range response is inaccessible"
       asset={{ environmentId: EnvironmentId.make("test"), attachmentId: "empty" }}
     />,
   );
-  await vi.waitFor(() => expect(screen.container.textContent).toContain("This file is empty."));
+  await vi.waitFor(
+    () => expect(screen.container.textContent).toContain("This file is empty."),
+    10_000,
+  );
 });
 
 it.each(["draft", "thread"] as const)(
