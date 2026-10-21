@@ -50,7 +50,13 @@ const replyText = "Local stub reply.";
 const [command, ...rest] = process.argv.slice(2);
 const portFlag = rest.indexOf("--port");
 const port = portFlag === -1 ? 18_988 : Number(rest[portFlag + 1]);
-const dirArgument = rest.find((_, index) => index !== portFlag && index !== portFlag + 1);
+const dirArgument = rest.find(
+  (_, index) => portFlag === -1 || (index !== portFlag && index !== portFlag + 1),
+);
+
+function shellQuote(value: string) {
+  return "'" + value.split("'").join("'\\''") + "'";
+}
 
 function prepare(rawDir: string) {
   const dir = NodePath.resolve(rawDir);
@@ -78,11 +84,11 @@ function prepare(rawDir: string) {
     wrapperPath,
     [
       "#!/bin/sh",
-      `export OPENCODE_CONFIG='${configPath}'`,
-      `export XDG_DATA_HOME='${NodePath.join(dir, "xdg", "data")}'`,
-      `export XDG_CONFIG_HOME='${NodePath.join(dir, "xdg", "config")}'`,
-      `export XDG_CACHE_HOME='${NodePath.join(dir, "xdg", "cache")}'`,
-      `exec "\${OPENCODE_BIN:-${process.env.OPENCODE_BIN ?? "opencode"}}" "$@"`,
+      `export OPENCODE_CONFIG=${shellQuote(configPath)}`,
+      `export XDG_DATA_HOME=${shellQuote(NodePath.join(dir, "xdg", "data"))}`,
+      `export XDG_CONFIG_HOME=${shellQuote(NodePath.join(dir, "xdg", "config"))}`,
+      `export XDG_CACHE_HOME=${shellQuote(NodePath.join(dir, "xdg", "cache"))}`,
+      `exec "\${OPENCODE_BIN:-opencode}" "$@"`,
       "",
     ].join("\n"),
     { mode: 0o755 },
