@@ -512,7 +512,7 @@ function listNormalizationPlugin(isComposing: () => boolean) {
             ? !prefix.contentSpace
             : prefix.kind === "bullet" &&
               prefix.marker === "-" &&
-              (!content || content.startsWith("[")))
+              (!content || /^\[(?:[ xX]\]?)?$/.test(content)))
         ) {
           pending.add(pos);
           continue;

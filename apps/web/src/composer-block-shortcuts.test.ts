@@ -137,6 +137,17 @@ describe("composer list normalization", () => {
     expect(serializeEditorDoc(editor.state.doc).value).toBe("- existing text");
   });
 
+  it.each(["[link](url)", "[ordinary text]", "[x]text"])(
+    "converts a dash before existing bracket-prefixed text %j",
+    (text) => {
+      const editor = createEditor(text);
+      editor.view.dispatch(editor.state.tr.insertText("- ", 1));
+      expect(editor.state.doc.firstChild?.type.name).toBe("bulletList");
+      expect(editor.state.doc.firstChild?.firstChild?.textContent).toBe(text);
+      expect(serializeEditorDoc(editor.state.doc).value).toBe(`- ${text}`);
+    },
+  );
+
   it.each(["- ", "* ", "+ ", "3) ", "4. ", "- [ ] ", "- [x] "])(
     "converts %j inserted in front of existing text",
     (marker) => {
