@@ -31,6 +31,8 @@ export interface PullRequestCodeViewState {
   readonly foldOverride: DiffFoldOverride;
   readonly toggledFiles: ReadonlySet<string>;
   readonly scrollTop: number;
+  readonly loadedPageCount: number;
+  readonly chromeCondensed: boolean;
 }
 
 export const EMPTY_CODE_VIEW: PullRequestCodeViewState = {
@@ -38,6 +40,8 @@ export const EMPTY_CODE_VIEW: PullRequestCodeViewState = {
   foldOverride: null,
   toggledFiles: new Set(),
   scrollTop: 0,
+  loadedPageCount: 1,
+  chromeCondensed: false,
 };
 
 export function pullRequestCodeViewKey(
@@ -71,7 +75,12 @@ export const usePullRequestReviewStore = create<PullRequestReviewStoreState>()((
   updateCodeView: (key, update) =>
     set((state) => {
       const current = state.codeViews[key] ?? EMPTY_CODE_VIEW;
-      const next = update(current);
+      const updated = update(current);
+      // A session can see an unbounded sequence of renamed or replaced files.
+      const next =
+        updated.toggledFiles.size <= 2048
+          ? updated
+          : { ...updated, toggledFiles: new Set([...updated.toggledFiles].slice(-2048)) };
       if (next === current) return state;
       const codeViews = { ...state.codeViews };
       delete codeViews[key];
@@ -123,4 +132,8 @@ export function usePendingReviewComments(
   return usePullRequestReviewStore(
     (store) => store.drafts[pullRequestReviewKey(reference)] ?? EMPTY,
   );
+}
+
+export function readPullRequestCodeView(key: string) {
+  return usePullRequestReviewStore.getState().codeViews[key] ?? EMPTY_CODE_VIEW;
 }

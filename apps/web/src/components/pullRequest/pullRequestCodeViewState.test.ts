@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 import { ProjectId } from "@t3tools/contracts";
 
-import { getRenderablePatch, buildFileDiffIdentityKey } from "~/lib/diffRendering";
+import {
+  getRenderablePatch,
+  buildFileDiffIdentityKey,
+  buildFileDiffContentVersion,
+} from "~/lib/diffRendering";
 import {
   isFileDiffCollapsed,
   mergePullRequestDiffSlices,
@@ -12,6 +16,9 @@ import {
   pullRequestCodeViewKey,
   usePullRequestReviewStore,
 } from "./pullRequestReviewStore";
+
+import { PullRequestCodeScrollRestoration } from "./pullRequestCodeScroll.logic";
+import { resolvePullRequestSelectionFile } from "./pullRequestSelection.logic";
 
 const reference = {
   projectId: ProjectId.make("project-a"),
@@ -54,20 +61,16 @@ describe("pull request Code tab session", () => {
       foldOverride: "folded",
       toggledFiles: new Set(["file-a", "file-b"]),
       scrollTop: 570,
+      loadedPageCount: 3,
+      chromeCondensed: true,
     }));
-    const unsubscribe = usePullRequestReviewStore.subscribe(() => {});
-    unsubscribe();
     const state = usePullRequestReviewStore.getState().codeViews[key]!;
     expect(state.selectedCommitOid).toBe("commit-a");
     expect(state.scrollTop).toBe(570);
+    expect(state.chromeCondensed).toBe(true);
+    expect(state.loadedPageCount).toBe(3);
     expect(isFileDiffCollapsed("file-a", state.foldOverride, state.toggledFiles)).toBe(false);
     expect(isFileDiffCollapsed("file-c", state.foldOverride, state.toggledFiles)).toBe(true);
-    expect(Object.keys(state).sort()).toEqual([
-      "foldOverride",
-      "scrollTop",
-      "selectedCommitOid",
-      "toggledFiles",
-    ]);
   });
 
   it.each([
@@ -97,6 +100,18 @@ describe("pull request Code tab session", () => {
     expect(Object.keys(views)).toHaveLength(32);
     expect(views[reviewKey(null, "env", 0)]?.scrollTop).toBe(5);
     expect(views[reviewKey(null, "env", 1)]).toBeUndefined();
+  });
+
+  it("bounds file overrides within a session, evicting the oldest overrides", () => {
+    const update = session();
+    update(reviewKey(), (current) => ({
+      ...current,
+      toggledFiles: new Set(Array.from({ length: 2049 }, (_, index) => `file-${index}`)),
+    }));
+    const saved = usePullRequestReviewStore.getState().codeViews[reviewKey()]!;
+    expect(saved.toggledFiles.size).toBe(2048);
+    expect(isFileDiffCollapsed("file-0", "folded", saved.toggledFiles)).toBe(true);
+    expect(isFileDiffCollapsed("file-2048", "folded", saved.toggledFiles)).toBe(false);
   });
 
   it("does not notify consumers for a no-op update", () => {
@@ -187,4 +202,78 @@ describe("pull request file keys", () => {
       expect(new Set(before.files.map(buildFileDiffIdentityKey)).size).toBe(11);
     },
   );
+});
+
+describe("pull request scroll restoration", () => {
+  it("waits for saved pages without overwriting the offset with a first-page clamp", () => {
+    const saved = { scrollTop: 1800, loadedPageCount: 3 };
+    const restore = new PullRequestCodeScrollRestoration(saved);
+    const surface = { scrollTop: 0, scrollHeight: 600, clientHeight: 400 };
+    expect(restore.restore(surface, 0, false)).toBe("waiting");
+    expect(restore.restore(surface, 1, true)).toBe("load-more");
+    expect(restore.restore(surface, 2, true)).toBe("load-more");
+    expect(surface.scrollTop).toBe(0);
+    expect(restore.pending).toBe(true);
+    surface.scrollHeight = 3000;
+    expect(restore.restore(surface, 3, true)).toBe("restored");
+    expect(surface.scrollTop).toBe(1800);
+    expect(restore.pending).toBe(false);
+    surface.scrollTop = 1900;
+    expect(restore.restore(surface, 4, true)).toBe("waiting");
+    expect(surface.scrollTop).toBe(1900);
+  });
+
+  it("restores raw offsets without losing the sticky header height on each roundtrip", () => {
+    const surface = { scrollTop: 570, scrollHeight: 3000, clientHeight: 400 };
+    for (let trip = 0; trip < 3; trip++) {
+      const restore = new PullRequestCodeScrollRestoration({
+        scrollTop: surface.scrollTop,
+        loadedPageCount: 1,
+      });
+      surface.scrollTop = 0;
+      expect(restore.restore(surface, 1, false)).toBe("restored");
+      expect(surface.scrollTop).toBe(570);
+    }
+  });
+
+  it("keeps the target pending while its tab has no viewport", () => {
+    const restore = new PullRequestCodeScrollRestoration({ scrollTop: 570, loadedPageCount: 1 });
+    const surface = { scrollTop: 0, scrollHeight: 3000, clientHeight: 0 };
+    expect(restore.restore(surface, 1, false)).toBe("waiting");
+    expect(restore.pending).toBe(true);
+    surface.clientHeight = 400;
+    expect(restore.restore(surface, 1, false)).toBe("restored");
+    expect(surface.scrollTop).toBe(570);
+  });
+
+  it("stops paging and clamps once when the refreshed diff has fewer pages", () => {
+    const restore = new PullRequestCodeScrollRestoration({ scrollTop: 1800, loadedPageCount: 3 });
+    const surface = { scrollTop: 0, scrollHeight: 600, clientHeight: 400 };
+    expect(restore.restore(undefined, 1, false)).toBe("waiting");
+    expect(restore.restore(surface, 1, false)).toBe("restored");
+    expect(surface.scrollTop).toBe(200);
+    expect(restore.pending).toBe(false);
+  });
+});
+
+describe("pull request line anchors", () => {
+  it("keeps an anchor through unrelated patch changes but rejects changed or removed code", () => {
+    const before = getRenderablePatch(page().patch, "before");
+    const after = getRenderablePatch(page("shifted code").patch, "after");
+    const same = getRenderablePatch(page().patch, "different-page-cache-key");
+    if (before?.kind !== "files" || after?.kind !== "files" || same?.kind !== "files") {
+      throw new Error("fixture must parse as files");
+    }
+    const original = before.files[0]!;
+    const anchor = {
+      fileKey: buildFileDiffIdentityKey(original),
+      contentVersion: buildFileDiffContentVersion(original),
+    };
+    expect(resolvePullRequestSelectionFile([same.files[0]!, ...after.files.slice(1)], anchor)).toBe(
+      same.files[0],
+    );
+    expect(buildFileDiffIdentityKey(after.files[0]!)).toBe(anchor.fileKey);
+    expect(resolvePullRequestSelectionFile(after.files, anchor)).toBeUndefined();
+    expect(resolvePullRequestSelectionFile(before.files.slice(1), anchor)).toBeUndefined();
+  });
 });

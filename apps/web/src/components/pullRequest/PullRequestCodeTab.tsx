@@ -44,6 +44,7 @@ import { canEditPullRequestComment, canResolvePullRequestThread } from "./pullRe
 import { orderDiffFiles } from "./pullRequestFileOrder.logic";
 import {
   buildFileDiffIdentityKey,
+  buildFileDiffContentVersion,
   fnv1a32,
   getDiffLineStat,
   getRenderablePatch,
@@ -55,6 +56,7 @@ import {
 import { APP_BASE_NAME } from "~/branding";
 import { PREFERRED_HIGHLIGHTER } from "~/lib/syntaxHighlighting";
 import { cn } from "~/lib/utils";
+import { observeResize } from "~/lib/observeResize";
 import { createPullRequestDiffFileContentsLoader } from "~/lib/diffFileContents";
 import {
   buildDiffReviewComment,
@@ -101,6 +103,8 @@ import {
   isLineInFileDiff,
   toggleFileDiffFoldForViewed,
 } from "./pullRequestDiff.logic";
+import { resolvePullRequestSelectionFile } from "./pullRequestSelection.logic";
+import { PullRequestCodeScrollRestoration } from "./pullRequestCodeScroll.logic";
 import { PullRequestDiffStat, PullRequestMetaLine } from "./pullRequestPresentation";
 import { PullRequestDiffUnavailableState } from "./PullRequestDiffUnavailableState";
 import { usePullRequestFilesViewed } from "./usePullRequestFilesViewed";
@@ -108,6 +112,7 @@ import {
   EMPTY_CODE_VIEW,
   nextPendingReviewCommentId,
   pullRequestReviewKey,
+  readPullRequestCodeView,
   usePendingReviewComments,
   usePullRequestReviewStore,
   type PendingReviewComment,
@@ -221,6 +226,7 @@ interface MutableAnnotationGroup {
 
 interface DraftAnchor {
   readonly fileKey: string;
+  readonly contentVersion: number;
   readonly path: string;
   readonly oldPath: string | null;
   readonly position: PullRequestReviewPosition;
@@ -297,6 +303,7 @@ function PullRequestCodeTab({
   );
   const [selectedLines, setSelectedLines] = useState<{
     id: string;
+    contentVersion: number;
     range: SelectedLineRange;
   } | null>(null);
   const [draft, setDraft] = useState<DraftAnchor | null>(null);
@@ -313,22 +320,20 @@ function PullRequestCodeTab({
     null,
   );
 
-  useEffect(() => {
-    if (viewer === null) return;
-    const position = (
-      usePullRequestReviewStore.getState().codeViews[codeViewKey] ?? EMPTY_CODE_VIEW
-    ).scrollTop;
-    viewer.scrollTo({ type: "position", position });
-  }, [viewer, codeViewKey]);
-
   const referenceKey = pullRequestReviewKey(reference);
   const commit = selectedCommitOid;
   const scopeKey = JSON.stringify([codeViewKey, commit]);
+  const [scrollRestoration, setScrollRestoration] = useState(
+    () => new PullRequestCodeScrollRestoration(readPullRequestCodeView(codeViewKey)),
+  );
   // The panel keeps this mounted across pull requests, so an open composer would otherwise
   // survive the switch and attach its comment to whichever one is on screen when it is sent.
   const [stateScopeKey, setStateScopeKey] = useState(scopeKey);
   if (stateScopeKey !== scopeKey) {
     setStateScopeKey(scopeKey);
+    setScrollRestoration(
+      new PullRequestCodeScrollRestoration(readPullRequestCodeView(codeViewKey)),
+    );
     setDraft(null);
     setSelectedLines(null);
     setVisibleCommitCount(COMMIT_PAGE_SIZE);
@@ -470,6 +475,27 @@ function PullRequestCodeTab({
   const files = parsedSlices.flatMap((parsed) =>
     parsed?.kind === "files" ? orderDiffFiles(parsed.files) : [],
   );
+  if (
+    selectedLines !== null &&
+    resolvePullRequestSelectionFile(files, { ...selectedLines, fileKey: selectedLines.id }) ===
+      undefined
+  ) {
+    setSelectedLines(null);
+  }
+  if (draft !== null && resolvePullRequestSelectionFile(files, draft) === undefined) {
+    setDraft(null);
+  }
+  const changeSelectedLines = (selection: { id: string; range: SelectedLineRange } | null) => {
+    const file =
+      selection === null
+        ? undefined
+        : files.find((candidate) => buildFileDiffIdentityKey(candidate) === selection.id);
+    setSelectedLines(
+      selection === null || file === undefined
+        ? null
+        : { ...selection, contentVersion: buildFileDiffContentVersion(file) },
+    );
+  };
   const filePaths = files.map((file) => resolveFileDiffPath(file));
   const omittedFileStats = new Map(
     loadedSlices.flatMap((slice) =>
@@ -593,6 +619,8 @@ function PullRequestCodeTab({
   });
 
   const nextCursor = loadedSlices.at(-1)?.nextCursor ?? null;
+  const hasUnloadedNextSlice =
+    nextCursor !== null && !loadedSlices.some((slice) => slice.cursor === nextCursor);
   const withheldContent =
     loadedSlices.some((slice) => slice.truncated) ||
     parsedSlices.some((parsed) => parsed?.kind === "raw");
@@ -653,7 +681,7 @@ function PullRequestCodeTab({
   // A failed slice must not be asked for again on its own. The files already loaded keep the
   // sentinel on screen, so re-arming it after a failure would request the same slice forever.
   const canLoadNextSlice =
-    nextCursor !== null &&
+    hasUnloadedNextSlice &&
     nextCursor !== cursor &&
     !diffQuery.isPending &&
     diffQuery.error === null;
@@ -727,6 +755,7 @@ function PullRequestCodeTab({
     if (position === null) return;
     setDraft({
       fileKey: item.id,
+      contentVersion: buildFileDiffContentVersion(file),
       path,
       oldPath: previousPath === path ? null : previousPath,
       position,
@@ -739,7 +768,7 @@ function PullRequestCodeTab({
     text: string,
     onFinish: (comment: ReviewCommentContext) => void,
   ) => {
-    const file = files.find((candidate) => buildFileDiffIdentityKey(candidate) === anchor.fileKey);
+    const file = resolvePullRequestSelectionFile(files, anchor);
     const comment =
       file === undefined
         ? null
@@ -1282,6 +1311,36 @@ function PullRequestCodeTab({
   // The effects sit after every derivation: a hook between the diff's derivations and their
   // later readers (the viewer options, the reveal handler) would leave them uncached.
   useEffect(() => {
+    if (viewer === null || !scrollRestoration.pending) return;
+    const instance = viewer.getInstance();
+    const surface = instance?.getContainerElement();
+    if (instance === undefined || surface === undefined) return;
+    const content = surface.firstElementChild;
+    const stopObserving = observeResize(content === null ? [surface] : [surface, content], () =>
+      restore(),
+    );
+    const restore = () => {
+      // A cold highlighter can defer layout until after the pages have arrived.
+      instance.render(true);
+      const result = scrollRestoration.restore(
+        (content?.getBoundingClientRect().height ?? 0) > 0 ? surface : undefined,
+        loadedSlices.length,
+        hasUnloadedNextSlice,
+      );
+      if (result === "restored") stopObserving();
+      if (result === "load-more" && canLoadNextSlice) loadNextSlice();
+    };
+    restore();
+    return stopObserving;
+  }, [
+    viewer,
+    scrollRestoration,
+    loadedSlices,
+    hasUnloadedNextSlice,
+    canLoadNextSlice,
+    loadNextSlice,
+  ]);
+  useEffect(() => {
     if (sentinel === null || !canLoadNextSlice) return;
     const observer = new IntersectionObserver(
       (observed) => {
@@ -1448,15 +1507,18 @@ function PullRequestCodeTab({
             <StyledDiffCodeView<ReviewAnnotationGroup>
               className="@container h-full overflow-auto [scrollbar-gutter:stable]"
               containerRef={scrollerRef}
-              onScroll={(scrollTop) =>
+              onScroll={(scrollTop) => {
+                if (scrollRestoration.pending) return;
                 updateCodeView(codeViewKey, (current) =>
-                  current.scrollTop === scrollTop ? current : { ...current, scrollTop },
-                )
-              }
+                  current.scrollTop === scrollTop && current.loadedPageCount === loadedSlices.length
+                    ? current
+                    : { ...current, scrollTop, loadedPageCount: loadedSlices.length },
+                );
+              }}
               viewerRef={setViewer}
               items={items}
               selectedLines={selectedLines}
-              onSelectedLinesChange={setSelectedLines}
+              onSelectedLinesChange={changeSelectedLines}
               options={diffViewOptions}
               renderCodeViewFooter={renderCodeViewFooter}
               renderHeaderPrefix={renderHeaderPrefix}
