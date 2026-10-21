@@ -2061,9 +2061,10 @@ export const make = Effect.gen(function* () {
         (yield* gitCore.readConfigValue(cwd, "remote.pushDefault")) ??
         headContext.remoteName ??
         "origin";
+      const baseRemote = headContext.isCrossRepository ? "origin" : pushRemote;
       const remoteRef = recordedBase.baseRef.startsWith("refs/remotes/")
         ? recordedBase.baseRef
-        : `refs/remotes/${pushRemote}/${recordedBase.baseRef.replace(/^refs\/heads\//, "")}`;
+        : `refs/remotes/${baseRemote}/${recordedBase.baseRef.replace(/^refs\/heads\//, "")}`;
       const remoteBranch = yield* gitCore.resolveBranchName(cwd, remoteRef);
       if (remoteBranch) {
         return {
@@ -2072,7 +2073,7 @@ export const make = Effect.gen(function* () {
           message: null,
         };
       }
-      missingRemoteBase = remoteRef;
+      missingRemoteBase = remoteRef.slice("refs/remotes/".length);
     }
 
     if (!missingRemoteBase && upstreamRef && !headContext.isCrossRepository) {
@@ -2099,7 +2100,7 @@ export const make = Effect.gen(function* () {
       baseBranch,
       baseRef: baseBranch,
       message: missingRemoteBase
-        ? `Recorded remote base ${missingRemoteBase} is missing. Using default branch ${baseBranch}.`
+        ? `Recorded base ${missingRemoteBase} is unavailable in this checkout. Using default branch ${baseBranch}.`
         : null,
     };
   });
@@ -2317,20 +2318,35 @@ export const make = Effect.gen(function* () {
       });
     }
 
-    const headContext = yield* resolveBranchHeadContext(cwd, {
+    let headContext = yield* resolveBranchHeadContext(cwd, {
       branch,
       upstreamRef: details.upstreamRef,
     });
 
+    const pushRemote =
+      (yield* gitCore.readConfigValue(cwd, `branch.${branch}.pushRemote`)) ??
+      (yield* gitCore.readConfigValue(cwd, "remote.pushDefault"));
+    if (pushRemote && pushRemote !== headContext.remoteName) {
+      const publishingContext = yield* resolveBranchHeadContext(cwd, {
+        branch,
+        upstreamRef: null,
+        remoteName: pushRemote,
+      });
+      if (publishingContext.isCrossRepository) headContext = publishingContext;
+    }
+
     const existing = yield* findOpenPr(cwd, headContext);
     if (existing) {
       return {
-        status: "opened_existing" as const,
-        url: existing.url,
-        number: existing.number,
-        baseBranch: existing.baseRefName,
-        headBranch: existing.headRefName,
-        title: existing.title,
+        pr: {
+          status: "opened_existing" as const,
+          url: existing.url,
+          number: existing.number,
+          baseBranch: existing.baseRefName,
+          headBranch: existing.headRefName,
+          title: existing.title,
+        },
+        message: null,
       };
     }
 
@@ -2402,20 +2418,26 @@ export const make = Effect.gen(function* () {
     const created = yield* findOpenPr(cwd, headContext);
     if (!created) {
       return {
-        status: "created" as const,
-        baseBranch,
-        headBranch: headContext.headBranch,
-        title: generated.title,
+        pr: {
+          status: "created" as const,
+          baseBranch,
+          headBranch: headContext.headBranch,
+          title: generated.title,
+        },
+        message,
       };
     }
 
     return {
-      status: "created" as const,
-      url: created.url,
-      number: created.number,
-      baseBranch: created.baseRefName,
-      headBranch: created.headRefName,
-      title: created.title,
+      pr: {
+        status: "created" as const,
+        url: created.url,
+        number: created.number,
+        baseBranch: created.baseRefName,
+        headBranch: created.headRefName,
+        title: created.title,
+      },
+      message,
     };
   });
 
@@ -3245,7 +3267,7 @@ export const make = Effect.gen(function* () {
               )
           : { status: "skipped_not_requested" as const };
 
-        const pr = wantsPr
+        const { pr, message: prMessage } = wantsPr
           ? yield* progress
               .emit({
                 kind: "phase_started",
@@ -3264,9 +3286,9 @@ export const make = Effect.gen(function* () {
                   ),
                 ),
               )
-          : { status: "skipped_not_requested" as const };
+          : { pr: { status: "skipped_not_requested" as const }, message: null };
 
-        const toast = yield* buildCompletionToast(input.cwd, {
+        const completionToast = yield* buildCompletionToast(input.cwd, {
           action: input.action,
           branch: branchStep,
           commit,
@@ -3274,6 +3296,12 @@ export const make = Effect.gen(function* () {
           pr,
         });
 
+        const toast = prMessage
+          ? {
+              ...completionToast,
+              description: [completionToast.description, prMessage].filter(Boolean).join(" "),
+            }
+          : completionToast;
         const result = {
           action: input.action,
           branch: branchStep,

@@ -3466,6 +3466,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     { baseState: "unconfigured", t3BaseRef: false },
     { baseState: "deleted", t3BaseRef: false },
     { baseState: "deleted", t3BaseRef: true },
+    { baseState: "not-cached", t3BaseRef: false },
   ] as const)(
     "resolves PR base against the remote ($baseState, T3 base ref: $t3BaseRef)",
     ({ baseState, t3BaseRef }) =>
@@ -3480,7 +3481,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         NodeFS.writeFileSync(NodePath.join(repoDir, "parent.txt"), "parent work\n");
         yield* runGit(repoDir, ["add", "parent.txt"]);
         yield* runGit(repoDir, ["commit", "-m", "Parent commit"]);
-        if (baseState === "remote" || baseState === "deleted") {
+        if (baseState === "remote" || baseState === "deleted" || baseState === "not-cached") {
           yield* runGit(repoDir, ["push", "origin", "parent"]);
         }
         yield* runGit(repoDir, ["checkout", "-b", "child"]);
@@ -3508,8 +3509,18 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           ).toBe(0);
           yield* runGit(repoDir, ["fetch", "--prune", "origin"]);
         }
+        if (baseState === "not-cached") {
+          yield* runGit(repoDir, [
+            "config",
+            "--replace-all",
+            "remote.origin.fetch",
+            "+refs/heads/child:refs/remotes/origin/child",
+          ]);
+          yield* runGit(repoDir, ["update-ref", "-d", "refs/remotes/origin/parent"]);
+        }
         const expectedBase = baseState === "remote" ? "parent" : "main";
-        const missingRemoteBase = baseState === "local-only" || baseState === "deleted";
+        const missingRemoteBase =
+          baseState === "local-only" || baseState === "deleted" || baseState === "not-cached";
         expect(
           (yield* runGit(repoDir, ["show-ref", "--verify", "refs/heads/parent"])).exitCode,
         ).toBe(0);
@@ -3563,49 +3574,128 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           .soft(ghCalls.filter((call) => call.startsWith("pr create ")))
           .toEqual([expect.stringContaining(`pr create --base ${expectedBase} --head child`)]);
         if (missingRemoteBase) {
-          // The fallback must explain the missing remote base through the result or progress.
-          const feedback = JSON.stringify({ result, events });
-          expect.soft(feedback).toContain("parent");
+          const message =
+            "Recorded base origin/parent is unavailable in this checkout. Using default branch main.";
+          expect.soft(result.toast.description).toContain(message);
+          expect.soft(result.toast.description).not.toContain("refs/remotes/");
           expect
-            .soft(feedback)
-            .toMatch(/missing|not (?:found|exist)|does(?:n't| not) exist|deleted|unavailable/i);
-          expect.soft(feedback).toMatch(/remote|origin/i);
+            .soft(events)
+            .toContainEqual(
+              expect.objectContaining({ kind: "phase_started", phase: "pr", label: message }),
+            );
         }
       }),
   );
 
   it.effect.each([
-    { remoteConfig: "branch.child.pushRemote", published: true },
-    { remoteConfig: "branch.child.pushRemote", published: false },
-    { remoteConfig: "remote.pushDefault", published: true },
-    { remoteConfig: "remote.pushDefault", published: false },
-    { remoteConfig: "branch.child.remote", published: true },
-    { remoteConfig: "branch.child.remote", published: false },
+    { remoteConfig: "branch.child.remote", baseRef: null },
+    { remoteConfig: "branch.child.pushRemote", baseRef: null },
+    { remoteConfig: "remote.pushDefault", baseRef: null },
+    { remoteConfig: "branch.child.remote", baseRef: "refs/heads/parent" },
+    { remoteConfig: "branch.child.pushRemote", baseRef: "refs/heads/parent" },
+    { remoteConfig: "remote.pushDefault", baseRef: "refs/heads/parent" },
+    { remoteConfig: "branch.child.pushRemote", baseRef: "refs/remotes/origin/parent" },
   ])(
-    "validates the recorded PR base on $remoteConfig (published: $published)",
-    ({ remoteConfig, published }) =>
+    "keeps the target PR base for fork publishing via $remoteConfig ($baseRef)",
+    ({ remoteConfig, baseRef }) =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        const originDir = yield* createBareRemote();
+        const forkDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", originDir]);
+        yield* runGit(repoDir, ["remote", "add", "fork", forkDir]);
+        yield* runGit(repoDir, ["push", "origin", "main"]);
+        yield* runGit(repoDir, ["checkout", "-b", "parent"]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "parent.txt"), "parent work\n");
+        yield* runGit(repoDir, ["add", "parent.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Parent commit"]);
+        yield* runGit(repoDir, ["push", "origin", "parent"]);
+        yield* runGit(repoDir, ["checkout", "-b", "child"]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "child.txt"), "child work\n");
+        yield* runGit(repoDir, ["add", "child.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Child commit"]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "child"]);
+        yield* runGit(repoDir, ["push", "fork", "child"]);
+        yield* runGit(repoDir, ["config", remoteConfig, "fork"]);
+        yield* runGit(repoDir, ["config", "branch.child.gh-merge-base", "parent"]);
+        if (baseRef) yield* runGit(repoDir, ["config", "branch.child.t3-merge-base-ref", baseRef]);
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "origin",
+          "git@github.com:target/project.git",
+          originDir,
+        );
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "fork",
+          "git@github.com:contributor/project.git",
+          forkDir,
+        );
+        expect(
+          (yield* runGit(
+            repoDir,
+            ["show-ref", "--verify", "--quiet", "refs/remotes/fork/parent"],
+            true,
+          )).exitCode,
+        ).toBe(1);
+        const generatedInputs: TextGeneration.PrContentGenerationInput[] = [];
+        const { manager, ghCalls } = yield* makeManager({
+          ghScenario: { defaultBranch: "main", prListSequence: ["[]", "[]"] },
+          textGeneration: {
+            generatePrContent: (input) => {
+              generatedInputs.push(input);
+              return Effect.succeed({ title: "Child PR", body: "Child body" });
+            },
+          },
+        });
+        const result = yield* runStackedAction(manager, { cwd: repoDir, action: "create_pr" });
+        expect(result.pr.baseBranch).toBe("parent");
+        expect(result.toast.description).not.toContain("unavailable in this checkout");
+        expect(generatedInputs).toHaveLength(1);
+        expect(generatedInputs[0]!.commitSummary).toContain("Child commit");
+        expect(generatedInputs[0]!.commitSummary).not.toContain("Parent commit");
+        expect(generatedInputs[0]!.diffPatch).toContain("+child work");
+        expect(generatedInputs[0]!.diffPatch).not.toContain("+parent work");
+        expect(ghCalls.filter((call) => call.startsWith("pr create "))).toEqual([
+          expect.stringContaining("pr create --base parent --head contributor:child"),
+        ]);
+      }),
+  );
+
+  it.effect.each([
+    { remoteConfig: "branch.child.pushRemote", published: true, remoteName: "publish" },
+    { remoteConfig: "branch.child.pushRemote", published: false, remoteName: "publish" },
+    { remoteConfig: "remote.pushDefault", published: true, remoteName: "publish" },
+    { remoteConfig: "remote.pushDefault", published: false, remoteName: "publish" },
+    { remoteConfig: "branch.child.remote", published: true, remoteName: "publish" },
+    { remoteConfig: "branch.child.remote", published: false, remoteName: "publish" },
+    { remoteConfig: "branch.child.pushRemote", published: false, remoteName: "team/fork" },
+  ])(
+    "validates the recorded PR base on $remoteConfig via $remoteName (published: $published)",
+    ({ remoteConfig, published, remoteName }) =>
       Effect.gen(function* () {
         const repoDir = yield* makeTempDir("t3code-git-manager-");
         yield* initRepo(repoDir);
         const originDir = yield* createBareRemote();
         const publishDir = yield* createBareRemote();
         yield* runGit(repoDir, ["remote", "add", "origin", originDir]);
-        yield* runGit(repoDir, ["remote", "add", "publish", publishDir]);
+        yield* runGit(repoDir, ["remote", "add", remoteName, publishDir]);
         yield* runGit(repoDir, ["push", "origin", "main"]);
         yield* runGit(repoDir, ["branch", "parent"]);
         yield* runGit(repoDir, ["push", "origin", "parent"]);
-        if (published) yield* runGit(repoDir, ["push", "publish", "parent"]);
+        if (published) yield* runGit(repoDir, ["push", remoteName, "parent"]);
         yield* runGit(repoDir, ["checkout", "-b", "child"]);
         NodeFS.writeFileSync(NodePath.join(repoDir, "child.txt"), "child work\n");
         yield* runGit(repoDir, ["add", "child.txt"]);
         yield* runGit(repoDir, ["commit", "-m", "Child commit"]);
         yield* runGit(repoDir, ["push", "-u", "origin", "child"]);
-        yield* runGit(repoDir, ["push", "publish", "child"]);
+        yield* runGit(repoDir, ["push", remoteName, "child"]);
         yield* runGit(repoDir, ["config", "branch.child.gh-merge-base", "parent"]);
         if (remoteConfig === "branch.child.pushRemote") {
           yield* runGit(repoDir, ["config", "remote.pushDefault", "origin"]);
         }
-        yield* runGit(repoDir, ["config", remoteConfig, "publish"]);
+        yield* runGit(repoDir, ["config", remoteConfig, remoteName]);
         const events: GitActionProgressEvent[] = [];
         const { manager } = yield* makeManager({
           ghScenario: { defaultBranch: "main", prListSequence: ["[]", "[]"] },
@@ -3625,12 +3715,14 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
 
         expect(result.pr.baseBranch).toBe(published ? "parent" : "main");
         if (!published) {
+          expect(result.toast.description).toContain(
+            `Recorded base ${remoteName}/parent is unavailable in this checkout. Using default branch main.`,
+          );
           expect(events).toContainEqual(
             expect.objectContaining({
               kind: "phase_started",
               phase: "pr",
-              label:
-                "Recorded remote base refs/remotes/publish/parent is missing. Using default branch main.",
+              label: `Recorded base ${remoteName}/parent is unavailable in this checkout. Using default branch main.`,
             }),
           );
         }
