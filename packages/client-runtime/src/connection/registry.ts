@@ -38,6 +38,7 @@ import { ConnectionBlockedError } from "./model.ts";
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionDriver from "./driver.ts";
+export { ConnectionDriver } from "./driver.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
 import {
   GitHubRoutingPermissions,
@@ -363,7 +364,31 @@ export const make = Effect.gen(function* () {
             learnRoutes: (input) => learnRoutes({ environmentId, ...input }),
           }).pipe(
             Effect.provideService(Connectivity.Connectivity, connectivity),
-            Effect.provideService(ConnectionDriver.ConnectionDriver, driver),
+            Effect.provideService(ConnectionDriver.ConnectionDriver, {
+              ...driver,
+              connect: Effect.fn(function* (current, reportProgress) {
+                const target = current.target;
+                if (
+                  target._tag !== "BearerConnectionTarget" ||
+                  !(yield* Ref.get(platformEnvironmentIds)).has(environmentId)
+                ) {
+                  return yield* driver.connect(current, reportProgress);
+                }
+                const before = yield* credentials.get(target.connectionId);
+                return yield* driver.connect(current, reportProgress).pipe(
+                  Effect.tapError((error) =>
+                    error._tag === "ConnectionBlockedError" && error.reason === "authentication"
+                      ? Effect.gen(function* () {
+                          const stored = yield* credentials.get(target.connectionId);
+                          if (Option.isSome(before) && Equal.equals(before, stored)) {
+                            yield* credentials.remove(target.connectionId);
+                          }
+                        }).pipe(Effect.ignore)
+                      : Effect.void,
+                  ),
+                );
+              }),
+            }),
             Effect.provideService(ConnectionWakeups.ConnectionWakeups, wakeups),
             Scope.provide(scope),
             Effect.onError(() => Scope.close(scope, Exit.void)),
@@ -682,13 +707,12 @@ export const make = Effect.gen(function* () {
 
           yield* installEntryLocked(entry, { retainEquivalentRuntime: true });
 
-          if (bearerReplaced && registration._tag === "BearerConnectionRegistration") {
+          if (registration._tag === "BearerConnectionRegistration") {
             const scope = (yield* SubscriptionRef.get(serviceScopes)).get(target.environmentId);
             if (scope !== undefined) {
               const state = yield* SubscriptionRef.get(scope.supervisor.state);
               if (
-                state.phase === "connecting" ||
-                state.phase === "backoff" ||
+                (bearerReplaced && (state.phase === "connecting" || state.phase === "backoff")) ||
                 (state.phase === "blocked" &&
                   state.lastFailure?._tag === "ConnectionBlockedError" &&
                   state.lastFailure.reason === "authentication")

@@ -8,10 +8,28 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Ref from "effect/Ref";
 import * as Fiber from "effect/Fiber";
+import * as Stream from "effect/Stream";
+import * as Layer from "effect/Layer";
+import { FetchHttpClient } from "effect/http";
+import * as Option from "effect/Option";
+import * as TestClock from "effect/testing/TestClock";
+import * as PrimaryTarget from "../environments/primary/target.ts";
 import { afterEach, vi } from "vite-plus/test";
-import { ClientCapabilities } from "@t3tools/client-runtime/platform";
 import {
+  ClientCapabilities,
+  PlatformConnectionSource,
+  Persistence,
+} from "@t3tools/client-runtime/platform";
+import {
+  EnvironmentRegistry,
+  Connectivity,
+  ProfileStore,
+  Wakeups,
+  CredentialStore,
+  type ConnectionCredential,
   ConnectionBlockedError,
   ConnectionTransientError,
 } from "@t3tools/client-runtime/connection";
@@ -20,6 +38,7 @@ import {
   canRetainCachedPlatformRegistrationAfterRefreshFailure,
   canReuseCachedPlatformRegistration,
   layer,
+  layerPlatformConnectionSource,
   isRejectedBootstrapCredentialError,
   isRejectedSecondaryBootstrap,
   nextRejectedSecondaryBootstrap,
@@ -51,6 +70,14 @@ function pendingSetup() {
     reject = onReject;
   });
   return { promise, resolve, reject };
+}
+
+function pendingSignal() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((onResolve) => {
+    resolve = onResolve;
+  });
+  return { promise, resolve };
 }
 
 afterEach(() => {
@@ -411,4 +438,464 @@ describe("primary topology cache", () => {
       }),
     ).toBe(cached);
   });
+});
+
+const layerTestCredentials = Layer.effect(
+  CredentialStore.ConnectionCredentialStore,
+  Effect.gen(function* () {
+    const stored = yield* Ref.make(new Map<string, ConnectionCredential>());
+    return CredentialStore.ConnectionCredentialStore.of({
+      get: (id) =>
+        Ref.get(stored).pipe(Effect.map((current) => Option.fromUndefinedOr(current.get(id)))),
+      put: (id, credential) =>
+        Ref.update(stored, (current) => new Map(current).set(id, credential)),
+      remove: (id) =>
+        Ref.update(stored, (current) => {
+          const next = new Map(current);
+          next.delete(id);
+          return next;
+        }),
+    });
+  }),
+);
+
+describe("desktop-local startup bearer exchange", () => {
+  function fakeBootstrapEndpoint(beforeExchange?: (request: number) => Promise<void>) {
+    const tokenRequests: string[] = [];
+    let rejectExchange = false;
+    let bootstrapToken = "bootstrap-token";
+    let present = true;
+    let host = "backend.example.test";
+    vi.spyOn(PrimaryTarget, "readPrimaryEnvironmentTarget").mockReturnValue(null);
+    vi.stubGlobal("window", {
+      location: new URL("http://renderer.example.test/"),
+      desktopBridge: {
+        getLocalEnvironmentBootstraps: () =>
+          present
+            ? [
+                {
+                  id: "wsl:test",
+                  label: "WSL test",
+                  httpBaseUrl: `http://${host}/`,
+                  wsBaseUrl: `ws://${host}/`,
+                  bootstrapToken,
+                },
+              ]
+            : [],
+      },
+    });
+    vi.stubGlobal("navigator", { userAgent: "test", platform: "Linux", maxTouchPoints: 0 });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.pathname === "/.well-known/t3/environment") {
+          return Response.json({
+            environmentId: "desktop-secondary-test",
+            label: "WSL test",
+            platform: { os: "linux", arch: "x64" },
+            serverVersion: "0.0.0-test",
+            capabilities: { repositoryIdentity: true },
+          });
+        }
+        if (url.pathname === "/oauth/token") {
+          tokenRequests.push(url.href);
+          const request = tokenRequests.length;
+          await beforeExchange?.(request);
+          if (rejectExchange) {
+            return Response.json(
+              {
+                _tag: "EnvironmentAuthInvalidError",
+                code: "auth_invalid",
+                reason: "invalid_credential",
+                traceId: "revoked-session-test",
+              },
+              { status: 401 },
+            );
+          }
+          return Response.json({
+            access_token: `bearer-${request}`,
+            issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
+            token_type: "Bearer",
+            expires_in: 60,
+            scope: AuthStandardClientScopes.join(" "),
+          });
+        }
+        throw new Error(`Unexpected endpoint: ${url.href}`);
+      }),
+    );
+    return {
+      tokenRequests,
+      move: () => {
+        host = "restarted-backend.example.test";
+      },
+      rotate: () => {
+        bootstrapToken = "rotated-bootstrap";
+      },
+      remove: () => {
+        present = false;
+      },
+      revoke: () => {
+        rejectExchange = true;
+      },
+      recover: () => {
+        rejectExchange = false;
+      },
+    };
+  }
+
+  it.effect(
+    "shares one oauth token exchange between concurrent startup callers for the same backend",
+    () =>
+      Effect.gen(function* () {
+        const endpoint = fakeBootstrapEndpoint();
+        yield* Effect.gen(function* () {
+          const source = yield* PlatformConnectionSource.PlatformConnectionSource;
+          const [first, second] = yield* Effect.all(
+            [Stream.runHead(source.registrations), Stream.runHead(source.registrations)],
+            { concurrency: "unbounded" },
+          );
+          expect(endpoint.tokenRequests).toHaveLength(1);
+          expect(Option.getOrThrow(first)).toHaveLength(1);
+          expect(Option.getOrThrow(second)[0]).toBe(Option.getOrThrow(first)[0]);
+        }).pipe(
+          Effect.provide(
+            layerPlatformConnectionSource.pipe(Layer.provideMerge(layerTestCredentials)),
+          ),
+          Effect.provideService(FetchHttpClient.Fetch, globalThis.fetch),
+          Effect.scoped,
+        );
+      }),
+  );
+
+  it.effect("exchanges again on the next poll after its bearer credential is invalidated", () =>
+    Effect.gen(function* () {
+      const endpoint = fakeBootstrapEndpoint();
+      yield* Effect.gen(function* () {
+        const source = yield* PlatformConnectionSource.PlatformConnectionSource;
+        const first = Option.getOrThrow(yield* Stream.runHead(source.registrations));
+        expect(first).toHaveLength(1);
+        const credentials = yield* CredentialStore.ConnectionCredentialStore;
+        const registration = first[0]!;
+        if (registration._tag !== "BearerConnectionRegistration")
+          throw new Error("Expected bearer");
+        yield* credentials.remove(registration.target.connectionId);
+        const recovered = Option.getOrThrow(yield* Stream.runHead(source.registrations));
+        expect(endpoint.tokenRequests).toHaveLength(2);
+        expect(recovered).toHaveLength(1);
+        expect(recovered[0]).not.toEqual(first[0]);
+      }).pipe(
+        Effect.provide(
+          layerPlatformConnectionSource.pipe(Layer.provideMerge(layerTestCredentials)),
+        ),
+        Effect.provideService(FetchHttpClient.Fetch, globalThis.fetch),
+        Effect.scoped,
+      );
+    }),
+  );
+
+  it.effect("retains a valid bearer and backs off when a rotated bootstrap grant is rejected", () =>
+    Effect.gen(function* () {
+      const endpoint = fakeBootstrapEndpoint();
+      yield* Effect.gen(function* () {
+        const source = yield* PlatformConnectionSource.PlatformConnectionSource;
+        const first = Option.getOrThrow(yield* Stream.runHead(source.registrations));
+        endpoint.rotate();
+        endpoint.revoke();
+        const rejected = Option.getOrThrow(yield* Stream.runHead(source.registrations));
+        expect(rejected).toEqual(first);
+        endpoint.recover();
+        const backedOff = Option.getOrThrow(yield* Stream.runHead(source.registrations));
+        expect(backedOff).toEqual(first);
+        expect(endpoint.tokenRequests).toHaveLength(2);
+        yield* TestClock.adjust("60 seconds");
+        const recovered = Option.getOrThrow(yield* Stream.runHead(source.registrations));
+        expect(endpoint.tokenRequests).toHaveLength(3);
+        expect(recovered).not.toEqual(first);
+      }).pipe(
+        Effect.provide(
+          layerPlatformConnectionSource.pipe(Layer.provideMerge(layerTestCredentials)),
+        ),
+        Effect.provideService(FetchHttpClient.Fetch, globalThis.fetch),
+        Effect.scoped,
+      );
+    }),
+  );
+
+  it.effect("a known revoked bearer is not retained when its bootstrap refresh also fails", () =>
+    Effect.gen(function* () {
+      const endpoint = fakeBootstrapEndpoint();
+      yield* Effect.gen(function* () {
+        const source = yield* PlatformConnectionSource.PlatformConnectionSource;
+        const first = Option.getOrThrow(yield* Stream.runHead(source.registrations));
+        const target = first[0]!.target;
+        if (target._tag !== "BearerConnectionTarget") throw new Error("Expected bearer");
+        const credentials = yield* CredentialStore.ConnectionCredentialStore;
+        yield* credentials.remove(target.connectionId);
+        endpoint.revoke();
+        expect(Option.getOrThrow(yield* Stream.runHead(source.registrations))).toEqual([]);
+        expect(Option.getOrThrow(yield* Stream.runHead(source.registrations))).toEqual([]);
+        expect(endpoint.tokenRequests).toHaveLength(2);
+        endpoint.recover();
+        yield* TestClock.adjust("60 seconds");
+        expect(Option.getOrThrow(yield* Stream.runHead(source.registrations))).toHaveLength(1);
+        expect(endpoint.tokenRequests).toHaveLength(3);
+      }).pipe(
+        Effect.provide(
+          layerPlatformConnectionSource.pipe(Layer.provideMerge(layerTestCredentials)),
+        ),
+        Effect.provideService(FetchHttpClient.Fetch, globalThis.fetch),
+        Effect.scoped,
+      );
+    }),
+  );
+
+  it.effect("one canceled consumer leaves the shared exchange running for the other", () =>
+    Effect.gen(function* () {
+      const started = pendingSignal();
+      const release = pendingSignal();
+      const endpoint = fakeBootstrapEndpoint(async () => {
+        started.resolve();
+        await release.promise;
+      });
+      yield* Effect.gen(function* () {
+        const source = yield* PlatformConnectionSource.PlatformConnectionSource;
+        const first = yield* Stream.runHead(source.registrations).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* Effect.promise(() => started.promise);
+        const second = yield* Stream.runHead(source.registrations).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* Fiber.interrupt(first);
+        release.resolve();
+        expect(Option.getOrThrow(yield* Fiber.join(second))).toHaveLength(1);
+        expect(endpoint.tokenRequests).toHaveLength(1);
+      }).pipe(
+        Effect.provide(
+          layerPlatformConnectionSource.pipe(Layer.provideMerge(layerTestCredentials)),
+        ),
+        Effect.provideService(FetchHttpClient.Fetch, globalThis.fetch),
+        Effect.scoped,
+      );
+    }),
+  );
+
+  it.effect("all canceled consumers clear the exchange so a later poll can retry", () =>
+    Effect.gen(function* () {
+      const started = pendingSignal();
+      const release = pendingSignal();
+      const endpoint = fakeBootstrapEndpoint(async (request) => {
+        if (request !== 1) return;
+        started.resolve();
+        await release.promise;
+      });
+      yield* Effect.gen(function* () {
+        const source = yield* PlatformConnectionSource.PlatformConnectionSource;
+        const first = yield* Stream.runHead(source.registrations).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* Effect.promise(() => started.promise);
+        yield* Fiber.interrupt(first);
+        release.resolve();
+        expect(Option.getOrThrow(yield* Stream.runHead(source.registrations))).toHaveLength(1);
+        expect(endpoint.tokenRequests).toHaveLength(2);
+      }).pipe(
+        Effect.provide(
+          layerPlatformConnectionSource.pipe(Layer.provideMerge(layerTestCredentials)),
+        ),
+        Effect.provideService(FetchHttpClient.Fetch, globalThis.fetch),
+        Effect.scoped,
+      );
+    }),
+  );
+
+  it.effect("a failed exchange is cleared and retried after bootstrap rejection backoff", () =>
+    Effect.gen(function* () {
+      const endpoint = fakeBootstrapEndpoint();
+      endpoint.revoke();
+      yield* Effect.gen(function* () {
+        const source = yield* PlatformConnectionSource.PlatformConnectionSource;
+        expect(Option.getOrThrow(yield* Stream.runHead(source.registrations))).toEqual([]);
+        endpoint.recover();
+        expect(Option.getOrThrow(yield* Stream.runHead(source.registrations))).toEqual([]);
+        expect(endpoint.tokenRequests).toHaveLength(1);
+        yield* TestClock.adjust("60 seconds");
+        expect(Option.getOrThrow(yield* Stream.runHead(source.registrations))).toHaveLength(1);
+        expect(endpoint.tokenRequests).toHaveLength(2);
+      }).pipe(
+        Effect.provide(
+          layerPlatformConnectionSource.pipe(Layer.provideMerge(layerTestCredentials)),
+        ),
+        Effect.provideService(FetchHttpClient.Fetch, globalThis.fetch),
+        Effect.scoped,
+      );
+    }),
+  );
+
+  it.effect.each(["rotate", "move", "remove"] as const)(
+    "an older exchange cannot emit or store stale registrations after backend %s",
+    (change) =>
+      Effect.gen(function* () {
+        const started = pendingSignal();
+        const release = pendingSignal();
+        const endpoint = fakeBootstrapEndpoint(async (request) => {
+          if (request !== 1) return;
+          started.resolve();
+          await release.promise;
+        });
+        yield* Effect.gen(function* () {
+          const source = yield* PlatformConnectionSource.PlatformConnectionSource;
+          const old = yield* Stream.runHead(source.registrations).pipe(
+            Effect.forkChild({ startImmediately: true }),
+          );
+          yield* Effect.promise(() => started.promise);
+          endpoint[change]();
+          const current = Option.getOrThrow(yield* Stream.runHead(source.registrations));
+          release.resolve();
+          expect(Option.getOrThrow(yield* Fiber.join(old))).toEqual(current);
+          expect(Option.getOrThrow(yield* Stream.runHead(source.registrations))).toEqual(current);
+          expect(endpoint.tokenRequests).toHaveLength(change === "remove" ? 1 : 2);
+          if (change !== "remove") {
+            const registration = current[0]!;
+            if (registration._tag !== "BearerConnectionRegistration")
+              throw new Error("Expected bearer");
+            const credentials = yield* CredentialStore.ConnectionCredentialStore;
+            expect(yield* credentials.get(registration.target.connectionId)).toEqual(
+              Option.some(registration.credential),
+            );
+          }
+        }).pipe(
+          Effect.provide(
+            layerPlatformConnectionSource.pipe(Layer.provideMerge(layerTestCredentials)),
+          ),
+          Effect.provideService(FetchHttpClient.Fetch, globalThis.fetch),
+          Effect.scoped,
+        );
+      }),
+  );
+
+  it.effect(
+    "registry bearer rejection causes the platform's next poll to exchange and reconnect",
+    () =>
+      Effect.gen(function* () {
+        const endpoint = fakeBootstrapEndpoint();
+        const freshAttempt = yield* Deferred.make<string>();
+        const layerRegistry = EnvironmentRegistry.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(Persistence.ConnectionTargetStore, {
+                list: Effect.succeed([]),
+                listDisabled: Effect.succeed([]),
+              }),
+              Layer.succeed(Persistence.ConnectionRegistrationStore, {
+                register: () => Effect.void,
+                setRoutes: () => Effect.void,
+                remove: () => Effect.void,
+                setEnabled: () => Effect.void,
+              }),
+              Layer.succeed(Persistence.EnvironmentCacheStore, {
+                loadShell: () => Effect.succeedNone,
+                saveShell: () => Effect.void,
+                loadThread: () => Effect.succeedNone,
+                saveThread: () => Effect.void,
+                removeThread: () => Effect.void,
+                loadServerConfig: () => Effect.succeedNone,
+                saveServerConfig: () => Effect.void,
+                loadVcsRefs: () => Effect.succeedNone,
+                saveVcsRefs: () => Effect.void,
+                removeVcsRefs: () => Effect.void,
+                clearVcsRefs: () => Effect.void,
+                clear: () => Effect.void,
+              }),
+              Layer.succeed(ProfileStore.ConnectionProfileStore, {
+                get: () => Effect.succeedNone,
+                put: () => Effect.void,
+                remove: () => Effect.void,
+              }),
+              Layer.succeed(ClientCapabilities.SshEnvironmentGateway, {
+                provision: () => Effect.never,
+                prepare: () => Effect.never,
+                disconnect: () => Effect.void,
+              }),
+              Connectivity.layer({ status: Effect.succeed("online"), changes: Stream.never }),
+              Wakeups.layer({ changes: Stream.never }),
+              Layer.effect(
+                EnvironmentRegistry.ConnectionDriver,
+                Effect.gen(function* () {
+                  const credentials = yield* CredentialStore.ConnectionCredentialStore;
+                  return EnvironmentRegistry.ConnectionDriver.of({
+                    connect: (entry) =>
+                      Effect.gen(function* () {
+                        if (entry.target._tag !== "BearerConnectionTarget")
+                          return yield* Effect.never;
+                        const credential = Option.getOrThrow(
+                          yield* credentials.get(entry.target.connectionId),
+                        );
+                        if (credential.token === "bearer-1")
+                          return yield* new ConnectionBlockedError({
+                            reason: "authentication",
+                            detail: "The environment credential is invalid.",
+                            hop: "server",
+                          });
+                        yield* Deferred.succeed(freshAttempt, credential.token);
+                        return yield* Effect.never;
+                      }),
+                    checkRoute: () => Effect.succeed("unchecked"),
+                    preflight: () => Effect.succeed(false),
+                  });
+                }),
+              ),
+            ),
+          ),
+        );
+        yield* Effect.gen(function* () {
+          const source = yield* PlatformConnectionSource.PlatformConnectionSource;
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          const credentials = yield* CredentialStore.ConnectionCredentialStore;
+          const first = Option.getOrThrow(yield* Stream.runHead(source.registrations));
+          const target = first[0]!.target;
+          if (target._tag !== "BearerConnectionTarget") throw new Error("Expected bearer");
+          yield* registry.reconcilePlatform(first);
+          yield* registry.stateChanges(target.environmentId).pipe(
+            Stream.filter((state) => state.phase === "blocked"),
+            Stream.runHead,
+          );
+          expect(yield* credentials.get(target.connectionId)).toEqual(Option.none());
+          const next = Option.getOrThrow(yield* Stream.runHead(source.registrations));
+          yield* registry.reconcilePlatform(next);
+          expect(yield* Deferred.await(freshAttempt)).toBe("bearer-2");
+          expect(endpoint.tokenRequests).toHaveLength(2);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(layerRegistry, layerPlatformConnectionSource).pipe(
+              Layer.provideMerge(layerTestCredentials),
+            ),
+          ),
+          Effect.provideService(FetchHttpClient.Fetch, globalThis.fetch),
+          Effect.scoped,
+        );
+      }),
+  );
+
+  it.effect("reuses a valid bearer when the endpoint and bootstrap token are unchanged", () =>
+    Effect.gen(function* () {
+      const endpoint = fakeBootstrapEndpoint();
+      yield* Effect.gen(function* () {
+        const source = yield* PlatformConnectionSource.PlatformConnectionSource;
+        const first = Option.getOrThrow(yield* Stream.runHead(source.registrations));
+        yield* TestClock.adjust("3 seconds");
+        const next = Option.getOrThrow(yield* Stream.runHead(source.registrations));
+        expect(first).toHaveLength(1);
+        expect(next[0]).toBe(first[0]);
+        expect(endpoint.tokenRequests).toHaveLength(1);
+      }).pipe(
+        Effect.provide(
+          layerPlatformConnectionSource.pipe(Layer.provideMerge(layerTestCredentials)),
+        ),
+        Effect.provideService(FetchHttpClient.Fetch, globalThis.fetch),
+        Effect.scoped,
+      );
+    }),
+  );
 });

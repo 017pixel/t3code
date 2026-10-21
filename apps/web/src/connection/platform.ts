@@ -12,6 +12,7 @@ import {
   type ConnectionAttemptError,
   ConnectionTransientError,
   Connectivity,
+  CredentialStore,
   mapRemoteEnvironmentError,
   type PlatformConnectionRegistration,
   PrimaryConnectionRegistration,
@@ -626,7 +627,7 @@ export function secondaryRegistrationsToRetainAfterTopologyRead(
   );
 }
 
-const layerPlatformConnectionSource = Layer.effect(
+export const layerPlatformConnectionSource = Layer.effect(
   PlatformConnectionSource.PlatformConnectionSource,
   Effect.gen(function* () {
     if (isHostedStaticApp() || isLocalEnvironmentDisabled()) {
@@ -634,14 +635,30 @@ const layerPlatformConnectionSource = Layer.effect(
         registrations: Stream.empty,
       });
     }
+    const credentials = yield* CredentialStore.ConnectionCredentialStore;
+    const pending = new Map<string, ReturnType<typeof loadSecondaryConnectionRegistration>>();
+    const identities = new Map<string, string>();
     const cacheRef = yield* Ref.make(new Map<string, CachedPlatformRegistration>());
     const rejectedRef = yield* Ref.make(new Map<string, RejectedSecondaryBootstrap>());
 
     const buildPlatformRegistrations = Effect.gen(function* () {
-      const previous = yield* Ref.get(cacheRef);
+      const snapshot = yield* Ref.get(cacheRef);
+      const previous = new Map(snapshot);
+      for (const [id, cached] of previous) {
+        if (cached.registration._tag !== "BearerConnectionRegistration") continue;
+        const stored = yield* credentials
+          .get(cached.registration.target.connectionId)
+          .pipe(Effect.option);
+        if (
+          Option.isSome(stored) &&
+          (Option.isNone(stored.value) ||
+            stored.value.value.token !== cached.registration.credential.token)
+        ) {
+          previous.delete(id);
+        }
+      }
       const nowEpochMs = yield* Clock.currentTimeMillis;
       const next = new Map<string, CachedPlatformRegistration>();
-      const registrations: Array<PlatformConnectionRegistration> = [];
 
       const primaryTopologyRead = readPrimaryEnvironmentTargetResult();
       const retainedPrimary = primaryRegistrationToRetainAfterTopologyRead(
@@ -650,7 +667,6 @@ const layerPlatformConnectionSource = Layer.effect(
       );
       if (retainedPrimary !== undefined) {
         next.set(PRIMARY_LOCAL_ENVIRONMENT_ID, retainedPrimary);
-        registrations.push(retainedPrimary.registration);
       }
 
       if (primaryTopologyRead._tag === "Failure") {
@@ -666,7 +682,6 @@ const layerPlatformConnectionSource = Layer.effect(
           canReuseCachedPlatformRegistration(cached, signature, nowEpochMs)
         ) {
           next.set(PRIMARY_LOCAL_ENVIRONMENT_ID, cached);
-          registrations.push(cached.registration);
         } else {
           const built = yield* loadPrimaryConnectionRegistration(primaryTarget).pipe(
             Effect.tapError((error) =>
@@ -677,7 +692,6 @@ const layerPlatformConnectionSource = Layer.effect(
           if (Option.isSome(built)) {
             const cacheEntry = { signature, registration: built.value };
             next.set(PRIMARY_LOCAL_ENVIRONMENT_ID, cacheEntry);
-            registrations.push(built.value);
           }
         }
       }
@@ -689,7 +703,6 @@ const layerPlatformConnectionSource = Layer.effect(
         nowEpochMs,
       )) {
         next.set(id, cached);
-        registrations.push(cached.registration);
       }
 
       if (topologyRead._tag === "Failure") {
@@ -697,6 +710,13 @@ const layerPlatformConnectionSource = Layer.effect(
           cause: topologyRead.cause,
         });
       } else {
+        identities.clear();
+        for (const bootstrap of topologyRead.bootstraps) {
+          identities.set(
+            bootstrap.id,
+            `${bootstrap.httpBaseUrl}|${bootstrap.wsBaseUrl}|${bootstrap.bootstrapToken ?? ""}`,
+          );
+        }
         const rejected = yield* Ref.get(rejectedRef);
         const nextRejected = new Map<string, RejectedSecondaryBootstrap>();
         for (const bootstrap of topologyRead.bootstraps) {
@@ -716,7 +736,7 @@ const layerPlatformConnectionSource = Layer.effect(
             canReuseCachedPlatformRegistration(cached, endpointSignature, nowEpochMs)
           ) {
             next.set(bootstrap.id, cached);
-            registrations.push(cached.registration);
+
             continue;
           }
           const previouslyRejected = rejected.get(bootstrap.id);
@@ -731,11 +751,42 @@ const layerPlatformConnectionSource = Layer.effect(
               )
             ) {
               next.set(bootstrap.id, cached);
-              registrations.push(cached.registration);
             }
             continue;
           }
-          const built = yield* loadSecondaryConnectionRegistration(bootstrap).pipe(
+          const key = `${bootstrap.id}|${signature}`;
+          let exchange = pending.get(key);
+          if (exchange === undefined) {
+            exchange = yield* Effect.cached(
+              loadSecondaryConnectionRegistration(bootstrap).pipe(
+                Effect.tap((built) =>
+                  Effect.gen(function* () {
+                    if (identities.get(bootstrap.id) !== signature) return;
+                    yield* credentials
+                      .put(built.registration.target.connectionId, built.registration.credential)
+                      .pipe(Effect.ignore);
+                    if (identities.get(bootstrap.id) !== signature) return;
+                    yield* Ref.update(cacheRef, (current) =>
+                      new Map(current).set(bootstrap.id, {
+                        signature: endpointSignature,
+                        ...(bootstrap.bootstrapToken === undefined
+                          ? {}
+                          : { bootstrapToken: bootstrap.bootstrapToken }),
+                        ...built,
+                      }),
+                    );
+                  }),
+                ),
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    if (pending.get(key) === exchange) pending.delete(key);
+                  }),
+                ),
+              ),
+            );
+            pending.set(key, exchange);
+          }
+          const built = yield* exchange.pipe(
             Effect.tapError((error) =>
               Effect.logWarning("Could not connect a desktop-local backend.", {
                 id: bootstrap.id,
@@ -771,7 +822,6 @@ const layerPlatformConnectionSource = Layer.effect(
               ...built.value,
             };
             next.set(bootstrap.id, cacheEntry);
-            registrations.push(built.value.registration);
           } else if (
             cached !== undefined &&
             canRetainCachedPlatformRegistrationAfterRefreshFailure(
@@ -781,14 +831,42 @@ const layerPlatformConnectionSource = Layer.effect(
             )
           ) {
             next.set(bootstrap.id, cached);
-            registrations.push(cached.registration);
           }
         }
-        yield* Ref.set(rejectedRef, nextRejected);
+        yield* Ref.update(rejectedRef, (current) => {
+          const updated = new Map(current);
+          for (const id of updated.keys()) {
+            if (!identities.has(id)) updated.delete(id);
+          }
+          for (const bootstrap of topologyRead.bootstraps) {
+            const signature = `${bootstrap.httpBaseUrl}|${bootstrap.wsBaseUrl}|${bootstrap.bootstrapToken ?? ""}`;
+            if (identities.get(bootstrap.id) !== signature) continue;
+            const rejection = nextRejected.get(bootstrap.id);
+            if (rejection === undefined) updated.delete(bootstrap.id);
+            else updated.set(bootstrap.id, rejection);
+          }
+          return updated;
+        });
       }
 
-      yield* Ref.set(cacheRef, next);
-      return registrations as ReadonlyArray<PlatformConnectionRegistration>;
+      yield* Ref.update(cacheRef, (current) => {
+        const updated = new Map(current);
+        for (const id of new Set([...snapshot.keys(), ...next.keys()])) {
+          // Another consumer may have installed a newer bearer while this poll waited.
+          if (current.get(id) !== snapshot.get(id)) continue;
+          const entry = next.get(id);
+          if (
+            id !== PRIMARY_LOCAL_ENVIRONMENT_ID &&
+            entry !== undefined &&
+            identities.get(id) !== `${entry.signature}|${entry.bootstrapToken ?? ""}`
+          )
+            continue;
+          if (entry === undefined) updated.delete(id);
+          else updated.set(id, entry);
+        }
+        return updated;
+      });
+      return [...(yield* Ref.get(cacheRef)).values()].map((entry) => entry.registration);
     }).pipe(Effect.provide(FetchHttpClient.layer));
 
     return PlatformConnectionSource.PlatformConnectionSource.of({
@@ -824,25 +902,12 @@ const layerRpcRequestObserver = Layer.succeed(
   }),
 );
 
-type ConnectionPlatformLayerSource =
-  | typeof ConnectionStorage.layer
-  | typeof layerConnectivity
-  | typeof layerWakeups
-  | typeof layerCapabilities
-  | typeof layerPlatformConnectionSource
-  | typeof layerEnvironmentOwnedDataCleanup
-  | typeof layerRpcRequestObserver;
-
-export const layer: Layer.Layer<
-  Layer.Success<ConnectionPlatformLayerSource>,
-  Layer.Error<ConnectionPlatformLayerSource>,
-  Layer.Services<ConnectionPlatformLayerSource>
-> = Layer.mergeAll(
+export const layer = Layer.mergeAll(
   ConnectionStorage.layer,
   layerConnectivity,
   layerWakeups,
   layerCapabilities,
-  layerPlatformConnectionSource,
+  layerPlatformConnectionSource.pipe(Layer.provide(ConnectionStorage.layer)),
   layerEnvironmentOwnedDataCleanup,
   layerRpcRequestObserver,
 );
