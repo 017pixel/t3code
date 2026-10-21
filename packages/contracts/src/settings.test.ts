@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { type CommandId, ProjectId } from "./baseSchemas.ts";
@@ -22,6 +23,7 @@ const encodeClientSettings = Schema.encodeSync(ClientSettingsSchema);
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
+const encodeServerSettingsPatch = Schema.encodeSync(ServerSettingsPatch);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 
 describe("storage cleanup settings", () => {
@@ -156,6 +158,44 @@ describe("resolveIdleCompaction", () => {
       "beforeCacheExpires",
     );
     expect(decodeServerSettings({}).compactIdleThreads).toBe("onReturn");
+  });
+
+  // The field as clients before idle compaction modes (680152e27b) decode it.
+  const decodeLegacyClientSettings = Schema.decodeUnknownSync(
+    Schema.Struct({
+      compactIdleThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+    }),
+  );
+
+  it.each(["onReturn", "beforeCacheExpires", "off"] as const)(
+    "sends %s in a shape older clients decode and newer ones restore",
+    (mode) => {
+      const encoded = encodeServerSettings(
+        decodeServerSettings({ compactIdleThreads: mode }),
+      ) as Record<string, unknown>;
+
+      expect(decodeLegacyClientSettings(encoded).compactIdleThreads).toBe(
+        mode === "beforeCacheExpires",
+      );
+      expect(decodeServerSettings(encoded).compactIdleThreads).toBe(mode);
+    },
+  );
+
+  it("accepts the legacy switch in settings patches and round-trips every mode", () => {
+    expect(decodeServerSettingsPatch({ compactIdleThreads: true }).compactIdleThreads).toBe(
+      "beforeCacheExpires",
+    );
+    expect(decodeServerSettingsPatch({ compactIdleThreads: false }).compactIdleThreads).toBe(
+      "onReturn",
+    );
+    for (const mode of ["onReturn", "beforeCacheExpires", "off"] as const) {
+      const encoded = encodeServerSettingsPatch({ compactIdleThreads: mode });
+      expect(decodeServerSettingsPatch(encoded).compactIdleThreads).toBe(mode);
+    }
+    const unrelated = decodeServerSettingsPatch(
+      encodeServerSettingsPatch({ sidebarAutoSettleOnMerge: false }),
+    );
+    expect(unrelated).not.toHaveProperty("compactIdleThreads");
   });
 });
 
