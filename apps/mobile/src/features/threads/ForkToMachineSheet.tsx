@@ -6,7 +6,7 @@ import {
   forkModelSelection,
 } from "@t3tools/client-runtime/operations/forkToMachine";
 import { canCreateProjectInEnvironment } from "@t3tools/client-runtime/operations/projects";
-import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
+import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
 import { deriveLogicalProjectKeyFromSettings } from "@t3tools/client-runtime/state/project-grouping";
 import {
   type AtomCommandResult,
@@ -92,7 +92,9 @@ export function ForkToMachineSheet({ route }: StaticScreenProps<ForkTarget>) {
       : [];
   });
   const [targetId, setTargetId] = useState<EnvironmentId | null>(null);
-  const target = targets.find((t) => t.environmentId === targetId) ?? targets[0] ?? null;
+  // The choice locks once the note is written, so a lost target disables the fork.
+  const target =
+    targets.find((t) => t.environmentId === (targetId ?? targets[0]?.environmentId)) ?? null;
   const sourceLabel =
     environments.find((environment) => environment.environmentId === source.environmentId)?.label ??
     "another machine";
@@ -111,11 +113,13 @@ export function ForkToMachineSheet({ route }: StaticScreenProps<ForkTarget>) {
   const [busy, setBusy] = useState<"note" | "fork" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const isRunning = thread !== null && !threadRuntimeCanArchive(thread.runtime);
+  // The note forks the latest completed turn, which includes its checkpoint.
+  const isRunning = thread !== null && threadRuntimeIsActive(thread.runtime);
   const ready = thread !== null && target !== null && branchState?.kind === "ready" && !isRunning;
 
   const writeNote = async () => {
     if (!ready || busy) return;
+    setTargetId(target.environmentId);
     setBusy("note");
     setError(null);
     const result = await writeForkNote({
@@ -128,7 +132,7 @@ export function ForkToMachineSheet({ route }: StaticScreenProps<ForkTarget>) {
       return;
     }
     setMessage(
-      forkFirstMessage({ note: result.value.note, sourceLabel, branch: branchState.branch }),
+      forkFirstMessage({ note: result.value.note, sourceLabel, baseRef: branchState.baseRef }),
     );
   };
 
@@ -157,7 +161,11 @@ export function ForkToMachineSheet({ route }: StaticScreenProps<ForkTarget>) {
         modelSelection,
         runtimeMode: thread.runtimeMode,
         interactionMode: thread.interactionMode,
-        workspaceStrategy: { type: "worktree", baseRef: branchState.branch, startFromOrigin: true },
+        workspaceStrategy: {
+          type: "worktree",
+          baseRef: branchState.baseRef,
+          startFromOrigin: true,
+        },
         initialMessage: { messageId: MessageId.make(uuidv4()), text: message, attachments: [] },
       },
     });
@@ -243,7 +251,7 @@ export function ForkToMachineSheet({ route }: StaticScreenProps<ForkTarget>) {
             </Text>
           ) : (
             <Text className="text-sm text-foreground-muted">
-              Starts a new branch from origin/{branchState.branch}.
+              Starts a new branch from {branchState.baseRef}.
             </Text>
           )}
           {status.data?.hasWorkingTreeChanges ? (

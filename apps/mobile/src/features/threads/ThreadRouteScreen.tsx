@@ -76,7 +76,7 @@ import { resolveMergeBackTargetThreadId } from "@t3tools/client-runtime/state/th
 import { resolveLatestMergeBackRun } from "@t3tools/client-runtime/state/thread-workflows";
 import { threadEnvironment } from "../../state/threads";
 import { threadListEnvironmentsAtom } from "../../state/server";
-import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
+import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
 import { useAtomValue } from "@effect/atom-react";
 import { projectThreadContentPresentation } from "./threadContentPresentation";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
@@ -717,7 +717,7 @@ function ThreadRouteContent(
     onForkToMachine:
       selectedThread !== null &&
       selectedThread.branch !== null &&
-      threadRuntimeCanArchive(selectedThread.runtime) &&
+      !threadRuntimeIsActive(selectedThread.runtime) &&
       forkToMachineEnvironmentIds.has(selectedThread.environmentId)
         ? () =>
             navigation.navigate("ThreadForkToMachine", {

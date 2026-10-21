@@ -4,21 +4,24 @@ import { resolvePromptLinkModelSelection } from "../promptLinks.ts";
 
 /**
  * Whether a thread's branch can be forked to another machine. The other
- * machine starts a new worktree from `origin/<branch>`, so every commit must be
- * pushed first. Uncommitted changes do not block the fork; they stay here.
+ * machine starts a new worktree from the branch's upstream, so the branch must
+ * be published with every commit pushed. Uncommitted changes stay here.
  */
 export type ForkBranchState =
-  | { readonly kind: "ready"; readonly branch: string }
+  | { readonly kind: "ready"; readonly baseRef: string }
   | { readonly kind: "blocked"; readonly reason: string; readonly canPush: boolean };
 
 export function forkBranchState(
-  status: Pick<VcsStatusResult, "isRepo" | "refName" | "hasUpstream" | "aheadCount">,
+  status: Pick<VcsStatusResult, "isRepo" | "refName" | "upstreamRef" | "aheadCount">,
 ): ForkBranchState {
   const branch = status.refName;
   if (!status.isRepo || branch === null) {
     return { kind: "blocked", reason: "This thread is not on a git branch.", canPush: false };
   }
-  if (!status.hasUpstream) {
+  // A new worktree branch tracks the base it started from, such as origin/main,
+  // until its first push. That upstream is not this branch.
+  const upstream = status.upstreamRef;
+  if (upstream === undefined || !upstream.endsWith(`/${branch}`)) {
     return {
       kind: "blocked",
       reason: `Push ${branch} first. The other machine starts from origin.`,
@@ -33,17 +36,17 @@ export function forkBranchState(
       canPush: true,
     };
   }
-  return { kind: "ready", branch };
+  return { kind: "ready", baseRef: upstream };
 }
 
 /** The first message of the forked thread. Clients show it for editing before it is sent. */
 export function forkFirstMessage(input: {
   readonly note: string;
   readonly sourceLabel: string;
-  readonly branch: string;
+  readonly baseRef: string;
 }): string {
   return [
-    `This thread was forked from ${input.sourceLabel}. You are on a new branch that starts from origin/${input.branch}. Read the handoff note, check the current state, then continue.`,
+    `This thread was forked from ${input.sourceLabel}. You are on a new branch that starts from ${input.baseRef}. Read the handoff note, check the current state, then continue.`,
     "",
     input.note,
   ].join("\n");

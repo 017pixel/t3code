@@ -24,7 +24,7 @@ import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state
 import {
   formatWorkingDurationLabel,
   resolveThreadWorkingStartedAt,
-  threadRuntimeCanArchive,
+  threadRuntimeIsActive,
 } from "@t3tools/client-runtime/state/models";
 import { AuthOrchestrationOperateScope, type EnvironmentMachineKind } from "@t3tools/contracts";
 import { canSnooze, resolveSnoozePresets } from "@t3tools/client-runtime/state/thread-settled";
@@ -761,7 +761,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const canForkToMachine =
     props.forkToMachineSupported === true &&
     thread.branch !== null &&
-    threadRuntimeCanArchive(thread.runtime);
+    !threadRuntimeIsActive(thread.runtime);
   const titleMenuItems = useMemo<MenuAction[]>(
     () => [
       { id: "rename", title: "Rename", image: "square.and.pencil" },

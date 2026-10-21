@@ -3,15 +3,21 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { forkBranchState, forkModelSelection } from "./forkToMachine.ts";
 
-const pushed = { isRepo: true, refName: "fix/login", hasUpstream: true, aheadCount: 0 };
+const pushed = {
+  isRepo: true,
+  refName: "fix/login",
+  upstreamRef: "origin/fix/login",
+  aheadCount: 0,
+};
 
 describe("forkBranchState", () => {
   it("is ready when every commit is on origin", () => {
-    expect(forkBranchState(pushed)).toEqual({ kind: "ready", branch: "fix/login" });
+    expect(forkBranchState(pushed)).toEqual({ kind: "ready", baseRef: "origin/fix/login" });
   });
 
-  it("asks for a push when the branch has no upstream or is ahead", () => {
-    expect(forkBranchState({ ...pushed, hasUpstream: false })).toMatchObject({
+  it("asks for a push when the branch is unpublished or ahead", () => {
+    // A new worktree branch tracks the base it started from until its first push.
+    expect(forkBranchState({ ...pushed, upstreamRef: "origin/main" })).toMatchObject({
       kind: "blocked",
       canPush: true,
     });
