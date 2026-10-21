@@ -131,7 +131,7 @@ query PullRequestList(
   }
 }
 
-# Search can omit repositories from its index. Empty repositories are safe to skip too.
+# Search can omit repositories from its index.
 query PullRequestSearchCoverage($q: String!, $owner: String!, $name: String!) {
   search(query: $q, type: ISSUE, first: 0) {
     issueCount
