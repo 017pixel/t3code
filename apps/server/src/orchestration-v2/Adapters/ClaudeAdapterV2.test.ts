@@ -569,6 +569,19 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
     assert.equal(logged.hasMcpServers, true);
     assert.notInclude(JSON.stringify(logged), "secret-claude-token");
   });
+
+  it("logs --settings key names without their values", () => {
+    const options = ClaudeAdapterV2.makeClaudeQueryOptions({
+      modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+      nativeThreadId: "native-thread-claude-settings-log",
+      resume: false,
+      cwd: "/workspace",
+      sdkSettings: { env: { ANTHROPIC_API_KEY: "secret-settings-key" } },
+    });
+    const logged = ClaudeAdapterV2.loggedClaudeQueryOptions(options);
+    assert.deepEqual(logged.settingKeys, ["env", "showThinkingSummaries"]);
+    assert.notInclude(JSON.stringify(logged), "secret-settings-key");
+  });
 });
 
 describe("ClaudeAdapterV2 context usage", () => {
