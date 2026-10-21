@@ -481,7 +481,7 @@ describe("DesktopWindow", () => {
     const overflowingBounds = { ...snappedBounds, x: 1922 };
     const offscreenBounds = { ...snappedBounds, x: 2320 };
 
-    assert.deepEqual(
+    assert.strictEqual(
       DesktopWindow.resolveInitialMainWindowBounds(snappedBounds, displays),
       snappedBounds,
     );
