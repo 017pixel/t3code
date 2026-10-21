@@ -1,35 +1,36 @@
 import { RunId } from "@t3tools/contracts";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import type { TimestampFormat } from "@t3tools/contracts/settings";
+import { describe, expect, it, vi } from "vite-plus/test";
 
-import { formatShortTimestamp } from "../../timestampFormat";
 import { usageLimitRecoveryBannerItem } from "./UsageLimitRecoveryBanner";
 
+const stoppedAt = new Date(2026, 9, 20, 12, 0);
+
+function bannerDescription(resetAt: Date, timestampFormat: TimestampFormat) {
+  return usageLimitRecoveryBannerItem({
+    runId: RunId.make("run-1"),
+    resetAt: resetAt.toISOString(),
+    stoppedAt: stoppedAt.toISOString(),
+    snoozedUntil: null,
+    recovery: null,
+    timestampFormat,
+    onChange: async () => {},
+  }).description;
+}
+
 describe("usageLimitRecoveryBannerItem", () => {
-  const resetAt = new Date(2026, 9, 20, 17, 30).toISOString();
-
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(2026, 9, 20, 12, 0));
+  it.each([
+    ["12-hour", "Resets 5:30 PM"],
+    ["24-hour", "Resets 17:30"],
+  ] as const)("formats a same-day reset with the %s setting", (timestampFormat, expected) => {
+    using _now = vi.spyOn(Date, "now").mockReturnValue(stoppedAt.getTime());
+    expect(bannerDescription(new Date(2026, 9, 20, 17, 30), timestampFormat)).toBe(expected);
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
+  it("names the day when the reset is tomorrow", () => {
+    using _now = vi.spyOn(Date, "now").mockReturnValue(stoppedAt.getTime());
+    expect(bannerDescription(new Date(2026, 9, 21, 17, 30), "24-hour")).toBe(
+      "Resets tomorrow at 17:30",
+    );
   });
-
-  it.each(["locale", "12-hour", "24-hour"] as const)(
-    "formats the reset time with the %s setting",
-    (timestampFormat) => {
-      const item = usageLimitRecoveryBannerItem({
-        runId: RunId.make("run-1"),
-        resetAt,
-        stoppedAt: new Date(2026, 9, 20, 12, 0).toISOString(),
-        snoozedUntil: null,
-        recovery: null,
-        timestampFormat,
-        onChange: async () => {},
-      });
-
-      expect(item.description).toBe(`Resets ${formatShortTimestamp(resetAt, timestampFormat)}`);
-    },
-  );
 });
