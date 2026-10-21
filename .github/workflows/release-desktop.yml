@@ -99,6 +99,11 @@ on:
         required: true
         type: string
 
+# electron-builder leaves the default arch (x64) out of the unpacked app's
+# directory name.
+env:
+  UNPACKED_DIR: ${{ inputs.platform }}-${{ inputs.arch != 'x64' && format('{0}-', inputs.arch) || '' }}unpacked
+
 permissions:
   # Windows builds read this run's artifact list to wait for the Linux CLI archive.
   actions: read
@@ -525,7 +530,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p verify
-          unpacked=$(ls -d "${TMPDIR:-/tmp}"/t3code-desktop-${{ inputs.platform }}-stage-*/app/dist/${{ inputs.platform }}-${{ inputs.arch }}-unpacked)
+          unpacked=$(ls -d "${TMPDIR:-/tmp}"/t3code-desktop-${{ inputs.platform }}-stage-*/app/dist/"$UNPACKED_DIR")
           tar -C "$(dirname "$unpacked")" -cf verify/unpacked.tar "$(basename "$unpacked")"
           esbuild=scripts/node_modules/.bin/esbuild
           banner="import{createRequire as __cr}from'node:module';const require=__cr(import.meta.url);"
@@ -645,7 +650,7 @@ jobs:
           set -euo pipefail
           tar -C verify -xf verify/unpacked.tar
           node verify/verify-windows-desktop-artifact.mjs \
-            --app-dir "$(cygpath -w "$PWD/verify/${{ inputs.platform }}-${{ inputs.arch }}-unpacked")" \
+            --app-dir "$(cygpath -w "$PWD/verify/$UNPACKED_DIR")" \
             --arch "${{ inputs.arch }}" --build-version "${{ inputs.version }}" --verbose
 
       - name: Smoke-test CLI archive
@@ -660,7 +665,7 @@ jobs:
       - name: Smoke-test resource monitor
         shell: bash
         env:
-          MONITOR: verify/${{ inputs.platform }}-${{ inputs.arch }}-unpacked/resources/resource-monitor/t3-resource-monitor.exe
+          MONITOR: verify/${{ env.UNPACKED_DIR }}/resources/resource-monitor/t3-resource-monitor.exe
           EXPECTED_ARCH: ${{ inputs.arch == 'arm64' && 'aarch64' || 'x86_64' }}
         run: |
           node --input-type=module <<'EOF'
