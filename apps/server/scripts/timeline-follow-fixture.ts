@@ -6,14 +6,8 @@ import * as NodeURL from "node:url";
 
 import type * as AcpSchema from "effect-acp/schema";
 
-export const timelineFixtureEpoch = "2026-01-01T12:00:00.000Z";
-export const timelineFixturePhases = [
-  "entry",
-  "tool-start",
-  "tool-finish",
-  "prose",
-  "resumed",
-] as const;
+const timelineFixtureEpoch = "2026-01-01T12:00:00.000Z";
+const timelineFixturePhases = ["entry", "tool-start", "tool-finish", "prose", "resumed"] as const;
 
 export function timelineFollowFixture(kind: "long" | "short") {
   const say = (text: string): AcpSchema.SessionUpdate => ({
