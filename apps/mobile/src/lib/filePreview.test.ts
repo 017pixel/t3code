@@ -347,14 +347,21 @@ describe("ThreadInlineFilePreview playback", () => {
     (["user", "assistant"] as const).flatMap((role) =>
       (["attachment", "markdown"] as const).flatMap((origin) =>
         (["audio", "video"] as const).flatMap((kind) =>
-          (kind === "video" ? ["initial play", "native resume"] : ["initial play"]).map(
-            (playback) => ({ role, origin, kind, playback }),
-          ),
+          (kind === "video"
+            ? ["initial play", "native resume", "continued playback"]
+            : ["initial play"]
+          ).map((playback) => ({
+            role,
+            origin,
+            kind,
+            playback,
+            outcome: playback === "continued playback" ? "preserves" : "cancels",
+          })),
         ),
       ),
     ),
   )(
-    "cancels a pending file lookup on $role $origin $kind $playback",
+    "$outcome a pending file lookup on $role $origin $kind $playback",
     async ({ role, origin, kind, playback }) => {
       (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
       const environmentId = EnvironmentId.make("environment-1");
@@ -428,11 +435,18 @@ describe("ThreadInlineFilePreview playback", () => {
       const playLabel = kind === "audio" ? "Play audio" : `Play ${name}`;
       const play = () =>
         container.querySelector<HTMLButtonElement>(`[aria-label="${playLabel}"]`)!.click();
-      if (playback === "native resume") {
+      if (playback !== "initial play") {
         await act(async () => play());
         expect(audio.video.playing).toBe(true);
-        await act(async () => audio.video.pause());
-        expect(audio.video.playing).toBe(false);
+        if (playback === "native resume") {
+          await act(async () => audio.video.pause());
+          expect(audio.video.playing).toBe(false);
+        } else {
+          await act(async () => {
+            for (const listener of audio.videoRequestListeners)
+              listener({ isPlaybackRequested: true });
+          });
+        }
       }
       await act(async () => link.click());
       const signal: AbortSignal = audio.query.mock.calls[0]![2].signal;
@@ -445,6 +459,14 @@ describe("ThreadInlineFilePreview playback", () => {
           for (const listener of audio.videoRequestListeners)
             listener({ isPlaybackRequested: true });
           expect(audio.video.playing).toBe(false);
+        } else if (playback === "continued playback") {
+          for (const isPlaying of [false, true, false, true]) {
+            audio.video.playing = isPlaying;
+            for (const listener of audio.videoListeners) listener({ isPlaying });
+            for (const listener of audio.videoRequestListeners)
+              listener({ isPlaybackRequested: true });
+          }
+          expect(signal.aborted).toBe(false);
         } else play();
       });
       expect(kind === "audio" ? audio.played : audio.video.play).toHaveBeenCalled();
@@ -455,8 +477,17 @@ describe("ThreadInlineFilePreview playback", () => {
           value: { entries: [{ path: "src/target.ts", kind: "file" }] },
         }),
       );
-      expect(audio.navigate).not.toHaveBeenCalled();
-      expect(signal.aborted).toBe(true);
+      if (playback === "continued playback") {
+        expect(audio.navigate).toHaveBeenCalledExactlyOnceWith("ThreadFile", {
+          environmentId,
+          threadId,
+          path: ["src", "target.ts"],
+        });
+        expect(signal.aborted).toBe(false);
+      } else {
+        expect(audio.navigate).not.toHaveBeenCalled();
+        expect(signal.aborted).toBe(true);
+      }
       expect(container.querySelector(`[aria-label="${playLabel}"]`)).toBeNull();
       if (kind === "audio")
         expect(container.querySelector('[aria-label="Pause audio"]')).not.toBeNull();

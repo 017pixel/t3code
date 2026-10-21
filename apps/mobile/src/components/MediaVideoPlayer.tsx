@@ -34,6 +34,7 @@ function LoadedMediaVideo(props: {
     player.bufferOptions = { preferredForwardBufferDuration: 5 };
   });
   const playback = useMemo(() => createAudioPlaybackSession(player, true), [player]);
+  const previousPlaybackRequested = useRef(false);
   const onPlaybackStart = useEffectEvent(() => props.onPlaybackStart?.());
   useEffect(() => {
     const subscription = player.addListener("playingChange", ({ isPlaying }) => {
@@ -41,11 +42,13 @@ function LoadedMediaVideo(props: {
       else playback.playingChanged(isPlaying);
     });
     const requested = player.addListener("playbackRequestedChange", ({ isPlaybackRequested }) => {
+      const wasPlaybackRequested = previousPlaybackRequested.current;
+      previousPlaybackRequested.current = isPlaybackRequested;
       if (!isPlaybackRequested) {
         if (playback.requested) playback.pause();
       } else if (!active.current && !fullscreen.current) playback.pause();
       else {
-        onPlaybackStart();
+        if (!wasPlaybackRequested) onPlaybackStart();
         playback.playingChanged(true);
       }
     });
@@ -59,6 +62,7 @@ function LoadedMediaVideo(props: {
       ended.remove();
       failed.remove();
       playback.pause();
+      previousPlaybackRequested.current = false;
     };
   }, [player, playback]);
   const { status } = useEvent(player, "statusChange", { status: player.status });
@@ -69,6 +73,7 @@ function LoadedMediaVideo(props: {
     if (signal.aborted) return;
     if (uri === null) throw new Error("Video unavailable");
     playback.pause();
+    previousPlaybackRequested.current = false;
     await player.replaceAsync({ uri, contentType: "progressive" });
     if (!signal.aborted && props.playRequested && active.current) await playback.play();
   });
