@@ -7798,6 +7798,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             return;
           }
 
+          // Claude emits passive Stop summaries as notices. Warnings and notices
+          // that prevent continuation still need to explain why a hook blocked work.
           if (
             message.type === "system" &&
             (message.subtype === "model_refusal_fallback" ||

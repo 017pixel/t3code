@@ -4670,9 +4670,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
-  // Recorded Claude 2.1.303 live Stop-hook systemMessage probe, 2026-10-21:
-  // /tmp/t3-22949-hook-probe/stop-stream.ndjson. Excludes machine-specific init;
-  // session/message UUIDs are sanitized and the assistant timestamp is removed.
+  // Claude 2.1.303 stream-json recording (2026-10-21) of a Stop hook returning
+  // {"systemMessage":"T3 issue 22949 probe: 40 scans, 0 findings"}.
+  // Machine-specific init is omitted, IDs sanitized, and the assistant timestamp removed.
   const recordedStopHookFrames = NodeFS.readFileSync(
     new URL("./fixtures/claude-stop-system-message.ndjson", import.meta.url),
     "utf8",
