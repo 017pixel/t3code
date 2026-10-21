@@ -4316,6 +4316,114 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       }),
   );
 
+  it.effect("starts a queued delegated completion on the selection chosen while it waited", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-layer-queue-delegated-completion-selection");
+      const completionMessageId = MessageId.make(`${threadId}:completion`);
+      const taskIds = [NodeId.make(`${threadId}:task`)];
+      const currentSelection = { ...modelSelection, model: "gpt-5.5" };
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`${threadId}:create`),
+        threadId,
+        projectId: ProjectId.make(`${threadId}:project`),
+        createdBy: "user",
+        creationSource: "web",
+        title: "Delegated completion selection",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      });
+      const dispatchUserTurn = (name: string) =>
+        orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`${threadId}:${name}`),
+          threadId,
+          messageId: MessageId.make(`${threadId}:${name}`),
+          text: name,
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+      yield* dispatchUserTurn("parent");
+      const parent = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+      const now = yield* DateTime.now;
+      // The parent turn ends while its async child is still running.
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make(`${threadId}:parent-completed`),
+            type: "run.updated",
+            threadId,
+            runId: parent.id,
+            occurredAt: now,
+            payload: {
+              ...parent,
+              status: "completed",
+              completedAt: now,
+              delegatedCompletion: {
+                disposition: "open",
+                nextGeneration: 2,
+                delivery: { messageId: completionMessageId, generation: 1, taskIds },
+              },
+            },
+          },
+        ],
+      });
+      yield* dispatchUserTurn("second");
+      const second = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+        (run) => run.id !== parent.id,
+      )!;
+      // ProviderContinuationService queues the completion without a selection.
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(`${threadId}:completion`),
+        threadId,
+        messageId: completionMessageId,
+        text: "Delegated task finished",
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+        createdBy: "agent",
+        creationSource: "server",
+        delegatedCompletion: { parentRunId: parent.id, generation: 1, taskIds },
+      });
+      const queued = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+        (run) => run.status === "queued",
+      );
+      assert.isDefined(queued);
+      yield* orchestrator.dispatch({
+        type: "thread.model-selection.set",
+        commandId: CommandId.make(`${threadId}:select-current`),
+        threadId,
+        modelSelection: currentSelection,
+      });
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make(`${threadId}:second-completed`),
+            type: "run.updated",
+            threadId,
+            runId: second.id,
+            occurredAt: now,
+            payload: { ...second, status: "completed", completedAt: now },
+          },
+        ],
+      });
+      yield* orchestrator.resumeQueuedRuns;
+      const after = yield* orchestrator.getThreadProjection(threadId);
+      const started = after.runs.find((run) => run.id === queued.id);
+      assert.equal(started?.status, "starting");
+      assert.deepEqual(after.thread.modelSelection, currentSelection);
+      assert.deepEqual(started?.modelSelection, currentSelection);
+    }),
+  );
+
   it.effect("keeps the queue after a user interrupts the active run", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
