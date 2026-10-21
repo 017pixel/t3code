@@ -1076,8 +1076,6 @@ const grayscalePng = (width: number, height: number) => {
   ]);
 };
 
-// Reproduces #19220: decoding a full-resolution capture only to read its size
-// stalls every snapshot, while the PNG header already carries the dimensions.
 it.effect("sizes accessibility from the PNG header without decoding the capture", () => {
   vi.stubEnv("XDG_SESSION_TYPE", "wayland");
   flashWindows.length = 0;
