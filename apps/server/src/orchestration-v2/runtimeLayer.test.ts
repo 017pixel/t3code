@@ -6327,6 +6327,7 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
 const browserOverrideProjectId = ProjectId.make("project:browser-override");
 const browserInheritProjectId = ProjectId.make("project:browser-inherit");
 const browserOptOutProjectId = ProjectId.make("project:browser-opt-out");
+const browserGlobalOffOptInProjectId = ProjectId.make("project:browser-global-off-opt-in");
 const issuedMcpCapabilities = new Map<ThreadId, ReadonlySet<string>>();
 
 const layerProductionBrowserAccessTest = RuntimeLayer.layerProduction.pipe(
@@ -6389,12 +6390,13 @@ const layerProductionBrowserAccessTest = RuntimeLayer.layerProduction.pipe(
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(
+  Layer.provideMerge(
     ServerSettings.layerTest({
       enableAgentBrowserAccess: true,
       projectSettingsOverrides: {
         [browserOverrideProjectId]: { enableAgentBrowserAccess: true },
         [browserOptOutProjectId]: { enableAgentBrowserAccess: false },
+        [browserGlobalOffOptInProjectId]: { enableAgentBrowserAccess: true },
       },
     }),
   ),
@@ -6461,6 +6463,13 @@ it.layer(layerProductionBrowserAccessTest)("production agent browser access", (i
       assert.isFalse(
         yield* openWithMcp(browserOptOutProjectId),
         "an explicit project opt-out still withholds preview",
+      );
+
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({ enableAgentBrowserAccess: false });
+      assert.isTrue(
+        yield* openWithMcp(browserGlobalOffOptInProjectId),
+        "an explicit project opt-in grants preview when the global setting is off",
       );
     }),
   );
