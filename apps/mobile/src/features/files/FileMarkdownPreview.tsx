@@ -7,7 +7,10 @@ import { RefreshControl, ScrollView, View } from "react-native";
 
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { FONT_FAMILIES } from "../../lib/fontFamilies";
-import { resolveNativeMarkdownTypography } from "../../lib/appearancePreferences";
+import {
+  resolveNativeMarkdownTypography,
+  resolveScaledTextRole,
+} from "../../lib/appearancePreferences";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import {
   ThreadMarkdownImage,
@@ -32,11 +35,14 @@ interface MarkdownPreviewStyles {
   readonly nativeTextStyle: NativeMarkdownTextStyle;
 }
 
-export function useMarkdownPreviewStyles(): MarkdownPreviewStyles {
+export function useMarkdownPreviewStyles(
+  tone: "body" | "secondary" = "body",
+): MarkdownPreviewStyles {
   const { appearance } = useAppearancePreferences();
   const nativeMarkdownTypography = resolveNativeMarkdownTypography(appearance.baseFontSize);
+  const secondaryTypography = resolveScaledTextRole("footnote", appearance.baseFontSize);
   const theme = useUniwindTheme();
-  const body = theme["--color-md-body"];
+  const body = theme[tone === "secondary" ? "--color-foreground-muted" : "--color-md-body"];
   const strong = theme["--color-md-strong"];
   const link = theme["--color-md-link"];
   const blockquoteBorder = theme["--color-md-blockquote-border"];
@@ -59,8 +65,12 @@ export function useMarkdownPreviewStyles(): MarkdownPreviewStyles {
       fileTextColor: codeText,
       quoteMarkerColor: blockquoteBorder,
       dividerColor: horizontalRule,
-      fontSize: nativeMarkdownTypography.fontSize,
-      lineHeight: nativeMarkdownTypography.lineHeight,
+      ...(tone === "secondary"
+        ? secondaryTypography
+        : {
+            fontSize: nativeMarkdownTypography.fontSize,
+            lineHeight: nativeMarkdownTypography.lineHeight,
+          }),
       headingFontSizes: nativeMarkdownTypography.headingFontSizes,
       fontFamily: regularFontFamily,
       headingFontFamily: boldFontFamily,

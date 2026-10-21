@@ -67,7 +67,8 @@ const EXPANDED_CARD_IS_OVERLAY = Platform.OS === "ios";
 const CARD_LAYOUT_TRANSITION = LinearTransition.duration(200);
 
 function QuestionText(props: { readonly markdown: string }) {
-  const styles = useMarkdownPreviewStyles();
+  // The question is context for the options below it, so it reads as secondary text.
+  const styles = useMarkdownPreviewStyles("secondary");
   const openLink = useOpenPullRequest();
   return (
     <SelectableMarkdownText
@@ -244,8 +245,9 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
                 {question.header}
               </Text>
               <QuestionText markdown={question.question} />
-              <View className="gap-2">
-                {question.options.map((option) => {
+              <View className="h-px bg-separator" />
+              <View className="gap-0.5">
+                {question.options.map((option, index) => {
                   const optionValue = option.value ?? option.label.trim();
                   const selected = isPendingUserInputOptionSelected(question, draft, optionValue);
                   const description =
@@ -257,8 +259,8 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
                       accessibilityState={{ checked: selected, disabled: responseDisabled }}
                       disabled={responseDisabled}
                       className={cn(
-                        "min-h-12 w-full rounded-2xl border px-3.5 py-3",
-                        selected ? "border-primary bg-primary/10" : "border-border bg-input",
+                        "min-h-12 w-full flex-row items-center gap-3 rounded-xl px-2 py-2",
+                        selected ? "bg-black/5" : "active:bg-row-hover",
                       )}
                       onPress={() =>
                         props.onSelectOption(
@@ -268,17 +270,32 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
                         )
                       }
                     >
+                      <View
+                        accessibilityElementsHidden
+                        importantForAccessibility="no-hide-descendants"
+                        className={cn(
+                          "size-6 items-center justify-center rounded-md border",
+                          selected ? "border-primary bg-primary" : "border-border bg-subtle",
+                        )}
+                      >
+                        {selected ? (
+                          <SymbolView
+                            name="checkmark"
+                            size={12}
+                            tintColorClassName="accent-primary-foreground"
+                            type="monochrome"
+                            weight="bold"
+                          />
+                        ) : (
+                          <Text className="font-t3-bold text-2xs text-foreground-muted">
+                            {index + 1}
+                          </Text>
+                        )}
+                      </View>
                       <View className="min-w-0 flex-1 gap-0.5">
-                        <Text
-                          className={cn(
-                            "font-t3-bold text-sm",
-                            selected ? "text-foreground" : "text-foreground-secondary",
-                          )}
-                        >
-                          {option.label}
-                        </Text>
+                        <Text className="font-t3-bold text-sm text-foreground">{option.label}</Text>
                         {description ? (
-                          <Text className="font-sans text-sm leading-5 text-foreground-muted">
+                          <Text className="font-sans text-xs text-foreground-muted">
                             {description}
                           </Text>
                         ) : null}

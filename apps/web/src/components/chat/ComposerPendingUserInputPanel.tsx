@@ -238,12 +238,12 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
               text={activeQuestion.question}
               cwd={cwd}
               threadRef={threadRef}
-              className="text-foreground/85"
+              className="text-xs/5 text-secondary-label"
             />
             {activeQuestion.multiSelect ? (
               <p className="mt-1 text-secondary-label text-xs">Select one or more options.</p>
             ) : null}
-            <div className="mt-2 space-y-0.5">
+            <div className="mt-2 space-y-0.5 border-t border-border/60 pt-1.5">
               {activeQuestion.options.map((option, index) => {
                 const optionValue = option.value ?? option.label;
                 const isOptimisticallySelected =
@@ -251,47 +251,42 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                   optimisticSingleSelect.optionValue === optionValue;
                 const isSelected =
                   isOptimisticallySelected || draftSelectedOptions?.[index] === true;
-                const shortcutKey = index < 9 ? index + 1 : null;
-                const className = cn(
-                  "group flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left outline-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary/25",
-                  isSelected
-                    ? "bg-muted/55 text-foreground"
-                    : "bg-transparent text-foreground/85 hover:bg-muted/30",
-                  (disabled || isResponding) && "opacity-50 cursor-not-allowed",
-                  !disabled && !isResponding && "cursor-pointer",
-                );
-                const content = (
-                  <>
-                    <div className="min-w-0 flex-1 flex flex-col gap-0.5">
-                      <span className="text-sm font-medium">{option.label}</span>
-                      {option.description && option.description !== option.label ? (
-                        <span className="text-secondary-label text-2xs">{option.description}</span>
-                      ) : null}
-                    </div>
-                    {isSelected ? (
-                      <CheckIcon className="size-3.5 shrink-0 text-primary" />
-                    ) : shortcutKey !== null ? (
-                      <kbd
-                        className={cn(
-                          "flex size-5 shrink-0 items-center justify-center text-3xs font-medium text-muted-foreground tabular-nums",
-                        )}
-                      >
-                        {shortcutKey}
-                      </kbd>
-                    ) : null}
-                  </>
-                );
                 return (
                   <button
                     key={`${activeQuestion.id}:${optionValue}`}
                     type="button"
+                    aria-pressed={isSelected}
                     disabled={disabled || isResponding}
                     onClick={() => {
                       handleOptionSelection(activeQuestion.id, optionValue);
                     }}
-                    className={className}
+                    className={cn(
+                      "flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-foreground outline-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary/25",
+                      // A black overlay darkens the row on every theme surface, light or dark.
+                      isSelected
+                        ? "bg-black/[0.045] dark:bg-black/20"
+                        : "bg-transparent hover:bg-muted/30",
+                      (disabled || isResponding) && "opacity-50 cursor-not-allowed",
+                      !disabled && !isResponding && "cursor-pointer",
+                    )}
                   >
-                    {content}
+                    <kbd
+                      data-pending-user-input-option-key
+                      className={cn(
+                        "flex size-5 shrink-0 items-center justify-center rounded border font-sans text-3xs font-medium tabular-nums transition-colors duration-150",
+                        isSelected
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "border-border bg-muted text-muted-foreground",
+                      )}
+                    >
+                      {isSelected ? <CheckIcon aria-hidden className="size-3" /> : index + 1}
+                    </kbd>
+                    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="text-sm font-semibold">{option.label}</span>
+                      {option.description && option.description !== option.label ? (
+                        <span className="text-secondary-label text-2xs">{option.description}</span>
+                      ) : null}
+                    </span>
                   </button>
                 );
               })}
