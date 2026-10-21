@@ -185,8 +185,8 @@ export const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS: PluggableList = [
   remarkNormalizeLinksAndTagInlineCode,
 ];
 
-// Users type paths like ~/a and (~/b, which GFM's single-tilde strikethrough turns into a hidden
-// <del> span. Appended after the base list, this reconfigures its remark-gfm entry; ~~double~~ still
+// Users type paths like ~/a and (~/b, which GFM's single-tilde strikethrough renders as a
+// <del> span with the tilde markers hidden. Appended after the base list, this reconfigures its remark-gfm entry; ~~double~~ still
 // strikes.
 export const CHAT_USER_MARKDOWN_REMARK_PLUGINS: PluggableList = [
   [remarkGfm, { singleTilde: false }],
