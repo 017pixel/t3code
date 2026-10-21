@@ -70,14 +70,61 @@ const make = Effect.gen(function* () {
   const runGit = (operation: string, cwd: string, args: ReadonlyArray<string>, timeoutMs: number) =>
     git.execute({ operation: `TriageService.${operation}`, cwd, args, timeoutMs, env: GIT_ENV });
 
+  // Clones outlive the request that started them: a fresh clone takes tens of
+  // seconds, and the user is writing their description meanwhile.
+  const serviceScope = yield* Effect.scope;
+
+  const cloneSource = Effect.fn("TriageService.cloneSource")(function* (ref: string) {
+    const staging = yield* fs.makeTempDirectory({ directory: sourceDir, prefix: ".clone-" });
+    yield* Effect.gen(function* () {
+      yield* runGit(
+        "cloneSource",
+        sourceDir,
+        [
+          "clone",
+          "--depth",
+          "1",
+          "--filter=blob:none",
+          "--branch",
+          ref,
+          "--",
+          T3CODE_REPOSITORY_URL,
+          staging,
+        ],
+        600_000,
+      );
+      // main can move between ls-remote and clone, so name the folder by what landed.
+      const commit = (yield* runGit(
+        "readSourceCommit",
+        staging,
+        ["rev-parse", "HEAD"],
+        10_000,
+      )).stdout.trim();
+      const directory = path.join(sourceDir, commit);
+      yield* fs.rename(staging, directory).pipe(
+        // A concurrent session cloned the same commit first; keep theirs.
+        Effect.catch((error) =>
+          fs
+            .exists(directory)
+            .pipe(Effect.flatMap((exists) => (exists ? Effect.void : Effect.fail(error)))),
+        ),
+      );
+    }).pipe(
+      // Gone after a successful rename; otherwise a failed or losing clone.
+      Effect.ensuring(fs.remove(staging, { recursive: true }).pipe(Effect.ignore)),
+    );
+  });
+
   // The playbook's own layout: one folder per commit under the source cache, so
-  // the agent finds and reuses this clone instead of making another.
-  const cloneSource = Effect.fn("TriageService.cloneSource")(function* () {
+  // the agent finds and reuses this clone instead of making another. The folder
+  // appears only once the clone is complete.
+  const startSourceClone = Effect.fn("TriageService.startSourceClone")(function* () {
     yield* fs.makeDirectory(sourceDir, { recursive: true });
+    const tag = `refs/tags/v${serverVersion}`;
     const listed = yield* runGit(
       "resolveSourceRef",
       sourceDir,
-      ["ls-remote", T3CODE_REPOSITORY_URL, `refs/tags/v${serverVersion}`, "refs/heads/main"],
+      ["ls-remote", T3CODE_REPOSITORY_URL, tag, `${tag}^{}`, "refs/heads/main"],
       30_000,
     );
     const source = pickSourceRef(listed.stdout, serverVersion);
@@ -88,51 +135,20 @@ const make = Effect.gen(function* () {
         reason: "the repository listed neither the release tag nor main.",
       } satisfies TriageSourceClone;
     }
-    const existing = path.join(sourceDir, source.commit);
-    if (yield* fs.exists(existing)) {
-      return { _tag: "cloned", directory: existing, serverVersion, ...source } as const;
+    const directory = path.join(sourceDir, source.commit);
+    if (yield* fs.exists(directory)) {
+      return { _tag: "cloned", directory, serverVersion, ...source } as const;
     }
-
-    const staging = yield* fs.makeTempDirectory({ directory: sourceDir, prefix: ".clone-" });
-    return yield* Effect.gen(function* () {
-      yield* runGit(
-        "cloneSource",
-        sourceDir,
-        [
-          "clone",
-          "--depth",
-          "1",
-          "--filter=blob:none",
-          "--branch",
-          source.ref,
-          "--",
-          T3CODE_REPOSITORY_URL,
-          staging,
-        ],
-        120_000,
-      );
-      // main can move between ls-remote and clone, so name the folder by what landed.
-      const commit = (yield* runGit("readSourceCommit", staging, ["rev-parse", "HEAD"], 10_000))
-        .stdout.trim();
-      const directory = path.join(sourceDir, commit);
-      yield* fs.rename(staging, directory).pipe(
-        // A concurrent session cloned the same commit first; keep theirs.
-        Effect.catch((error) =>
-          fs
-            .exists(directory)
-            .pipe(Effect.flatMap((exists) => (exists ? Effect.void : Effect.fail(error)))),
-        ),
-      );
-      return { _tag: "cloned", directory, serverVersion, ref: source.ref, commit } as const;
-    }).pipe(
-      // Gone after a successful rename; otherwise a failed or losing clone.
-      Effect.ensuring(fs.remove(staging, { recursive: true }).pipe(Effect.ignore)),
+    yield* cloneSource(source.ref).pipe(
+      Effect.ignoreCause({ log: true }),
+      Effect.forkIn(serviceScope),
     );
+    return { _tag: "cloning", directory, serverVersion, ...source } as const;
   });
 
   const prepare: TriageService["Service"]["prepare"] = Effect.fn("TriageService.prepare")(
     function* (input) {
-      const sourceClone = yield* cloneSource().pipe(
+      const sourceClone = yield* startSourceClone().pipe(
         Effect.catch((error) =>
           Effect.succeed<TriageSourceClone>({
             _tag: "failed",

@@ -193,7 +193,7 @@ ${TRIAGE_PLAYBOOK}`;
 /** A clone the server made before the session started, or why it could not. */
 export type TriageSourceClone =
   | {
-      readonly _tag: "cloned";
+      readonly _tag: "cloned" | "cloning";
       readonly directory: string;
       readonly ref: string;
       readonly commit: string;
@@ -237,25 +237,38 @@ const entryLines = (entry: TriageEntry) =>
         after: undefined,
       };
 
-const sourceSection = (clone: TriageSourceClone) =>
-  clone._tag === "cloned"
-    ? `
-## Source
-
-The server cloned the source for its own version (${clone.serverVersion}) before
-this session started:
-
-    ${clone.directory}  (${clone.ref}, commit ${clone.commit})
-
-Use it when the bug happened on this server's build. When it happened on another
-build, clone that version as step 4 describes.
-`
-    : `
+const sourceSection = (clone: TriageSourceClone) => {
+  if (clone._tag === "failed") {
+    return `
 ## Source
 
 The server could not clone the source for its version (${clone.serverVersion}): ${clone.reason}
 Clone it as step 4 describes.
 `;
+  }
+  const status =
+    clone._tag === "cloned"
+      ? "The server cloned the source for its own version"
+      : "The server is cloning the source for its own version";
+  const wait =
+    clone._tag === "cloned"
+      ? ""
+      : `
+The folder appears only when the clone is complete. Wait for it instead of
+cloning again. If it has not appeared after a few minutes, clone as step 4
+describes.
+`;
+  return `
+## Source
+
+${status} (${clone.serverVersion}):
+
+    ${clone.directory}  (${clone.ref}, commit ${clone.commit})
+${wait}
+Use it when the bug happened on this server's build. When it happened on another
+build, clone that version as step 4 describes.
+`;
+};
 
 const IN_APP_SECTION = `
 ## This session runs inside T3 Code

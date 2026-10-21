@@ -1,5 +1,6 @@
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import {
+  type AtomCommandResult,
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
@@ -8,6 +9,7 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { currentClientMetadata } from "~/connection/platform";
+import { projectEnvironment } from "~/state/projects";
 import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { writeTextToClipboard } from "./useCopyToClipboard";
@@ -27,16 +29,13 @@ const copyCliCommandAction = {
  * The user picks the provider in the composer and describes the problem.
  */
 export function useStartTriage() {
-  const { scratchWorkspaceRootFor, openScratchProject } = useScratchProject();
+  const { scratchWorkspaceRootFor } = useScratchProject();
   const handleNewThread = useNewThreadHandler();
   const prepare = useAtomCommand(serverEnvironment.prepareTriage, { reportFailure: false });
+  const openScratch = useAtomCommand(projectEnvironment.openScratch, { reportFailure: false });
 
   return async (environmentId: EnvironmentId) => {
-    const toastId = toastManager.add({
-      type: "loading",
-      title: "Preparing triage…",
-      description: "Getting the T3 Code source for this version.",
-    });
+    const toastId = toastManager.add({ type: "loading", title: "Preparing triage…" });
     const fail = (description: string) =>
       toastManager.update(
         toastId,
@@ -53,28 +52,27 @@ export function useStartTriage() {
       fail("This environment cannot start threads without a project.");
       return;
     }
+    const failWith = (
+      result: Extract<AtomCommandResult<unknown, unknown>, { readonly _tag: "Failure" }>,
+    ) => {
+      if (isAtomCommandInterrupted(result)) {
+        toastManager.close(toastId);
+        return;
+      }
+      const error = squashAtomCommandFailure(result);
+      fail(error instanceof Error ? error.message : "An error occurred.");
+    };
+
     const prepared = await prepare({
       environmentId,
       input: { client: currentClientMetadata() },
     });
-    if (prepared._tag === "Failure") {
-      if (isAtomCommandInterrupted(prepared)) {
-        toastManager.close(toastId);
-        return;
-      }
-      const error = squashAtomCommandFailure(prepared);
-      fail(error instanceof Error ? error.message : "The server could not prepare triage.");
-      return;
-    }
-    const project = await openScratchProject(environmentId, "Could not start triage");
-    if (project === null) {
-      // openScratchProject already reported why.
-      toastManager.close(toastId);
-      return;
-    }
-    const opened = await handleNewThread(scopeProjectRef(project.environmentId, project.id)).catch(
-      () => null,
-    );
+    if (prepared._tag === "Failure") return failWith(prepared);
+    const project = await openScratch({ environmentId, input: {} });
+    if (project._tag === "Failure") return failWith(project);
+    const opened = await handleNewThread(
+      scopeProjectRef(project.value.environmentId, project.value.id),
+    ).catch(() => null);
     if (opened === null) {
       fail("T3 Code could not open a new thread.");
       return;

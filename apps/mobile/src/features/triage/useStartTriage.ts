@@ -55,7 +55,9 @@ export function useStartTriage() {
     const scratch = await openScratch({ environmentId, input: {} });
     if (scratch._tag === "Failure") {
       if (!isAtomCommandInterrupted(scratch)) {
-        fail(errorMessage(squashAtomCommandFailure(scratch), "No project threads are not available."));
+        fail(
+          errorMessage(squashAtomCommandFailure(scratch), "No project threads are not available."),
+        );
       }
       return;
     }
