@@ -12,7 +12,12 @@ export type OfficeWorkerRequest =
 
 export type OfficeWorkerResult =
   | { readonly type: "error"; readonly message: string }
-  | { readonly type: "docx"; readonly bytes: ArrayBuffer }
+  | {
+      readonly type: "docx";
+      readonly bytes: ArrayBuffer;
+      readonly documents: string[];
+      readonly truncated: boolean;
+    }
   | {
       readonly type: "xlsx";
       readonly sheets: {

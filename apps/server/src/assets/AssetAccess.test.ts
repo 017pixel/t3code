@@ -803,6 +803,23 @@ describe("AssetAccess", () => {
         kind: "file",
         path: canonicalCssPath,
       });
+      for (const extension of ["otf", "ttf", "woff", "woff2"]) {
+        const fontName = `preview.${extension}`;
+        const fontPath = path.join(root, fontName);
+        yield* fileSystem.writeFileString(fontPath, "font bytes");
+        const canonicalFontPath = yield* fileSystem.realPath(fontPath);
+        for (const resource of [
+          { _tag: "workspace-file" as const, threadId: ThreadId.make("thread-1"), path: htmlPath },
+          { _tag: "draft-workspace-file" as const, cwd: root, path: "report.html" },
+        ]) {
+          const url = yield* issueAssetUrl({ resource, workspaceRoot: root });
+          const suffix = url.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+          expect(yield* resolveAsset(suffix.slice(0, suffix.indexOf("/")), fontName)).toEqual({
+            kind: "file",
+            path: canonicalFontPath,
+          });
+        }
+      }
       expect(yield* resolveAsset(token, "../secret.txt")).toBeNull();
       expect(yield* resolveAsset(token, ".env")).toBeNull();
       expect(yield* resolveAsset(`${token}tampered`, "report.html")).toBeNull();
@@ -810,10 +827,6 @@ describe("AssetAccess", () => {
         "docx",
         "xlsx",
         "pptx",
-        "ttf",
-        "otf",
-        "woff",
-        "woff2",
         "bmp",
         "heic",
         "tif",
@@ -1032,7 +1045,7 @@ describe("AssetAccess", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
-  it.effect("issues exact workspace URLs for image, office, and font previews", () =>
+  it.effect("issues exact workspace URLs for every non-HTML preview", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -1046,6 +1059,7 @@ describe("AssetAccess", () => {
         "private document",
       );
       for (const extension of [
+        "pdf",
         "png",
         "bmp",
         "heic",

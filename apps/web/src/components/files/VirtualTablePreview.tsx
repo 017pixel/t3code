@@ -222,7 +222,7 @@ function RowPage(
                     : "translateX(var(--preview-scroll-left, 0px))",
                 }}
               >
-                {index + 1}
+                <span className="sticky top-0 block">{index + 1}</span>
               </div>
             ) : null}
             {!props.source ? (

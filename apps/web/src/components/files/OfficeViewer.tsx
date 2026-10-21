@@ -46,61 +46,79 @@ async function readOfficeFile(src: string, signal: AbortSignal) {
   return new Blob(chunks).arrayBuffer();
 }
 
-async function renderWord(bytes: ArrayBuffer) {
+async function renderWord(
+  result: Extract<OfficeWorkerResult, { type: "docx" }>,
+  signal: AbortSignal,
+) {
   const [{ renderAsync }, { default: JSZip }, { default: DOMPurify }] = await Promise.all([
     import("docx-preview"),
     import("jszip"),
     import("dompurify"),
   ]);
-  const archive = await JSZip.loadAsync(bytes);
-  // Even detached images can initiate requests. Remove external relationships
-  // before the renderer creates DOM, then restrict its output again in the frame.
-  for (const entry of Object.values(archive.files)) {
-    if (!entry.name.endsWith(".rels")) continue;
-    const xml = new DOMParser().parseFromString(await entry.async("string"), "application/xml");
-    if (xml.querySelector("parsererror") || xml.doctype)
-      throw new Error("This document contains invalid XML.");
-    for (const rel of Array.from(xml.getElementsByTagNameNS("*", "Relationship"))) {
-      const target = rel.getAttribute("Target") ?? "";
-      if (
-        rel.getAttribute("TargetMode")?.toLowerCase() === "external" ||
-        /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(target)
-      )
-        rel.remove();
+  const archive = await JSZip.loadAsync(result.bytes);
+  const html: string[] = [];
+  const css = new Set<string>();
+  for (const document of result.documents) {
+    signal.throwIfAborted();
+    // Worker batches end at body-level boundaries. Yield between batches so
+    // parsing and sanitizing a long report cannot monopolize the UI thread.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const doc = window.document.implementation.createHTMLDocument();
+    const body = doc.createElement("div");
+    const styles = doc.createElement("div");
+    archive.file("word/document.xml", document);
+    await renderAsync(await archive.generateAsync({ type: "arraybuffer" }), body, styles, {
+      ignoreFonts: true,
+      useBase64URL: true,
+      renderAltChunks: false,
+      renderFootnotes: true,
+      renderEndnotes: true,
+      renderHeaders: true,
+      renderFooters: true,
+      renderComments: true,
+      renderChanges: false,
+      experimental: false,
+    });
+    const markup = DOMPurify.sanitize(body.innerHTML, {
+      FORBID_TAGS: ["style", "a", "form", "input", "button", "video", "audio", "svg", "math"],
+      FORBID_ATTR: ["srcset"],
+    });
+    const clean = new DOMParser().parseFromString(markup, "text/html");
+    for (const image of clean.images) {
+      if (!/^data:image\/(png|jpeg|gif|webp|bmp);base64,/i.test(image.src)) image.remove();
     }
-    archive.file(entry.name, new XMLSerializer().serializeToString(xml));
+    // docx-preview uses an emoji that may be absent from the client's fonts.
+    for (const marker of clean.querySelectorAll(".docx-comment-ref")) {
+      marker.textContent = "";
+      marker.setAttribute("role", "img");
+      marker.setAttribute("aria-label", "Comment");
+    }
+    html.push(clean.body.innerHTML);
+    for (const style of styles.querySelectorAll("style")) css.add(style.textContent);
   }
-  const doc = document.implementation.createHTMLDocument();
-  const body = doc.createElement("div");
-  const styles = doc.createElement("div");
-  await renderAsync(await archive.generateAsync({ type: "arraybuffer" }), body, styles, {
-    ignoreFonts: true,
-    useBase64URL: true,
-    renderAltChunks: false,
-  });
-  const markup = DOMPurify.sanitize(body.innerHTML, {
-    FORBID_TAGS: ["style", "a", "form", "input", "button", "video", "audio", "svg", "math"],
-    FORBID_ATTR: ["srcset"],
-  });
-  const clean = new DOMParser().parseFromString(markup, "text/html");
-  for (const image of clean.images) {
-    if (!/^data:image\/(png|jpeg|gif|webp|bmp);base64,/i.test(image.src)) image.remove();
-  }
-  const css = [...styles.querySelectorAll("style")]
-    .map((style) => style.textContent)
-    .join("\n")
-    .replaceAll(/<\/style/gi, "");
-  return { html: clean.body.innerHTML, css };
+  return {
+    html: html.join(""),
+    css: [...css].join("\n").replaceAll(/<\/style/gi, ""),
+    truncated: result.truncated,
+  };
 }
 
 function WordFrame(props: {
-  readonly content: { html: string; css: string };
+  readonly content: { html: string; css: string; truncated: boolean };
   readonly name: string;
 }) {
   const { resolvedTheme } = useTheme();
-  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><style>${props.content.css}</style><style>html{background:${OFFICE_PAGE_BACKGROUND[resolvedTheme]}}body{margin:0}.docx-wrapper{background:transparent;padding:${OFFICE_PAGE_PADDING}px;box-sizing:border-box}.docx-wrapper section.docx{max-width:100%;box-sizing:border-box;padding:32px!important;min-height:0!important}img{max-width:100%;height:auto}.docx-wrapper section.docx div{max-width:100%}img{height:auto!important}*{scrollbar-width:thin}</style></head><body>${props.content.html}</body></html>`;
+  // HTML reparsing moves block comment popovers out of their source paragraph.
+  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><style>${props.content.css}</style><style>html{background:${OFFICE_PAGE_BACKGROUND[resolvedTheme]}}body{margin:0}.docx-wrapper{background:transparent;padding:${OFFICE_PAGE_PADDING}px;box-sizing:border-box}.docx-wrapper section.docx{width:612pt;max-width:100%;box-sizing:border-box;padding:32px!important;min-height:0!important}img{max-width:100%;height:auto}.docx-wrapper section.docx div{max-width:100%}img{height:auto!important}.docx-comment-ref{display:inline-block;position:relative;width:.75em;height:.6em;margin-left:.25em;border:1px solid currentColor;border-radius:.12em;vertical-align:baseline}.docx-comment-ref::after{content:"";position:absolute;bottom:-.25em;left:.12em;width:.2em;height:.2em;border-left:1px solid currentColor;transform:skewY(-35deg)}.docx p:has(.docx-comment-ref:hover)+.docx-comment-popover{display:block}*{scrollbar-width:thin}</style></head><body>${props.content.html}</body></html>`;
   return (
-    <iframe title={props.name} srcDoc={srcDoc} sandbox="" className="min-h-0 flex-1 border-0" />
+    <div className="flex min-h-0 flex-1 flex-col">
+      {props.content.truncated ? (
+        <FileSurfaceNotice>
+          Preview limited. Save it or open it in another app to read the full document.
+        </FileSurfaceNotice>
+      ) : null}
+      <iframe title={props.name} srcDoc={srcDoc} sandbox="" className="min-h-0 flex-1 border-0" />
+    </div>
   );
 }
 
@@ -213,7 +231,7 @@ export default function OfficeViewer(props: {
       const result = event.data;
       if (result.type === "error") fail(result.message);
       else if (result.type === "docx") {
-        void renderWord(result.bytes)
+        void renderWord(result, controller.signal)
           .then((content) => {
             if (!controller.signal.aborted) {
               if (timerRef.current) clearTimeout(timerRef.current);
@@ -339,7 +357,9 @@ export default function OfficeViewer(props: {
         <>
           <FileSurfaceNotice>
             Cell values only. Charts, images, and formatting are not shown.
-            {sheet.truncated ? " Limited to 250,000 rows and 1,024 columns." : ""}
+            {sheet.truncated
+              ? " Preview limited to 250,000 rows, 1,024 columns, and bounded cell text."
+              : ""}
           </FileSurfaceNotice>
           {sheet.rowCount === 0 ? (
             <p className="p-6 text-xs text-muted-foreground">This sheet is empty.</p>

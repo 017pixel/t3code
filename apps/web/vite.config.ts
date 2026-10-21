@@ -104,6 +104,7 @@ const browserTestProject = {
       "dompurify",
       "jszip",
       "mermaid",
+      "saxes",
       "read-excel-file/universal",
     ],
   },
