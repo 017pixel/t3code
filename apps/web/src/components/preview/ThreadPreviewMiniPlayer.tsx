@@ -57,6 +57,7 @@ import {
   PREVIEW_MINI_PLAYER_WEBVIEW_Z_INDEX,
   type PreviewMiniPlayerFrame,
   resizePreviewMiniPlayer,
+  resolvePreviewMiniPlayerFrame,
   resolveDeviceMiniPlayerCornerRadius,
   resolveDeviceMiniPlayerSourceSize,
   resolvePreviewMiniPlayerSourceSize,
@@ -65,10 +66,12 @@ import {
 interface PointerGesture {
   readonly pointerId: number;
   readonly pointerType: string;
+  readonly target: HTMLElement;
   readonly pointerX: number;
   readonly pointerY: number;
   readonly frame: PreviewMiniPlayerFrame;
   readonly direction: BrowserViewportResizeDirection | null;
+  currentFrame: PreviewMiniPlayerFrame;
   moved: boolean;
 }
 
@@ -390,21 +393,70 @@ function MiniPlayerShell({
     usePreviewMiniPlayerStore.getState().close(threadRef);
   };
 
+  const finishGesture = () => {
+    const gesture = gestureRef.current;
+    if (!gesture) return;
+    gestureRef.current = null;
+    handleTappedRef.current = false;
+    if (container && gesture.moved) {
+      const next = resolvePreviewMiniPlayerFrame({
+        width: gesture.currentFrame.width,
+        position: gesture.currentFrame,
+        source: gesture.frame,
+        container,
+      });
+      const store = usePreviewMiniPlayerStore.getState();
+      const position = { x: next.x, y: next.y };
+      if (gesture.direction === null) store.move(threadRef, sourceKey, position);
+      else store.resize(threadRef, sourceKey, next.width, position);
+    }
+    if (gesture.target.hasPointerCapture(gesture.pointerId)) {
+      gesture.target.releasePointerCapture(gesture.pointerId);
+    }
+  };
+
+  const finishGestureRef = useRef(finishGesture);
+  useLayoutEffect(() => {
+    finishGestureRef.current = finishGesture;
+  });
+  useEffect(() => {
+    const handleBlur = () => finishGestureRef.current();
+    window.addEventListener("blur", handleBlur);
+    return () => window.removeEventListener("blur", handleBlur);
+  }, []);
+
   const beginGesture = (
     event: ReactPointerEvent<HTMLElement>,
     direction: BrowserViewportResizeDirection | null,
   ) => {
-    if (event.button !== 0 || !frame) return;
+    if (event.button !== 0 || !frame || gestureRef.current) return;
+    const preview = event.currentTarget.closest<HTMLElement>("[data-preview-mini-player]");
+    if (!preview) return;
+    const rect = preview.getBoundingClientRect();
+    // The canvas can lag the rendered element after a resize.
+    const start = {
+      x: preview.offsetLeft ?? rect.left,
+      y: preview.offsetTop ?? rect.top,
+      width: preview.offsetWidth,
+      height: preview.offsetHeight,
+    };
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      return;
+    }
+    handleTappedRef.current = false;
     gestureRef.current = {
       pointerId: event.pointerId,
       pointerType: event.pointerType,
+      target: event.currentTarget,
       pointerX: event.clientX,
       pointerY: event.clientY,
-      frame,
+      frame: start,
+      currentFrame: start,
       direction,
       moved: false,
     };
-    event.currentTarget.setPointerCapture(event.pointerId);
     event.preventDefault();
     event.stopPropagation();
   };
@@ -412,46 +464,46 @@ function MiniPlayerShell({
   const handlePointerMove = (event: ReactPointerEvent<HTMLElement>) => {
     const gesture = gestureRef.current;
     if (!gesture || gesture.pointerId !== event.pointerId || !container) return;
+    if ((event.buttons & 1) === 0) {
+      finishGesture();
+      return;
+    }
     const delta = { x: event.clientX - gesture.pointerX, y: event.clientY - gesture.pointerY };
     if (!gesture.moved && Math.hypot(delta.x, delta.y) < HANDLE_TAP_SLOP_PX) return;
     gesture.moved = true;
     const store = usePreviewMiniPlayerStore.getState();
     if (gesture.direction === null) {
-      store.move(
-        threadRef,
-        sourceKey,
-        clampPreviewMiniPlayerPosition(
-          { x: gesture.frame.x + delta.x, y: gesture.frame.y + delta.y },
-          container,
-          gesture.frame,
-          obstacles,
-        ),
+      const position = clampPreviewMiniPlayerPosition(
+        { x: gesture.frame.x + delta.x, y: gesture.frame.y + delta.y },
+        container,
+        gesture.frame,
+        obstacles,
       );
+      gesture.currentFrame = { ...gesture.frame, ...position };
+      store.move(threadRef, sourceKey, position);
       return;
     }
     const next = resizePreviewMiniPlayer({
       start: gesture.frame,
       direction: gesture.direction,
       delta,
-      source: sourceSize,
+      source: gesture.frame,
       container,
       obstacles,
     });
+    gesture.currentFrame = next;
     store.resize(threadRef, sourceKey, next.width, { x: next.x, y: next.y });
   };
 
   const endGesture = (event: ReactPointerEvent<HTMLElement>) => {
     const gesture = gestureRef.current;
     if (gesture?.pointerId !== event.pointerId) return;
-    gestureRef.current = null;
+    finishGesture();
     handleTappedRef.current =
       event.type === "pointerup" &&
       gesture.direction === null &&
       gesture.pointerType === "touch" &&
       !gesture.moved;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
   };
 
   return (
@@ -478,6 +530,7 @@ function MiniPlayerShell({
             onPointerMove={handlePointerMove}
             onPointerUp={endGesture}
             onPointerCancel={endGesture}
+            onLostPointerCapture={endGesture}
             onClick={() => {
               if (!handleTappedRef.current) return;
               handleTappedRef.current = false;
@@ -554,6 +607,7 @@ function MiniPlayerShell({
               onPointerMove={handlePointerMove}
               onPointerUp={endGesture}
               onPointerCancel={endGesture}
+              onLostPointerCapture={endGesture}
             />
           ))}
         </section>
