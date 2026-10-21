@@ -94,11 +94,6 @@ const isWait = (node: ESTree.Node): boolean => {
   return false;
 };
 
-const isFailure = (node: ESTree.Node): boolean =>
-  node.type === "ThrowStatement" ||
-  (node.type === "CallExpression" &&
-    (isMember(node.callee, "Effect", "die") || isMember(node.callee, "Effect", "fail")));
-
 const hasConditionalExit = (body: ESTree.Node): boolean =>
   someDescendant(
     body,
@@ -167,19 +162,12 @@ const isTrueLiteral = (test: ESTree.Expression): boolean => {
 
 // `for (...) { yield* Effect.yieldNow } return yield* Effect.die("timed out")`
 // keys a failure on the loop running out, which makes the bound a budget.
-const failsAfterLoop = (loop: LoopNode): boolean => {
-  const parent = loop.parent;
-  if (parent?.type !== "BlockStatement" && parent?.type !== "Program") return false;
-  const statements: ReadonlyArray<ESTree.Node> = parent.body;
-  const next = statements[statements.indexOf(loop) + 1];
-  return next !== undefined && someDescendant(next, isFailure);
-};
-
-const hasPredicateExit = (loop: LoopNode): boolean => {
-  if (hasConditionalExit(loop.body)) return true;
-  if (loop.test != null && !isTrueLiteral(loop.test) && !isCounterTest(loop)) return true;
-  return failsAfterLoop(loop);
-};
+// A loop is polling when a predicate decides whether it keeps going: a conditional exit in the
+// body, or a test that is neither `true` nor a counter the loop advances. A fixed-count flush
+// followed by unrelated error handling is not polling, so what comes after the loop is ignored.
+const hasPredicateExit = (loop: LoopNode): boolean =>
+  hasConditionalExit(loop.body) ||
+  (loop.test != null && !isTrueLiteral(loop.test) && !isCounterTest(loop));
 
 export default defineRule({
   meta: {

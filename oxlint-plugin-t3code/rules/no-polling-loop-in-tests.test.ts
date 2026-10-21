@@ -8,6 +8,20 @@ const rule = createOxlintRuleHarness("t3code/no-polling-loop-in-tests", {
 
 describe("t3code/no-polling-loop-in-tests", () => {
   rule.valid(
+    "allows a fixed-count flush followed by unrelated error handling",
+    `
+      import { it } from "@effect/vitest";
+      import * as Effect from "effect/Effect";
+      it.effect("flushes", () =>
+        Effect.gen(function* () {
+          for (let i = 0; i < 3; i++) yield* Effect.yieldNow;
+          if (!ready()) return yield* Effect.die("not ready");
+        }),
+      );
+    `,
+  );
+
+  rule.valid(
     "allows a fixed-N flush with a literal bound",
     `
       import * as Effect from "effect/Effect";
