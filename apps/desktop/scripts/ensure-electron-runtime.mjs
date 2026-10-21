@@ -176,26 +176,69 @@ function downloadElectronRuntime(stageDir, version) {
   }
 }
 
+function lockOwnerIsGone(lockDir) {
+  let pid;
+  try {
+    pid = Number(NodeFS.readFileSync(NodePath.join(lockDir, "pid"), "utf8"));
+  } catch {
+    // The owner writes its pid right after mkdir; only an old lock lacks one.
+    try {
+      return Date.now() - NodeFS.statSync(lockDir).mtimeMs > 10_000;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return error.code === "ESRCH";
+  }
+}
+
+// Holds a lock directory (mkdir is atomic) in electronDir while fn runs.
+function withPublishLock(electronDir, fn) {
+  const lockDir = NodePath.join(electronDir, ".t3-publish.lock");
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    try {
+      NodeFS.mkdirSync(lockDir);
+      NodeFS.writeFileSync(NodePath.join(lockDir, "pid"), String(process.pid));
+      break;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      if (lockOwnerIsGone(lockDir)) {
+        NodeFS.rmSync(lockDir, { recursive: true, force: true });
+      } else {
+        Atomics.wait(pause, 0, 0, 100);
+      }
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    NodeFS.rmSync(lockDir, { recursive: true, force: true });
+  }
+}
+
 // With pnpm's global virtual store, every worktree on this Electron version
 // shares electronDir, and another worktree may run Electron from it. So the
-// runtime is built in a private stage directory and published with one
-// rename. A broken dist is renamed away before it is deleted. If another
-// process publishes first, our rename fails and we keep theirs.
+// runtime is built in a private stage directory, and only the publish step is
+// serialized: under the lock, a valid dist from another installer is kept,
+// and a broken one is renamed away before ours is renamed into place.
 function publishRuntime(electronDir, stageDir, isValid) {
   const distPath = NodePath.join(electronDir, "dist");
-  if (isValid()) {
-    return;
-  }
-  try {
-    NodeFS.renameSync(distPath, NodePath.join(stageDir, "broken-dist"));
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
-  try {
+  withPublishLock(electronDir, () => {
+    if (isValid()) {
+      return;
+    }
+    try {
+      NodeFS.renameSync(distPath, NodePath.join(stageDir, "broken-dist"));
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
     NodeFS.renameSync(NodePath.join(stageDir, "dist"), distPath);
-  } catch (error) {
-    if (!["EEXIST", "ENOTEMPTY", "EPERM"].includes(error.code)) throw error;
-  }
+  });
 }
 
 export function ensureElectronRuntime() {
