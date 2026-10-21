@@ -881,6 +881,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       Effect.void,
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
+    onResponse: (method: string) => Effect.Effect<void> = () => Effect.void,
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -912,6 +913,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                       request: (method, params) =>
                         onRequest(method, params).pipe(
                           Effect.andThen(client.request(method, params)),
+                          Effect.tap(() => onResponse(method)),
                         ),
                     }) satisfies CodexClient.CodexAppServerClient["Service"],
                 ),
@@ -2721,6 +2723,161 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         ),
       ),
     ),
+  );
+
+  it.effect(
+    "hands a stopped run's live turn, items and completion to the run Codex reuses it for",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const nativeThreadId = "reused-interrupted-turn-thread";
+          const nativeTurnId = "reused-interrupted-turn";
+          const replacementPrompt = "Replacement message.";
+          const transcript = makeCodexReplayTranscript({
+            scenario: "codex-reused-interrupted-turn",
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId,
+                nativeTurnId,
+                prompt: "Retracted message.",
+              }),
+              {
+                type: "expect_outbound",
+                label: "turn/interrupt",
+                frame: {
+                  id: 4,
+                  method: "turn/interrupt",
+                  params: { threadId: nativeThreadId, turnId: nativeTurnId },
+                },
+              },
+              { type: "emit_inbound", label: "turn/interrupt", frame: { id: 4, result: {} } },
+              {
+                type: "expect_outbound",
+                label: "replacement turn/start",
+                frame: {
+                  id: 5,
+                  method: "turn/start",
+                  params: {
+                    threadId: nativeThreadId,
+                    input: [{ type: "text", text: replacementPrompt }],
+                    cwd: "/workspace",
+                    model: "gpt-5.4",
+                    approvalPolicy: "never",
+                    approvalsReviewer: "user",
+                    sandboxPolicy: { type: "dangerFullAccess" },
+                    summary: "detailed",
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "replacement turn/started",
+                frame: {
+                  method: "turn/started",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }),
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "replacement answer",
+                frame: {
+                  method: "item/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turnId: nativeTurnId,
+                    item: { type: "agentMessage", id: "replacement-answer", text: "Done." },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "replacement turn/start",
+                frame: {
+                  id: 5,
+                  result: { turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }) },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "turn/completed",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                  },
+                },
+              },
+            ],
+          });
+          const interruptAcknowledged = yield* Deferred.make<void>();
+          const harness = yield* makeCodexReplayHarness(
+            transcript,
+            () => Effect.void,
+            () => Effect.void,
+            undefined,
+            (method) =>
+              method === "turn/interrupt"
+                ? Deferred.succeed(interruptAcknowledged, undefined).pipe(Effect.asVoid)
+                : Effect.void,
+          );
+          const now = yield* DateTime.now;
+          const retracted = makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-codex-retracted"),
+            text: "Retracted message.",
+          });
+          const replacement = {
+            ...makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-codex-replacement"),
+              text: replacementPrompt,
+            }),
+            runOrdinal: 2,
+            providerTurnOrdinal: 2,
+          };
+
+          yield* harness.runtime.startTurn(retracted);
+          // Codex acknowledges the interrupt but keeps the turn open.
+          yield* harness.runtime
+            .interruptTurn({
+              providerThread: harness.providerThread,
+              providerTurnId: (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+                driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+                nativeTurnId,
+              }),
+            })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(interruptAcknowledged);
+          yield* harness.runtime.startTurn(replacement);
+          yield* harness.awaitTerminal(1);
+
+          const answer = harness.events.find(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.nativeItemRef?.nativeId === "replacement-answer",
+          );
+          assert.equal(
+            answer?.type === "turn_item.updated" ? answer.turnItem.runId : undefined,
+            replacement.runId,
+          );
+          assert.deepEqual(
+            harness.terminalEvents().map((event) => [event.runOrdinal, event.status]),
+            [[2, "completed"]],
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
   );
 
   const BG_SCENARIO = "codex-bg-exec-wake";

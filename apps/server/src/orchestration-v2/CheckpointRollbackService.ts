@@ -259,10 +259,29 @@ export const layer: Layer.Layer<
 
       // Rolled-back turns remain in audit history but no longer exist in the provider conversation.
       const rolledBackAttemptIds = new Set(context.rolledBackAttemptIds);
-      const providerThreadTurns = context.providerTurns.filter(
+      // A run past the target may still be streaming. Left alive, the provider
+      // keeps its native turn open and can hand that turn to the next run, so
+      // stop it first; the stopped turn is then part of what the rollback drops.
+      // Refusing rollback while a run is active is #16843's scope.
+      const providerThreadTurns = yield* Effect.forEach(
+        context.providerTurns.filter(
+          (turn) =>
+            turn.providerThreadId === providerThread.id &&
+            (turn.runAttemptId === null || !rolledBackAttemptIds.has(turn.runAttemptId)),
+        ),
         (turn) =>
-          turn.providerThreadId === providerThread.id &&
-          (turn.runAttemptId === null || !rolledBackAttemptIds.has(turn.runAttemptId)),
+          turn.status !== "running"
+            ? Effect.succeed(turn)
+            : session.interruptTurn({ providerThread, providerTurnId: turn.id }).pipe(
+                Effect.as({ ...turn, status: "interrupted" as const }),
+                Effect.catch((cause) =>
+                  Effect.logWarning("orchestration-v2.rollback-interrupt-failed", {
+                    threadId: input.threadId,
+                    providerTurnId: turn.id,
+                    cause,
+                  }).pipe(Effect.as(turn)),
+                ),
+              ),
       );
 
       const snapshot =

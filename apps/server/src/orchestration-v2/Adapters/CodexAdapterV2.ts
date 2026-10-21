@@ -2011,8 +2011,27 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           readonly waitForNativeStart?: boolean;
         }) {
           const existing = (yield* Ref.get(activeTurns)).get(input.nativeTurnId);
-          if (existing !== undefined) {
+          if (existing !== undefined && existing.projectionRunId === input.turnInput.runId) {
             return existing;
+          }
+          // Codex can answer turn/start with a turn it still holds open for an
+          // earlier run (one retracted mid-stream). The newest run owns it from
+          // here, so its items and turn/completed settle that run.
+          if (existing !== undefined) {
+            yield* Effect.logWarning("orchestration-v2.codex-turn-rehomed", {
+              nativeTurnId: input.nativeTurnId,
+              fromRunId: existing.projectionRunId,
+              toRunId: input.turnInput.runId,
+            });
+            if (existing.nativeStartReady !== undefined) {
+              yield* Deferred.succeed(existing.nativeStartReady, undefined);
+            }
+            // A Stop still pending for the earlier run does not stop this one.
+            yield* Ref.update(interruptingNativeTurns, (current) => {
+              const updated = new Set(current);
+              updated.delete(input.nativeTurnId);
+              return updated;
+            });
           }
           const providerTurnId = idAllocator.derive.providerTurn({
             driver: CODEX_PROVIDER,
@@ -4455,13 +4474,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         yield* client.handleServerNotification("turn/started", (payload) =>
           Effect.gen(function* () {
             const context = (yield* Ref.get(activeTurns)).get(payload.turn.id);
-            if (context !== undefined) {
+            const pendingRootTurn = (yield* Ref.get(pendingRootTurns)).get(payload.threadId);
+            if (
+              context !== undefined &&
+              (pendingRootTurn === undefined || pendingRootTurn.runId === context.projectionRunId)
+            ) {
               if (context.nativeStartReady !== undefined) {
                 yield* Deferred.succeed(context.nativeStartReady, undefined);
               }
               return;
             }
-            const pendingRootTurn = (yield* Ref.get(pendingRootTurns)).get(payload.threadId);
             if (pendingRootTurn !== undefined) {
               yield* registerRootTurn({
                 turnInput: pendingRootTurn,
