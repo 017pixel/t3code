@@ -1838,7 +1838,7 @@ it.layer(layerTest)("delegated task consumption", (it) => {
     outputTokens: 44,
   } satisfies TurnTokenUsage;
 
-  it.effect.each(["available", "absent", "unavailable"] as const)(
+  it.effect.each(["available", "absent", "unavailable", "zero", "partial"] as const)(
     "attributes %s child consumption on completion without substituting context occupancy",
     (availability) =>
       Effect.gen(function* () {
@@ -1846,13 +1846,22 @@ it.layer(layerTest)("delegated task consumption", (it) => {
         const usage =
           availability === "available"
             ? consumption
-            : availability === "unavailable"
-              ? {
-                  usageStatus: "unavailable" as const,
-                  usageScope: "main_agent" as const,
-                  hasSubagents: false,
-                }
-              : undefined;
+            : availability === "zero"
+              ? { ...consumption, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 }
+              : availability === "partial"
+                ? {
+                    usageStatus: "partial" as const,
+                    usageScope: "main_agent" as const,
+                    hasSubagents: true,
+                    outputTokens: 0,
+                  }
+                : availability === "unavailable"
+                  ? {
+                      usageStatus: "unavailable" as const,
+                      usageScope: "main_agent" as const,
+                      hasSubagents: false,
+                    }
+                  : undefined;
         const events = turnEvents({
           name: "completed",
           runId: child.childRunId,
@@ -1887,8 +1896,8 @@ it.layer(layerTest)("delegated task consumption", (it) => {
         const completed = yield* orchestrator.getThreadProjection(threadId);
         const task = completed.subagents.find((row) => row.id === child.taskId)!;
         assert.equal(task.status, "completed");
-        if (availability === "available") {
-          const expected = { ...task, turnTokenUsage: consumption };
+        if (usage !== undefined && usage.usageStatus !== "unavailable") {
+          const expected = { ...task, turnTokenUsage: usage };
           assert.deepEqual(task, expected);
         } else {
           assert.notProperty(task, "turnTokenUsage");
@@ -1899,6 +1908,99 @@ it.layer(layerTest)("delegated task consumption", (it) => {
           completed.subagents,
         );
       }),
+  );
+
+  it.effect.each(["absent", "unavailable"] as const)(
+    "marks recorded consumption partial when another task turn has %s usage",
+    (availability) =>
+      Effect.gen(function* () {
+        const { orchestrator, sink, threadId, child, turnEvents } = yield* setup(
+          `mixed:${availability}`,
+        );
+        yield* sink.write({
+          events: [
+            ...turnEvents({
+              name: "known",
+              runId: child.childRunId,
+              ordinal: 1,
+              usage: consumption,
+            }),
+            ...turnEvents({
+              name: "unknown",
+              runId: child.childRunId,
+              ordinal: 2,
+              attemptOrdinal: 2,
+              ...(availability === "unavailable"
+                ? {
+                    usage: {
+                      usageStatus: "unavailable" as const,
+                      usageScope: "main_agent" as const,
+                      hasSubagents: true,
+                    },
+                  }
+                : {}),
+            }),
+          ],
+        });
+        yield* orchestrator.recoverDelegatedTasks;
+        const completed = yield* orchestrator.getThreadProjection(threadId);
+        assert.deepEqual(
+          completed.subagents.find((row) => row.id === child.taskId)?.turnTokenUsage,
+          {
+            ...consumption,
+            usageStatus: "partial",
+            hasSubagents: availability === "unavailable",
+          },
+        );
+      }),
+  );
+
+  it.effect("attributes an older untagged result without including an unrelated earlier run", () =>
+    Effect.gen(function* () {
+      const { orchestrator, sink, now, threadId, child, providerThreadId, turnEvents } =
+        yield* setup("legacy");
+      const childProjection = yield* orchestrator.getThreadProjection(child.childThreadId);
+      const { delegatedTaskId: _taskId, ...legacyRun } = childProjection.runs[0]!;
+      const unrelatedRunId = RunId.make("run:consumption-legacy-unrelated");
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("event:consumption-legacy-run"),
+            type: "run.updated",
+            threadId: child.childThreadId,
+            runId: child.childRunId,
+            occurredAt: now,
+            payload: { ...legacyRun, ordinal: 2 },
+          },
+          runEvent({
+            threadId: child.childThreadId,
+            runId: unrelatedRunId,
+            ordinal: 1,
+            status: "completed",
+            now,
+            providerThreadId,
+          }),
+          ...turnEvents({
+            name: "unrelated",
+            runId: unrelatedRunId,
+            ordinal: 1,
+            usage: consumption,
+          }),
+          ...turnEvents({
+            name: "result",
+            runId: child.childRunId,
+            ordinal: 2,
+            usage: consumption,
+          }),
+        ],
+      });
+      yield* orchestrator.recoverDelegatedTasks;
+      const completed = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepEqual(
+        completed.subagents.find((row) => row.id === child.taskId)?.turnTokenUsage,
+        consumption,
+      );
+    }),
   );
 
   it.effect(
