@@ -1369,10 +1369,11 @@ const make = Effect.gen(function* () {
     }
     const url = tab.page.url();
     const viewport = tab.desktop
-      ? await ServerBrowserPage.readPageMetrics(tab.cdp).then(({ width, height }) => ({
-          width,
-          height,
-        }))
+      ? tab.dialog
+        ? null
+        : await ServerBrowserPage.readPageMetrics(tab.cdp)
+            .then(({ width, height }) => ({ width, height }))
+            .catch(() => null)
       : tab.page.viewportSize();
     const status = {
       available: true,

@@ -23,6 +23,7 @@ import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import type { BrowserContext, Page } from "playwright-core";
 import { beforeEach, expect, vi } from "vite-plus/test";
 
@@ -448,42 +449,77 @@ it.effect("desktop resize reports unconfirmed until the UI applies the requested
         input: resizeCases[1]!.input,
       });
       expect(resized).toMatchObject({ viewport: { width: 1280, height: 800 }, confirmed: false });
-      const applied = yield* broker.invoke<PreviewAutomationResizeResult>({
+      const applied = yield* broker.invoke<PreviewAutomationStatus>({
         scope,
         tabId,
-        operation: "resize",
-        input: resizeCases[1]!.input,
+        operation: "status",
+        input: {},
       });
-      expect(applied).toMatchObject({ viewport: { width: 560, height: 760 }, confirmed: true });
+      expect(applied).toMatchObject({ viewport: { width: 560, height: 760 } });
     }),
   ).pipe(Effect.provide(layer)),
 );
 
-it.effect("desktop resize fails when the CDP measurement receipt is missing", () =>
+it.effect("desktop status omits the viewport when live measurement is unavailable", () =>
   Effect.scoped(
     Effect.gen(function* () {
       desktopRendersNext = true;
       const { broker, tabId } = yield* ready;
       desktopConnections[0]!.context.readMetrics.mockRejectedValue(
-        new Error("CDP measurement unavailable"),
+        new Error("Execution context was destroyed"),
       );
-      const result = yield* broker
-        .invoke({
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status).toMatchObject({
+        available: true,
+        tabId,
+        viewportSetting: { _tag: "fill" },
+        dialog: null,
+      });
+      expect(status).not.toHaveProperty("viewport");
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect("desktop resize times out when the CDP measurement never responds", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const started = Promise.withResolvers<void>();
+      const measurement = Promise.withResolvers<{ ratio: number; width: number; height: number }>();
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => measurement.reject(new Error("Test measurement cancelled"))),
+      );
+      desktopConnections[0]!.context.readMetrics.mockImplementation(async () => {
+        started.resolve();
+        return measurement.promise;
+      });
+      const resizing = yield* broker
+        .invoke<PreviewAutomationResizeResult>({
           scope,
           tabId,
           operation: "resize",
           input: resizeCases[0]!.input,
+          timeoutMs: 100,
         })
-        .pipe(Effect.result);
-      expect(result).toMatchObject({
+        .pipe(Effect.result, Effect.forkScoped);
+      yield* Effect.promise(() => started.promise);
+      expect(resizing.pollUnsafe()).toBeUndefined();
+      yield* TestClock.adjust(1_100);
+      expect(yield* Fiber.join(resizing)).toMatchObject({
         _tag: "Failure",
-        failure: { _tag: "PreviewAutomationExecutionError" },
+        failure: { _tag: "PreviewAutomationTimeoutError", operation: "resize" },
       });
     }),
   ).pipe(Effect.provide(layer)),
 );
 
-it.effect.each(["delayed", "missing"] as const)(
+it.effect.each(["delayed", "rejected"] as const)(
   "desktop resize waits for a $0 CDP measurement receipt",
   (receipt) =>
     Effect.scoped(
@@ -517,10 +553,10 @@ it.effect.each(["delayed", "missing"] as const)(
           );
           expect(first).toBe("measurement");
           expect(resizing.pollUnsafe()).toBeUndefined();
-          if (receipt === "missing") measurement.reject(new Error("CDP measurement unavailable"));
+          if (receipt === "rejected") measurement.reject(new Error("CDP measurement unavailable"));
           else measurement.resolve(measured);
           const result = yield* Fiber.join(resizing);
-          if (receipt === "missing") {
+          if (receipt === "rejected") {
             expect(result).toMatchObject({
               _tag: "Failure",
               failure: { _tag: "PreviewAutomationExecutionError" },
@@ -861,83 +897,104 @@ it.live(
     ).pipe(Effect.provide(layer)),
 );
 
-it.live("reports a pending dialog without evaluating the page and resolves it explicitly", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const { broker, tabId } = yield* ready;
-      const page = contexts[0]!.page;
-      yield* broker.invoke({
-        scope,
-        tabId,
-        operation: "navigate",
-        input: { url: "http://localhost:5173" },
-      });
-      const started = Promise.withResolvers<void>();
-      const resolvedEvaluation = Promise.withResolvers<Record<string, unknown>>();
-      const session = contexts[0]!.sessions[0]!;
-      const send = session.send.getMockImplementation()!;
-      session.send.mockImplementation(async (method, input) => {
-        if (method !== "Runtime.evaluate") return send(method, input);
-        started.resolve();
-        return resolvedEvaluation.promise;
-      });
-      const blockedAction = yield* broker
-        .invoke({
+it.live.each(["headless", "desktop"])(
+  "$0 reports a pending dialog without evaluating the page and resolves it explicitly",
+  (runtime) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = runtime === "desktop";
+        const { broker, tabId } = yield* ready;
+        const context = runtime === "desktop" ? desktopConnections[0]!.context : contexts[0]!;
+        const page = context.page;
+        yield* broker.invoke({
           scope,
           tabId,
-          operation: "evaluate",
-          input: { expression: 'confirm("Delete row?")' },
-        })
-        .pipe(Effect.forkScoped);
-      yield* Effect.addFinalizer(() =>
-        Effect.sync(() => resolvedEvaluation.resolve({ result: { value: true } })),
-      );
-      yield* Effect.promise(() => started.promise);
-      const dialog = {
-        type: () => "confirm",
-        message: () => "Delete row?",
-        defaultValue: () => "",
-        accept: vi.fn(async () => {
-          resolvedEvaluation.resolve({ result: { value: true } });
-        }),
-        dismiss: vi.fn(async () => {}),
-      };
-      page.emit("dialog", dialog);
-      page.title.mockClear();
-      const status = yield* broker.invoke<PreviewAutomationStatus>({
-        scope,
-        tabId,
-        operation: "status",
-        input: {},
-      });
-      expect(status.dialog).toMatchObject({ type: "confirm", message: "Delete row?" });
-      expect(page.title).not.toHaveBeenCalled();
-      expect(dialog.dismiss).not.toHaveBeenCalled();
-      const reuse = yield* broker
-        .invoke<void>({
+          operation: "navigate",
+          input: { url: "http://localhost:5173" },
+        });
+        const started = Promise.withResolvers<void>();
+        const resolvedEvaluation = Promise.withResolvers<Record<string, unknown>>();
+        const session = context.sessions[0]!;
+        let dialogPending = false;
+        const send = session.send.getMockImplementation()!;
+        session.send.mockImplementation(async (method, input) => {
+          if (method !== "Runtime.evaluate") return send(method, input);
+          if ((input as { contextId?: number }).contextId === 8) {
+            if (dialogPending) throw new Error("Metrics evaluation blocks behind the dialog");
+            return send(method, input);
+          }
+          started.resolve();
+          return resolvedEvaluation.promise;
+        });
+        const blockedAction = yield* broker
+          .invoke({
+            scope,
+            tabId,
+            operation: "evaluate",
+            input: { expression: 'confirm("Delete row?")' },
+          })
+          .pipe(Effect.forkScoped);
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => resolvedEvaluation.resolve({ result: { value: true } })),
+        );
+        yield* Effect.promise(() => started.promise);
+        const dialog = {
+          type: () => "confirm",
+          message: () => "Delete row?",
+          defaultValue: () => "",
+          accept: vi.fn(async () => {
+            dialogPending = false;
+            resolvedEvaluation.resolve({ result: { value: true } });
+          }),
+          dismiss: vi.fn(async () => {}),
+        };
+        dialogPending = true;
+        page.emit("dialog", dialog);
+        page.title.mockClear();
+        context.readMetrics.mockClear();
+        session.send.mockClear();
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
           scope,
           tabId,
-          operation: "open",
-          input: { url: "http://localhost:5173/other" },
-        })
-        .pipe(Effect.flip);
-      expect(reuse).toMatchObject({
-        _tag: "PreviewAutomationControlInterruptedError",
-        reason: "dialogPending",
-      });
-      expect(page.goto).toHaveBeenCalledTimes(1);
-      yield* broker.invoke({ scope, tabId, operation: "dialog", input: { accept: true } });
-      expect(yield* Fiber.join(blockedAction)).toBe(true);
-      expect(dialog.accept).toHaveBeenCalledTimes(1);
-      const resolved = yield* broker.invoke<PreviewAutomationStatus>({
-        scope,
-        tabId,
-        operation: "status",
-        input: {},
-      });
-      expect(resolved.dialog).toBeNull();
-    }),
-  ).pipe(Effect.provide(layer)),
+          operation: "status",
+          input: {},
+        });
+        expect(status.dialog).toMatchObject({ type: "confirm", message: "Delete row?" });
+        expect(page.title).not.toHaveBeenCalled();
+        expect(context.readMetrics).not.toHaveBeenCalled();
+        expect(session.send).not.toHaveBeenCalledWith(
+          "Runtime.evaluate",
+          expect.objectContaining({ contextId: 8 }),
+        );
+        if (runtime === "desktop") expect(status).not.toHaveProperty("viewport");
+        else expect(status.viewport).toEqual({ width: 1280, height: 800 });
+        expect(dialog.dismiss).not.toHaveBeenCalled();
+        const reuse = yield* broker
+          .invoke<void>({
+            scope,
+            tabId,
+            operation: "open",
+            input: { url: "http://localhost:5173/other" },
+          })
+          .pipe(Effect.flip);
+        expect(reuse).toMatchObject({
+          _tag: "PreviewAutomationControlInterruptedError",
+          reason: "dialogPending",
+        });
+        expect(page.goto).toHaveBeenCalledTimes(1);
+        yield* broker.invoke({ scope, tabId, operation: "dialog", input: { accept: true } });
+        expect(yield* Fiber.join(blockedAction)).toBe(true);
+        expect(dialog.accept).toHaveBeenCalledTimes(1);
+        const resolved = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(resolved.dialog).toBeNull();
+        expect(resolved.viewport).toEqual({ width: 1280, height: 800 });
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live("a tab opened to a file the browser cannot show reports the file to download", () =>
