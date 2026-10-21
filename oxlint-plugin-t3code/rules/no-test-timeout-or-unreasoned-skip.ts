@@ -36,6 +36,20 @@ const chainRoot = (node: unknown): Option.Option<string> => {
 const isTestChain = (node: unknown) =>
   Option.exists(chainRoot(node), (name) => TEST_FUNCTIONS.has(name));
 
+const hasEnabledOption = (node: unknown, names: ReadonlySet<string>) => {
+  const expression = unwrapExpression(node);
+  if (Option.isNone(expression) || expression.value.type !== "ObjectExpression") return false;
+  return expression.value.properties.some(
+    (property) =>
+      property.type === "Property" &&
+      Option.exists(getPropertyName(property.key), (name) => names.has(name)) &&
+      Option.exists(
+        unwrapExpression(property.value),
+        (value) => value.type === "Literal" && value.value === true,
+      ),
+  );
+};
+
 const hasOption = (node: unknown, names: ReadonlySet<string>) => {
   const expression = unwrapExpression(node);
   if (Option.isNone(expression) || expression.value.type !== "ObjectExpression") return false;
@@ -118,10 +132,11 @@ export default defineRule({
         ) {
           context.report({ node, message: TIMEOUT_MESSAGE });
         }
-        // `test(name, { skip: true }, fn)` is the options spelling of `test.skip`.
+        // `test(name, { skip: true }, fn)` is the options spelling of `test.skip`. A computed value
+        // such as `{ skip: windowsHost }` is a platform gate, the same as `skipIf`, and stays allowed.
         if (
-          hasOption(second, FOCUS_OR_SKIP_MODIFIERS) ||
-          hasOption(third, FOCUS_OR_SKIP_MODIFIERS)
+          hasEnabledOption(second, FOCUS_OR_SKIP_MODIFIERS) ||
+          hasEnabledOption(third, FOCUS_OR_SKIP_MODIFIERS)
         ) {
           reportUnlessQuarantined(node);
         }

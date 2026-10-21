@@ -128,6 +128,15 @@ describe(RULE, () => {
     assertTimeoutMessage,
   );
 
+  rule.valid(
+    "allows a computed skip option, which is a platform gate like skipIf",
+    `
+      import { it } from "vitest";
+      const windowsHost = process.platform === "win32";
+      it.each([{ name: "a" }])("x $name", { skip: windowsHost }, () => {});
+    `,
+  );
+
   rule.invalid(
     "flags the suite alias and option-object skips",
     `
