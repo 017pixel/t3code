@@ -89,6 +89,32 @@ describe("DesktopBrowserHost", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("reports a tab when the server captures it, so a hidden tab can draw", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make;
+      host.attach(key, makeDebuggee().tab);
+      const captures = yield* host.captures.pipe(
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+
+      yield* Effect.yieldNow;
+      const command = (id: number, method: string) =>
+        host.handleCommandLine(
+          encodeJson({
+            type: "cdp",
+            ...key,
+            message: encodeJson({ id, method, sessionId: "t3-preview-page" }),
+          }),
+        );
+      yield* command(1, "DOM.enable");
+      yield* command(2, "Page.captureScreenshot");
+
+      expect(yield* Fiber.join(captures)).toEqual([key]);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("saves a server tab's download under its CDP guid where the server asked", () =>
     Effect.gen(function* () {
       const host = yield* DesktopBrowserHost.make;
