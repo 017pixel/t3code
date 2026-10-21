@@ -4,8 +4,8 @@ import { resolvePromptLinkModelSelection } from "../promptLinks.ts";
 
 /**
  * Whether a thread's branch can be forked to another machine. The other
- * machine starts a new worktree from the branch's upstream, so the branch must
- * be published with every commit pushed. Uncommitted changes stay here.
+ * machine starts a new worktree from `origin/<branch>`, so the branch must be
+ * published there with every commit pushed. Uncommitted changes stay here.
  */
 export type ForkBranchState =
   | { readonly kind: "ready"; readonly baseRef: string }
@@ -19,9 +19,9 @@ export function forkBranchState(
     return { kind: "blocked", reason: "This thread is not on a git branch.", canPush: false };
   }
   // A new worktree branch tracks the base it started from, such as origin/main,
-  // until its first push. That upstream is not this branch.
-  const upstream = status.upstreamRef;
-  if (upstream === undefined || !upstream.endsWith(`/${branch}`)) {
+  // until its first push. Other remote names may not exist on the other machine.
+  const baseRef = `origin/${branch}`;
+  if (status.upstreamRef !== baseRef) {
     return {
       kind: "blocked",
       reason: `Push ${branch} first. The other machine starts from origin.`,
@@ -36,7 +36,7 @@ export function forkBranchState(
       canPush: true,
     };
   }
-  return { kind: "ready", baseRef: upstream };
+  return { kind: "ready", baseRef };
 }
 
 /** The first message of the forked thread. Clients show it for editing before it is sent. */

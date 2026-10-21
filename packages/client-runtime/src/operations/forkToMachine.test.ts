@@ -21,6 +21,7 @@ describe("forkBranchState", () => {
       kind: "blocked",
       canPush: true,
     });
+    expect(forkBranchState({ ...pushed, refName: "login" })).toMatchObject({ kind: "blocked" });
     expect(forkBranchState({ ...pushed, aheadCount: 2 })).toEqual({
       kind: "blocked",
       reason: "Push fix/login first. 2 commits are not on origin yet.",
