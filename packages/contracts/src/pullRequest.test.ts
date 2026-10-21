@@ -144,3 +144,43 @@ describe("PullRequestCapabilities", () => {
     expect(decoded.title).toBe(detail.title);
   });
 });
+
+describe("PullRequestDetail unavailable checks", () => {
+  const detail = {
+    ...LIST_RESULT.entries[0],
+    workspaceRoot: "/workspace/t3code",
+    body: "",
+    changedFiles: 1,
+    mergedAt: null,
+    closedAt: null,
+    reviewers: [],
+    checks: [],
+    mergeCapabilities: { merge: true, squash: true, rebase: true },
+    capabilities: {
+      diff: true,
+      comment: true,
+      actions: [],
+      mergeMethods: [],
+      search: true,
+      review: { inlineComment: true, reply: true, resolve: true, verdicts: [] },
+      reviewers: { request: true, listCandidates: true },
+    },
+    viewerPermissions: {
+      actions: [],
+      verdicts: [],
+      comment: true,
+      resolve: true,
+      requestReviewers: true,
+    },
+  };
+  it("preserves a nonempty reason through the detail wire codec", () => {
+    const reason = "Resource not accessible by personal access token";
+    expect(decodeDetail({ ...detail, checksUnavailable: reason })).toMatchObject({
+      checksUnavailable: reason,
+    });
+    expect(decodeDetail(detail)).not.toHaveProperty("checksUnavailable");
+  });
+  it("rejects an empty unavailable reason", () => {
+    expect(() => decodeDetail({ ...detail, checksUnavailable: "" })).toThrow();
+  });
+});

@@ -3003,6 +3003,137 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect.each(["review", "comment", "aggregate success"] as const)(
+    "keeps a degraded watch alive through eight sweeps and wakes on %s",
+    (change) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const threadId = ThreadId.make(`degraded-watch-${change}`);
+        const projectId = ProjectId.make(`degraded-watch-project-${change}`);
+        yield* seedProject({
+          projectId,
+          title: "Degraded watch",
+          workspaceRoot: "/workspace/watch",
+          defaultModelSelection: null,
+          createdAt: "2026-10-01T00:00:00.000Z",
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`degraded-create-${change}`),
+          threadId,
+          projectId,
+          title: "Degraded watch",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+        });
+        const key = { host: "github.com", repository: "pingdotgg/t3code", number: 7 };
+        yield* orchestrator.dispatch({
+          type: "thread.pull-request.link",
+          commandId: CommandId.make(`degraded-link-${change}`),
+          threadId,
+          ...key,
+          url: "https://github.com/pingdotgg/t3code/pull/7",
+          source: "agent",
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.pull-request.watch",
+          commandId: CommandId.make(`degraded-start-${change}`),
+          threadId,
+          ...key,
+          watching: true,
+        });
+        let changed = false;
+        let failing = false;
+        let reads = 0;
+        const remark: PullRequestComment = {
+          id: `new-${change}`,
+          kind: change === "review" ? "review" : "issue-comment",
+          author: { login: "reviewer", name: null, avatarUrl: null },
+          body: "Please update this.",
+          createdAt: "2999-01-01T00:00:03.000Z",
+          url: null,
+          path: null,
+          reviewState: change === "review" ? "CHANGES_REQUESTED" : null,
+        };
+        const reactor = yield* PullRequestWatchReactor.make.pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              Layer.mock(PullRequestService.PullRequestService)({
+                detail: (input) => {
+                  if (input.projectId === projectId) reads += 1;
+                  if (failing && input.projectId === projectId)
+                    return Effect.fail(
+                      new PullRequestOperationError({
+                        operation: "detail",
+                        detail: "Temporary network failure",
+                      }),
+                    );
+                  return Effect.succeed({
+                    ...watchedPullRequestDetail({
+                      projectId,
+                      number: 7,
+                      at: "2026-10-02T12:00:00.000Z",
+                    }),
+                    checksUnavailable: "Resource not accessible by personal access token",
+                    checks: [
+                      {
+                        name: "Overall check status",
+                        status:
+                          changed && change === "aggregate success"
+                            ? ("success" as const)
+                            : ("pending" as const),
+                        description: "Individual checks are unavailable.",
+                        url: "https://github.com/pingdotgg/t3code/pull/7/checks",
+                      },
+                    ],
+                  });
+                },
+                activity: () =>
+                  Effect.succeed({
+                    comments: changed && change !== "aggregate success" ? [remark] : [],
+                    commentCount: changed && change !== "aggregate success" ? 1 : 0,
+                    commentsTruncated: false,
+                    reviewThreadsTruncated: false,
+                    reviewThreads: [],
+                    commits: [],
+                  }),
+              }),
+            ),
+          ),
+        );
+        for (let index = 0; index < 8; index += 1) yield* reactor.sweep;
+        assert.equal(reads, 8);
+        assert.isDefined((yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch);
+        assert.deepEqual(
+          (yield* orchestrator.getThreadRecords(threadId, ["messages"])).messages,
+          [],
+        );
+        // Seven real errors after degraded reads must still be below the eight-failure cutoff.
+        failing = true;
+        for (let index = 0; index < 7; index += 1) yield* reactor.sweep;
+        assert.isDefined((yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch);
+        failing = false;
+        changed = true;
+        yield* reactor.sweep;
+        const { messages } = yield* orchestrator.getThreadRecords(threadId, ["messages"]);
+        assert.deepEqual(
+          messages.map((message) => message.notification?.summary),
+          [change === "aggregate success" ? "#7: checks passed" : "#7: new comments"],
+        );
+        yield* reactor.sweep;
+        assert.equal(
+          (yield* orchestrator.getThreadRecords(threadId, ["messages"])).messages.length,
+          1,
+        );
+      }),
+  );
+
   it.effect("persists rejected command receipts across retries", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

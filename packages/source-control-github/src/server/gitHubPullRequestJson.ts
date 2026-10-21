@@ -385,6 +385,7 @@ export interface GitHubPullRequestDetail extends GitHubPullRequestListItem {
   readonly mergedAt: string | null;
   readonly closedAt: string | null;
   readonly checks: ReadonlyArray<PullRequestCheck>;
+  readonly checksUnavailable?: string;
   readonly autoMergeEnabled?: boolean;
   readonly autoMergeMethod?: PullRequestMergeMethod;
 }
@@ -1098,7 +1099,10 @@ type CoreRequestedReviewer = NonNullable<
 >[number];
 
 /** Null for a repository or number that names no pull request the viewer can see. */
-export function toPullRequestCore(result: PullRequestCore.Result): GitHubPullRequestCore | null {
+export function toPullRequestCore(
+  result: PullRequestCore.Result,
+  detailedChecks = true,
+): GitHubPullRequestCore | null {
   const repository = result.repository;
   const pr = repository?.pullRequest;
   if (repository == null || pr == null) return null;
@@ -1132,6 +1136,21 @@ export function toPullRequestCore(result: PullRequestCore.Result): GitHubPullReq
       labels: nodesOf(pr.labels),
       statusCheckRollup: toCheckContexts(nodesOf(contexts)),
     }),
+    ...(!detailedChecks
+      ? {
+          checksUnavailable:
+            "Individual checks are unavailable with the current GitHub credential.",
+          checksState: rollupChecksState(rollupStates(pr.commits)),
+          checks: toChecks(
+            rollupStates(pr.commits).map((check) => ({
+              ...check,
+              context: "Overall check status",
+              description: "Individual checks are unavailable with the current GitHub credential.",
+              targetUrl: `${pr.url}/checks`,
+            })),
+          ),
+        }
+      : {}),
     headRepositoryNameWithOwner: trimmed(pr.headRepository?.nameWithOwner),
     viewerAccess: {
       canWrite: toCanWrite(repository.viewerPermission),

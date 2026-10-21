@@ -10,7 +10,7 @@ import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as Redacted from "effect/Redacted";
 
-import { HttpClient, HttpClientResponse } from "effect/http";
+import { HttpClient, HttpClientError, HttpClientResponse } from "effect/http";
 
 import * as GitHubRest from "./GitHubRest.ts";
 import * as GitHubRequestPolicy from "./GitHubRequestPolicy.ts";
@@ -100,6 +100,7 @@ type ApiCall =
 
 type ApiAnswer = Effect.Effect<GitHubRest.GitHubRestResponse, GitHubRequestPolicy.GitHubApiError>;
 
+const mockedTransportFailure = vi.fn(() => false);
 const mockedExecute = vi.fn<(call: ApiCall) => ApiAnswer>();
 const defaultCredential = (host: string) =>
   Effect.succeed({ token: Redacted.make("token"), fingerprint: `${host}:token` });
@@ -126,6 +127,15 @@ const mockHttp = Layer.succeed(
   HttpClient.HttpClient,
   HttpClient.make((request) =>
     Effect.gen(function* () {
+      if (mockedTransportFailure())
+        return yield* Effect.fail(
+          new HttpClientError.HttpClientError({
+            reason: new HttpClientError.TransportError({
+              request,
+              cause: new Error("Connection reset"),
+            }),
+          }),
+        );
       const host = new URL(request.url).hostname.replace(/^api\./, "");
       const sent =
         request.body._tag === "Uint8Array"
@@ -559,6 +569,7 @@ const checkContextsPage = (
               {
                 commit: {
                   statusCheckRollup: {
+                    state: "SUCCESS",
                     contexts: { nodes, pageInfo: { hasNextPage: endCursor !== null, endCursor } },
                   },
                 },
@@ -629,6 +640,8 @@ const NODE_ID_QUERY = "PullRequestNodeId";
 const nodeIdAnswer = (id: string) => ({ data: { repository: { pullRequest: { id } } } });
 
 afterEach(() => {
+  mockedTransportFailure.mockReset();
+  mockedTransportFailure.mockReturnValue(false);
   mockedExecute.mockReset();
   mockedStackMemberships.mockReset();
   mockedCredential.mockReset();
@@ -3117,6 +3130,324 @@ layer("GitHubPullRequestApi.layer", (it) => {
       }),
   );
 
+  it.effect.each([
+    { aggregate: "SUCCESS", status: "success", checksState: "passing", httpStatus: 200 },
+    { aggregate: "SUCCESS", status: "success", checksState: "passing", httpStatus: 403 },
+    { aggregate: "FAILURE", status: "failure", checksState: "failing" },
+    { aggregate: "PENDING", status: "pending", checksState: "pending" },
+  ])(
+    "preserves full detail when PAT cannot read check contexts: $aggregate",
+    ({ aggregate, status, checksState, httpStatus = 200 }) =>
+      Effect.gen(function* () {
+        const refusal = {
+          type: "FORBIDDEN",
+          message: "Resource not accessible by personal access token",
+          path: [
+            "repository",
+            "pullRequest",
+            "commits",
+            "nodes",
+            0,
+            "commit",
+            "statusCheckRollup",
+            "contexts",
+          ],
+        };
+        const answer = coreResponse({
+          body: "Keep the full description",
+          additions: 42,
+          labels: { nodes: [{ name: "bug", color: "ff0000" }] },
+          reviewRequests: {
+            nodes: [{ requestedReviewer: { __typename: "User", login: "reviewer", name: null } }],
+          },
+          commits: { nodes: [{ commit: { statusCheckRollup: { state: aggregate } } }] },
+        });
+        mockedExecute.mockReturnValueOnce(
+          Effect.succeed(
+            output(encodeJson({ data: null, errors: [refusal] }), false, false, {}, httpStatus),
+          ),
+        );
+        mockedExecute.mockReturnValueOnce(Effect.succeed(output(encodeJson(answer))));
+        const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+        const detail = yield* cli.getPullRequestDetail(pullRequestInput);
+        expect(detail).toMatchObject({
+          number: 7,
+          title: "Pull request 7",
+          body: "Keep the full description",
+          additions: 42,
+          headSha: "abc123",
+          headBranch: "feature",
+          baseBranch: "main",
+          labels: [{ name: "bug", color: "ff0000" }],
+          reviewRequestLogins: ["reviewer"],
+          comparison: { behindBy: 2 },
+          checksState,
+          checksUnavailable: expect.stringMatching(/\S/),
+          checks: [
+            {
+              name: "Overall check status",
+              status,
+              description: expect.stringMatching(/individual checks.*unavailable/i),
+              url: "https://github.com/acme/web/pull/7/checks",
+            },
+          ],
+        });
+        expect(mockedExecute).toHaveBeenCalledTimes(2);
+        const retry = mockedExecute.mock.calls[1]?.[0];
+        assert.equal(retry?.kind, "graphql");
+        if (retry?.kind === "graphql") {
+          // A skipped field is safe too, but the retry must actually disable detailed contexts.
+          const contexts = /contexts\s*\([^)]*\)\s*(?:@(include|skip)\s*\(if:\s*\$(\w+)\))?/.exec(
+            retry.query,
+          );
+          if (contexts !== null) {
+            expect(contexts[1]).toBeDefined();
+            expect(retry.variables?.[contexts[2]!]).toBe(contexts[1] === "skip");
+          }
+          expect(retry.query).toMatch(/statusCheckRollup\s*\{[^}]*\bstate\b/);
+        }
+        mockedExecute.mockReturnValueOnce(
+          Effect.succeed(
+            output(encodeJson({ data: null, errors: [refusal] }), false, false, {}, httpStatus),
+          ),
+        );
+        mockedExecute.mockReturnValueOnce(Effect.succeed(output(encodeJson(answer))));
+        const provider = yield* GitHubPullRequestProvider.make;
+        const publicDetail = yield* provider.getChangeRequest(pullRequestInput);
+        expect(publicDetail).toMatchObject({
+          checks: detail.checks,
+          checksUnavailable: expect.stringMatching(/\S/),
+          body: detail.body,
+        });
+      }),
+  );
+
+  it.effect.each([false, true])(
+    "recovers a paginated checks refusal and preserves reviewer fallback: %s",
+    (reviewerRefused) =>
+      Effect.gen(function* () {
+        const response = coreResponse({
+          commits: {
+            nodes: [
+              {
+                commit: {
+                  statusCheckRollup: {
+                    state: "FAILURE",
+                    contexts: { nodes: [], pageInfo: { hasNextPage: true } },
+                  },
+                },
+              },
+            ],
+          },
+        });
+        mockedExecute.mockReturnValueOnce(Effect.succeed(output(encodeJson(response))));
+        mockedExecute.mockReturnValueOnce(
+          Effect.succeed(
+            output(
+              encodeJson({
+                data: null,
+                errors: [
+                  {
+                    type: "FORBIDDEN",
+                    message: "Resource not accessible by personal access token",
+                    path: [
+                      "repository",
+                      "pullRequest",
+                      "commits",
+                      "nodes",
+                      0,
+                      "commit",
+                      "statusCheckRollup",
+                      "contexts",
+                    ],
+                  },
+                ],
+              }),
+            ),
+          ),
+        );
+        if (reviewerRefused) mockedExecute.mockReturnValueOnce(refusedReviewerResponse());
+        mockedExecute.mockReturnValueOnce(
+          Effect.succeed(
+            output(
+              encodeJson(
+                coreResponse({
+                  body: "Preserved after pagination refusal",
+                  commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] },
+                }),
+              ),
+            ),
+          ),
+        );
+        const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+        const detail = yield* cli.getPullRequestDetail(pullRequestInput);
+        expect(detail).toMatchObject({
+          body: "Preserved after pagination refusal",
+          checksState: "failing",
+          checksUnavailable: expect.stringMatching(/\S/),
+          checksTruncated: false,
+          checks: [{ name: "Overall check status", status: "failure" }],
+        });
+        expect(
+          variablesOf("PullRequestCore").map((v) => [v["detailedChecks"], v["requestedReviewers"]]),
+        ).toEqual(
+          reviewerRefused
+            ? [
+                [true, 100],
+                [false, 100],
+                [false, 0],
+              ]
+            : [
+                [true, 100],
+                [false, 100],
+              ],
+        );
+        expect(mockedExecute).toHaveBeenCalledTimes(reviewerRefused ? 4 : 3);
+      }),
+  );
+
+  it.effect.each([
+    { name: "generic forbidden", status: 200, message: "Forbidden", type: "FORBIDDEN" },
+    { name: "rate limited", status: 200, message: "API rate limit exceeded", type: "RATE_LIMITED" },
+    { name: "HTTP forbidden", status: 403, message: "Forbidden", type: "FORBIDDEN" },
+    {
+      name: "HTTP rate limited",
+      status: 403,
+      message: "API rate limit exceeded",
+      type: "RATE_LIMITED",
+    },
+    { name: "server failure", status: 500, message: "Internal server error", type: "INTERNAL" },
+  ])("does not degrade unrelated check-context errors: $name", ({ name, status, message, type }) =>
+    Effect.gen(function* () {
+      mockedExecute.mockReturnValue(
+        Effect.succeed(
+          output(
+            encodeJson({
+              data: null,
+              errors: [
+                {
+                  type,
+                  message,
+                  path: [
+                    "repository",
+                    "pullRequest",
+                    "commits",
+                    "nodes",
+                    0,
+                    "commit",
+                    "statusCheckRollup",
+                    "contexts",
+                  ],
+                },
+              ],
+            }),
+            false,
+            false,
+            {},
+            status,
+          ),
+        ),
+      );
+      const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+      const result = yield* Effect.result(
+        cli.getPullRequestDetail({
+          ...pullRequestInput,
+          host: `github.check-${name.replaceAll(" ", "-")}.test`,
+        }),
+      );
+      expect(result._tag).toBe("Failure");
+      expect(mockedExecute).toHaveBeenCalledOnce();
+    }),
+  );
+
+  it.effect("keeps GraphQL network errors as failures rather than unavailable checks", () =>
+    Effect.gen(function* () {
+      mockedTransportFailure.mockReturnValue(true);
+      const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+      const result = yield* Effect.result(
+        cli.getPullRequestDetail({ ...pullRequestInput, host: "github.network-failure.test" }),
+      );
+      expect(result._tag).toBe("Failure");
+      expect(mockedTransportFailure).toHaveBeenCalledOnce();
+      expect(mockedExecute).not.toHaveBeenCalled();
+    }),
+  );
+
+  it.effect(
+    "falls back from conditional REST check-runs PAT refusal to degraded GraphQL detail",
+    () =>
+      Effect.gen(function* () {
+        const sha = "a".repeat(40);
+        mockedExecute.mockImplementation((call) => {
+          if (call.kind === "rest") {
+            if (call.path.endsWith("/pulls/7"))
+              return Effect.succeed(
+                output(encodeJson({ head: { sha, repo: { id: 1 } }, base: { repo: { id: 1 } } })),
+              );
+            expect(call.path).toContain("/check-runs?");
+            return Effect.fail(
+              new GitHubRequestPolicy.GitHubApiResponseError({
+                host: "github.com",
+                operation: "revalidateChecks",
+                status: 403,
+                githubErrors: ["Resource not accessible by personal access token"],
+              }),
+            );
+          }
+          const reads = mockedExecute.mock.calls.filter(([c]) => c.kind === "graphql").length;
+          return Effect.succeed(
+            output(
+              encodeJson(
+                reads === 1
+                  ? {
+                      data: null,
+                      errors: [
+                        {
+                          type: "FORBIDDEN",
+                          message: "Resource not accessible by personal access token",
+                          path: [
+                            "repository",
+                            "pullRequest",
+                            "commits",
+                            "nodes",
+                            0,
+                            "commit",
+                            "statusCheckRollup",
+                            "contexts",
+                          ],
+                        },
+                      ],
+                    }
+                  : coreResponse({
+                      headRefOid: sha,
+                      commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+                    }),
+              ),
+            ),
+          );
+        });
+        const provider = yield* GitHubPullRequestProvider.make;
+        assert.ok(provider.getChangeRequestChecks);
+        const checks = yield* provider.getChangeRequestChecks(pullRequestInput).pipe(
+          Effect.provideService(GitHubRequestPolicy.PinnedGitHubCredential, {
+            host: "github.com",
+            token: Redacted.make("token"),
+            credentialFingerprint: "conditional-pat-refusal",
+          }),
+        );
+        expect(checks.checks).toEqual([
+          {
+            name: "Overall check status",
+            status: "success",
+            description: expect.stringMatching(/individual checks.*unavailable/i),
+            url: "https://github.com/acme/web/pull/7/checks",
+          },
+        ]);
+        expect(mockedExecute.mock.calls.filter(([c]) => c.kind === "rest")).toHaveLength(2);
+        expect(mockedExecute.mock.calls.filter(([c]) => c.kind === "graphql")).toHaveLength(2);
+      }),
+  );
+
   it.effect("decodes reviewers, labels and workflow checks without another detail read", () =>
     Effect.gen(function* () {
       mockedExecute.mockReturnValueOnce(
@@ -3145,6 +3476,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
                     {
                       commit: {
                         statusCheckRollup: {
+                          state: "SUCCESS",
                           contexts: {
                             nodes: [
                               checkRun({
@@ -3211,6 +3543,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
                       {
                         commit: {
                           statusCheckRollup: {
+                            state: "FAILURE",
                             contexts: {
                               nodes: [
                                 checkRun({
@@ -3281,6 +3614,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
               {
                 commit: {
                   statusCheckRollup: {
+                    state: "SUCCESS",
                     contexts: {
                       nodes: [],
                       pageInfo: { hasNextPage: true },

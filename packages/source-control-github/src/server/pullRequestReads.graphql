@@ -59,6 +59,7 @@ query PullRequestCore(
   $headRef: String!
   $required: Boolean!
   $requestedReviewers: Int!
+  $detailedChecks: Boolean!
 ) {
   repository(owner: $owner, name: $name) {
     mergeCommitAllowed
@@ -149,7 +150,8 @@ query PullRequestCore(
         nodes {
           commit {
             statusCheckRollup {
-              contexts(first: 100) {
+              state
+              contexts(first: 100) @include(if: $detailedChecks) {
                 nodes {
                   ...CheckContext
                 }
