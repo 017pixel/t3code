@@ -530,6 +530,47 @@ it.effect("retries a failed settings write without accepting an incomplete proje
   }).pipe(Effect.provide(layerProjectServiceDependencies)),
 );
 
+it.effect("allows settings persistence to wait for an independent SQL reader", () =>
+  Effect.gen(function* () {
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const sql = yield* SqlClient.SqlClient;
+    const settingsWriteStarted = yield* Deferred.make<void>();
+    // Settings reloads SQL while holding its write semaphore. This reader starts outside
+    // the project transaction so it must acquire its own connection.
+    const settingsReader = yield* Deferred.await(settingsWriteStarted).pipe(
+      Effect.andThen(sql`SELECT 1`.pipe(Effect.orDie)),
+      Effect.forkChild({ startImmediately: true }),
+    );
+    const service = yield* ProjectService.make.pipe(
+      Effect.provideService(ServerSettings.ServerSettingsService, {
+        ...settings,
+        getSettings: settings.getSettings.pipe(
+          Effect.map((current) => ({ ...current, projectSettingsFolded: true })),
+        ),
+        updateSettings: (patch) =>
+          Deferred.succeed(settingsWriteStarted, undefined).pipe(
+            Effect.andThen(Fiber.join(settingsReader)),
+            Effect.andThen(settings.updateSettings(patch)),
+          ),
+      }),
+    );
+    const projectId = ProjectId.make("project:settings-sql-lock");
+    yield* service.create({
+      commandId: CommandId.make("command:settings-sql-lock:create"),
+      projectId,
+      title: "Settings SQL lock",
+      workspaceRoot: "/work/settings-sql-lock",
+    });
+    assert.isTrue(
+      (yield* service.update({
+        commandId: CommandId.make("command:settings-sql-lock:update"),
+        projectId,
+        autoPull: true,
+      })).autoPull,
+    );
+  }).pipe(Effect.provide(layerProjectServiceDependencies)),
+);
+
 it.effect("keeps project snapshots available when optional metadata enrichment fails", () =>
   Effect.gen(function* () {
     const layerFailingMetadata = Layer.merge(

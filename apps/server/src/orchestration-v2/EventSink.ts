@@ -12,6 +12,7 @@ import {
   type ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -223,6 +224,7 @@ const layerBase: Layer.Layer<
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const commandReceipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+    const commandLocks = yield* KeyedLock.make<CommandId>();
     const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
     const eventStore = yield* EventStore.EventStoreV2;
     const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
@@ -719,6 +721,16 @@ const layerBase: Layer.Layer<
 
     const commitProjectCommandEffect = Effect.fn("orchestrationV2.EventSink.commitProjectCommand")(
       function* (input: Parameters<EventSinkV2Shape["commitProjectCommand"]>[0]) {
+        const existing = yield* commandReceipts.getProjectByCommandId(input.commandId);
+        if (Option.isSome(existing)) return { receipt: existing.value, committed: false };
+        if (Option.isSome(yield* commandReceipts.getByCommandId(input.commandId))) {
+          return yield* Effect.fail(
+            `Command ${input.commandId} was already used by a thread command.`,
+          );
+        }
+        // Settings takes its own lock before reading SQL. Never hold the SQL writer while
+        // waiting for it. The command lock keeps concurrent collisions from rerunning this write.
+        if (input.beforeCommit !== undefined) yield* input.beforeCommit;
         const result = yield* commitThenPublish(
           Effect.gen(function* () {
             const reserved: CommandReceiptStore.ProjectCommandReceiptV2 = {
@@ -735,9 +747,6 @@ const layerBase: Layer.Layer<
             }
             const event = yield* eventStore.appendProjectEvent(input.event);
             yield* projectStore.apply(event);
-            // A failed settings write must leave no accepted receipt to suppress its retry.
-            // Existing receipts return above, so successful replays never rerun this write.
-            if (input.beforeCommit !== undefined) yield* input.beforeCommit;
             const receipt = { ...reserved, resultSequence: event.sequence };
             yield* commandReceipts.upsert(receipt);
             return { receipt, event };
@@ -903,7 +912,7 @@ const layerBase: Layer.Layer<
           ),
         ),
       commitCommand: (input) =>
-        commitCommandEffect(input).pipe(
+        commandLocks.withLock(input.commandId, commitCommandEffect(input)).pipe(
           Effect.mapError(
             (cause) =>
               new EventSinkWriteError({
@@ -914,7 +923,7 @@ const layerBase: Layer.Layer<
           ),
         ),
       commitRejectedCommand: (input) =>
-        commitRejectedCommandEffect(input).pipe(
+        commandLocks.withLock(input.commandId, commitRejectedCommandEffect(input)).pipe(
           Effect.mapError(
             (cause) =>
               new EventSinkWriteError({
@@ -925,19 +934,23 @@ const layerBase: Layer.Layer<
           ),
         ),
       commitProjectCommand: (input) =>
-        commitProjectCommandEffect(input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({ commandId: input.commandId, eventCount: 1, cause }),
+        commandLocks
+          .withLock(input.commandId, commitProjectCommandEffect(input))
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new EventSinkWriteError({ commandId: input.commandId, eventCount: 1, cause }),
+            ),
           ),
-        ),
       commitRejectedProjectCommand: (input) =>
-        commitRejectedProjectCommandEffect(input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({ commandId: input.commandId, eventCount: 0, cause }),
+        commandLocks
+          .withLock(input.commandId, commitRejectedProjectCommandEffect(input))
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new EventSinkWriteError({ commandId: input.commandId, eventCount: 0, cause }),
+            ),
           ),
-        ),
       stream: (input) =>
         stream(input).pipe(
           Stream.mapError(
