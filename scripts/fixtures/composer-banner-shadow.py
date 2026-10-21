@@ -10,7 +10,7 @@ import sqlite3
 from pathlib import Path
 
 
-database = Path.cwd() / ".t3/userdata/statev2.sqlite"
+database = Path(__file__).resolve().parents[2] / ".t3/userdata/statev2.sqlite"
 if not database.is_file():
     raise SystemExit("Seed this worktree's .t3 with migrate-dev-db first.")
 
@@ -23,6 +23,7 @@ with sqlite3.connect(database) as connection:
         JOIN orchestration_v2_projection_threads t ON t.thread_id = r.thread_id
         WHERE r.status = 'completed' AND p.driver = 'claudeAgent'
           AND t.active_provider_thread_id = p.provider_thread_id
+          AND t.archived_at IS NULL AND t.deleted_at IS NULL
         ORDER BY r.rowid LIMIT 1"""
     ).fetchone()
     if row is None:
