@@ -170,11 +170,20 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
 
 ## Where code lives
 
-- `apps/server` - WebSocket, orchestration, providers, checkpointing. Effect-heavy: read [Effect services](docs/internals/effect-services.md) before adding server code, and `.repos/effect-smol/LLMS.md` for the Effect library itself.
-- `apps/web` - React/Vite UI. `apps/desktop` wraps it, `apps/mobile` is React Native, `apps/marketing` is the site.
-- `packages/contracts` - Effect/Schema contracts plus small derived helpers. No heavy runtime logic.
+Open the named entry points first. Paths are relative to the bullet's package.
+
+- `apps/server` - WebSocket, orchestration, providers, checkpointing. Effect-heavy: read [Effect services](docs/internals/effect-services.md) before adding server code, and `.repos/effect-smol/LLMS.md` for the Effect library itself. Entry points:
+  - `src/ws.ts` (RPC handlers), `src/server.ts` (HTTP routes, layer wiring).
+  - `src/orchestration-v2/`: `EventSink.ts` (commit), `ProjectionStore.ts` (read models), `EffectWorker.ts` (outbox), `ProviderSessionManager.ts`.
+  - `src/orchestration-v2/Adapters/`: `CodexAdapterV2.ts`, `ClaudeAdapterV2.ts`. Other providers live in `packages/provider-*/src/server/adapter.ts`, on the interface in `packages/provider-core/src/server/ProviderAdapter.ts`.
+  - `src/provider/ProviderRegistry.ts` (provider snapshots), `src/auth/RpcAuthorization.ts` (RPC scopes), `src/persistence/Sqlite.ts` and `Migrations/`.
+- `apps/web` - React/Vite UI. Start at `src/components/ChatView.tsx`, `src/components/chat/` (`MessagesTimeline.tsx`, `ChatComposer.tsx`), `src/components/settings/SettingsPanels.tsx`, and `src/routes/`.
+- `apps/desktop` - Electron shell around web. Start at `src/main.ts` and `src/backend/DesktopBackendManager.ts` (bundled server).
+- `apps/mobile` - React Native. Threads are in `src/features/threads/` (`ThreadRouteScreen.tsx`, `ThreadFeed.tsx`). `apps/marketing` is the site.
+- `packages/contracts` - Effect/Schema contracts plus small derived helpers. No heavy runtime logic. Start at `src/orchestrationV2.ts` (domain), `src/rpc.ts` (`WS_METHODS`), `src/settings.ts`.
 - `packages/shared` - shared runtime utils, subpath exports, no barrel.
-- `packages/client-runtime` - client code shared by web and mobile.
+- `packages/client-runtime` - client code shared by web and mobile. Start at `src/state/threads.ts`, `src/state/orchestrationV2Projection.ts` (applies events), `src/connection/supervisor.ts`.
+- Scripts: [Verifying](#verifying) lists the commands you need. Read a `package.json` only for others.
 - `.repos/` - vendored read-only references. Prefer their patterns over invented ones. Never edit or import from them. Sync with `vpr sync:repos` when bumping the matching dependency.
 
 ## Taste
