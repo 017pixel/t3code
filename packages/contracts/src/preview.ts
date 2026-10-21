@@ -367,7 +367,7 @@ export class PreviewInvalidUrlError extends Schema.TaggedError<PreviewInvalidUrl
 ) {
   override get message() {
     const protocol = this.protocol === undefined ? "" : `: ${this.protocol}`;
-    return `Invalid preview URL (${this.reason}${protocol}; input length ${this.inputLength}).`;
+    return `Invalid preview URL (${this.reason}${protocol}; input length ${this.inputLength}). Use an absolute http(s) URL or a schemeless host such as t3.chat or localhost:5173.`;
   }
 }
 

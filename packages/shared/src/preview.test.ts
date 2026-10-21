@@ -149,6 +149,12 @@ describe("resolveSearchUrlTemplate", () => {
 });
 
 describe("normalizePreviewUrl", () => {
+  it("says which URL forms are accepted", () => {
+    expect(() => normalizePreviewUrl("about:blank")).toThrow(
+      "Use an absolute http(s) URL or a schemeless host such as t3.chat or localhost:5173.",
+    );
+  });
+
   it("rejects unparseable input without retaining credentials or tokens", () => {
     const rawUrl = "https://user:password@example.com:bad/path?access_token=secret#fragment";
     try {

@@ -17,6 +17,9 @@ const BoundedUrl = Schema.String.check(Schema.isTrimmed())
   .check(Schema.isMaxLength(2048));
 const URL_GUIDANCE =
   "Absolute http(s) URL or a schemeless host such as t3.chat or localhost:5173. Schemeless public hosts use https; loopback hosts use http.";
+// Playwright reports both bad syntax and strict-mode ambiguity as invalid selectors.
+const SELECTOR_GUIDANCE =
+  "Use locator='aria-ref=<ref>' from the latest snapshot, or a valid Playwright role, text, or CSS selector that matches exactly one element.";
 const PROFILE_GUIDANCE =
   "Browser profile for a new tab, by id or name (case-insensitive) from preview_status profiles. Omit to use the user's default profile. A tab keeps the profile it opened with.";
 const OptionalTimeoutMs = Schema.optional(
@@ -1020,9 +1023,9 @@ export class PreviewAutomationInvalidSelectorError extends Schema.TaggedError<Pr
     if (this.staleRef)
       return "This element ref is stale. Navigation, dialogs, and new snapshots replace refs; take a fresh snapshot and use its refs.";
     if (this.selectorKind !== undefined && this.selectorLength !== undefined) {
-      return `Preview automation ${this.operation} received an invalid ${this.selectorKind} (${this.selectorLength} characters).`;
+      return `Preview automation ${this.operation} received an invalid ${this.selectorKind} (${this.selectorLength} characters). ${SELECTOR_GUIDANCE}`;
     }
-    return `Preview automation ${this.operation} received an invalid selector.`;
+    return `Preview automation ${this.operation} received an invalid selector. ${SELECTOR_GUIDANCE}`;
   }
 }
 
