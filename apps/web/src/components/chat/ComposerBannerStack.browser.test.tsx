@@ -84,15 +84,23 @@ it("keeps only the usage limit attached while an active goal waits in the collap
     "Usage limit reached",
   );
 
-  await act(async () => page.getByRole("button", { name: "Show other notices" }).click());
+  const peek = page.getByRole("button", { name: "Show other notices" });
+  // Hover opens the stack and hides the peek before a pointer click can finish.
+  await act(() => peek.element().focus());
+  await userEvent.keyboard("{Enter}");
   await expect.element(goal).toBeVisible();
   await expect.element(limit).toBeVisible();
   await expect.poll(visibleBanners).toHaveLength(2);
 
-  await act(async () => userEvent.keyboard("{Escape}"));
+  await userEvent.keyboard("{Escape}");
   await expect.element(goal).not.toBeVisible();
   await expect.element(limit).toBeVisible();
   expect(visibleBanners()).toHaveLength(1);
+
+  await userEvent.hover(peek);
+  await expect.element(goal).toBeVisible();
+  await expect.element(limit).toBeVisible();
+  await expect.poll(visibleBanners).toHaveLength(2);
 });
 
 it("reveals the full running command only while its title is clipped", async () => {
