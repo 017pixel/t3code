@@ -154,3 +154,16 @@ export async function trace(environmentId) {
   );
   return { rows, stop };
 }
+
+export async function reset(environmentId) {
+  const { appAtomRegistry } = await import("../../src/rpc/atomRegistry.ts");
+  const { environmentCatalog } = await import("../../src/connection/catalog.ts");
+  await environmentCatalog.retryNow.run(appAtomRegistry, environmentId);
+  return waitState(environmentId, "connected");
+}
+
+export const scenarios = {
+  backoff: "http://localhost:14275/fail",
+  heldAttempt: "http://localhost:14275/hold",
+  recover: "http://localhost:14275/pass",
+};
