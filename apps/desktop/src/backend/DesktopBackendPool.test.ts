@@ -170,6 +170,61 @@ describe("DesktopBackendPool", () => {
       ),
   );
 
+  it.effect("unregister during pool quit does not interrupt sibling stops", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const backend = yield* makeFakeBackendProcess(false);
+        yield* Effect.gen(function* () {
+          const pool = yield* DesktopBackendPool.DesktopBackendPool;
+          const id = DesktopBackendPool.BackendInstanceId("wsl:Ubuntu");
+          const ready = yield* Deferred.make<void>();
+          const siblingStarted = yield* Deferred.make<void>();
+          const finishSibling = yield* Deferred.make<void>();
+          let siblingCompleted = false;
+          const instance = yield* pool.register({
+            id,
+            label: Effect.succeed("WSL (Ubuntu)"),
+            configResolve: Effect.succeed(runningConfig),
+            onReady: () => Deferred.succeed(ready, undefined).pipe(Effect.asVoid),
+          });
+          yield* instance.start;
+          yield* backend.started;
+          yield* Deferred.await(ready);
+          const quitFiber = yield* Effect.all(
+            [
+              instance.stop({ timeout: Duration.seconds(5) }),
+              Deferred.succeed(siblingStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(finishSibling)),
+                Effect.andThen(
+                  Effect.sync(() => {
+                    siblingCompleted = true;
+                  }),
+                ),
+              ),
+            ],
+            { concurrency: "unbounded" },
+          ).pipe(Effect.forkChild);
+          yield* Deferred.await(siblingStarted);
+          assert.equal(yield* Queue.take(backend.signals), "SIGTERM");
+          const unregisterFiber = yield* pool.unregister(id).pipe(Effect.forkChild);
+          yield* TestClock.adjust(Duration.seconds(5));
+          assert.equal(yield* Queue.take(backend.signals), "SIGKILL");
+          assert.isUndefined(quitFiber.pollUnsafe());
+          assert.isTrue(yield* backend.isRunning);
+          yield* TestClock.adjust(backend.killWait);
+          yield* Fiber.join(unregisterFiber);
+          yield* Deferred.succeed(finishSibling, undefined);
+          yield* Fiber.join(quitFiber);
+
+          assert.isTrue(siblingCompleted);
+          assert.isFalse(yield* backend.isRunning);
+          assert.isTrue(Option.isNone((yield* instance.snapshot).activePid));
+          assert.isTrue(Option.isNone(yield* pool.get(id)));
+        }).pipe(Effect.provide(layerPool(Ref.makeUnsafe("Windows"), backend)));
+      }),
+    ),
+  );
+
   it.effect("closing the pool scope stops a registered backend without explicit unregister", () =>
     Effect.gen(function* () {
       const backend = yield* makeFakeBackendProcess(true);

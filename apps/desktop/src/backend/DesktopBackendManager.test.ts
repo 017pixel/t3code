@@ -374,7 +374,7 @@ describe("DesktopBackendManager", () => {
     ),
   );
 
-  it.effect("starts the configured backend and closes the scoped process on stop", () =>
+  it.effect("stops the scoped process with output still pending", () =>
     Effect.scoped(
       Effect.gen(function* () {
         let startCount = 0;
@@ -411,6 +411,7 @@ describe("DesktopBackendManager", () => {
               yield* Scope.addFinalizer(scope, close);
 
               return makeProcess({
+                stdout: Stream.never,
                 exitCode: Deferred.await(closed).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
                 kill: () => close,
               });

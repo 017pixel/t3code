@@ -321,8 +321,9 @@ const closeRun = (
               })
             : Effect.void,
         ),
-        // Scoped release owns process-group escalation. Never abandon its exit acknowledgement.
-        Effect.andThen(Fiber.join(closeFiber)),
+        // Parent-scope interruption still finishes release; do not cancel sibling stops.
+        Effect.andThen(Fiber.await(closeFiber)),
+        Effect.asVoid,
       ),
     ),
   );
