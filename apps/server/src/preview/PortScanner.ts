@@ -520,8 +520,8 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   const agentThreadsRef = yield* Ref.make<ReadonlyMap<number, ThreadId | null>>(new Map());
   let runningAgents = 0;
   // An agent that exited, or a cache cleared with a marked listener, owes one listener read: the
-  // servers it left may still run.
-  let agentScanPending = false;
+  // servers it left may still run. So does startup, for agents that ran before a restart.
+  let agentScanPending = true;
 
   const readAgentThreads = Effect.fn("PortDiscovery.readAgentThreads")(function* (
     pids: ReadonlyArray<number>,

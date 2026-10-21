@@ -520,7 +520,7 @@ effectIt.effect.each(["linux", "darwin"] as const)(
     const otherPort = 43_125;
     const agentListener = `p4242\ncnode\nn127.0.0.1:${agentPort}\n`;
     const otherListener = `p5000\ncpostgres\nn127.0.0.1:${otherPort}\n`;
-    let lsofStdout = `${agentListener}${otherListener}`;
+    let lsofStdout = otherListener;
     let lsofFails = false;
     let lsofCalls = 0;
     let environmentReads = 0;
@@ -586,11 +586,14 @@ effectIt.effect.each(["linux", "darwin"] as const)(
 
     return Effect.gen(function* () {
       const scanner = yield* PortScanner.PortDiscovery;
+      // Startup reads listeners once. With none marked, later scans stay idle.
       expect(yield* scanner.scan()).toEqual([]);
-      expect(lsofCalls).toBe(0);
+      expect(yield* scanner.scan()).toEqual([]);
+      expect(lsofCalls).toBe(1);
 
       // The agent exits before any client looks, and the first read fails; its server is still
       // found.
+      lsofStdout = `${agentListener}${otherListener}`;
       scanner.trackAgent()();
       lsofFails = true;
       expect(yield* scanner.scan()).toEqual([]);
@@ -601,12 +604,12 @@ effectIt.effect.each(["linux", "darwin"] as const)(
       expect(requests).toEqual([`http://localhost:${agentPort}/`]);
 
       expect(yield* scanner.scan()).toHaveLength(1);
-      expect(environmentReads).toBe(platform === "linux" ? 2 : 1);
+      expect(environmentReads).toBe(2);
 
       // Stop reads its target's environment again rather than trust the cache, and still finds it.
       const stop = yield* Effect.flip(scanner.stopServer({ pid: 4242, port: agentPort }));
       expect(stop.reason).toBe("shared-group");
-      expect(environmentReads).toBe(platform === "linux" ? 3 : 2);
+      expect(environmentReads).toBe(3);
 
       lsofStdout = otherListener;
       expect(yield* scanner.scan()).toEqual([]);
@@ -616,6 +619,51 @@ effectIt.effect.each(["linux", "darwin"] as const)(
     }).pipe(Effect.provide(layer));
   },
 );
+
+effectIt.effect("finds a server an agent left before a restart on the first scan", () => {
+  const port = 43_127;
+  let lsofStdout = `p4242\ncnode\nn127.0.0.1:${port}\n`;
+  let lsofCalls = 0;
+  const missing = FileSystem.makeNoop({});
+  const layer = PortScanner.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        FileSystem.layerNoop({
+          readFileString: (path) =>
+            path === "/proc/4242/environ"
+              ? Effect.succeed(`${PortScanner.AGENT_THREAD_ENV}=thread-agent\0`)
+              : missing.readFileString(path),
+        }),
+        Layer.succeed(ProcessRunner.ProcessRunner, {
+          run: () => {
+            lsofCalls += 1;
+            return Effect.succeed(processOutput(lsofStdout));
+          },
+        }),
+        Layer.succeed(HostProcess.Platform, "linux"),
+        FetchHttpClient.layer.pipe(
+          Layer.provide(
+            Layer.succeed(FetchHttpClient.Fetch, () =>
+              Promise.resolve(new Response("app", { headers: { "content-type": "text/html" } })),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    // No agent has run and no terminal is open since this server started.
+    expect(yield* scanner.scan()).toMatchObject([
+      { port, pid: 4242, terminal: null, agent: { threadId: "thread-agent" } },
+    ]);
+    lsofStdout = "";
+    expect(yield* scanner.scan()).toEqual([]);
+    const lsofCallsAfterExit = lsofCalls;
+    expect(yield* scanner.scan()).toEqual([]);
+    expect(lsofCalls).toBe(lsofCallsAfterExit);
+  }).pipe(Effect.provide(layer));
+});
 
 effectIt.effect("forgets agent pids while no client scans, since they can be reused", () => {
   const port = 43_126;
