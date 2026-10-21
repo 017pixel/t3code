@@ -404,8 +404,9 @@ function nextRunOrdinal(projection: Pick<OrchestrationV2ThreadProjection, "runs"
 /**
  * Stamp it when the wake run starts, not when it queues: a queued prompt ahead
  * of it has no start yet, and delegated results jump the queue. Agent messages
- * queued behind active work continue it even from unrelated coordinators; only
- * delegated children can continue completed work with an immediate send.
+ * automatically drained after active work continue it even from unrelated
+ * coordinators. Explicit queue starts reset it; immediate child updates retain
+ * the same historical-child semantics as delegated completion delivery.
  */
 function wakeWorkStartedAt(
   projection: Pick<OrchestrationV2ThreadProjection, "runs" | "subagents">,
@@ -417,7 +418,7 @@ function wakeWorkStartedAt(
     readonly delegatedCompletion?: unknown;
     readonly restartContinuationOfRunId?: RunId | undefined;
   },
-  fromQueue = false,
+  delivery: "immediate" | "automatic-queue" | "explicit-queue" = "immediate",
 ): Pick<OrchestrationV2Run, "workStartedAt"> {
   if (
     trigger.notification === undefined &&
@@ -427,11 +428,12 @@ function wakeWorkStartedAt(
       trigger.createdBy === "agent" &&
       trigger.creationSource === "mcp" &&
       trigger.senderThreadId !== undefined &&
-      (fromQueue ||
-        projection.subagents.some(
-          (subagent) =>
-            subagent.origin === "app_owned" && subagent.childThreadId === trigger.senderThreadId,
-        ))
+      (delivery === "automatic-queue" ||
+        (delivery === "immediate" &&
+          projection.subagents.some(
+            (subagent) =>
+              subagent.origin === "app_owned" && subagent.childThreadId === trigger.senderThreadId,
+          )))
     )
   ) {
     return {};
@@ -1849,7 +1851,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             delegatedCompletion: queuedMessage.delegatedCompletion,
             restartContinuationOfRunId: queuedRun.restartContinuationOfRunId,
           },
-          true,
+          options?.endedRunId === undefined || queuedRun.queueHeld === true
+            ? "explicit-queue"
+            : "automatic-queue",
         ),
       };
       const userTurnItem: OrchestrationV2TurnItem = {

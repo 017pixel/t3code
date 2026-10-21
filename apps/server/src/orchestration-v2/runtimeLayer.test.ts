@@ -3922,6 +3922,10 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     { origin: "agent" as const, delivery: "queued" as const },
     { origin: "agent" as const, delivery: "after-completion" as const },
     { origin: "agent" as const, delivery: "idle-queue" as const },
+    { origin: "agent" as const, delivery: "held-resume" as const },
+    { origin: "agent" as const, delivery: "held-send-now" as const },
+    { origin: "child" as const, delivery: "held-resume" as const },
+    { origin: "child" as const, delivery: "held-send-now" as const },
     { origin: "child" as const, delivery: "after-completion" as const },
     { origin: "user" as const, delivery: "queued" as const },
     { origin: "user" as const, delivery: "after-completion" as const },
@@ -3975,7 +3979,8 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
             type: delivery === "after-completion" ? "start_immediately" : "queue_after_active",
           },
         });
-        if (delivery === "queued") yield* dispatchFollowUp;
+        const held = delivery === "held-resume" || delivery === "held-send-now";
+        if (delivery === "queued" || held) yield* dispatchFollowUp;
         const startedRunIds = yield* Queue.unbounded<RunId>();
         const afterSequence = yield* orchestrator.getThreadEventSequence(threadId);
         yield* eventSink.stream({ threadId, afterSequence }).pipe(
@@ -4026,6 +4031,23 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
             ],
           });
         }
+        if (held) {
+          const queued = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+            (run) => run.userMessageId === followUpMessageId,
+          );
+          assert.isDefined(queued);
+          yield* eventSink.write({
+            events: [
+              {
+                id: EventId.make(`${threadId}-hold`),
+                type: "run.updated",
+                threadId,
+                occurredAt: original.requestedAt,
+                payload: { ...queued, queueHeld: true },
+              },
+            ],
+          });
+        }
         const originalStart = DateTime.makeUnsafe("2026-10-21T14:20:17.457Z");
         const completedAt = DateTime.makeUnsafe("2026-10-21T14:23:53.509Z");
         yield* eventSink.write({
@@ -4038,18 +4060,38 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
               ...(original.rootNodeId === null ? {} : { nodeId: original.rootNodeId }),
               providerInstanceId: original.providerInstanceId,
               occurredAt: completedAt,
-              payload: { ...original, status: "completed", startedAt: originalStart, completedAt },
+              payload: {
+                ...original,
+                status: held ? "interrupted" : "completed",
+                startedAt: originalStart,
+                completedAt,
+              },
             },
           ],
         });
-        if (delivery !== "queued") yield* dispatchFollowUp;
+        if (held) {
+          yield* TestClock.adjust("3 hours");
+          const queued = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+            (run) => run.userMessageId === followUpMessageId,
+          );
+          assert.isDefined(queued);
+          assert.equal(queued.status, "queued");
+          yield* orchestrator.dispatch({
+            ...(delivery === "held-resume"
+              ? { type: "queue.resume" as const }
+              : { type: "queued-run.start" as const, runId: queued.id }),
+            commandId: CommandId.make(`${threadId}-resume`),
+            threadId,
+          });
+        } else if (delivery !== "queued") yield* dispatchFollowUp;
         const startedRunId = delivery === "queued" ? yield* Queue.take(startedRunIds) : null;
         const followUp = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
           (run) => run.userMessageId === followUpMessageId,
         );
         assert.isDefined(followUp);
         if (delivery === "queued") assert.equal(startedRunId, followUp.id);
-        if (origin === "child" || (origin === "agent" && delivery === "queued")) {
+        assert.equal(followUp.status, "starting");
+        if ((origin === "child" && !held) || (origin === "agent" && delivery === "queued")) {
           assert.isDefined(followUp.workStartedAt);
           assert.equal(
             DateTime.toEpochMillis(followUp.workStartedAt),
@@ -4057,10 +4099,6 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           );
         } else {
           assert.isUndefined(followUp.workStartedAt);
-          assert.notEqual(
-            DateTime.toEpochMillis(followUp.startedAt ?? followUp.requestedAt),
-            DateTime.toEpochMillis(originalStart),
-          );
         }
       }),
   );
