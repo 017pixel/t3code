@@ -10,6 +10,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -2140,6 +2141,97 @@ it.layer(
   });
 
   describe("checkClaudeProviderStatus", () => {
+    it.effect.each([
+      {
+        name: "native binary installation error",
+        stderr:
+          "  Error: claude native binary not installed.  \nRun claude install to repair it.\n",
+        firstLine: "Error: claude native binary not installed.",
+      },
+      {
+        name: "oversized first line",
+        stderr: `  Error: claude native binary not installed. ${"x".repeat(10_000)}  \nsecond line`,
+        firstLine: undefined,
+      },
+    ])("includes a trimmed, capped version failure detail: $name", ({ stderr, firstLine }) =>
+      Effect.gen(function* () {
+        const status = yield* checkClaudeProviderStatus(
+          defaultClaudeSettings,
+          claudeCapabilities(),
+        );
+        assert.strictEqual(status.status, "error");
+        assert.strictEqual(status.auth.status, "unknown");
+        assert.isTrue(status.installed);
+        assert.exists(status.message);
+        const message = status.message!;
+        assert.include(message, "Error: claude native binary not installed.");
+        assert.notInclude(message, "  Error:");
+        assert.notInclude(message, "\n");
+        assert.notInclude(message, "Run claude install");
+        assert.notInclude(message, "second line");
+        if (firstLine) {
+          assert.isTrue(message.endsWith(firstLine));
+        } else {
+          assert.isBelow(message.length, 1_024);
+        }
+      }).pipe(
+        Effect.provide(
+          layerMockSpawner((args) => {
+            assert.deepStrictEqual(args, ["--version"]);
+            return { stdout: "", stderr, code: 1 };
+          }),
+        ),
+      ),
+    );
+
+    it.effect("logs the stderr excerpt when the Claude version command exits non-zero", () => {
+      const messages: Array<unknown> = [];
+      const logCapture = Logger.make<unknown, void>(({ message }) => {
+        messages.push(message);
+      });
+      const stderr =
+        "Error: claude native binary not installed.\nRun claude install to repair it.\n";
+      return Effect.gen(function* () {
+        yield* checkClaudeProviderStatus(defaultClaudeSettings, claudeCapabilities());
+        const versionWarning = messages.find((message) =>
+          JSON.stringify(message).includes(
+            "Claude Agent CLI version probe exited with a non-zero status.",
+          ),
+        );
+        assert.exists(versionWarning);
+        assert.include(
+          JSON.stringify(versionWarning),
+          "Error: claude native binary not installed.",
+        );
+      }).pipe(
+        Effect.provide([
+          Logger.layer([logCapture], { mergeWithExisting: false }),
+          layerMockSpawner((args) => {
+            assert.deepStrictEqual(args, ["--version"]);
+            return { stdout: "", stderr, code: 1 };
+          }),
+        ]),
+      );
+    });
+
+    it.effect("keeps the generic version failure message when stderr is empty", () =>
+      Effect.gen(function* () {
+        const status = yield* checkClaudeProviderStatus(
+          defaultClaudeSettings,
+          claudeCapabilities(),
+        );
+        assert.strictEqual(status.status, "error");
+        assert.strictEqual(status.message, "Claude Agent CLI is installed but failed to run.");
+      }).pipe(
+        Effect.provide(
+          layerMockSpawner((args) => {
+            assert.deepStrictEqual(args, ["--version"]);
+            return { stdout: "", stderr: "", code: 1 };
+          }),
+        ),
+      ),
+    );
+
     it.effect("reports a logged-out CLI as unauthenticated", () =>
       Effect.gen(function* () {
         // The capability probe resolves for a logged-out CLI, so `tokenSource:
