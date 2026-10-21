@@ -10,6 +10,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http";
 
@@ -52,9 +53,18 @@ const ClaudeWindow = Schema.Struct({
   utilization: Schema.Number,
   resets_at: Schema.NullOr(Schema.String),
 });
+// Spend data is optional extra detail, so a malformed budget drops the spend row, not the account.
+const ClaudeExtraUsage = Schema.Struct({
+  is_enabled: Schema.Boolean,
+  monthly_limit: Schema.NullOr(Schema.Number),
+  used_credits: Schema.NullOr(Schema.Number),
+  utilization: Schema.NullOr(Schema.Number),
+});
 const ClaudeUsage = Schema.Struct({
   five_hour: Schema.optional(Schema.NullOr(ClaudeWindow)),
   seven_day: Schema.optional(Schema.NullOr(ClaudeWindow)),
+  spend: Schema.optional(Schema.Unknown),
+  extra_usage: Schema.optional(Schema.Unknown),
   limits: Schema.optional(
     Schema.Array(
       Schema.Struct({
@@ -88,6 +98,7 @@ const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeApiResponse = Schema.decodeUnknownEffect(ApiResponse);
 const decodeCreditList = Schema.decodeUnknownEffect(Schema.fromJsonString(CreditList));
 const decodeClaudeUsage = Schema.decodeUnknownEffect(Schema.fromJsonString(ClaudeUsage));
+const decodeClaudeExtraUsage = Schema.decodeUnknownOption(ClaudeExtraUsage);
 const decodeCodexUsage = Schema.decodeUnknownEffect(Schema.fromJsonString(CodexUsage));
 const isUsageLimitSourceError = Schema.is(UsageLimitSourceError);
 
@@ -276,19 +287,20 @@ export const makeCliproxyApi = Effect.gen(function* () {
               ]
             : [],
         );
+        // `spend` is untyped in the SDK; claudeUsageResponseToLimits validates it structurally.
+        const rate_limits = {
+          five_hour: usage.five_hour ?? null,
+          seven_day: usage.seven_day ?? null,
+          model_scoped,
+          spend: usage.spend,
+          extra_usage: Option.getOrNull(decodeClaudeExtraUsage(usage.extra_usage)),
+        };
         return {
           ...base,
           plan: "Claude Subscription",
           usageLimits: claudeUsageResponseToLimits({
             checkedAt,
-            response: {
-              rate_limits_available: true,
-              rate_limits: {
-                five_hour: usage.five_hour ?? null,
-                seven_day: usage.seven_day ?? null,
-                model_scoped,
-              },
-            },
+            response: { rate_limits_available: true, rate_limits },
           }).limits,
         };
       }
