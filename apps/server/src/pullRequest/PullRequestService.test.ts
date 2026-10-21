@@ -2157,11 +2157,16 @@ it.effect("coalesces turn refreshes for 30 seconds, then refreshes once the wind
     yield* service.refreshAfterTurn("p1" as ProjectId);
     yield* TestClock.adjust("10 seconds");
     // Cached until t=40, so only the trailing refresh can make the t=30 read fresh.
-    yield* service.list({ state: "open" });
-    yield* service.refreshAfterTurn("p2" as ProjectId);
+    // `projectIds` is the global page split across environments, so it waits too.
+    const readGlobal = Effect.all([
+      service.list({ state: "open" }),
+      service.list({ state: "open", projectIds: ["p1" as ProjectId] }),
+    ]);
+    yield* readGlobal;
+    yield* service.refreshAfterTurn("p1" as ProjectId);
     yield* service.refreshAfterTurn("p3" as ProjectId);
-    yield* service.list({ state: "open" });
-    assert.strictEqual(hostCalls, 1);
+    yield* readGlobal;
+    assert.strictEqual(hostCalls, 2);
 
     const trailing = yield* service.subscribeRefreshes.pipe(
       Stream.drop(1),
@@ -2170,8 +2175,8 @@ it.effect("coalesces turn refreshes for 30 seconds, then refreshes once the wind
     );
     yield* TestClock.adjust("20 seconds");
     yield* Fiber.join(trailing);
-    yield* service.list({ state: "open" });
-    assert.strictEqual(hostCalls, 2);
+    yield* readGlobal;
+    assert.strictEqual(hostCalls, 4);
   }),
 );
 

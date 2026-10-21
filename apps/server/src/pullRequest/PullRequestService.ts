@@ -2777,13 +2777,12 @@ export const make = Effect.gen(function* () {
   );
   const list: PullRequestService["Service"]["list"] = (input) =>
     Effect.suspend(() => {
-      // Project-filtered lists refresh immediately for their own turns.
-      const projectIds =
-        input.projectId !== undefined ? [input.projectId] : (input.projectIds ?? []);
-      const epoch = projectIds.reduce(
-        (epoch, projectId) => Math.max(epoch, projectEpochs.get(projectId) ?? projectEpochFloor),
-        listingsEpoch,
-      );
+      // A project's own list refreshes immediately for its turns. `projectIds` only splits the
+      // global page across environments, so it waits on the global epoch like that page does.
+      const epoch =
+        input.projectId === undefined
+          ? listingsEpoch
+          : Math.max(listingsEpoch, projectEpochs.get(input.projectId) ?? projectEpochFloor);
       const key = encodeListKey([
         epoch,
         input.state,
