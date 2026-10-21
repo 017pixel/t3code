@@ -15,6 +15,7 @@ import {
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
+  ServerSettingsWire,
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
@@ -24,6 +25,8 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodeServerSettingsPatch = Schema.encodeSync(ServerSettingsPatch);
+const decodeServerSettingsWire = Schema.decodeUnknownSync(ServerSettingsWire);
+const encodeServerSettingsWire = Schema.encodeSync(ServerSettingsWire);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 
 describe("storage cleanup settings", () => {
@@ -170,16 +173,25 @@ describe("resolveIdleCompaction", () => {
   it.each(["onReturn", "beforeCacheExpires", "off"] as const)(
     "sends %s in a shape older clients decode and newer ones restore",
     (mode) => {
-      const encoded = encodeServerSettings(
-        decodeServerSettings({ compactIdleThreads: mode }),
-      ) as Record<string, unknown>;
+      const encoded = encodeServerSettingsWire(decodeServerSettings({ compactIdleThreads: mode }));
 
       expect(decodeLegacyClientSettings(encoded).compactIdleThreads).toBe(
         mode === "beforeCacheExpires",
       );
-      expect(decodeServerSettings(encoded).compactIdleThreads).toBe(mode);
+      expect(decodeServerSettingsWire(encoded).compactIdleThreads).toBe(mode);
     },
   );
+
+  it("reads compactIdleThreads from servers that send only the boolean or the mode", () => {
+    expect(decodeServerSettingsWire({ compactIdleThreads: true }).compactIdleThreads).toBe(
+      "beforeCacheExpires",
+    );
+    expect(decodeServerSettingsWire({ compactIdleThreads: false }).compactIdleThreads).toBe(
+      "onReturn",
+    );
+    expect(decodeServerSettingsWire({ compactIdleThreads: "off" }).compactIdleThreads).toBe("off");
+    expect(decodeServerSettingsWire({}).compactIdleThreads).toBe("onReturn");
+  });
 
   it("accepts the legacy switch in settings patches and round-trips every mode", () => {
     expect(decodeServerSettingsPatch({ compactIdleThreads: true }).compactIdleThreads).toBe(
