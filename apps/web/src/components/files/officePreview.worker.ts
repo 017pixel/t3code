@@ -342,6 +342,11 @@ const WORD_BINARY_PARTS = new Set([
   "vbaProject",
   "origin",
   "certificate",
+  // Package metadata can point to binary payloads; explicit XML still wins below.
+  "core-properties",
+  "extended-properties",
+  "custom-properties",
+  "signature",
 ]);
 
 function wordPartTypes() {

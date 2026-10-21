@@ -231,6 +231,7 @@ it.each([
   "independent styles",
   "inherited styles",
   "python-docx package",
+  "binary package properties",
 ])(
   "retains Word %s without a limit warning",
   async (scenario) => {
@@ -243,7 +244,7 @@ it.each([
       "_rels/.rels",
       `<Relationships><Relationship Id="doc" Type="${r}/officeDocument" Target="word/document.xml"/></Relationships>`,
     );
-    if (scenario === "python-docx package") {
+    if (scenario === "python-docx package" || scenario === "binary package properties") {
       const packageRelationships = "http://schemas.openxmlformats.org/package/2006/relationships";
       archive.file(
         "_rels/.rels",
@@ -260,6 +261,20 @@ it.each([
       archive.file("_xmlsignatures/origin.sigs", new Uint8Array());
       for (const part of ["core", "app", "custom"])
         archive.file(`docProps/${part}.xml`, '<properties xmlns="urn:properties"/>');
+      if (scenario === "binary package properties") {
+        const roles = [
+          `${packageRelationships}/metadata/core-properties`,
+          `${r}/extended-properties`,
+          `${packageRelationships}/metadata/custom-properties`,
+          `${packageRelationships}/digital-signature/signature`,
+        ];
+        archive.file(
+          "_rels/.rels",
+          `<Relationships><Relationship Id="doc" Type="${r}/officeDocument" Target="word/document.xml"/>${roles.map((role, i) => `<Relationship Id="metadata${i}" Type="${role}" Target="docProps/metadata${i}.dat"/>`).join("")}</Relationships>`,
+        );
+        for (const i of roles.keys())
+          archive.file(`docProps/metadata${i}.dat`, new Uint8Array([255, 216, 255, 0]));
+      }
     }
     const ordinary = scenario === "ordinary parts";
     archive.file(
