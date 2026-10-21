@@ -56,6 +56,7 @@ function ThreadDetailsPrLinkRow({
       openAriaLabel={link.url}
       onOpen={onOpen}
       onStopWatching={onStopWatching}
+      failingOnBase={link.watch?.failingOnBase}
       {...(onActed ? { onActed } : {})}
     />
   );
@@ -89,7 +90,13 @@ export function ThreadDetailsPrRows({
               watching: false,
             },
           });
-  const currentRow = <ThreadDetailsPrRow {...row} onStopWatching={stopWatching(currentLink)} />;
+  const currentRow = (
+    <ThreadDetailsPrRow
+      {...row}
+      onStopWatching={stopWatching(currentLink)}
+      failingOnBase={currentLink?.watch?.failingOnBase}
+    />
+  );
   const rest =
     currentLink === null
       ? []

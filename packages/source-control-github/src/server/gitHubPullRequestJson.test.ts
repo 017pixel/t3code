@@ -6,6 +6,7 @@ import {
   buildReviewSubmission,
   buildReviewerRequest,
   pullRequestLookup,
+  toBranchChecks,
   toPullRequestWatchFingerprint,
   decodePullRequestDetailJson,
   decodePullRequestFilesJson,
@@ -25,6 +26,7 @@ import {
 } from "./gitHubPullRequestJson.ts";
 import { PullRequestWatchFingerprint } from "./pullRequestBatches.graphql.ts";
 import {
+  BranchCheckHistory,
   LabelCandidates,
   PullRequestActivity,
   PullRequestCore,
@@ -1668,5 +1670,43 @@ describe("pull request watch fingerprints", () => {
     expect(summaryEdited.remarks).not.toBe(before.remarks);
     expect(summaryEdited.status).toBe(before.status);
     expect(replied.remarks).not.toBe(before.remarks);
+  });
+});
+
+describe("branch check history", () => {
+  it("takes each check's newest finished run, past commits CI did not run on", () => {
+    const run = (name: string, status: string, conclusion: string | null) => ({
+      __typename: "CheckRun",
+      name,
+      status,
+      conclusion,
+    });
+    const commit = (contexts: ReadonlyArray<unknown> | null) => ({
+      statusCheckRollup: contexts === null ? null : { contexts: { nodes: contexts } },
+    });
+    const result = Schema.decodeUnknownSync(BranchCheckHistory.result)({
+      repository: {
+        ref: {
+          target: {
+            __typename: "Commit",
+            history: {
+              nodes: [
+                commit([run("lint", "IN_PROGRESS", null), run("test", "COMPLETED", "SUCCESS")]),
+                commit(null),
+                commit([
+                  run("lint", "COMPLETED", "FAILURE"),
+                  run("test", "COMPLETED", "FAILURE"),
+                  run("deploy", "COMPLETED", "CANCELLED"),
+                ]),
+              ],
+            },
+          },
+        },
+      },
+    });
+    expect(toBranchChecks(result)).toEqual({ failing: ["lint"], passing: ["test"] });
+    expect(
+      toBranchChecks(Schema.decodeUnknownSync(BranchCheckHistory.result)({ repository: null })),
+    ).toBeNull();
   });
 });

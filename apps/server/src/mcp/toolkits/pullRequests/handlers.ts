@@ -135,6 +135,7 @@ function entryOf(
     url: link.url,
     source: link.source,
     watching: link.watch !== undefined,
+    failingOnBase: link.watch?.failingOnBase ?? [],
     state: link.snapshot?.state ?? null,
     title: link.snapshot?.title ?? null,
     headBranch: link.snapshot?.headBranch ?? null,
@@ -296,6 +297,7 @@ const make = Effect.gen(function* () {
       url: target.url,
       watching: watchedLink(after)?.watch !== undefined,
       wasWatching: before?.watch !== undefined,
+      failingOnBase: watchedLink(after)?.watch?.failingOnBase ?? [],
     };
   });
 

@@ -559,3 +559,37 @@ query PullRequestSourceBranch($repositoryId: ID!, $ref: String!) {
     }
   }
 }
+
+# The checks of a branch's newest commits, newest first, so a check still running on the head is
+# answered by the last commit that finished it. CI often runs only on the tip of each push, so
+# this reads past the commits a push brings. A watch compares a pull request's failed checks with
+# these, so failures its base branch already has do not wake its agent.
+query BranchCheckHistory($owner: String!, $name: String!, $ref: String!) {
+  repository(owner: $owner, name: $name) {
+    ref(qualifiedName: $ref) {
+      target {
+        ... on Commit {
+          history(first: 20) {
+            nodes {
+              statusCheckRollup {
+                contexts(first: 100) {
+                  nodes {
+                    ... on StatusContext {
+                      context
+                      state
+                    }
+                    ... on CheckRun {
+                      name
+                      status
+                      conclusion
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

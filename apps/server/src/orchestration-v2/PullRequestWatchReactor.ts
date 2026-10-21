@@ -34,7 +34,11 @@ import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
-import { evaluatePullRequestWatch, pullRequestWatchMessage } from "./pullRequestWatch.ts";
+import {
+  evaluatePullRequestWatch,
+  isFailedCheck,
+  pullRequestWatchMessage,
+} from "./pullRequestWatch.ts";
 
 /**
  * Checks take minutes, so a faster pass mostly spends the host's rate limit,
@@ -171,6 +175,7 @@ function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatc
     left.failedChecks.join("\n") === right.failedChecks.join("\n") &&
     left.passed === right.passed &&
     left.passedChecks.join("\n") === right.passedChecks.join("\n") &&
+    left.failingOnBase.join("\n") === right.failingOnBase.join("\n") &&
     left.remarksThrough === right.remarksThrough &&
     left.remarkIds.join("\n") === right.remarkIds.join("\n") &&
     left.conflicting === right.conflicting &&
@@ -524,22 +529,43 @@ export const make = Effect.gen(function* () {
           fingerprint === null ? QUIET_REREAD_MS : FINGERPRINT_REREAD_MS,
         )
       : null;
+    // Only failures are compared with the base branch, so a green pull request costs no read.
+    const base =
+      detail.checks.some(isFailedCheck) ||
+      group.targets.some((target) => target.watch.failingOnBase.length > 0)
+        ? yield* pullRequests.baseChecks({ ...reference, branch: detail.baseBranch }).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.failCause(cause)
+                : Effect.logDebug("pull request watch base checks failed", {
+                    pullRequest: group.key,
+                    cause,
+                  }).pipe(Effect.as(null)),
+            ),
+          )
+        : null;
+    const waitsOnBase =
+      group.targets.some((target) => target.watch.failingOnBase.length > 0) ||
+      detail.checks.some((check) => isFailedCheck(check) && base?.failing.includes(check.name));
     lastReads.set(group.key, {
       at:
         plan.activity || last === undefined
           ? (threadTails.get(group.key)?.fetchedAt ?? now)
           : last.at,
       fingerprint: group.fingerprint,
+      // A failure the base branch shares waits on news a host fingerprint of this pull request
+      // cannot show, so it is read on every pass, like a pending check.
       inFlight:
         detail.mergeability === "unknown" ||
-        detail.checks.some((check) => check.status === "pending"),
+        detail.checks.some((check) => check.status === "pending") ||
+        waitsOnBase,
       remarksComplete: plan.activity ? remarks !== null : (last?.remarksComplete ?? false),
       watches: new Set(group.targets.map(watchKey)),
       status: fingerprint?.status ?? null,
       remarks: fingerprint?.remarks ?? null,
     });
     yield* eachTarget(group, (target) => {
-      const report = evaluatePullRequestWatch(target.watch, detail, remarks);
+      const report = evaluatePullRequestWatch(target.watch, detail, remarks, base);
       if (report.changes.length > 0) {
         const wake = pullRequestWatchMessage({
           number: target.link.number,

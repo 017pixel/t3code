@@ -1,3 +1,4 @@
+import type { ProviderBranchChecks } from "@t3tools/source-control-core/server/PullRequestProvider";
 import type {
   OrchestrationV2Notification,
   PullRequestCheck,
@@ -16,6 +17,8 @@ const SNIPPET_LENGTH = 200;
 
 export type PullRequestWatchChange =
   | { readonly kind: "checks-failed"; readonly failed: ReadonlyArray<PullRequestCheck> }
+  /** Checks that failed on the base branch too, which it passes now while they still fail here. */
+  | { readonly kind: "base-passes"; readonly failed: ReadonlyArray<PullRequestCheck> }
   | { readonly kind: "checks-passed"; readonly count: number; readonly required: boolean }
   | { readonly kind: "remarks"; readonly remarks: ReadonlyArray<PullRequestComment> }
   | { readonly kind: "conflicting" };
@@ -27,13 +30,15 @@ export interface PullRequestWatchReport {
 }
 
 // "action-required" is a finished check that needs someone, so the agent hears about it.
-const isFailedCheck = (check: PullRequestCheck) =>
+export const isFailedCheck = (check: PullRequestCheck) =>
   check.status === "failure" || check.status === "cancelled" || check.status === "action-required";
 
 export function evaluatePullRequestWatch(
   watch: ThreadPullRequestWatch,
   detail: Pick<PullRequestDetail, "headSha" | "checks" | "mergeability" | "viewer" | "author">,
   remarks: ReadonlyArray<PullRequestComment> | null,
+  /** Null where the host cannot read them: every new failure wakes. */
+  base: ProviderBranchChecks | null = null,
 ): PullRequestWatchReport {
   const changes: Array<PullRequestWatchChange> = [];
   const headSha = detail.headSha ?? null;
@@ -43,11 +48,26 @@ export function evaluatePullRequestWatch(
   let failedChecks = headMoved ? [] : watch.failedChecks;
   let passed = headMoved ? false : watch.passed;
   let passedChecks = headMoved ? [] : watch.passedChecks;
+  let failingOnBase = headMoved ? [] : watch.failingOnBase;
   if (detail.checks.length > 0) {
     const failed = detail.checks.filter(isFailedCheck);
-    const newlyFailed = failed.filter((check) => !failedChecks.includes(check.name));
+    // A failure the base branch has too is not this change's to fix, so it waits quietly until
+    // the base branch passes that check. Only a clear answer from the base branch moves it.
+    const quiet = failed.filter((check) =>
+      failingOnBase.includes(check.name)
+        ? !base?.passing.includes(check.name)
+        : !failedChecks.includes(check.name) && base?.failing.includes(check.name) === true,
+    );
+    const newlyFailed = failed.filter(
+      (check) => !failedChecks.includes(check.name) && !quiet.includes(check),
+    );
     if (newlyFailed.length > 0) changes.push({ kind: "checks-failed", failed: newlyFailed });
+    const basePasses = failed.filter(
+      (check) => failingOnBase.includes(check.name) && !quiet.includes(check),
+    );
+    if (basePasses.length > 0) changes.push({ kind: "base-passes", failed: basePasses });
     failedChecks = failed.map((check) => check.name);
+    failingOnBase = quiet.map((check) => check.name);
 
     const required = detail.checks.filter((check) => check.required === true);
     const gate = required.length > 0 ? required : detail.checks;
@@ -102,6 +122,7 @@ export function evaluatePullRequestWatch(
       failedChecks,
       passed,
       passedChecks,
+      failingOnBase,
       remarksThrough,
       remarkIds,
       conflicting,
@@ -153,6 +174,11 @@ function changeLines(
           return `  - ${remark.author?.login ?? "someone"}${where}: ${said}${remark.url ? ` ${remark.url}` : ""}`;
         }),
       ];
+    case "base-passes":
+      return [
+        `- These checks fail here but pass on ${context.baseBranch} now${context.commit}. Update the branch or rerun them:`,
+        ...listed(change.failed, (check) => `  - ${check.name}${check.url ? ` ${check.url}` : ""}`),
+      ];
     case "conflicting":
       return [`- The branch now conflicts with ${context.baseBranch}.`];
   }
@@ -160,6 +186,7 @@ function changeLines(
 
 const SUMMARY: Record<PullRequestWatchChange["kind"], string> = {
   "checks-failed": "checks failed",
+  "base-passes": "base branch passes failed checks",
   "checks-passed": "checks passed",
   remarks: "new comments",
   conflicting: "merge conflict",
@@ -180,13 +207,18 @@ export function pullRequestWatchMessage(input: {
   const text = [
     `Update on pull request #${input.number} (${input.url}), which T3 Code is watching for you:`,
     ...changes.flatMap((change) => changeLines(change, context)),
+    ...(input.report.next.failingOnBase.length === 0
+      ? []
+      : [
+          `- Also failing on ${input.baseBranch}, so not from this change, and T3 Code does not wake you for them: ${input.report.next.failingOnBase.join(", ")}.`,
+        ]),
     "",
     exhausted
       ? `T3 Code stopped watching after ${PULL_REQUEST_WATCH_WAKE_LIMIT} comment-only updates in a row. Call watch_pull_request to watch it again.`
       : "Look into each item and act on it as your task requires. T3 Code keeps watching and wakes you on the next change, so end your turn when you are done. When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox.",
   ].join("\n");
   const failed = changes.some(
-    (change) => change.kind === "checks-failed" || change.kind === "conflicting",
+    (change) => change.kind !== "checks-passed" && change.kind !== "remarks",
   );
   const summary = changes.map((change) => SUMMARY[change.kind]);
   if (exhausted) summary.push("stopped watching");

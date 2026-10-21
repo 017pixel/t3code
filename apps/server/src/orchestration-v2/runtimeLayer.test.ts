@@ -2746,6 +2746,91 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("a watch waits quietly on a failure its base branch has too", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("runtime-pull-request-watch-base");
+      const projectId = ProjectId.make("pr-watch-base-project");
+      yield* seedProject({
+        projectId,
+        title: "Watch base",
+        workspaceRoot: "/workspace/watch-base",
+        defaultModelSelection: null,
+        createdAt: "2026-10-01T00:00:00.000Z",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("pr-watch-base-create"),
+        threadId,
+        projectId,
+        title: "Watch base",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+      });
+      const key = { host: "github.com", repository: "pingdotgg/t3code", number: 14 };
+      yield* orchestrator.dispatch({
+        type: "thread.pull-request.watch",
+        commandId: CommandId.make("pr-watch-base-start"),
+        threadId,
+        ...key,
+        watching: true,
+        link: { url: "https://github.com/pingdotgg/t3code/pull/14", source: "agent" },
+      });
+      const watchOf = Effect.map(
+        orchestrator.getThreadShell(threadId),
+        (thread) => thread?.pullRequests?.[0]?.watch,
+      );
+      const startedAt = (yield* watchOf)?.startedAt ?? "";
+
+      let base = { failing: ["lint"], passing: [] as Array<string> };
+      const host = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(PullRequestService.PullRequestService)({
+          // An unchanged fingerprint: only the wait on the base branch brings the second read.
+          watchFingerprint: () => Effect.succeed({ status: "failing", remarks: "none" }),
+          invalidate: () => Effect.void,
+          detail: () =>
+            Effect.succeed(watchedPullRequestDetail({ projectId, number: 14, at: startedAt })),
+          activity: () =>
+            Effect.succeed({
+              comments: [],
+              commentCount: 0,
+              commentsTruncated: false,
+              reviewThreads: [],
+              commits: [],
+            }),
+          baseChecks: () => Effect.sync(() => base),
+        }),
+      );
+      const summaries = Effect.map(
+        orchestrator.getThreadRecords(threadId, ["messages"]),
+        ({ messages }) => messages.flatMap((message) => message.notification?.summary ?? []),
+      );
+      const reactor = yield* PullRequestWatchReactor.make.pipe(Effect.provide(host));
+      yield* reactor.sweep;
+      assert.deepEqual(yield* summaries, []);
+      assert.deepEqual((yield* watchOf)?.failingOnBase, ["lint"]);
+
+      base = { failing: [], passing: ["lint"] };
+      yield* reactor.sweep;
+      assert.deepEqual(yield* summaries, ["#14: base branch passes failed checks"]);
+      assert.deepEqual((yield* watchOf)?.failingOnBase, []);
+
+      yield* orchestrator.dispatch({
+        type: "thread.pull-request.watch",
+        commandId: CommandId.make("pr-watch-base-end"),
+        threadId,
+        ...key,
+        watching: false,
+      });
+    }),
+  );
+
   // regression: #21155 watching a pull request again repeated news the thread already got
   it.effect("watching a dismissed stack layer again keeps what its last watch told", () =>
     Effect.gen(function* () {

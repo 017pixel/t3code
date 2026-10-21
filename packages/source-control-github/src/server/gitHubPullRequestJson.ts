@@ -36,6 +36,7 @@ import type {
 import { quoteGitPatchPath } from "@t3tools/shared/gitPatchPath";
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
 import { dedupeChecks } from "@t3tools/source-control-core/server/pullRequestChecks";
+import type { ProviderBranchChecks } from "@t3tools/source-control-core/server/PullRequestProvider";
 
 import type * as GitHubSchema from "../../schema/github.graphql.ts";
 import type {
@@ -50,6 +51,7 @@ import {
 } from "./pullRequestListings.graphql.ts";
 import type {
   ActorAvatars,
+  BranchCheckHistory,
   CheckContext,
   LabelCandidates,
   PullRequestActivity,
@@ -1264,6 +1266,27 @@ export function toPullRequestCheckContextsPage(result: PullRequestCheckContexts.
     contexts: toCheckContexts(nodesOf(contexts)),
     nextCursor: nextCursorOf(contexts?.pageInfo),
   };
+}
+
+/** Null for a branch GitHub did not find. A check's newest finished run decides its side. */
+export function toBranchChecks(result: BranchCheckHistory.Result): ProviderBranchChecks | null {
+  const target = result.repository?.ref?.target;
+  if (target?.__typename !== "Commit") return null;
+  const verdicts = new Map<string, boolean>();
+  for (const commit of nodesOf(target.history)) {
+    const contexts = nodesOf(commit.statusCheckRollup?.contexts).filter(
+      (context) => context.__typename === "CheckRun" || context.__typename === "StatusContext",
+    );
+    for (const check of toChecks(contexts)) {
+      if (verdicts.has(check.name)) continue;
+      if (check.status === "failure" || check.status === "success") {
+        verdicts.set(check.name, check.status === "failure");
+      }
+    }
+  }
+  const named = (failing: boolean) =>
+    [...verdicts].flatMap(([name, failed]) => (failed === failing ? [name] : []));
+  return { failing: named(true), passing: named(false) };
 }
 
 export function pullRequestChecksFromContexts(contexts: ReadonlyArray<GitHubCheckContext>): {

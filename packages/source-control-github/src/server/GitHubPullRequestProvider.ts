@@ -346,6 +346,9 @@ export const make = Effect.gen(function* () {
         .getPullRequestWatchFingerprint(input)
         .pipe(Effect.mapError(fail("getChangeRequestWatchFingerprint"))),
 
+    getBranchChecks: (input) =>
+      cli.getBranchChecks(input).pipe(Effect.mapError(fail("getBranchChecks"))),
+
     getChangeRequestPreview: (input) =>
       cli.getPullRequestPreview(input).pipe(Effect.mapError(fail("getChangeRequestPreview"))),
 

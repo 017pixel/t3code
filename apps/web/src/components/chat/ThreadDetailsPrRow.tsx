@@ -87,6 +87,7 @@ export function ThreadDetailsPrRow({
   onOpen,
   onActed,
   onStopWatching,
+  failingOnBase,
 }: {
   environmentId: EnvironmentId;
   pr: ThreadPr;
@@ -99,6 +100,7 @@ export function ThreadDetailsPrRow({
   onOpen: (event: ReactMouseEvent<HTMLElement>) => void;
   onActed?: () => void;
   onStopWatching?: (() => void) | undefined;
+  failingOnBase?: ReadonlyArray<string> | undefined;
 }) {
   const serverConfigs = useServerConfigs();
   const supportsPullRequests =
@@ -380,6 +382,9 @@ export function ThreadDetailsPrRow({
         </TooltipTrigger>
         <TooltipPopup side="top">
           Watching: the agent wakes when checks finish, someone comments, or the branch conflicts.
+          {failingOnBase?.length
+            ? ` Not for checks the base branch fails too: ${failingOnBase.join(", ")}.`
+            : ""}{" "}
           Click to stop.
         </TooltipPopup>
       </Tooltip>

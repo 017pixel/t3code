@@ -89,6 +89,13 @@ export const ThreadPullRequestWatch = Schema.Struct({
   passedChecks: Schema.Array(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  /**
+   * Failed checks that the base branch fails too. They do not wake the agent until the base
+   * branch passes them while they still fail here.
+   */
+  failingOnBase: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   remarksThrough: IsoDateTime,
   /** Remarks created exactly at `remarksThrough` that were reported, so a late one still counts. */
   remarkIds: Schema.Array(TrimmedNonEmptyString),

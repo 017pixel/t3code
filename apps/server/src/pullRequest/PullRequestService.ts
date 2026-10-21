@@ -89,6 +89,7 @@ import * as SourceControlRateLimit from "@t3tools/source-control-core/server/Sou
 import {
   type ProviderChangeRequest,
   type ProviderListCursor,
+  type ProviderBranchChecks,
   type ProviderChangeRequestWatchFingerprint,
   type PullRequestProviderApi,
   PullRequestProviderError,
@@ -214,6 +215,10 @@ export class PullRequestService extends Context.Service<
     readonly watchFingerprint: (
       input: PullRequestRef,
     ) => Effect.Effect<ProviderChangeRequestWatchFingerprint | null, PullRequestError>;
+    /** The checks of the pull request's base branch. Null where the host cannot read them. */
+    readonly baseChecks: (
+      input: PullRequestRef & { readonly branch: string },
+    ) => Effect.Effect<ProviderBranchChecks | null, PullRequestError>;
     readonly activity: (
       input: PullRequestRef,
     ) => Effect.Effect<PullRequestActivity, PullRequestError>;
@@ -518,6 +523,9 @@ function withRateLimitBackoff(
     ...(api.getChangeRequestStack === undefined
       ? {}
       : { getChangeRequestStack: wrap("getChangeRequestStack", api.getChangeRequestStack) }),
+    ...(api.getBranchChecks === undefined
+      ? {}
+      : { getBranchChecks: wrap("getBranchChecks", api.getBranchChecks) }),
     ...(api.getChangeRequestWatchFingerprint === undefined
       ? {}
       : {
@@ -2821,6 +2829,23 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  // Uncached: the watch reads it at most once per pull request per pass, and only on failures.
+  const baseChecks = (input: PullRequestRef & { readonly branch: string }) =>
+    requireProject(input).pipe(
+      Effect.flatMap((project) =>
+        project.api.getBranchChecks === undefined
+          ? Effect.succeed(null)
+          : project.api
+              .getBranchChecks({
+                cwd: project.project.workspaceRoot,
+                repository: project.repository,
+                host: project.host,
+                branch: input.branch,
+              })
+              .pipe(Effect.mapError(toPullRequestError("baseChecks"))),
+      ),
+    );
+
   const detailCache = yield* Cache.makeWith(
     (key: string) => {
       const statsKey = statsCacheKey(key);
@@ -3393,6 +3418,7 @@ export const make = Effect.gen(function* () {
     watchFingerprint: credentialCached((input) =>
       Cache.get(watchFingerprintCache, refCacheKey(input)),
     ),
+    baseChecks: credentialCached(baseChecks),
     activity: credentialCached(activity),
     preview: credentialCached(preview),
     threadComments,

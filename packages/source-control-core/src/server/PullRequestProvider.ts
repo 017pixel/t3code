@@ -66,6 +66,12 @@ export interface ProviderChangeRequestWatchFingerprint {
   readonly remarks: string;
 }
 
+/** Check names by the newest finished result each has on a branch. */
+export interface ProviderBranchChecks {
+  readonly failing: ReadonlyArray<string>;
+  readonly passing: ReadonlyArray<string>;
+}
+
 export interface PullRequestProviderFailure {
   readonly reason: PullRequestProviderError["reason"];
   readonly retryAt?: number | undefined;
@@ -366,6 +372,14 @@ export interface PullRequestProviderApi {
   readonly getChangeRequestWatchFingerprint?: (
     input: ProviderRepositoryRef & { readonly number: number },
   ) => Effect.Effect<ProviderChangeRequestWatchFingerprint | null, PullRequestProviderError>;
+
+  /**
+   * Null when the host has no such branch. Optional: without it, a watch wakes for every failed
+   * check, including ones the base branch fails too.
+   */
+  readonly getBranchChecks?: (
+    input: ProviderRepositoryRef & { readonly branch: string },
+  ) => Effect.Effect<ProviderBranchChecks | null, PullRequestProviderError>;
 
   readonly getChangeRequestStack?: (
     input: ProviderRepositoryRef & { readonly includeDetails?: boolean; readonly number: number },

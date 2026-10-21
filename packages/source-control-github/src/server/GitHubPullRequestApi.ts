@@ -79,6 +79,7 @@ import {
   toPullRequestRows,
   toPullRequestSummary,
   toPullRequestWatchFingerprint,
+  toBranchChecks,
   toReviewDismissalsPage,
   toReviewerCandidates,
   toReviewThreadCommentsPage,
@@ -107,6 +108,7 @@ import {
   IMMEDIATELY_MERGEABLE,
 } from "./gitHubPullRequestJson.ts";
 import type {
+  ProviderBranchChecks,
   ProviderChangeRequestSummary,
   ProviderListCursor,
 } from "@t3tools/source-control-core/server/PullRequestProvider";
@@ -495,6 +497,14 @@ export class GitHubPullRequestApi extends Context.Service<
     }) => Effect.Effect<GitHubPullRequestWatchFingerprint | null, GitHubPullRequestApiError>;
 
     readonly revalidateChecks: Effect.Success<typeof makeChecksRevalidator>;
+
+    /** Null for a branch GitHub did not find. */
+    readonly getBranchChecks: (input: {
+      readonly cwd: string;
+      readonly repository: string;
+      readonly host: string;
+      readonly branch: string;
+    }) => Effect.Effect<ProviderBranchChecks | null, GitHubPullRequestApiError>;
 
     readonly getPullRequestDetail: (input: {
       readonly cwd: string;
@@ -1995,6 +2005,12 @@ export const make = Effect.gen(function* () {
     getPullRequestWatchFingerprint,
 
     getPullRequestDetail,
+    getBranchChecks: (input) => {
+      const { owner, name } = parseRepositorySelector(input.repository);
+      return client
+        .BranchCheckHistory({ owner, name, ref: `refs/heads/${input.branch}` })
+        .pipe(graphql({ ...input, operation: "getBranchChecks" }), Effect.map(toBranchChecks));
+    },
     getPullRequestPreview: (input) => {
       const { owner, name } = parseRepositorySelector(input.repository);
       const operation = "getPullRequestPreview";

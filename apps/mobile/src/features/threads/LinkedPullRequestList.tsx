@@ -80,7 +80,7 @@ export const LinkedPullRequestRow = memo(function LinkedPullRequestRow(props: {
   const row = (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Pull request ${link.number}, ${snapshot?.title ?? "waiting for host state"}${status ? `, ${status.label}` : ""}${conflict ? `, ${conflict.label.toLowerCase()}` : ""}, ${link.repository}${stack ? `, stack of ${stack.size}` : ""}${watching ? ", watching" : ""}${checks ? `, checks ${snapshot?.checksState}` : ""}${review ? `, ${review.accessibleLabel}` : ""}`}
+      accessibilityLabel={`Pull request ${link.number}, ${snapshot?.title ?? "waiting for host state"}${status ? `, ${status.label}` : ""}${conflict ? `, ${conflict.label.toLowerCase()}` : ""}, ${link.repository}${stack ? `, stack of ${stack.size}` : ""}${watching ? `, watching${link.watch?.failingOnBase.length ? `, not waking for checks the base branch fails too: ${link.watch.failingOnBase.join(", ")}` : ""}` : ""}${checks ? `, checks ${snapshot?.checksState}` : ""}${review ? `, ${review.accessibleLabel}` : ""}`}
       accessibilityHint={props.actions ? "Touch and hold for actions." : undefined}
       onPress={() => {
         void props.openPullRequest(link.url).then((opened) => {

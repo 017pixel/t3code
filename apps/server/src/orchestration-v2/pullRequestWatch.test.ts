@@ -5,7 +5,11 @@ import type {
 } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 
-import { PULL_REQUEST_WATCH_WAKE_LIMIT, evaluatePullRequestWatch } from "./pullRequestWatch.ts";
+import {
+  PULL_REQUEST_WATCH_WAKE_LIMIT,
+  evaluatePullRequestWatch,
+  pullRequestWatchMessage,
+} from "./pullRequestWatch.ts";
 
 const STARTED = "2026-10-02T12:00:00.000Z";
 
@@ -15,6 +19,7 @@ const watch = (overrides: Partial<ThreadPullRequestWatch> = {}): ThreadPullReque
   failedChecks: [],
   passed: false,
   passedChecks: [],
+  failingOnBase: [],
   remarksThrough: STARTED,
   remarkIds: [],
   conflicting: false,
@@ -74,6 +79,47 @@ describe("evaluatePullRequestWatch", () => {
 
     const pushed = detail({ ...second, headSha: "bbbbbbbbbb" });
     assert.equal(evaluatePullRequestWatch(test.next, pushed, noRemarks).changes.length, 1);
+  });
+
+  it("waits quietly on a failure the base branch has too, until the base branch passes it", () => {
+    const red = detail({ checks: [check("lint", "failure"), check("test", "pending")] });
+    const quiet = evaluatePullRequestWatch(watch(), red, noRemarks, {
+      failing: ["lint"],
+      passing: [],
+    });
+    assert.deepEqual(quiet.changes, []);
+    assert.deepEqual(quiet.next.failingOnBase, ["lint"]);
+
+    // An unread base branch, or one whose lint is still running, says nothing new.
+    assert.deepEqual(evaluatePullRequestWatch(quiet.next, red, noRemarks).changes, []);
+    const running = { failing: [], passing: [] };
+    assert.deepEqual(evaluatePullRequestWatch(quiet.next, red, noRemarks, running).changes, []);
+
+    const green = { failing: [], passing: ["lint"] };
+    const fixed = evaluatePullRequestWatch(quiet.next, red, noRemarks, green);
+    assert.deepEqual(fixed.changes, [{ kind: "base-passes", failed: [check("lint", "failure")] }]);
+    assert.deepEqual(fixed.next.failingOnBase, []);
+    assert.deepEqual(evaluatePullRequestWatch(fixed.next, red, noRemarks, green).changes, []);
+  });
+
+  it("wakes for a new failure next to one the base branch has, and names the shared one", () => {
+    const red = detail({ checks: [check("lint", "failure"), check("test", "failure")] });
+    const report = evaluatePullRequestWatch(watch(), red, noRemarks, {
+      failing: ["lint"],
+      passing: ["test"],
+    });
+    assert.deepEqual(report.changes, [
+      { kind: "checks-failed", failed: [check("test", "failure")] },
+    ]);
+    const { text } = pullRequestWatchMessage({
+      number: 7,
+      url: "https://github.com/o/r/pull/7",
+      baseBranch: "main",
+      headSha: "aaaaaaaaaa",
+      report,
+    });
+    assert.include(text, "Also failing on main, so not from this change");
+    assert.include(text, "does not wake you for them: lint.");
   });
 
   it("reports passed once the required checks pass, whatever the others do", () => {

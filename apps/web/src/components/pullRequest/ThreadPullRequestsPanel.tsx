@@ -199,6 +199,9 @@ function LinkRowImpl({
                     <TooltipPopup>
                       Watching: the agent wakes when checks finish, someone comments, or the branch
                       conflicts
+                      {link.watch?.failingOnBase.length
+                        ? `. Not for checks the base branch fails too: ${link.watch.failingOnBase.join(", ")}`
+                        : ""}
                     </TooltipPopup>
                   </Tooltip>
                 ) : null}

@@ -4,7 +4,7 @@ import * as Schema from "effect/Schema"
 import * as Shared from "../../schema/github.graphql.ts"
 
 /** Represents an individual commit status context */
-export const StatusContext = Schema.Struct({
+export const CheckContextStatusContext = Schema.Struct({
   __typename: Schema.Literal("StatusContext"),
   /** The name of this status context. */
   context: Schema.String,
@@ -19,7 +19,7 @@ export const StatusContext = Schema.Struct({
   /** Whether this is required to pass before merging for a specific pull request. */
   isRequired: Schema.optionalKey(Schema.Boolean)
 })
-export interface StatusContext extends Schema.Struct.Type<typeof StatusContext.fields> {}
+export interface CheckContextStatusContext extends Schema.Struct.Type<typeof CheckContextStatusContext.fields> {}
 
 /** A workflow contains meta information about an Actions workflow file. */
 export const Workflow = Schema.Struct({
@@ -43,7 +43,7 @@ export const CheckSuite = Schema.Struct({
 export interface CheckSuite extends Schema.Struct.Type<typeof CheckSuite.fields> {}
 
 /** A check run. */
-export const CheckRun = Schema.Struct({
+export const CheckContextCheckRun = Schema.Struct({
   __typename: Schema.Literal("CheckRun"),
   /** The name of the check for this check run. */
   name: Schema.String,
@@ -62,7 +62,7 @@ export const CheckRun = Schema.Struct({
   /** The check suite that this run is a part of. */
   checkSuite: CheckSuite
 })
-export interface CheckRun extends Schema.Struct.Type<typeof CheckRun.fields> {}
+export interface CheckContextCheckRun extends Schema.Struct.Type<typeof CheckContextCheckRun.fields> {}
 
 /** Types that can be inside a StatusCheckRollup context. */
 export const StatusCheckRollupContextOther = Schema.Struct({
@@ -76,8 +76,8 @@ export interface StatusCheckRollupContextOther extends Schema.Struct.Type<typeof
  * Types that can be inside a StatusCheckRollup context.
  */
 export const CheckContext = Schema.Union([
-  StatusContext,
-  CheckRun,
+  CheckContextStatusContext,
+  CheckContextCheckRun,
   StatusCheckRollupContextOther
 ])
 export type CheckContext = typeof CheckContext.Type
@@ -1535,11 +1535,11 @@ export const GitObject = Schema.Struct({
 export interface GitObject extends Schema.Struct.Type<typeof GitObject.fields> {}
 
 /** Represents a Git reference. */
-export const RefRef = Schema.Struct({
+export const NodeRefRef = Schema.Struct({
   /** The object the ref points to. Returns null when object does not exist. */
   target: Schema.NullOr(GitObject)
 })
-export interface RefRef extends Schema.Struct.Type<typeof RefRef.fields> {}
+export interface NodeRefRef extends Schema.Struct.Type<typeof NodeRefRef.fields> {}
 
 /** A repository contains the content for a project. */
 export const NodeRepository = Schema.Struct({
@@ -1547,7 +1547,7 @@ export const NodeRepository = Schema.Struct({
   /** The Ref associated with the repository's default branch. */
   defaultBranchRef: Schema.NullOr(DefaultBranchRefRef),
   /** Fetch a given ref from the repository */
-  ref: Schema.NullOr(RefRef)
+  ref: Schema.NullOr(NodeRefRef)
 })
 export interface NodeRepository extends Schema.Struct.Type<typeof NodeRepository.fields> {}
 
@@ -1586,5 +1586,118 @@ export declare namespace PullRequestSourceBranch {
   export type Result = typeof PullRequestSourceBranch.result.Type
 }
 
+/** Represents an individual commit status context */
+export const NodesStatusContext = Schema.Struct({
+  __typename: Schema.Literal("StatusContext"),
+  /** The name of this status context. */
+  context: Schema.String,
+  /** The state of this status context. */
+  state: GraphQL.enumLiterals(Shared.StatusState.literals)
+})
+export interface NodesStatusContext extends Schema.Struct.Type<typeof NodesStatusContext.fields> {}
+
+/** A check run. */
+export const NodesCheckRun = Schema.Struct({
+  __typename: Schema.Literal("CheckRun"),
+  /** The name of the check for this check run. */
+  name: Schema.String,
+  /** The current status of the check run. */
+  status: GraphQL.enumLiterals(Shared.CheckStatusState.literals),
+  /** The conclusion of the check run. */
+  conclusion: Schema.NullOr(GraphQL.enumLiterals(Shared.CheckConclusionState.literals))
+})
+export interface NodesCheckRun extends Schema.Struct.Type<typeof NodesCheckRun.fields> {}
+
+/** The connection type for StatusCheckRollupContext. */
+export const NodesStatusCheckRollupContextsStatusCheckRollupContextConnection = Schema.Struct({
+  /** A list of nodes. */
+  nodes: Schema.NullOr(Schema.Array(Schema.NullOr(Schema.Union([
+    NodesStatusContext,
+    NodesCheckRun,
+    StatusCheckRollupContextOther
+  ]))))
+})
+export interface NodesStatusCheckRollupContextsStatusCheckRollupContextConnection extends Schema.Struct.Type<typeof NodesStatusCheckRollupContextsStatusCheckRollupContextConnection.fields> {}
+
+/** Represents the rollup for both the check runs and status for a commit. */
+export const NodesStatusCheckRollupStatusCheckRollup = Schema.Struct({
+  /** A list of status contexts and check runs for this commit. */
+  contexts: NodesStatusCheckRollupContextsStatusCheckRollupContextConnection
+})
+export interface NodesStatusCheckRollupStatusCheckRollup extends Schema.Struct.Type<typeof NodesStatusCheckRollupStatusCheckRollup.fields> {}
+
+/** Represents a Git commit. */
+export const NodesCommit = Schema.Struct({
+  /** Check and Status rollup information for this commit. */
+  statusCheckRollup: Schema.NullOr(NodesStatusCheckRollupStatusCheckRollup)
+})
+export interface NodesCommit extends Schema.Struct.Type<typeof NodesCommit.fields> {}
+
+/** The connection type for Commit. */
+export const CommitHistoryConnection = Schema.Struct({
+  /** A list of nodes. */
+  nodes: Schema.NullOr(Schema.Array(Schema.NullOr(NodesCommit)))
+})
+export interface CommitHistoryConnection extends Schema.Struct.Type<typeof CommitHistoryConnection.fields> {}
+
+/** Represents a Git commit. */
+export const TargetCommit = Schema.Struct({
+  __typename: Schema.Literal("Commit"),
+  /** The linear commit history starting from (and including) this commit, in the same order as `git log`. */
+  history: CommitHistoryConnection
+})
+export interface TargetCommit extends Schema.Struct.Type<typeof TargetCommit.fields> {}
+
+/** Represents a Git object. */
+export const GitObjectOther = Schema.Struct({
+  __typename: GraphQL.otherTypename<Shared.Typename.GitObject>()(["Commit"])
+})
+export interface GitObjectOther extends Schema.Struct.Type<typeof GitObjectOther.fields> {}
+
+/** Represents a Git reference. */
+export const RepositoryRefRef = Schema.Struct({
+  /** The object the ref points to. Returns null when object does not exist. */
+  target: Schema.NullOr(Schema.Union([
+    TargetCommit,
+    GitObjectOther
+  ]))
+})
+export interface RepositoryRefRef extends Schema.Struct.Type<typeof RepositoryRefRef.fields> {}
+
+/** A repository contains the content for a project. */
+export const BranchCheckHistoryRepositoryRepository = Schema.Struct({
+  /** Fetch a given ref from the repository */
+  ref: Schema.NullOr(RepositoryRefRef)
+})
+export interface BranchCheckHistoryRepositoryRepository extends Schema.Struct.Type<typeof BranchCheckHistoryRepositoryRepository.fields> {}
+
+/** `query BranchCheckHistory` */
+export const BranchCheckHistory = GraphQL.query("BranchCheckHistory", {
+  document: {
+    variables: [
+      { name: "owner", body: "String!" },
+      { name: "name", body: "String!" },
+      { name: "ref", body: "String!" }
+    ],
+    selections: [
+      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){ref(qualifiedName:$", "ref", "){target{__typename...on Commit{history(first:20){nodes{statusCheckRollup{contexts(first:100){nodes{__typename...on StatusContext{context state}...on CheckRun{name status conclusion}}}}}}}}}}"] }
+    ],
+    fragments: []
+  },
+  variables: {
+    owner: Schema.String,
+    name: Schema.String,
+    ref: Schema.String
+  },
+  result: Schema.Struct({
+    /** Lookup a given repository by the owner and repository name. */
+    repository: Schema.NullOr(BranchCheckHistoryRepositoryRepository)
+  })
+})
+export declare namespace BranchCheckHistory {
+  export type Variables = typeof BranchCheckHistory.variables.Type
+  export type Result = typeof BranchCheckHistory.result.Type
+}
+
 /** Every operation in pullRequestReads.graphql. */
-export const PullRequestReadsGraphQLGroup = GraphQLGroup.make(RoutingIdentityViewer, ActorAvatars, PullRequestCore, PullRequestCheckContexts, PullRequestPreview, PullRequestActivity, PullRequestHeads, PullRequestNodeId, PullRequestSubject, ViewerPermissions, ReviewerCandidates, LabelCandidates, PullRequestFilesViewed, PullRequestFileStats, PullRequestMergeMessage, PullRequestActionState, PullRequestBranchToDelete, PullRequestSourceBranch)
+export const PullRequestReadsGraphQLGroup = GraphQLGroup.make(RoutingIdentityViewer, ActorAvatars, PullRequestCore, PullRequestCheckContexts, PullRequestPreview, PullRequestActivity, PullRequestHeads, PullRequestNodeId, PullRequestSubject, ViewerPermissions, ReviewerCandidates, LabelCandidates, PullRequestFilesViewed, PullRequestFileStats, PullRequestMergeMessage, PullRequestActionState, PullRequestBranchToDelete, PullRequestSourceBranch, BranchCheckHistory)

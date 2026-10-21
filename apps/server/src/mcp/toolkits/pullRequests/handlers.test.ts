@@ -291,6 +291,7 @@ describe("pull request toolkit handlers", () => {
         failedChecks: [],
         passed: false,
         passedChecks: [],
+        failingOnBase: ["lint"],
         remarksThrough: "2026-08-20T00:00:00.000Z",
         remarkIds: [],
         conflicting: false,
@@ -308,6 +309,11 @@ describe("pull request toolkit handlers", () => {
         .call("watch_pull_request", { repository: "t3tools/t3code", number: 1 })
         .pipe(Effect.flip);
       expect(error).toMatchObject({ _tag: "PullRequestNotOpenError", state: "merged" });
+      // The agent can read why a failed check did not wake it.
+      const listed = yield* harness.call("list_thread_pull_requests", {});
+      expect(listed.pullRequests.find((entry) => entry.number === 3)?.failingOnBase).toEqual([
+        "lint",
+      ]);
       expect(
         yield* harness.call("unwatch_pull_request", { repository: "t3tools/t3code", number: 3 }),
       ).toMatchObject({ wasWatching: true });
@@ -522,6 +528,7 @@ describe("pull request toolkit handlers", () => {
         url: "https://github.com/t3tools/t3code/pull/3",
         source: "agent",
         watching: false,
+        failingOnBase: [],
         state: "open",
         title: "PR 3",
         headBranch: "feat-c",
