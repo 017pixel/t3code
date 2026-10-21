@@ -619,15 +619,9 @@ export const PreviewAutomationEvaluateInput = Schema.Struct({
   awaitPromise: Schema.optional(
     Schema.Boolean.annotate({ description: "Await a returned Promise. Defaults to true." }),
   ),
-  returnByValue: Schema.optional(
-    Schema.Boolean.annotate({
-      description:
-        "Serialize and return the value instead of a remote object reference. Defaults to true.",
-    }),
-  ),
 }).annotate({
   description:
-    "Evaluates JavaScript in the page. Prefer snapshot and semantic actions; use evaluate for inspection or unsupported interactions.",
+    "Evaluates JavaScript in the page and returns the result by value. Prefer snapshot and semantic actions; use evaluate for inspection or unsupported interactions.",
 });
 export type PreviewAutomationEvaluateInput = typeof PreviewAutomationEvaluateInput.Type;
 

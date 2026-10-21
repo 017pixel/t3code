@@ -2,11 +2,13 @@ import { Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  PreviewAutomationEvaluateInput,
   PreviewAutomationHost,
   PreviewAutomationOpenInput,
   PreviewAutomationStatus,
 } from "./previewAutomation.ts";
 
+const decodeEvaluateInput = Schema.decodeUnknownSync(PreviewAutomationEvaluateInput);
 const decodeOpenInput = Schema.decodeUnknownSync(PreviewAutomationOpenInput);
 const decodeAutomationHost = Schema.decodeUnknownSync(PreviewAutomationHost);
 const decodeAutomationStatus = Schema.decodeUnknownSync(PreviewAutomationStatus);
@@ -51,5 +53,17 @@ describe("PreviewAutomationStatus", () => {
         viewport: { width: 412, height: 915 },
       }).viewport,
     ).toEqual({ width: 412, height: 915 });
+  });
+});
+
+describe("PreviewAutomationEvaluateInput", () => {
+  it.each([false, true, undefined])("discards legacy returnByValue=%s", (returnByValue) => {
+    const input = {
+      expression: "({ answer: 42 })",
+      ...(returnByValue === undefined ? {} : { returnByValue }),
+    };
+    expect(decodeEvaluateInput(input)).toEqual({
+      expression: input.expression,
+    });
   });
 });
