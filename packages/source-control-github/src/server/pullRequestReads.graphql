@@ -573,6 +573,9 @@ query BranchCheckHistory($owner: String!, $name: String!, $ref: String!) {
             nodes {
               statusCheckRollup {
                 contexts(first: 100) {
+                  pageInfo {
+                    hasNextPage
+                  }
                   nodes {
                     ... on StatusContext {
                       context

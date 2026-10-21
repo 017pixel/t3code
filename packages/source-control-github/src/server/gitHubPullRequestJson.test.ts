@@ -1690,8 +1690,9 @@ describe("branch check history", () => {
       completedAt,
       checkSuite: { workflowRun: { workflow: { name: workflow } } },
     });
-    const commit = (contexts: ReadonlyArray<unknown> | null) => ({
-      statusCheckRollup: contexts === null ? null : { contexts: { nodes: contexts } },
+    const commit = (contexts: ReadonlyArray<unknown> | null, hasNextPage = false) => ({
+      statusCheckRollup:
+        contexts === null ? null : { contexts: { pageInfo: { hasNextPage }, nodes: contexts } },
     });
     const result = Schema.decodeUnknownSync(BranchCheckHistory.result)({
       repository: {
@@ -1731,5 +1732,23 @@ describe("branch check history", () => {
     expect(
       toBranchChecks(Schema.decodeUnknownSync(BranchCheckHistory.result)({ repository: null })),
     ).toBeNull();
+
+    // A commit with more checks than one page ends the walk: "deep" may be on its next page.
+    const cut = Schema.decodeUnknownSync(BranchCheckHistory.result)({
+      repository: {
+        ref: {
+          target: {
+            __typename: "Commit",
+            history: {
+              nodes: [
+                commit([run("lint", "COMPLETED", "SUCCESS")], true),
+                commit([run("deep", "COMPLETED", "FAILURE")]),
+              ],
+            },
+          },
+        },
+      },
+    });
+    expect(toBranchChecks(cut)).toEqual({ failing: [], passing: ["lint"] });
   });
 });

@@ -1289,6 +1289,8 @@ export function toBranchChecks(result: BranchCheckHistory.Result): ProviderBranc
     for (const check of toChecks(finished)) {
       if (!verdicts.has(check.name)) verdicts.set(check.name, check.status === "failure");
     }
+    // Past a cut-off page, an older commit's result could stand in for a newer one never read.
+    if (commit.statusCheckRollup?.contexts.pageInfo.hasNextPage) break;
   }
   const named = (failing: boolean) =>
     [...verdicts].flatMap(([name, failed]) => (failed === failing ? [name] : []));

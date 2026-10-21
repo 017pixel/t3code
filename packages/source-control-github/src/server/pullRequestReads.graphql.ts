@@ -1616,6 +1616,8 @@ export interface NodesCheckRun extends Schema.Struct.Type<typeof NodesCheckRun.f
 
 /** The connection type for StatusCheckRollupContext. */
 export const NodesStatusCheckRollupContextsStatusCheckRollupContextConnection = Schema.Struct({
+  /** Information to aid in pagination. */
+  pageInfo: PullRequestCoreRepositoryPullRequestCommitsNodesCommitStatusCheckRollupContextsPageInfoPageInfo,
   /** A list of nodes. */
   nodes: Schema.NullOr(Schema.Array(Schema.NullOr(Schema.Union([
     NodesStatusContext,
@@ -1686,7 +1688,7 @@ export const BranchCheckHistory = GraphQL.query("BranchCheckHistory", {
       { name: "ref", body: "String!" }
     ],
     selections: [
-      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){ref(qualifiedName:$", "ref", "){target{__typename...on Commit{history(first:20){nodes{statusCheckRollup{contexts(first:100){nodes{__typename...on StatusContext{context state}...on CheckRun{name status conclusion startedAt completedAt checkSuite{workflowRun{workflow{name}}}}}}}}}}}}}"] }
+      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){ref(qualifiedName:$", "ref", "){target{__typename...on Commit{history(first:20){nodes{statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}nodes{__typename...on StatusContext{context state}...on CheckRun{name status conclusion startedAt completedAt checkSuite{workflowRun{workflow{name}}}}}}}}}}}}}"] }
     ],
     fragments: []
   },
