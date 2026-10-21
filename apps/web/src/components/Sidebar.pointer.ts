@@ -149,3 +149,69 @@ export class SidebarPointerSensor {
     }
   }
 }
+
+/**
+ * Another client can insert or remove rows while the mouse rests on the list, sliding a
+ * different row under it. Hit-testing follows the new layout, so swallow the first press
+ * that lands on a list child the mouse never moved onto. Touch has no hover to go stale.
+ */
+export function guardSidebarStalePress(list: HTMLElement) {
+  const document = list.ownerDocument;
+  let point: { x: number; y: number } | null = null;
+  let hovered: Element | null = null;
+  let swallowClick = false;
+  const childOf = (target: EventTarget | null) => {
+    let node = target instanceof Element ? target : null;
+    while (node !== null && node !== list && node.parentElement !== list) {
+      node = node.parentElement;
+    }
+    return node === list ? null : node;
+  };
+  const move = (event: PointerEvent) => {
+    if (event.pointerType !== "mouse") return;
+    // Some engines re-dispatch moves at the same point after layout changes.
+    if (point?.x === event.clientX && point.y === event.clientY) return;
+    point = { x: event.clientX, y: event.clientY };
+    hovered = childOf(event.target);
+  };
+  const forget = () => {
+    point = null;
+    hovered = null;
+  };
+  // Scrolling the list moves rows under the mouse on purpose; trust the next press.
+  // Other scrollers, like a streaming chat, must not disarm the guard.
+  const scroll = (event: Event) => {
+    if (event.target instanceof Node && event.target.contains(list)) forget();
+  };
+  const press = (event: PointerEvent) => {
+    swallowClick = false;
+    if (event.pointerType !== "mouse" || event.button !== 0 || hovered === null) return;
+    const target = childOf(event.target);
+    if (target === hovered) return;
+    hovered = target;
+    swallowClick = true;
+    // Also suppresses the compatibility mousedown that menu triggers listen to.
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  const click = (event: MouseEvent) => {
+    if (!swallowClick) return;
+    swallowClick = false;
+    // A keyboard activation (detail 0) is never the stale press.
+    if (event.detail === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  list.addEventListener("pointermove", move, { passive: true });
+  list.addEventListener("pointerleave", forget);
+  list.addEventListener("pointerdown", press, { capture: true });
+  list.addEventListener("click", click, { capture: true });
+  document.addEventListener("scroll", scroll, { capture: true, passive: true });
+  return () => {
+    list.removeEventListener("pointermove", move);
+    list.removeEventListener("pointerleave", forget);
+    list.removeEventListener("pointerdown", press, { capture: true });
+    list.removeEventListener("click", click, { capture: true });
+    document.removeEventListener("scroll", scroll, { capture: true });
+  };
+}

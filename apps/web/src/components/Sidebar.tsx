@@ -173,7 +173,11 @@ import {
   createSidebarSortingStrategy,
   restrictBelowSidebarLabel,
 } from "./Sidebar.drag";
-import { SidebarDragLifecycle, SidebarPointerSensor } from "./Sidebar.pointer";
+import {
+  SidebarDragLifecycle,
+  SidebarPointerSensor,
+  guardSidebarStalePress,
+} from "./Sidebar.pointer";
 import { createSidebarListMotion } from "./Sidebar.motion";
 import { resolveSnoozePresets, snoozeWakeLabel, type SnoozePreset } from "./Sidebar.snooze";
 import { ProjectFavicon } from "./ProjectFavicon";
@@ -878,6 +882,7 @@ export default function Sidebar() {
   const threadListRef = useRef<HTMLUListElement | null>(null);
   const dragLabelOffsetRef = useRef(0);
   const listMotionRef = useRef<ReturnType<typeof createSidebarListMotion> | null>(null);
+  const releaseListPressGuardRef = useRef<(() => void) | null>(null);
   const [dragState, setDragState] = useState<{
     readonly activeKey: string;
     readonly activeSection: SidebarSection;
@@ -1369,6 +1374,8 @@ export default function Sidebar() {
     listMotionRef.current?.dispose();
     listMotionRef.current = node === null ? null : createSidebarListMotion(node);
     listMotionRef.current?.update(false);
+    releaseListPressGuardRef.current?.();
+    releaseListPressGuardRef.current = node === null ? null : guardSidebarStalePress(node);
   };
 
   // Working rows can supply chat context, but never preview sidebar movement.
