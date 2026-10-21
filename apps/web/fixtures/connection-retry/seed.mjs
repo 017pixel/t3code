@@ -159,7 +159,14 @@ export async function reset(environmentId) {
   const { appAtomRegistry } = await import("../../src/rpc/atomRegistry.ts");
   const { environmentCatalog } = await import("../../src/connection/catalog.ts");
   await environmentCatalog.retryNow.run(appAtomRegistry, environmentId);
-  return waitState(environmentId, "connected");
+  const deadline = performance.now() + 45000;
+  while (performance.now() < deadline) {
+    const s = await state(environmentId);
+    if (s._tag === "Success" && s.value.phase === "connected" && s.value.attempt === 1)
+      return s.value;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("Synthetic supervisor did not reset to connected attempt 1");
 }
 
 export const scenarios = {
