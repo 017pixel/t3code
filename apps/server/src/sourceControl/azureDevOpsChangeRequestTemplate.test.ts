@@ -45,6 +45,7 @@ const runWithTempDirectory = <A, E, R>(
       yield* runGit(cwd, ["init", "--initial-branch=main"]);
       yield* runGit(cwd, ["config", "user.email", "test@example.com"]);
       yield* runGit(cwd, ["config", "user.name", "Test User"]);
+      yield* runGit(cwd, ["remote", "add", "origin", cwd]);
       return yield* test(cwd);
     }),
   ).pipe(Effect.provide(layerPrTemplateDetectionTest));
@@ -63,6 +64,8 @@ const commitTemplates = (cwd: string) =>
   Effect.gen(function* () {
     yield* runGit(cwd, ["add", "-A"]);
     yield* runGit(cwd, ["commit", "--allow-empty", "-m", "Add pull request templates"]);
+    yield* runGit(cwd, ["update-ref", "refs/remotes/origin/main", "main"]);
+    yield* runGit(cwd, ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
   });
 
 const makeProvider = Effect.gen(function* () {
@@ -71,7 +74,9 @@ const makeProvider = Effect.gen(function* () {
     Effect.provide(
       Layer.mergeAll(
         Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({}),
-        TestSourceControlHost.layer({ git: { execute: git.execute } }),
+        TestSourceControlHost.layer({
+          git: { execute: git.execute, resolvePrimaryRemoteName: git.resolvePrimaryRemoteName },
+        }),
       ),
     ),
   );
@@ -144,7 +149,9 @@ it.effect("returns the same absent value as GitLab for a repository without temp
         Effect.provide(
           Layer.mergeAll(
             Layer.mock(GitLabCli.GitLabCli)({}),
-            TestSourceControlHost.layer({ git: { execute: git.execute } }),
+            TestSourceControlHost.layer({
+              git: { execute: git.execute, resolvePrimaryRemoteName: git.resolvePrimaryRemoteName },
+            }),
           ),
         ),
       );
@@ -194,6 +201,18 @@ it.effect("bounds template content and marks truncation", () =>
         assert.isTrue(template.value.endsWith("[truncated]"));
         assert.isBelow(template.value.length, 8_100);
       }
+    }),
+  ),
+);
+
+it.effect("returns no template when the local remote default branch is unknown", () =>
+  runWithTempDirectory((cwd) =>
+    Effect.gen(function* () {
+      yield* writeTemplate(cwd, "pull_request_template.md", "Target branch template");
+      yield* commitTemplates(cwd);
+      yield* runGit(cwd, ["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
+
+      assert.deepStrictEqual(yield* readTemplate(cwd), Option.none());
     }),
   ),
 );
