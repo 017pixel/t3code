@@ -235,24 +235,16 @@ it.effect("falls back when REST checks are unavailable without retrying unsuppor
                 invalidUtf8: false,
               });
             }
-            if (path.includes("/status")) {
-              return Effect.yieldNow.pipe(
-                Effect.andThen(
-                  Effect.fail(
-                    new GitHubRequestPolicy.GitHubApiResponseError({
-                      host: "github.com",
-                      operation: "revalidateChecks",
-                      status: 502,
-                    }),
-                  ),
+            if (path.includes("/status")) return Effect.never;
+            return Effect.yieldNow.pipe(
+              Effect.andThen(
+                Effect.fail(
+                  new GitHubRequestPolicy.GitHubApiNotFoundError({
+                    host: "github.com",
+                    operation: "revalidateChecks",
+                  }),
                 ),
-              );
-            }
-            return Effect.fail(
-              new GitHubRequestPolicy.GitHubApiNotFoundError({
-                host: "github.com",
-                operation: "revalidateChecks",
-              }),
+              ),
             );
           },
         }),

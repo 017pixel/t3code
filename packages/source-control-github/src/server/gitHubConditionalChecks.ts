@@ -1,6 +1,7 @@
 import * as Clock from "effect/Clock";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -22,6 +23,8 @@ const HeadSchema = Schema.Struct({
   base: Schema.Struct({ repo: Schema.Struct({ id: PositiveInt }) }),
 });
 const decodeHead = Schema.decodeUnknownEffect(Schema.fromJsonString(HeadSchema));
+
+class ChecksUnavailable extends Data.TaggedError("ChecksUnavailable") {}
 
 const WorkflowRunSchema = Schema.Struct({
   id: Schema.Int,
@@ -150,6 +153,7 @@ export const makeChecksRevalidator = Effect.gen(function* () {
           ];
           const runPages: Array<string> = [];
           // Each endpoint has its own cursor; only pages within one endpoint depend on each other.
+          // An unavailable endpoint interrupts the others so the fallback read starts at once.
           const available = yield* Effect.forEach(
             endpoints,
             Effect.fn("gitHubConditionalChecks.revalidateEndpoint")(function* (endpoint) {
@@ -157,14 +161,17 @@ export const makeChecksRevalidator = Effect.gen(function* () {
                 if (page > 100) return yield* fail(200);
                 const paged = `${endpoint}${endpoint.includes("?") ? "&" : "?"}per_page=100&page=${page}`;
                 const next = yield* get(paged);
-                if (next === null) return false;
+                if (next === null) return yield* new ChecksUnavailable();
                 if (endpoint === runsEndpoint) runPages.push(paged);
-                if (!next) return true;
+                if (!next) return;
               }
             }),
-            { concurrency: 3 },
+            { concurrency: 3, discard: true },
+          ).pipe(
+            Effect.as(true),
+            Effect.catchTags({ ChecksUnavailable: () => Effect.succeed(false) }),
           );
-          if (available.includes(false)) return yield* read;
+          if (!available) return yield* read;
           const now = yield* Clock.currentTimeMillis;
           if (entry.value !== null && now - entry.readAt < 5 * 60_000) return entry.value;
           const pages = runPages.map((endpoint) =>
