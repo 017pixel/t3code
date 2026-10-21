@@ -59,9 +59,14 @@ const layerTest = Layer.mergeAll(
 
 it.effect.each(
   (["provider.switch", "thread.model-selection.set"] as const).flatMap((type) =>
-    [true, false].map((active) => ({ type, active })),
+    [
+      { active: true, selectionChange: "instance" },
+      { active: false, selectionChange: "instance" },
+      { active: true, selectionChange: "next-turn" },
+      { active: true, selectionChange: "restart" },
+    ].map((scenario) => ({ type, ...scenario })),
   ),
-)("$type instance switch (active: $active)", ({ type, active }) =>
+)("$type $selectionChange ($active)", ({ type, active, selectionChange }) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -179,8 +184,9 @@ it.effect.each(
     const sequence = yield* orchestrator.getThreadEventSequence(threadId);
     const commandId = CommandId.make("switch-instance");
     const target = {
-      instanceId: ProviderInstanceId.make("codex-other"),
-      model: modelSelection.model,
+      instanceId:
+        selectionChange === "instance" ? ProviderInstanceId.make("codex-other") : instanceId,
+      model: selectionChange === "instance" ? modelSelection.model : "gpt-6",
     };
     const outcome = yield* orchestrator
       .dispatch({
@@ -191,7 +197,7 @@ it.effect.each(
       })
       .pipe(Effect.result);
     const after = yield* projections.getThreadProjection(threadId);
-    if (active) {
+    if (active && selectionChange !== "next-turn") {
       assert.deepEqual(
         after,
         before,
@@ -227,7 +233,15 @@ it.effect.each(
         ProviderReplayHarness.layerWithRegistry(
           { name: "instance-switch" },
           ProviderAdapterRegistry.layerFromAdapters([
-            adapter,
+            {
+              ...adapter,
+              planSelectionTransition: () =>
+                Effect.succeed(
+                  selectionChange === "restart"
+                    ? { type: "restart_session" as const }
+                    : { type: "apply_on_next_turn" as const },
+                ),
+            },
             { ...adapter, instanceId: ProviderInstanceId.make("codex-other") },
           ]),
           { databaseLayer: layerDatabase, runEffectWorker: false },

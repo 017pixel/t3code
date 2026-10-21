@@ -2931,12 +2931,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   }),
               ),
             );
-            return yield* providerSwitchService
+            const plan = yield* providerSwitchService
               .plan({
                 projection: providerContext!,
                 targetModelSelection: command.modelSelection,
               })
               .pipe(mapDispatchError(command));
+            if (plan.instanceChanged || plan.releaseProviderSessionIds.length > 0) {
+              const projection = yield* loadProjectionForCommand(command, ["runs"], {
+                turnItemTypes: [],
+              });
+              if (projection.runs.some(isBlockingRun)) {
+                return yield* new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause:
+                    "Wait for the active turn to finish, then retry the provider selection change.",
+                });
+              }
+            }
+            return plan;
           })
         : null;
 
