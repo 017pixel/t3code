@@ -210,6 +210,7 @@ describe("DesktopBackendPool", () => {
           yield* TestClock.adjust(Duration.seconds(5));
           assert.equal(yield* Queue.take(backend.signals), "SIGKILL");
           assert.isUndefined(quitFiber.pollUnsafe());
+          assert.isUndefined(unregisterFiber.pollUnsafe());
           assert.isTrue(yield* backend.isRunning);
           yield* TestClock.adjust(backend.killWait);
           yield* Fiber.join(unregisterFiber);
