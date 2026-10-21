@@ -6,8 +6,10 @@ import { inlineFilePreviewKind, isPdfFile } from "./filePreview";
 import { ThreadInlineFilePreview } from "../features/threads/ThreadInlineFilePreview";
 import { AudioFilePreview } from "../features/files/AudioFilePreview";
 import { MediaVideoPlayer } from "../components/MediaVideoPlayer";
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import { acquireAudioSession, activateAudioSession, releaseAudioSession } from "./audioSession";
+import { ThreadFeed } from "../features/threads/ThreadFeed";
+import type { ThreadFeedEntry } from "./threadActivity";
 
 const audio = vi.hoisted(() => ({
   status: {
@@ -46,6 +48,8 @@ const audio = vi.hoisted(() => ({
   videoStatusListeners: new Set<(event: { status: string }) => void>(),
   videoEndListeners: new Set<() => void>(),
   videoRequestListeners: new Set<(event: { isPlaybackRequested: boolean }) => void>(),
+  navigate: vi.fn(),
+  query: vi.fn(),
 }));
 vi.mock("expo-audio", () => ({
   AudioModule: { setAudioSessionOwner: audio.setSessionOwner },
@@ -55,8 +59,16 @@ vi.mock("expo-audio", () => ({
   setAudioModeAsync: audio.setAudioMode,
   setIsAudioActiveAsync: audio.setActive,
 }));
-vi.mock("@react-navigation/native", () => ({ useIsFocused: () => true }));
+vi.mock("@react-navigation/native", () => ({
+  useIsFocused: () => true,
+  useNavigation: () => ({ navigate: audio.navigate }),
+  useFocusEffect: (callback: () => (() => void) | undefined) => useEffect(callback, [callback]),
+}));
 vi.mock("react-native", () => ({
+  Platform: { OS: "android", select: (values: { android?: unknown }) => values.android },
+  StyleSheet: { create: (styles: unknown) => styles },
+  useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
+  Text: ({ children }: { children?: ReactNode }) => createElement("span", null, children),
   AppState: { currentState: "active", addEventListener: () => ({ remove() {} }) },
   View: ({ children }: { children?: ReactNode }) => createElement("div", null, children),
   Pressable: (props: {
@@ -106,7 +118,9 @@ vi.mock("expo-video", () => ({
 }));
 vi.mock("../components/VideoThumbnailImage", () => ({ VideoThumbnailImage: () => null }));
 vi.mock("../components/ui/AppActivityIndicator", () => ({ AppActivityIndicator: () => null }));
-vi.mock("../components/MediaActionsMenu", () => ({ MediaActionsMenu: () => null }));
+vi.mock("../components/MediaActionsMenu", () => ({
+  MediaActionsMenu: ({ children }: { children?: ReactNode }) => children,
+}));
 vi.mock("../state/mediaActions", () => ({
   useMediaActions: () => ({ sharing: false, actions: [] }),
 }));
@@ -114,10 +128,129 @@ vi.mock("./videoAudioSession", () => ({
   useMediaAudioSessionHold() {},
   useFullscreenVideoOpen: () => false,
 }));
-vi.mock("../state/assets", () => ({ useRefreshAssetUrl: () => audio.refresh }));
-vi.mock("../features/threads/ThreadMarkdownVideo", async () => {
+vi.mock("../state/assets", () => ({
+  useRefreshAssetUrl: () => audio.refresh,
+  useAssetUrlState: () => ({ _tag: "Success", url: "https://example.com/clip.mp4" }),
+  assetEnvironment: {},
+}));
+vi.mock("../features/threads/ThreadMarkdownVideo", async (importOriginal) => {
   const { createContext } = await import("react");
-  return { ThreadMediaVisibleContext: createContext(true) };
+  const actual = await importOriginal<typeof import("../features/threads/ThreadMarkdownVideo")>();
+  return {
+    ...actual,
+    ThreadMediaVisibleContext: createContext(true),
+    ThreadMarkdownVideo: (props: Parameters<typeof actual.ThreadMarkdownVideo>[0]) =>
+      createElement(actual.ThreadMarkdownVideo, { ...props, thumbnailVisible: true }),
+  };
+});
+
+vi.mock("@t3tools/client-runtime/state/runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@t3tools/client-runtime/state/runtime")>()),
+  executeAtomQuery: (...args: unknown[]) => audio.query(...args),
+}));
+vi.mock("../state/projects", () => ({
+  projectEnvironment: {
+    searchEntries: (input: unknown) => input,
+    fileMetadata: (input: unknown) => input,
+  },
+}));
+vi.mock("../state/session", () => ({
+  readEnvironmentScope: () => true,
+  usePreparedConnection: () => ({ _tag: "Some", value: { httpBaseUrl: "https://example.com" } }),
+}));
+vi.mock("../state/atom-registry", () => ({ appAtomRegistry: {} }));
+vi.mock("../state/threads", () => ({ environmentThreadShells: {}, threadEnvironment: {} }));
+vi.mock("../state/entities", () => ({ useLiveThreadLinkLabels: (text: string) => text }));
+vi.mock("../state/use-thread-selection", () => ({
+  useThreadSelection: () => ({ selectedThread: null }),
+}));
+vi.mock("../state/use-atom-query-runner", () => ({ useAtomQueryRunner: () => vi.fn() }));
+vi.mock("../state/use-atom-command", () => ({}));
+vi.mock("../state/v2-item-support", () => ({}));
+vi.mock("../native/SelectableMarkdownText", () => ({
+  SelectableMarkdownText: (props: { markdown: string; onLinkPress(href: string): void }) =>
+    createElement("button", { onClick: () => props.onLinkPress("target.ts") }, props.markdown),
+}));
+vi.mock("@legendapp/list/keyboard", () => ({
+  KeyboardAwareLegendList: (props: {
+    data: ThreadFeedEntry[];
+    renderItem(info: { item: ThreadFeedEntry; index: number }): ReactNode;
+  }) =>
+    props.data.map((item, index) =>
+      createElement("div", { key: item.id }, props.renderItem({ item, index })),
+    ),
+}));
+vi.mock("@legendapp/list/react-native", () => ({
+  useViewabilityAmount: (callback: (token: { sizeVisible: number }) => void) =>
+    useEffect(() => callback({ sizeVisible: 1 }), [callback]),
+}));
+vi.mock("react-native-reanimated", () => {
+  const transition = { delay: () => transition, duration: () => transition };
+  return {
+    default: { View: ({ children }: { children?: ReactNode }) => children },
+    FadeIn: transition,
+    FadeInUp: transition,
+  };
+});
+vi.mock("react-native-safe-area-context", () => ({
+  useSafeAreaInsets: () => ({ top: 0, bottom: 0 }),
+}));
+vi.mock("expo-haptics", () => ({ selectionAsync: async () => {} }));
+vi.mock("expo-image", () => ({}));
+vi.mock("uniwind", () => ({}));
+vi.mock("../components/ui/Dialog", () => ({}));
+vi.mock("../components/ui/NativePresentation", () => ({
+  PresentationSource: ({ children }: { children?: ReactNode }) => children,
+}));
+vi.mock("../components/ui/Menu", () => ({
+  Menu: ({ children }: { children?: ReactNode }) => children,
+}));
+vi.mock("../components/FilePreviewGallery", () => ({
+  FilePreviewGallery: ({ children }: { children?: ReactNode }) => children,
+}));
+vi.mock("../components/FilePreviewModal", () => ({ FilePreviewModal: () => null }));
+vi.mock("../components/VideoPreviewModal", () => ({ VideoPreviewModal: () => null }));
+vi.mock("../components/ComposerContextSheet", () => ({}));
+vi.mock("../native/useOpenPullRequest", () => ({ useOpenPullRequest: () => vi.fn() }));
+vi.mock("../native/useMarkdownImageSource", () => ({ useMarkdownImageSource: () => vi.fn() }));
+vi.mock("../native/useEnrichedLinkVariants", () => ({}));
+vi.mock("../native/NativeWorkspaceColumns", () => ({
+  useNativeWorkspaceColumnsSupported: () => false,
+}));
+vi.mock("../native/native-layout-metrics", () => ({ useDeviceType: () => "phone" }));
+vi.mock("../features/layout/workspace-content-width", () => ({
+  useWorkspaceSettledContentWidth: () => null,
+}));
+vi.mock("../features/settings/appearance/AppearancePreferencesProvider", () => ({
+  useAppearancePreferences: () => ({ appearance: { baseFontSize: 14 }, themeAppearance: "dark" }),
+}));
+vi.mock("./useUniwindTheme", () => ({
+  useUniwindTheme: () => new Proxy({}, { get: () => "#000000" }),
+}));
+vi.mock("./composerContextClipboard", () => ({}));
+vi.mock("./copyTextWithHaptic", () => ({}));
+vi.mock("./openExternalUrl", () => ({}));
+vi.mock("./attachmentDownload", () => ({}));
+vi.mock("./uuid", () => ({}));
+vi.mock("../features/threads/thread-context-divider", () => ({}));
+vi.mock("../features/threads/thread-handoff-row", () => ({}));
+vi.mock("../features/threads/SecretRequestCard", () => ({}));
+vi.mock("../features/threads/worktree-setup-card", () => ({}));
+vi.mock("../features/threads/CopyTextButton", () => ({ CopyTextButton: () => null }));
+vi.mock("../features/threads/thread-work-log", () => ({ THREAD_DISCLOSURE_TRANSITION_MS: 100 }));
+vi.mock("../features/threads/HtmlRenderWebView", () => ({}));
+vi.mock("../features/threads/McpAppWebView", () => ({}));
+vi.mock("../features/threads/thread-workflow-opening", () => ({ useWorkflowOpening: () => null }));
+vi.mock("../features/threads/useFileChipShare", () => ({ useFileChipShare: () => vi.fn() }));
+vi.mock("../features/threads/ThreadMarkdownImage", async () => {
+  const { createContext } = await import("react");
+  return { MarkdownImageAvailableWidthContext: createContext(390) };
+});
+vi.mock("../features/review/ReviewCommentCard", () => ({ useReviewCommentColors: () => ({}) }));
+vi.mock("../features/prompt-links/prompt-link-actions", () => ({}));
+vi.mock("@react-navigation/elements", async () => {
+  const { createContext } = await import("react");
+  return { HeaderHeightContext: createContext(0) };
 });
 
 describe("ThreadInlineFilePreview playback", () => {
@@ -197,6 +330,94 @@ describe("ThreadInlineFilePreview playback", () => {
       isBuffering: false,
     };
   });
+
+  it.each(["user", "assistant"] as const)(
+    "cancels a pending file lookup when a %s attachment video starts inline",
+    async (role) => {
+      (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+      const environmentId = EnvironmentId.make("environment-1");
+      const threadId = ThreadId.make("thread-1");
+      const messageId = MessageId.make("message-1");
+      const timestamp = "2026-10-20T00:00:00.000Z";
+      const feed: ThreadFeedEntry[] = [
+        {
+          type: "message",
+          id: messageId,
+          createdAt: timestamp,
+          message: {
+            id: messageId,
+            role,
+            text: "open target.ts",
+            attachments: [
+              { type: "file", id: "clip", name: "clip.mp4", mimeType: "video/mp4", sizeBytes: 12 },
+            ],
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            runId: null,
+            streaming: false,
+            visibility: "local",
+            sourceThreadId: threadId,
+          },
+        },
+      ];
+      let finishLookup!: (value: unknown) => void;
+      const lookup = new Promise((resolve) => {
+        finishLookup = resolve;
+      });
+      audio.query.mockReturnValueOnce(lookup);
+      audio.refresh.mockResolvedValue("https://example.com/clip.mp4");
+      const container = document.createElement("div");
+      root = createRoot(container);
+      await act(async () =>
+        root!.render(
+          createElement(ThreadFeed, {
+            environmentId,
+            threadId,
+            threadTitle: "preview",
+            workspaceRoot: "/repo",
+            feed,
+            queuedMessages: [],
+            dispatchingMessageId: null,
+            onEditPendingMessage: null,
+            contentPresentation: { kind: "ready" },
+            agentLabel: "agent",
+            latestRun: null,
+            activeWorkStartedAt: null,
+            listRef: { current: null },
+            freeze: { value: false } as Parameters<typeof ThreadFeed>[0]["freeze"],
+            contentInsetEndAdjustment: { value: 0 } as Parameters<
+              typeof ThreadFeed
+            >[0]["contentInsetEndAdjustment"],
+            anchorMessageId: null,
+            submittedMessageId: null,
+            keyboardOffset: 0,
+          }),
+        ),
+      );
+      const link = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent === "open target.ts",
+      )!;
+      await act(async () => link.click());
+      const signal: AbortSignal = audio.query.mock.calls[0]![2].signal;
+      expect(signal.aborted).toBe(false);
+      expect(audio.navigate).not.toHaveBeenCalled();
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('[aria-label="Play clip.mp4"]')!.click(),
+      );
+      expect(signal.aborted).toBe(true);
+      expect(audio.video.play).toHaveBeenCalled();
+      expect(audio.sessionOwned).toBe(true);
+      await act(async () =>
+        finishLookup({
+          _tag: "Success",
+          value: { entries: [{ path: "src/target.ts", kind: "file" }] },
+        }),
+      );
+      expect(audio.navigate).not.toHaveBeenCalled();
+      expect(container.querySelector('[aria-label="Play clip.mp4"]')).toBeNull();
+      expect(audio.video.playing).toBe(true);
+    },
+  );
 
   it.each(
     ["takeover", "pause", "finish"].flatMap((release) => [

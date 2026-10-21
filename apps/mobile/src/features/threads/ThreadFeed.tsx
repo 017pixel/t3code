@@ -539,6 +539,7 @@ function MessageAttachmentFile(props: {
   readonly environmentId: EnvironmentId;
   readonly attachment: ChatFileAttachment;
   readonly onPressPreview: (source: FilePreviewSource) => void;
+  readonly onPressVideo: () => void;
 }) {
   const sourceIdentifier = useId();
   const navigation = useNavigation();
@@ -674,6 +675,7 @@ function MessageAttachmentFile(props: {
       <View className="my-1" style={{ width: 224, maxWidth: "100%" }}>
         <ThreadMarkdownVideo
           source={attachmentVideoPreviewSource(props.environmentId, attachment, sourceIdentifier)}
+          onPlaybackStart={props.onPressVideo}
         />
       </View>
     );
@@ -1010,6 +1012,7 @@ function renderFeedEntry(
     readonly onToggleWorkRow: (rowId: string, anchorKey?: string, groupId?: string) => void;
     readonly onToggleTurnFold: (runId: RunId) => void;
     readonly onPressPreview: (source: FilePreviewSource) => void;
+    readonly onPressVideo: () => void;
     readonly markdownLinkHandlers: MarkdownLinkHandlers;
     readonly renderMarkdownImage: MarkdownImageRenderer;
     readonly renderViewedImage: MarkdownImageRenderer;
@@ -1289,6 +1292,7 @@ function renderFeedEntry(
                       environmentId={props.environmentId}
                       attachment={attachment}
                       onPressPreview={props.onPressPreview}
+                      onPressVideo={props.onPressVideo}
                     />
                   ) : (
                     <MessageAttachmentUnknown key={attachment.id} name={attachment.name} />
@@ -1424,6 +1428,7 @@ function renderFeedEntry(
               environmentId={props.environmentId}
               attachment={attachment}
               onPressPreview={props.onPressPreview}
+              onPressVideo={props.onPressVideo}
             />
           ) : (
             <MessageAttachmentUnknown key={attachment.id} name={attachment.name} />
@@ -2498,6 +2503,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     markdownLinkRequest.current?.abort();
     setExpandedFile((current) => current ?? source);
   };
+  const onPressVideo = () => {
+    markdownLinkRequest.current?.abort();
+  };
 
   // Without this, every row above the viewport is assumed to be
   // estimatedItemSize tall, and scrolling up through unmeasured content
@@ -2584,6 +2592,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             onToggleWorkRow,
             onToggleTurnFold,
             onPressPreview,
+            onPressVideo,
             markdownLinkHandlers,
             renderMarkdownImage,
             renderViewedImage,

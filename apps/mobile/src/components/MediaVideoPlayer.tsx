@@ -143,6 +143,7 @@ interface MediaVideoPlayerProps {
   readonly expanded?: boolean;
   readonly autoPlay?: boolean;
   readonly paused?: boolean;
+  readonly onPlaybackStart?: () => void;
   readonly actionsSource?: MediaActionsSource;
 }
 
@@ -176,7 +177,10 @@ function MediaVideoPlayerContent(props: MediaVideoPlayerProps) {
             accessibilityState={{ disabled: props.uri === null || props.unavailable === true }}
             // Stays pressable so the long-press menu still opens on a failed or unsigned tile.
             onPress={() => {
-              if (props.uri !== null && !props.unavailable) setPlaybackUri(props.uri);
+              if (props.uri !== null && !props.unavailable) {
+                props.onPlaybackStart?.();
+                setPlaybackUri(props.uri);
+              }
             }}
             className="flex-1 items-center justify-center px-4"
           >
