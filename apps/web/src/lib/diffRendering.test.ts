@@ -1,4 +1,4 @@
-import { hydratePartialDiff } from "@pierre/diffs";
+import { hydratePartialDiff, type FileDiffMetadata } from "@pierre/diffs";
 import { describe, expect, it } from "vite-plus/test";
 import { resolveDiffReviewPosition } from "../reviewCommentContext";
 import {
@@ -269,6 +269,49 @@ describe("diff file reconciliation", () => {
 
     expect(buildFileDiffIdentityKey(deleted)).not.toBe(buildFileDiffIdentityKey(added));
     expect(new Set(parsed.files.map(buildFileDiffIdentityKey)).size).toBe(parsed.files.length);
+  });
+
+  it("keeps a lazily loaded file's identity once its patch arrives", () => {
+    const patch = [
+      "diff --git a/b-added-0.txt b/b-added-0.txt",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/b-added-0.txt",
+      "@@ -0,0 +1 @@",
+      "+added",
+      "diff --git a/c-deleted-0.txt b/c-deleted-0.txt",
+      "deleted file mode 100644",
+      "--- a/c-deleted-0.txt",
+      "+++ /dev/null",
+      "@@ -1 +0,0 @@",
+      "-deleted",
+      "diff --git a/d-old-0.txt b/d-renamed-0.txt",
+      "similarity index 100%",
+      "rename from d-old-0.txt",
+      "rename to d-renamed-0.txt",
+    ].join("\n");
+    const parsed = getRenderablePatch(patch, "lazy-identity");
+    expect(parsed?.kind).toBe("files");
+    if (parsed?.kind !== "files") return;
+    expect(parsed.files.map((file) => file.type)).toEqual(["new", "deleted", "rename-pure"]);
+
+    // The review panel shows this placeholder until the file's own patch loads, knowing only
+    // the path stat, so a collapse toggled while it was pending must still apply afterwards.
+    const placeholders = parsed.files.map((loaded): FileDiffMetadata => ({
+      name: loaded.name,
+      ...(loaded.prevName ? { prevName: loaded.prevName } : {}),
+      type: loaded.prevName ? "rename-changed" : "change",
+      hunks: [],
+      additionLines: [],
+      deletionLines: [],
+      splitLineCount: 0,
+      unifiedLineCount: 0,
+      isPartial: true,
+      cacheKey: `scope:${loaded.name}:pending`,
+    }));
+    expect(parsed.files.map(buildFileDiffIdentityKey)).toEqual(
+      placeholders.map(buildFileDiffIdentityKey),
+    );
   });
 
   it("keeps identities stable and versions local to the changed file", () => {
