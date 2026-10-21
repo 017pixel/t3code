@@ -40,6 +40,7 @@ import * as Predicate from "effect/Predicate";
 import * as FileSystem from "effect/FileSystem";
 import { MCP_APP_OUTPUT_KEY, readMcpAppReference } from "@t3tools/shared/mcpApp";
 import { resolveAttachmentPathById } from "../../attachmentStore.ts";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
@@ -882,6 +883,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
     onResponse: (method: string) => Effect.Effect<void> = () => Effect.void,
+    onRawRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -915,6 +917,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                           Effect.andThen(client.request(method, params)),
                           Effect.tap(() => onResponse(method)),
                         ),
+                      raw: {
+                        ...client.raw,
+                        request: (method, params) =>
+                          onRawRequest(method, params).pipe(
+                            Effect.andThen(client.raw.request(method, params)),
+                          ),
+                      },
                     }) satisfies CodexClient.CodexAppServerClient["Service"],
                 ),
                 Effect.provide(context),
@@ -2710,12 +2719,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           runOrdinal: 2,
           providerTurnOrdinal: 2,
         });
-        yield* harness.awaitTerminal(1);
+        yield* harness.awaitTerminal(2);
 
         assert.deepEqual(
-          harness.terminalEvents().map((event) => event.runOrdinal),
-          [2],
-          "turn/completed for the reused native turn must settle the run that started it last",
+          harness.terminalEvents().map((event) => [event.runOrdinal, event.status]),
+          [
+            [1, "interrupted"],
+            [2, "completed"],
+          ],
+          "the earlier run must end when Codex hands its turn on, and turn/completed must settle the run that started it last",
         );
       }).pipe(
         Effect.provide(
@@ -2846,7 +2858,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
 
           yield* harness.runtime.startTurn(retracted);
           // Codex acknowledges the interrupt but keeps the turn open.
-          yield* harness.runtime
+          const stop = yield* harness.runtime
             .interruptTurn({
               providerThread: harness.providerThread,
               providerTurnId: (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
@@ -2857,7 +2869,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             .pipe(Effect.forkScoped);
           yield* Deferred.await(interruptAcknowledged);
           yield* harness.runtime.startTurn(replacement);
-          yield* harness.awaitTerminal(1);
+          yield* harness.awaitTerminal(2);
+          yield* Fiber.join(stop);
 
           const answer = harness.events.find(
             (event) =>
@@ -2870,7 +2883,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           );
           assert.deepEqual(
             harness.terminalEvents().map((event) => [event.runOrdinal, event.status]),
-            [[2, "completed"]],
+            [
+              [1, "interrupted"],
+              [2, "completed"],
+            ],
           );
         }).pipe(
           Effect.provide(
@@ -2878,6 +2894,242 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ),
         ),
       ),
+  );
+
+  it.effect("a Stop for a run whose turn Codex handed on leaves the new run's work alone", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const nativeThreadId = "reused-stopped-turn-thread";
+        const nativeTurnId = "reused-stopped-turn";
+        const replacementPrompt = "Replacement message.";
+        const command = (id: string, processId: string, status: "inProgress" | "completed") => ({
+          type: "commandExecution",
+          id,
+          command: "sleep 20",
+          cwd: "/workspace",
+          processId,
+          source: "unifiedExecStartup",
+          status,
+          commandActions: [{ type: "unknown", command: "sleep 20" }],
+          aggregatedOutput: status === "completed" ? "" : null,
+          exitCode: status === "completed" ? 0 : null,
+          durationMs: status === "completed" ? 1 : null,
+        });
+        const transcript = makeCodexReplayTranscript({
+          scenario: "codex-reused-stopped-turn",
+          entries: [
+            ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "Retracted message." }),
+            {
+              type: "emit_inbound",
+              label: "retracted command",
+              frame: {
+                method: "item/started",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: nativeTurnId,
+                  item: command("retracted-command", "1111", "inProgress"),
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              label: "turn/interrupt",
+              frame: {
+                id: 4,
+                method: "turn/interrupt",
+                params: { threadId: nativeThreadId, turnId: nativeTurnId },
+              },
+            },
+            { type: "emit_inbound", label: "turn/interrupt", frame: { id: 4, result: {} } },
+            {
+              type: "expect_outbound",
+              label: "terminate retracted command",
+              frame: {
+                id: 5,
+                method: "thread/backgroundTerminals/terminate",
+                params: { threadId: nativeThreadId, processId: "1111" },
+              },
+            },
+            // Emitted only once the terminate request above is on the wire.
+            {
+              type: "emit_inbound",
+              label: "retracted partial answer",
+              frame: {
+                method: "item/completed",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: nativeTurnId,
+                  item: { type: "agentMessage", id: "retracted-partial", text: "Partial." },
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              label: "replacement turn/start",
+              frame: {
+                id: 6,
+                method: "turn/start",
+                params: {
+                  threadId: nativeThreadId,
+                  input: [{ type: "text", text: replacementPrompt }],
+                  cwd: "/workspace",
+                  model: "gpt-5.4",
+                  approvalPolicy: "never",
+                  approvalsReviewer: "user",
+                  sandboxPolicy: { type: "dangerFullAccess" },
+                  summary: "detailed",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "replacement turn/started",
+              frame: {
+                method: "turn/started",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }),
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "replacement command",
+              frame: {
+                method: "item/started",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: nativeTurnId,
+                  item: command("replacement-command", "2222", "inProgress"),
+                },
+              },
+            },
+            // The earlier Stop resumes only now, with the new run's command
+            // running under the same native turn.
+            {
+              type: "emit_inbound",
+              label: "terminate retracted command",
+              frame: { id: 5, result: { terminated: true } },
+            },
+            {
+              type: "emit_inbound",
+              label: "replacement turn/start",
+              frame: {
+                id: 6,
+                result: { turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }) },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "replacement command done",
+              frame: {
+                method: "item/completed",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: nativeTurnId,
+                  item: command("replacement-command", "2222", "completed"),
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "turn/completed",
+              frame: {
+                method: "turn/completed",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                },
+              },
+            },
+          ],
+        });
+        const terminated: Array<unknown> = [];
+        const harness = yield* makeCodexReplayHarness(
+          transcript,
+          () => Effect.void,
+          () => Effect.void,
+          undefined,
+          () => Effect.void,
+          (method, params) =>
+            method === "thread/backgroundTerminals/terminate"
+              ? Effect.sync(() => {
+                  terminated.push(params);
+                })
+              : Effect.void,
+        );
+        const hasItem = (nativeId: string) => () =>
+          harness.events.some(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.nativeItemRef?.nativeId === nativeId,
+          );
+        const now = yield* DateTime.now;
+        const retracted = makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("attempt-codex-retracted"),
+          text: "Retracted message.",
+        });
+        const replacement = {
+          ...makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-codex-replacement"),
+            text: replacementPrompt,
+          }),
+          runOrdinal: 2,
+          providerTurnOrdinal: 2,
+        };
+
+        yield* harness.runtime.startTurn(retracted);
+        yield* harness.until(hasItem("retracted-command"));
+        const stop = yield* harness.runtime
+          .interruptTurn({
+            providerThread: harness.providerThread,
+            providerTurnId: (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+              driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+              nativeTurnId,
+            }),
+          })
+          .pipe(Effect.exit, Effect.forkScoped);
+        yield* harness.until(hasItem("retracted-partial"));
+        yield* harness.runtime.startTurn(replacement);
+        yield* harness.awaitTerminal(2);
+        const stopExit = yield* Fiber.join(stop);
+
+        assert.isTrue(Exit.isSuccess(stopExit), String(stopExit));
+        assert.deepEqual(terminated, [{ threadId: nativeThreadId, processId: "1111" }]);
+        const statuses = (nativeId: string) =>
+          harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.nativeItemRef?.nativeId === nativeId
+              ? [[event.turnItem.runId, event.turnItem.status]]
+              : [],
+          );
+        assert.deepEqual(statuses("retracted-command"), [
+          [retracted.runId, "running"],
+          [retracted.runId, "interrupted"],
+        ]);
+        assert.deepEqual(statuses("replacement-command"), [
+          [replacement.runId, "running"],
+          [replacement.runId, "completed"],
+        ]);
+        assert.deepEqual(
+          harness.terminalEvents().map((event) => [event.runOrdinal, event.status]),
+          [
+            [1, "interrupted"],
+            [2, "completed"],
+          ],
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
   );
 
   const BG_SCENARIO = "codex-bg-exec-wake";

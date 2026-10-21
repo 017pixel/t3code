@@ -43,7 +43,7 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 
@@ -561,6 +561,8 @@ const seedRollbackHistory = Effect.gen(function* () {
 
   const rollbackCounts: number[] = [];
   const interrupted: ProviderTurnId[] = [];
+  // Set to make the provider refuse the next interrupt, after running the effect.
+  const interruptFailure: { current: Effect.Effect<void> | null } = { current: null };
   const restored: CheckpointId[] = [];
   const deletedRefs: CheckpointId[] = [];
   const committed: OrchestrationV2DomainEvent[] = [];
@@ -604,9 +606,22 @@ const seedRollbackHistory = Effect.gen(function* () {
                   return { providerThread: input.providerThread };
                 }),
               interruptTurn: (input: ProviderAdapter.ProviderAdapterV2InterruptInput) =>
-                Effect.sync(() => {
-                  interrupted.push(input.providerTurnId);
-                }),
+                interruptFailure.current === null
+                  ? Effect.sync(() => {
+                      interrupted.push(input.providerTurnId);
+                    })
+                  : interruptFailure.current.pipe(
+                      Effect.andThen(
+                        Effect.fail(
+                          new ProviderAdapter.ProviderAdapterInterruptError({
+                            driver,
+                            providerThreadId: input.providerThread.id,
+                            providerTurnId: input.providerTurnId,
+                            cause: "Stop could not be delivered.",
+                          }),
+                        ),
+                      ),
+                    ),
             } as never),
         }),
         Layer.mock(RuntimePolicy.RuntimePolicyV2)({ resolve: () => Effect.succeed({} as never) }),
@@ -642,6 +657,7 @@ const seedRollbackHistory = Effect.gen(function* () {
     rollback,
     rollbackCounts,
     interrupted,
+    interruptFailure,
     restored,
     deletedRefs,
     committed,
@@ -746,9 +762,8 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
         }),
     );
 
-    it.effect("does not leave a run that is still streaming alive in the provider", () =>
+    const seedStreamingRun = (history: Effect.Success<typeof seedRollbackHistory>) =>
       Effect.gen(function* () {
-        const history = yield* seedRollbackHistory;
         const { now, runId, nodeId, attemptId, turnId } = history;
         yield* history.apply({
           type: "run.created",
@@ -787,31 +802,94 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
             completedAt: null,
           },
         });
-        yield* history.apply({
-          type: "provider-turn.updated",
-          payload: {
-            id: turnId(8),
-            providerThreadId: history.providerThreadId,
-            nodeId: nodeId(8),
-            runAttemptId: attemptId(8),
-            nativeTurnRef: {
-              driver: history.driver,
-              nativeId: "native-turn-8",
-              strength: "strong",
-            },
-            ordinal: 16,
-            status: "running",
-            startedAt: now,
-            completedAt: null,
-          },
-        });
+        yield* setStreamingTurnStatus(history, "running");
+      });
+    const setStreamingTurnStatus = (
+      history: Effect.Success<typeof seedRollbackHistory>,
+      status: "running" | "interrupted",
+    ) =>
+      history.apply({
+        type: "provider-turn.updated",
+        payload: {
+          id: history.turnId(8),
+          providerThreadId: history.providerThreadId,
+          nodeId: history.nodeId(8),
+          runAttemptId: history.attemptId(8),
+          nativeTurnRef: { driver: history.driver, nativeId: "native-turn-8", strength: "strong" },
+          ordinal: 16,
+          status,
+          startedAt: history.now,
+          completedAt: status === "running" ? null : history.now,
+        },
+      });
+    const runStatus = (history: Effect.Success<typeof seedRollbackHistory>, ordinal: number) =>
+      history.store
+        .getThreadRecords(history.threadId, ["runs"])
+        .pipe(
+          Effect.map(
+            (records) => records.runs.find((run) => run.id === history.runId(ordinal))?.status,
+          ),
+        );
+
+    it.effect("stops and drops a run that is still streaming", () =>
+      Effect.gen(function* () {
+        const history = yield* seedRollbackHistory;
+        yield* seedStreamingRun(history);
+
+        yield* history.rollback(6);
+        yield* history.rollback(6);
+
+        assert.deepEqual(history.interrupted, [history.turnId(8)]);
+        // The stopped turn is reverted once and is not counted again.
+        assert.deepEqual(history.rollbackCounts, [1]);
+        assert.equal(yield* runStatus(history, 8), "rolled_back");
+      }),
+    );
+
+    it.effect("drops a streaming run with stopped ones without counting it twice", () =>
+      Effect.gen(function* () {
+        const history = yield* seedRollbackHistory;
+        yield* seedStreamingRun(history);
+
+        yield* history.rollback(4);
+        yield* history.rollback(2);
+
+        assert.deepEqual(history.interrupted, [history.turnId(8)]);
+        assert.deepEqual(history.rollbackCounts, [3, 2]);
+        assert.deepEqual(
+          yield* Effect.forEach([3, 4, 5, 6, 8], (ordinal) => runStatus(history, ordinal)),
+          ["rolled_back", "rolled_back", "rolled_back", "rolled_back", "rolled_back"],
+        );
+      }),
+    );
+
+    it.effect("fails rather than rewind past a turn the provider would not stop", () =>
+      Effect.gen(function* () {
+        const history = yield* seedRollbackHistory;
+        yield* seedStreamingRun(history);
+        history.interruptFailure.current = Effect.void;
 
         const exit = yield* Effect.exit(history.rollback(6));
 
-        assert.isTrue(
-          Exit.isFailure(exit) || history.interrupted.includes(turnId(8)),
-          "rolling back past a running run succeeded without interrupting its provider turn, so the native turn keeps streaming",
+        assert.isTrue(Exit.isFailure(exit));
+        assert.deepEqual(history.rollbackCounts, []);
+        assert.deepEqual(history.restored, []);
+        assert.equal(yield* runStatus(history, 8), "running");
+      }),
+    );
+
+    it.effect("rewinds when a refused stop finds the turn already ended", () =>
+      Effect.gen(function* () {
+        const history = yield* seedRollbackHistory;
+        yield* seedStreamingRun(history);
+        history.interruptFailure.current = setStreamingTurnStatus(history, "interrupted").pipe(
+          Effect.orDie,
         );
+
+        yield* history.rollback(6);
+
+        assert.deepEqual(history.rollbackCounts, [1]);
+        assert.equal(yield* runStatus(history, 8), "rolled_back");
       }),
     );
   },

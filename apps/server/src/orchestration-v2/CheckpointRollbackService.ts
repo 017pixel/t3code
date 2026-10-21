@@ -263,6 +263,13 @@ export const layer: Layer.Layer<
       // keeps its native turn open and can hand that turn to the next run, so
       // stop it first; the stopped turn is then part of what the rollback drops.
       // Refusing rollback while a run is active is #16843's scope.
+      const liveAttemptIds = new Set(
+        runsToRollback.flatMap((run) =>
+          (run.status === "running" || run.status === "waiting") && run.activeAttemptId !== null
+            ? [run.activeAttemptId]
+            : [],
+        ),
+      );
       const providerThreadTurns = yield* Effect.forEach(
         context.providerTurns.filter(
           (turn) =>
@@ -270,17 +277,28 @@ export const layer: Layer.Layer<
             (turn.runAttemptId === null || !rolledBackAttemptIds.has(turn.runAttemptId)),
         ),
         (turn) =>
-          turn.status !== "running"
+          turn.status !== "running" ||
+          turn.runAttemptId === null ||
+          !liveAttemptIds.has(turn.runAttemptId)
             ? Effect.succeed(turn)
             : session.interruptTurn({ providerThread, providerTurnId: turn.id }).pipe(
-                Effect.as({ ...turn, status: "interrupted" as const }),
+                // Rewinding past work the provider still runs would leave it
+                // running, so only a turn that has since ended lets this go on.
                 Effect.catch((cause) =>
-                  Effect.logWarning("orchestration-v2.rollback-interrupt-failed", {
-                    threadId: input.threadId,
-                    providerTurnId: turn.id,
-                    cause,
-                  }).pipe(Effect.as(turn)),
+                  projections
+                    .getProviderControlContext(input.threadId, {
+                      providerThreadId: providerThread.id,
+                      providerTurnId: turn.id,
+                    })
+                    .pipe(
+                      Effect.flatMap(({ providerTurn }) =>
+                        providerTurn === undefined || providerTurn.status === "running"
+                          ? Effect.fail(cause)
+                          : Effect.void,
+                      ),
+                    ),
                 ),
+                Effect.as({ ...turn, status: "interrupted" as const }),
               ),
       );
 

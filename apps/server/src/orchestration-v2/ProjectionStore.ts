@@ -5089,7 +5089,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               AND attempt.thread_id = ${threadId}`,
                 sql<PayloadRow>`SELECT payload_json FROM orchestration_v2_projection_runs
             WHERE thread_id = ${threadId} AND ordinal > ${targetOrdinal}
-              AND status IN ('completed', 'interrupted', 'failed', 'cancelled')
+              AND status IN ('completed', 'interrupted', 'failed', 'cancelled', 'running', 'waiting')
             ORDER BY ordinal ASC`,
                 sql<PayloadRow>`SELECT session.payload_json
             FROM orchestration_v2_projection_provider_sessions AS session
@@ -7070,7 +7070,9 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               (run.status === "completed" ||
                 run.status === "interrupted" ||
                 run.status === "failed" ||
-                run.status === "cancelled"),
+                run.status === "cancelled" ||
+                run.status === "running" ||
+                run.status === "waiting"),
           );
           const rootNodeIds = new Set(runsToRollback.map((run) => run.rootNodeId));
           const rolledBackRunIds = new Set(
