@@ -1,4 +1,5 @@
 import { assert, it } from "@effect/vitest";
+import { Session } from "@opencode/client/effect";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
@@ -44,5 +45,71 @@ describe("OpenCode2Client authorization", () => {
       assert.strictEqual(yield* authorizationFor("pass€word"), utf8Basic("pass€word"));
       assert.strictEqual(yield* authorizationFor(Redacted.make("pässwörd")), utf8Basic("pässwörd"));
     }),
+  );
+});
+
+describe("OpenCode2Client message history", () => {
+  it.effect.each([
+    { status: "running", recentLocation: "metadata" },
+    { status: "completed", recentLocation: "metadata" },
+    { status: "running", recentLocation: "top-level" },
+    { status: "completed", recentLocation: "top-level" },
+  ] as const)(
+    "decodes $status compaction with $recentLocation recent",
+    ({ status, recentLocation }) =>
+      Effect.gen(function* () {
+        const previous = {
+          id: "msg_repro088",
+          type: "synthetic",
+          text: "Fixture message 88",
+          time: { created: 1088 },
+        };
+        const compaction = {
+          type: "compaction",
+          id: "msg_repro089",
+          time: { created: 1089 },
+          status,
+          reason: "manual",
+          summary: "Fixture compaction",
+          ...(recentLocation === "metadata"
+            ? { metadata: { recent: previous.id } }
+            : { recent: previous.id }),
+        };
+        const transport = Layer.succeed(
+          HttpClient.HttpClient,
+          HttpClient.make((request) =>
+            Effect.sync(() => {
+              assert.include(request.url, "/api/session/ses_repro/message");
+              return HttpClientResponse.fromWeb(
+                request,
+                new Response(JSON.stringify({ data: [previous, compaction], cursor: {} }), {
+                  headers: { "content-type": "application/json" },
+                }),
+              );
+            }),
+          ),
+        );
+        const opencode = yield* OpenCode2Client.OpenCode2Client.pipe(
+          Effect.provide(OpenCode2Client.layer.pipe(Layer.provide(transport))),
+        );
+        const { client } = yield* opencode.connect({
+          baseUrl: "http://127.0.0.1:4096",
+          password: "test-password",
+        });
+        const history = yield* client.message.list({
+          sessionID: Session.ID.make("ses_repro"),
+          order: "asc",
+        });
+
+        assert.deepStrictEqual(
+          history.data.map((message) => message.id),
+          [previous.id, compaction.id],
+        );
+        assert.deepInclude(history.data[1], {
+          type: "compaction",
+          status,
+          summary: compaction.summary,
+        });
+      }),
   );
 });
