@@ -10,6 +10,7 @@ import {
   PreviewTabId,
   ProviderInstanceId,
   ThreadId,
+  type PreviewAutomationResizeResult,
   type PreviewAutomationSnapshot,
   type PreviewAutomationStatus,
 } from "@t3tools/contracts";
@@ -52,7 +53,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
       return makeContext().page as unknown as Page;
     }
     async connectDesktopPage(endpoint: string) {
-      const context = makeContext();
+      const context = makeContext(undefined, true);
       desktopConnections.push({ endpoint, context });
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
@@ -80,7 +81,10 @@ const PNG_HEADER = (() => {
   return header.toString("base64");
 })();
 
-function makeSession(frame?: ReturnType<typeof makeFrame>) {
+function makeSession(
+  frame?: ReturnType<typeof makeFrame>,
+  readMetrics?: () => Promise<{ ratio: number; width: number; height: number }>,
+) {
   const events = new NodeEvents.EventEmitter();
   return {
     on: vi.fn((name: string, listener: () => void) => events.on(name, listener)),
@@ -97,8 +101,16 @@ function makeSession(frame?: ReturnType<typeof makeFrame>) {
       // Snapshots read password fields from their own isolated world in each frame.
       if (method === "Page.createIsolatedWorld") {
         return {
-          executionContextId: (input as { worldName?: string }).worldName === "t3-preview" ? 1 : 7,
+          executionContextId:
+            (input as { worldName?: string }).worldName === "t3-preview-metrics"
+              ? 8
+              : (input as { worldName?: string }).worldName === "t3-preview"
+                ? 1
+                : 7,
         };
+      }
+      if (method === "Runtime.evaluate" && (input as { contextId?: number }).contextId === 8) {
+        return { result: { value: await readMetrics?.() } };
       }
       if (method === "Runtime.evaluate" && (input as { contextId?: number }).contextId === 1) {
         return { result: { value: [] } };
@@ -119,13 +131,16 @@ function makeSession(frame?: ReturnType<typeof makeFrame>) {
   };
 }
 
-function makeContext(onClose?: (context: BrowserContext) => void) {
+function makeContext(onClose?: (context: BrowserContext) => void, desktop = false) {
   const events = new NodeEvents.EventEmitter();
   const nativeFileChooser = vi.fn();
   const setChooserFiles = vi.fn(async (_files: unknown) => {});
   const sessions: ReturnType<typeof makeSession>[] = [];
   let url = "about:blank";
-  let viewport = { width: 1280, height: 800 };
+  let viewport: { width: number; height: number } | null = desktop
+    ? null
+    : { width: 1280, height: 800 };
+  const readMetrics = vi.fn(async () => ({ ratio: 1, width: 1280, height: 800 }));
   let closed = false;
   let contextClosed = false;
   const page = {
@@ -156,7 +171,7 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     url: () => url,
     title: vi.fn(async () => "test page"),
     viewportSize: () => viewport,
-    setViewportSize: vi.fn(async (size: typeof viewport) => {
+    setViewportSize: vi.fn(async (size: { width: number; height: number }) => {
       viewport = size;
     }),
     goto: vi.fn(async (next: string) => {
@@ -192,12 +207,14 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
   };
   const context = {
     page,
+    readMetrics,
     sessions,
     newPage: async () => page as unknown as Page,
     grantPermissions: vi.fn(async () => {}),
     newCDPSession: async (target: unknown) => {
       const session = makeSession(
         target === page ? undefined : (target as ReturnType<typeof makeFrame>),
+        readMetrics,
       );
       sessions.push(session);
       return session;
@@ -332,6 +349,256 @@ beforeEach(() => {
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
+
+const resizeCases = [
+  {
+    input: { mode: "freeform" as const, width: 1920, height: 1200 },
+    setting: { _tag: "freeform" as const, width: 1920, height: 1200 },
+  },
+  {
+    input: { mode: "freeform" as const, width: 560, height: 760 },
+    setting: { _tag: "freeform" as const, width: 560, height: 760 },
+  },
+  {
+    input: { mode: "preset" as const, preset: "iphone-12-pro" as const },
+    setting: {
+      _tag: "preset" as const,
+      presetId: "iphone-12-pro" as const,
+      width: 390,
+      height: 844,
+    },
+  },
+];
+
+it.effect.each(resizeCases)(
+  "desktop-backed $input.mode $setting.width×$setting.height resize returns the measured CDP viewport",
+  ({ input, setting }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = true;
+        const { broker, tabId } = yield* ready;
+        const context = desktopConnections[0]!.context;
+        context.readMetrics.mockResolvedValue({
+          ratio: 1,
+          width: setting.width,
+          height: setting.height,
+        });
+        const resized = yield* broker.invoke<PreviewAutomationResizeResult>({
+          scope,
+          tabId,
+          operation: "resize",
+          input,
+        });
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect.soft(resized).toMatchObject({
+          tabId,
+          setting,
+          viewport: { width: setting.width, height: setting.height },
+          confirmed: true,
+        });
+        expect.soft(status).toMatchObject({
+          viewportSetting: setting,
+          viewport: { width: setting.width, height: setting.height },
+        });
+        expect(context.page.setViewportSize).not.toHaveBeenCalled();
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.effect("desktop resize reports a mismatched measured viewport as unconfirmed", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const context = desktopConnections[0]!.context;
+      context.readMetrics.mockResolvedValue({ ratio: 1, width: 963, height: 611 });
+      const resized = yield* broker.invoke<PreviewAutomationResizeResult>({
+        scope,
+        tabId,
+        operation: "resize",
+        input: resizeCases[0]!.input,
+      });
+      expect(resized).toMatchObject({
+        setting: resizeCases[0]!.setting,
+        viewport: { width: 963, height: 611 },
+        confirmed: false,
+      });
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect("desktop resize reports unconfirmed until the UI applies the requested viewport", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const context = desktopConnections[0]!.context;
+      context.readMetrics
+        .mockResolvedValueOnce({ ratio: 1, width: 1280, height: 800 })
+        .mockResolvedValue({ ratio: 1, width: 560, height: 760 });
+      const resized = yield* broker.invoke<PreviewAutomationResizeResult>({
+        scope,
+        tabId,
+        operation: "resize",
+        input: resizeCases[1]!.input,
+      });
+      expect(resized).toMatchObject({ viewport: { width: 1280, height: 800 }, confirmed: false });
+      const applied = yield* broker.invoke<PreviewAutomationResizeResult>({
+        scope,
+        tabId,
+        operation: "resize",
+        input: resizeCases[1]!.input,
+      });
+      expect(applied).toMatchObject({ viewport: { width: 560, height: 760 }, confirmed: true });
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect("desktop resize fails when the CDP measurement receipt is missing", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      desktopConnections[0]!.context.readMetrics.mockRejectedValue(
+        new Error("CDP measurement unavailable"),
+      );
+      const result = yield* broker
+        .invoke({
+          scope,
+          tabId,
+          operation: "resize",
+          input: resizeCases[0]!.input,
+        })
+        .pipe(Effect.result);
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "PreviewAutomationExecutionError" },
+      });
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect.each(["delayed", "missing"] as const)(
+  "desktop resize waits for a $0 CDP measurement receipt",
+  (receipt) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = true;
+        const { broker, tabId } = yield* ready;
+        const context = desktopConnections[0]!.context;
+        const measured = { ratio: 1, width: 560, height: 760 };
+        const started = Promise.withResolvers<"measurement">();
+        const completed = Promise.withResolvers<"completed">();
+        const measurement = Promise.withResolvers<typeof measured>();
+        context.readMetrics.mockResolvedValue(measured).mockImplementationOnce(async () => {
+          started.resolve("measurement");
+          return measurement.promise;
+        });
+        yield* Effect.gen(function* () {
+          const resizing = yield* broker
+            .invoke<PreviewAutomationResizeResult>({
+              scope,
+              tabId,
+              operation: "resize",
+              input: { mode: "freeform", width: 560, height: 760 },
+            })
+            .pipe(
+              Effect.result,
+              Effect.tap(() => Effect.sync(() => completed.resolve("completed"))),
+              Effect.forkScoped,
+            );
+          const first = yield* Effect.promise(() =>
+            Promise.race([started.promise, completed.promise]),
+          );
+          expect(first).toBe("measurement");
+          expect(resizing.pollUnsafe()).toBeUndefined();
+          if (receipt === "missing") measurement.reject(new Error("CDP measurement unavailable"));
+          else measurement.resolve(measured);
+          const result = yield* Fiber.join(resizing);
+          if (receipt === "missing") {
+            expect(result).toMatchObject({
+              _tag: "Failure",
+              failure: { _tag: "PreviewAutomationExecutionError" },
+            });
+          } else {
+            expect(result).toMatchObject({
+              _tag: "Success",
+              success: { tabId, viewport: { width: 560, height: 760 } },
+            });
+          }
+        }).pipe(Effect.ensuring(Effect.sync(() => measurement.resolve(measured))));
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.effect("desktop fill resize and status report a measured viewport without confirmation", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      desktopConnections[0]!.context.readMetrics.mockResolvedValue({
+        ratio: 1,
+        width: 963,
+        height: 611,
+      });
+      const resized = yield* broker.invoke<PreviewAutomationResizeResult>({
+        scope,
+        tabId,
+        operation: "resize",
+        input: { mode: "fill" },
+      });
+      expect(resized).toEqual({
+        tabId,
+        setting: { _tag: "fill" },
+        viewport: { width: 963, height: 611 },
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status).toMatchObject({
+        viewportSetting: { _tag: "fill" },
+        viewport: { width: 963, height: 611 },
+      });
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect.each(resizeCases)(
+  "headless $input.mode $setting.width×$setting.height resize keeps its viewport behavior",
+  ({ input, setting }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { broker, tabId } = yield* ready;
+        const resized = yield* broker.invoke<PreviewAutomationResizeResult>({
+          scope,
+          tabId,
+          operation: "resize",
+          input,
+        });
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(resized).toEqual({
+          tabId,
+          setting,
+          viewport: { width: setting.width, height: setting.height },
+        });
+        expect(status).toMatchObject({ viewportSetting: setting, viewport: resized.viewport });
+        expect(desktopConnections).toHaveLength(0);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
 
 it.live.each(["desktop" as const, undefined])(
   "explicit desktop targets ($0 runtime) fail without creating a server tab",

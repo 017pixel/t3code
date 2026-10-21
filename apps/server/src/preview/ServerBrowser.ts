@@ -1368,7 +1368,12 @@ const make = Effect.gen(function* () {
       };
     }
     const url = tab.page.url();
-    const viewport = tab.page.viewportSize();
+    const viewport = tab.desktop
+      ? await ServerBrowserPage.readPageMetrics(tab.cdp).then(({ width, height }) => ({
+          width,
+          height,
+        }))
+      : tab.page.viewportSize();
     const status = {
       available: true,
       visible: tab.viewers.size > 0,
@@ -1953,6 +1958,18 @@ const make = Effect.gen(function* () {
           manager.resize({ threadId: tab.threadId, tabId: tab.tabId, viewport: setting }),
         );
         await applySetting(tab, setting);
+        if (tab.desktop) {
+          // The desktop applies manager events asynchronously and has no resize acknowledgement.
+          const { width, height } = await ServerBrowserPage.readPageMetrics(tab.cdp);
+          return {
+            tabId: tab.tabId,
+            setting,
+            viewport: { width, height },
+            ...(setting._tag === "fill"
+              ? {}
+              : { confirmed: width === setting.width && height === setting.height }),
+          };
+        }
         return {
           tabId: tab.tabId,
           setting,
