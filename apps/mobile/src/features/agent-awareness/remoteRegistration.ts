@@ -1085,18 +1085,18 @@ export const refreshActiveLiveActivityRemoteRegistration = Effect.fn(
   // account changed or a newer read started, so a stale result is never
   // shown or primed.
   const identity = relayTokenProviderIdentity;
+  const isCurrentAccount = () =>
+    relayTokenProvider !== null && relayTokenProviderIdentity === identity;
+  let read = 0;
+  const isNewestRead = () => isCurrentAccount() && read === widgetSnapshotReads;
   const refreshWidget = Effect.gen(function* () {
     // An obsolete refresh must not supersede the current account's read.
-    if (!relayTokenProvider || relayTokenProviderIdentity !== identity) {
+    if (!isCurrentAccount()) {
       return undefined;
     }
-    const read = ++widgetSnapshotReads;
+    read = ++widgetSnapshotReads;
     const snapshot = yield* readAgentActivitySnapshot();
-    if (
-      read !== widgetSnapshotReads ||
-      !relayTokenProvider ||
-      relayTokenProviderIdentity !== identity
-    ) {
+    if (!isNewestRead()) {
       return undefined;
     }
     if (snapshot) {
@@ -1156,9 +1156,9 @@ export const refreshActiveLiveActivityRemoteRegistration = Effect.fn(
           cause,
         }),
     }).pipe(Effect.orElseSucceed(() => null));
-    // A sign-out or account switch during the preference read already ended
-    // this account's cards; priming now would bring its rows back.
-    if (!relayTokenProvider || relayTokenProviderIdentity !== identity) {
+    // A sign-out, account switch, or newer read during the preference read
+    // makes this snapshot stale; priming now could bring old rows back.
+    if (!isNewestRead()) {
       return;
     }
     if (preferences?.liveActivitiesEnabled !== false) {

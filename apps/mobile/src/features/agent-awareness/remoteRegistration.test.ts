@@ -1012,6 +1012,38 @@ describe("makeRelayDeviceRegistrationRequest", () => {
       }),
     );
 
+    it.effect("does not prime a Live Activity from a read a newer one replaced", () =>
+      Effect.gen(function* () {
+        let markRequested = () => {};
+        const requested = new Promise<void>((resolve) => {
+          markRequested = resolve;
+        });
+        let resolvePreferences = (_preferences: Preferences) => {};
+        vi.mocked(loadPreferences).mockImplementationOnce(() => {
+          markRequested();
+          return new Promise((resolve) => {
+            resolvePreferences = resolve;
+          });
+        });
+        const idle = { ...aggregate, activeCount: 0, activities: [] };
+        let reads = 0;
+        const relay = fakeRelay(() =>
+          Effect.succeed({ aggregate: ++reads === 1 ? aggregate : idle }),
+        );
+        setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
+
+        const older = yield* Effect.forkChild(
+          refreshActiveLiveActivityRemoteRegistration().pipe(Effect.provide(relay)),
+        );
+        yield* Effect.promise(() => requested);
+        yield* refreshActiveLiveActivityRemoteRegistration().pipe(Effect.provide(relay));
+        resolvePreferences({ liveActivitiesEnabled: true } as Preferences);
+        yield* Fiber.join(older);
+
+        expect(widgetMocks.start).not.toHaveBeenCalled();
+      }),
+    );
+
     it("shows the signed-out state after cloud sign-out", () => {
       setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
 
