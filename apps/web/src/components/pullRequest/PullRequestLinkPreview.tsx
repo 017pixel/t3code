@@ -57,9 +57,11 @@ export function PullRequestLinkPreview({
         })
       : null,
   );
+  // The hover card shares this query; refreshing keeps a failed hover from failing the click.
   const readPreview = useAtomQueryRunner(pullRequestEnvironment.preview, {
     reportFailure: false,
     reportDefect: false,
+    refresh: true,
   });
   const trigger =
     confirmBeforeOpen === true
