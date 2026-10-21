@@ -606,6 +606,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
   return (
     <ChatMarkdown
       text={props.text}
+      autoDirection={false}
       cwd={props.markdownCwd}
       threadRef={ctx.threadRef ?? undefined}
       skills={props.skills}

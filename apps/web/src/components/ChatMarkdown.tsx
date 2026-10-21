@@ -218,6 +218,7 @@ const isAssetNotFoundError = Schema.is(AssetWorkspaceAssetNotFoundError);
 interface ChatMarkdownProps {
   /** Compact markdown transforms remove blocks before rendering inside a label. */
   inline?: boolean;
+  autoDirection?: boolean;
   text: string;
   cwd: string | undefined;
   threadRef?: ScopedThreadRef | undefined;
@@ -434,6 +435,7 @@ const markdownServerConfigFieldsAtom = Atom.family((environmentId: EnvironmentId
 function useChatMarkdownState({
   text,
   inline = false,
+  autoDirection = true,
   cwd,
   threadRef,
   pullRequestPanelRef,
@@ -878,6 +880,7 @@ function useChatMarkdownState({
   };
 
   const componentState = {
+    proseDirection: autoDirection ? ("auto" as const) : undefined,
     canOperateHost,
     canOperatePreview,
     cwd,
@@ -936,10 +939,11 @@ function markdownHeadingRenderer(level: 1 | 2 | 3 | 4 | 5 | 6) {
     node: _node,
     ...props
   }: ComponentProps<typeof Tag> & ReactMarkdownExtraProps) {
-    const { headingLevelOffset } = use(ChatMarkdownRendererContext);
+    const { headingLevelOffset, proseDirection } = use(ChatMarkdownRendererContext);
     return (
       <Tag
         {...props}
+        dir={proseDirection}
         aria-level={headingLevelOffset > 0 ? Math.min(level + headingLevelOffset, 6) : undefined}
       />
     );
@@ -965,14 +969,23 @@ const CHAT_MARKDOWN_COMPONENTS = {
     return <div {...props}>{children}</div>;
   },
   p: function MarkdownParagraph({ node: _node, children, ...props }) {
-    const { skills } = use(ChatMarkdownRendererContext);
-    return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
+    const { skills, proseDirection } = use(ChatMarkdownRendererContext);
+    return (
+      <p {...props} dir={proseDirection}>
+        {renderSkillInlineMarkdownChildren(children, skills)}
+      </p>
+    );
   },
   blockquote: function MarkdownBlockquote({ node: _node, children, ...props }) {
+    const { proseDirection } = use(ChatMarkdownRendererContext);
     const alert =
       GITHUB_ALERT_PRESENTATIONS[String((props as Record<string, unknown>)["data-alert"] ?? "")];
     if (!alert) {
-      return <blockquote {...props}>{children}</blockquote>;
+      return (
+        <blockquote {...props} dir={proseDirection}>
+          {children}
+        </blockquote>
+      );
     }
     return (
       <div role="note" className={cn("my-1 border-l-2 pl-3", alert.borderClassName)}>
@@ -987,23 +1000,45 @@ const CHAT_MARKDOWN_COMPONENTS = {
       </div>
     );
   },
+  ul: function MarkdownUnorderedList({ node: _node, ...props }) {
+    const { proseDirection } = use(ChatMarkdownRendererContext);
+    return <ul {...props} dir={proseDirection} />;
+  },
+  th: function MarkdownTableHeading({ node: _node, ...props }) {
+    const { proseDirection } = use(ChatMarkdownRendererContext);
+    return <th {...props} dir={proseDirection} />;
+  },
+  td: function MarkdownTableCell({ node: _node, ...props }) {
+    const { proseDirection } = use(ChatMarkdownRendererContext);
+    return <td {...props} dir={proseDirection} />;
+  },
   ol: function MarkdownOrderedList({ node, start, style, ...props }) {
+    const { proseDirection } = use(ChatMarkdownRendererContext);
     const itemCount =
       node?.children?.filter((child) => child.type === "element" && child.tagName === "li")
         .length ?? 0;
     const gutterStyle = orderedListGutterStyle(itemCount, start);
     return (
-      <ol {...props} start={start} style={gutterStyle ? { ...style, ...gutterStyle } : style} />
+      <ol
+        {...props}
+        dir={proseDirection}
+        start={start}
+        style={gutterStyle ? { ...style, ...gutterStyle } : style}
+      />
     );
   },
   li: function MarkdownListItem({ node, children, ...props }) {
-    const { skills } = use(ChatMarkdownRendererContext);
+    const { skills, proseDirection } = use(ChatMarkdownRendererContext);
     // The checkbox finds its marker from this offset when toggled, so list items
     // don't read the source text and re-render on every streamed token.
     // remark-gfm marks task items with this class; plain items carry no offset.
     const isTaskItem = String(props.className ?? "").includes("task-list-item");
     return (
-      <li {...props} data-list-item-offset={isTaskItem ? node?.position?.start.offset : undefined}>
+      <li
+        {...props}
+        dir={proseDirection}
+        data-list-item-offset={isTaskItem ? node?.position?.start.offset : undefined}
+      >
         {renderSkillInlineMarkdownChildren(children, skills)}
       </li>
     );
@@ -1596,6 +1631,7 @@ function ChatMarkdown({
           "text-sm leading-relaxed text-foreground/[calc(80%+var(--appearance-contrast-boost)/5)]",
         className,
       )}
+      data-auto-direction={componentState.proseDirection ? "" : undefined}
       data-streaming={componentState.isStreaming ? "" : undefined}
       onCopy={handleCopy}
     >

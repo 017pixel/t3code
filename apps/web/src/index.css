@@ -1786,6 +1786,31 @@ code {
 
 /* Chat markdown rendering */
 
+/* dir=auto ignores descendants with their own dir, so list/quote chrome
+   follows the first independently directed block. */
+.chat-markdown[data-auto-direction] :is(ul, ol, li, blockquote):has(> :first-child:dir(rtl)),
+.chat-markdown[data-auto-direction] :is(ul, ol):has(> li:first-child > p:first-child:dir(rtl)) {
+  direction: rtl;
+}
+
+/* Code and table columns keep their order inside independently directed prose. */
+.chat-markdown[data-auto-direction] :is(pre, code, table) {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+.chat-markdown[data-auto-direction] :is(ul, ol) {
+  padding-left: 0;
+  padding-inline-start: var(--list-gutter, 1.25rem);
+}
+
+.chat-markdown[data-auto-direction] blockquote {
+  border-left: 0;
+  border-inline-start: 2px solid var(--contrast-border);
+  padding-left: 0;
+  padding-inline-start: 0.8rem;
+}
+
 .chat-markdown > :first-child {
   margin-top: 0;
 }

@@ -319,7 +319,57 @@ describe("ChatMarkdown content direction", () => {
     });
   });
 
-  it("keeps mainly Hebrew prose RTL even when it starts with an English term", async () => {
+  it("resolves mixed list items, quotes and table cells independently across updates", async () => {
+    setup();
+    await using screen = await renderText(
+      "- שלום.\n- Hello.\n\n> مرحبا.\n\n| שם | Name |\n| --- | --- |\n| שלום. | Hello. |",
+    );
+    const { container, rerender } = screen;
+    await vi.waitFor(() => {
+      const [rtlItem, ltrItem] = container.querySelectorAll("li");
+      expect(getComputedStyle(rtlItem!).direction).toBe("rtl");
+      expect(getComputedStyle(ltrItem!).direction).toBe("ltr");
+      expect(getComputedStyle(container.querySelector("blockquote")!).direction).toBe("rtl");
+      const [rtlCell, ltrCell] = container.querySelectorAll("td");
+      expect(getComputedStyle(rtlCell!).direction).toBe("rtl");
+      expect(getComputedStyle(ltrCell!).direction).toBe("ltr");
+      const [firstColumn, secondColumn] = container.querySelectorAll("th");
+      expect(getComputedStyle(firstColumn!).direction).toBe("rtl");
+      expect(firstColumn!.getBoundingClientRect().left).toBeLessThan(
+        secondColumn!.getBoundingClientRect().left,
+      );
+    });
+    await rerender(
+      <ChatMarkdown cwd="/tmp/project" text={"English first.\n\nשלום."} isStreaming />,
+    );
+    await vi.waitFor(() => {
+      const [english, hebrew] = container.querySelectorAll("p");
+      expect(getComputedStyle(english!).direction).toBe("ltr");
+      expect(getComputedStyle(hebrew!).direction).toBe("rtl");
+    });
+  });
+
+  it("keeps loose ordered list markers on the paragraph's side", async () => {
+    setup();
+    await using screen = await renderText("1. שלום.\n\n2. עוד.");
+    const { container } = screen;
+    expect(getComputedStyle(container.querySelector("ol")!).direction).toBe("rtl");
+    expect(getComputedStyle(container.querySelector("li")!).direction).toBe("rtl");
+    expect(getComputedStyle(container.querySelector("p")!).direction).toBe("rtl");
+  });
+
+  it("keeps inline code LTR in RTL prose and preserves the user bubble opt-out", async () => {
+    setup();
+    const text = "שלום עם `const value = 1` בתוך משפט.";
+    await using screen = await renderText(text);
+    const { container, rerender } = screen;
+    expect(getComputedStyle(container.querySelector("p")!).direction).toBe("rtl");
+    expect(getComputedStyle(container.querySelector("code")!).direction).toBe("ltr");
+    await rerender(<ChatMarkdown cwd="/tmp/project" text={text} autoDirection={false} />);
+    expect(getComputedStyle(container.querySelector("p")!).direction).toBe("ltr");
+  });
+
+  it("keeps Latin-first mixed prose LTR with native first-strong direction", async () => {
     setup();
     await using screen = await renderText(
       "React מאפשר לבנות ממשק בעברית עם `const value = 1` בתוך המשפט.\n\nEnglish prose stays left to right.",
@@ -327,7 +377,7 @@ describe("ChatMarkdown content direction", () => {
     const { container } = screen;
     await vi.waitFor(() => {
       const [hebrew, english] = container.querySelectorAll("p");
-      expect(getComputedStyle(hebrew!).direction).toBe("rtl");
+      expect(getComputedStyle(hebrew!).direction).toBe("ltr");
       expect(getComputedStyle(hebrew!.querySelector("code")!).direction).toBe("ltr");
       expect(getComputedStyle(english!).direction).toBe("ltr");
     });
