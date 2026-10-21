@@ -123,7 +123,7 @@ function patchedPaths(patch: string): ReadonlyArray<string> {
   );
 }
 
-describe("getChangeRequestSummary", () => {
+describe.each(["getChangeRequestSummary", "getChangeRequestPreview"] as const)("%s", (method) => {
   it.effect("costs the one pull request read, not the iterations changedFiles needs", () =>
     Effect.gen(function* () {
       let pullRequestReads = 0;
@@ -139,9 +139,9 @@ describe("getChangeRequestSummary", () => {
         ),
       );
 
-      const readSummary = provider.getChangeRequestSummary;
-      if (readSummary === undefined) return yield* Effect.die("summary read was not implemented");
-      const summary = yield* readSummary({
+      const read = provider[method];
+      if (read === undefined) return yield* Effect.die(`${method} read was not implemented`);
+      const summary = yield* read({
         cwd: "/w",
         repository: "acme/web",
         host: "dev.azure.com",
@@ -150,7 +150,7 @@ describe("getChangeRequestSummary", () => {
 
       expect(pullRequestReads).toBe(1);
       expect(summary.title).toBe(PULL_REQUEST.title);
-      expect(summary.changedFiles).toBeUndefined();
+      expect(summary).not.toHaveProperty("changedFiles");
     }),
   );
 });
