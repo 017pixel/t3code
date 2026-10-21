@@ -701,7 +701,7 @@ export const layerPlatformConnectionSource = Layer.effect(
           cause: topologyRead.cause,
         });
       } else {
-        const rejected = yield* Ref.get(rejectedRef);
+        const rejected = new Map(yield* Ref.get(rejectedRef));
         const nextRejected = new Map<string, RejectedSecondaryBootstrap>();
         for (const bootstrap of topologyRead.bootstraps) {
           // The cached bearer belongs to the endpoint, not to the bootstrap
@@ -718,7 +718,7 @@ export const layerPlatformConnectionSource = Layer.effect(
                   cached.registration.target.connectionId,
                   cached.registration.credential,
                 )
-                .pipe(Effect.orElseSucceed(() => false)) ?? Effect.succeed(false)
+                .pipe(Effect.orElseSucceed(() => undefined)) ?? Effect.succeed(undefined)
             );
             if (invalidated) {
               cached = { ...cached, stale: true };
@@ -728,6 +728,12 @@ export const layerPlatformConnectionSource = Layer.effect(
                   nextRejectedSecondaryBootstrap(rejected.get(bootstrap.id), signature, nowEpochMs),
                 );
               }
+            } else if (invalidated === false && cached.recoverySignature === signature) {
+              // Surviving a later poll ends this recovery episode. Only bearers
+              // rejected before that poll should accumulate rejection backoff.
+              const { recoverySignature: _recoverySignature, ...healthy } = cached;
+              cached = healthy;
+              rejected.delete(bootstrap.id);
             }
           }
           const priorRejection = rejected.get(bootstrap.id);

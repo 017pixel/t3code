@@ -931,6 +931,87 @@ describe("desktop-local startup bearer exchange", () => {
       }),
   );
 
+  it.effect(
+    "recovers immediately from an independent revocation after healthy recovery polls",
+    () =>
+      Effect.gen(function* () {
+        const endpoint = fakeBootstrapEndpoint();
+        yield* Effect.gen(function* () {
+          const source = yield* PlatformConnectionSource.PlatformConnectionSource;
+          const store = yield* CredentialStore.ConnectionCredentialStore;
+          const poll = source.registrations.pipe(Stream.runHead, Effect.map(Option.getOrThrow));
+          const reject = (registration: PlatformConnectionRegistration) =>
+            Effect.gen(function* () {
+              if (registration._tag !== "BearerConnectionRegistration")
+                throw new Error("Expected bearer");
+              yield* store.put(registration.target.connectionId, registration.credential);
+              yield* store.removeIfMatches!(
+                registration.target.connectionId,
+                registration.credential,
+              );
+            });
+
+          const first = yield* poll;
+          yield* reject(first[0]!);
+          const recovered = yield* poll;
+          // Build a real rejection history before proving a later healthy bearer resets it.
+          yield* reject(recovered[0]!);
+          yield* poll;
+          expect(endpoint.tokenRequests).toHaveLength(2);
+          yield* TestClock.adjust("60 seconds");
+          const healthy = yield* poll;
+          expect(endpoint.tokenRequests).toHaveLength(3);
+          for (let index = 0; index < 2; index++) {
+            yield* TestClock.adjust("3 seconds");
+            expect(yield* poll).toEqual(healthy);
+          }
+          yield* reject(healthy[0]!);
+          const replacement = yield* poll;
+          expect(endpoint.tokenRequests).toHaveLength(4);
+          expect(replacement[0]).not.toEqual(healthy[0]);
+        }).pipe(
+          Effect.provide(
+            layerPlatformConnectionSource.pipe(Layer.provideMerge(layerTestCredentials)),
+          ),
+          Effect.provideService(FetchHttpClient.Fetch, globalThis.fetch),
+          Effect.scoped,
+        );
+      }),
+  );
+
+  it.effect(
+    "the production platform layer shares credential rejection history with its source",
+    () =>
+      Effect.gen(function* () {
+        const endpoint = fakeBootstrapEndpoint();
+        let catalog: string | null = null;
+        Object.assign(window.desktopBridge!, {
+          getConnectionCatalog: async () => catalog,
+          setConnectionCatalog: async (next: string) => {
+            catalog = next;
+            return true;
+          },
+        });
+        yield* Effect.gen(function* () {
+          const source = yield* PlatformConnectionSource.PlatformConnectionSource;
+          const store = yield* CredentialStore.ConnectionCredentialStore;
+          const first = Option.getOrThrow(yield* Stream.runHead(source.registrations));
+          const registration = first[0]!;
+          if (registration._tag !== "BearerConnectionRegistration")
+            throw new Error("Expected bearer");
+          yield* store.put(registration.target.connectionId, registration.credential);
+          yield* store.removeIfMatches!(registration.target.connectionId, registration.credential);
+          const recovered = Option.getOrThrow(yield* Stream.runHead(source.registrations));
+          expect(endpoint.tokenRequests).toHaveLength(2);
+          expect(recovered[0]).not.toEqual(registration);
+        }).pipe(
+          Effect.provide(layer),
+          Effect.provideService(FetchHttpClient.Fetch, globalThis.fetch),
+          Effect.scoped,
+        );
+      }),
+  );
+
   it.effect("reuses a valid bearer when the endpoint and bootstrap token are unchanged", () =>
     Effect.gen(function* () {
       const endpoint = fakeBootstrapEndpoint();
