@@ -201,6 +201,41 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
     }),
   );
 
+  it.effect("keeps an older family that fits after skipping a newer one that does not", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-budget-" });
+      const destDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-budget-dest-" });
+      const source = yield* createFixtureSource(sourceDir);
+      yield* withDatabase(
+        source,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`INSERT INTO orchestration_v2_projection_threads
+            (thread_id, project_id, title, default_provider, runtime_mode, interaction_mode, created_at, updated_at, payload_json)
+            VALUES ('old-thread', 'project-kept', 'old', 'codex', 'full-access', 'default', '2026-07-01', '2026-07-01', '{}')`;
+        }),
+      );
+
+      // Newest first: settled-thread (1 thread), stopped + fork (2), old-thread (1).
+      // With room for 2, the middle family does not fit, but old-thread still does.
+      const result = yield* runMigrateDevDb(
+        { baseDir: destDir, source, projects: 5, threadsPerProject: 2, includeSettled: true },
+        { sharedHome: sourceDir },
+      );
+      const threads = yield* withDatabase(
+        result.databasePath,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const rows = yield* sql<{ thread_id: string }>`
+            SELECT thread_id FROM orchestration_v2_projection_threads ORDER BY thread_id`;
+          return rows.map((row) => row.thread_id);
+        }),
+      );
+      assert.deepStrictEqual(threads, ["old-thread", "settled-thread"]);
+    }),
+  );
+
   it.effect("--include-settled keeps settled threads but still drops archived ones", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

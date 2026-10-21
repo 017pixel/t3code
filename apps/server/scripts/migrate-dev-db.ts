@@ -338,23 +338,25 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
       COALESCE(q.last_stopped_at, p.updated_at) DESC
     LIMIT ${input.projects}`;
 
+  // Newest first, each family whole or not at all: a family too big for the
+  // remaining budget is skipped and older, smaller ones can still fit.
+  const candidates = yield* sql<{ root_id: string; project_id: string; thread_count: number }>`
+    SELECT sf.root_id, sf.project_id, sf.thread_count
+    FROM stopped_families sf
+    JOIN kept_projects kp ON kp.project_id = sf.project_id
+    ORDER BY sf.updated_at DESC, sf.root_id`;
+  const threadsByProject = new Map<string, number>();
+  yield* sql`CREATE TEMP TABLE kept_roots (root_id TEXT PRIMARY KEY)`;
+  for (const family of candidates) {
+    const used = threadsByProject.get(family.project_id) ?? 0;
+    const total = used + Number(family.thread_count);
+    if (total > input.threadsPerProject) continue;
+    threadsByProject.set(family.project_id, total);
+    yield* sql`INSERT INTO kept_roots (root_id) VALUES (${family.root_id})`;
+  }
   yield* sql`CREATE TEMP TABLE kept_threads AS
-    SELECT f.thread_id FROM thread_families f
-    WHERE f.root_id IN (
-      SELECT root_id FROM (
-        SELECT
-          sf.root_id,
-          SUM(sf.thread_count) OVER (
-            PARTITION BY sf.project_id
-            ORDER BY sf.updated_at DESC, sf.root_id
-            ROWS UNBOUNDED PRECEDING
-          ) AS threads_so_far
-        FROM stopped_families sf
-        JOIN kept_projects kp ON kp.project_id = sf.project_id
-        WHERE sf.thread_count <= ${input.threadsPerProject}
-      )
-      WHERE threads_so_far <= ${input.threadsPerProject}
-    )`;
+    SELECT thread_id FROM thread_families
+    WHERE root_id IN (SELECT root_id FROM kept_roots)`;
 
   const threadTables = yield* sql<{ name: string }>`
     SELECT m.name FROM sqlite_master m, pragma_table_info(m.name) c
