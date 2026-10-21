@@ -518,6 +518,7 @@ interface CachedPlatformRegistration {
   readonly bootstrapToken?: string;
   readonly stale?: boolean;
   readonly recoverySignature?: string;
+  readonly recoveryStartedAtEpochMs?: number;
 }
 
 export type PrimaryEnvironmentTargetRead =
@@ -570,6 +571,7 @@ export function canRetainCachedPlatformRegistrationAfterRefreshFailure(
   );
 }
 
+const SECONDARY_BEARER_RECOVERY_WINDOW_MS = 5 * 60_000;
 const REJECTED_BOOTSTRAP_RETRY_INITIAL_MS = 60_000;
 const REJECTED_BOOTSTRAP_RETRY_MAX_MS = 30 * 60_000;
 
@@ -728,10 +730,23 @@ export const layerPlatformConnectionSource = Layer.effect(
                   nextRejectedSecondaryBootstrap(rejected.get(bootstrap.id), signature, nowEpochMs),
                 );
               }
-            } else if (invalidated === false && cached.recoverySignature === signature) {
-              // Surviving a later poll ends this recovery episode. Only bearers
-              // rejected before that poll should accumulate rejection backoff.
-              const { recoverySignature: _recoverySignature, ...healthy } = cached;
+            } else if (
+              invalidated === false &&
+              cached.recoverySignature === signature &&
+              cached.recoveryStartedAtEpochMs !== undefined &&
+              nowEpochMs - cached.recoveryStartedAtEpochMs >=
+                Math.max(
+                  rejected.get(bootstrap.id)?.delayMs ?? 0,
+                  SECONDARY_BEARER_RECOVERY_WINDOW_MS,
+                )
+            ) {
+              // A slow connection can reject a bearer after several clean polls.
+              // Require sustained survival before treating a revocation as independent.
+              const {
+                recoverySignature: _recoverySignature,
+                recoveryStartedAtEpochMs: _recoveryStartedAtEpochMs,
+                ...healthy
+              } = cached;
               cached = healthy;
               rejected.delete(bootstrap.id);
             }
@@ -809,7 +824,10 @@ export const layerPlatformConnectionSource = Layer.effect(
               ...(cached?.stale ||
               cached?.recoverySignature === signature ||
               previouslyRejected?.signature === signature
-                ? { recoverySignature: signature }
+                ? {
+                    recoverySignature: signature,
+                    recoveryStartedAtEpochMs: yield* Clock.currentTimeMillis,
+                  }
                 : {}),
             };
             if (

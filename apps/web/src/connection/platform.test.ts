@@ -471,7 +471,10 @@ const layerTestCredentials = Layer.effect(
 );
 
 describe("desktop-local startup bearer exchange", () => {
-  function fakeBootstrapEndpoint(beforeExchange?: (request: number) => Promise<void>) {
+  function fakeBootstrapEndpoint(
+    beforeExchange?: (request: number) => Promise<void>,
+    expiresInSeconds = 60,
+  ) {
     const tokenRequests: string[] = [];
     const ticketRequests: Array<string | null> = [];
     let rejectExchange = false;
@@ -550,7 +553,7 @@ describe("desktop-local startup bearer exchange", () => {
             access_token: currentBearer,
             issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
             token_type: "Bearer",
-            expires_in: 60,
+            expires_in: expiresInSeconds,
             scope: AuthStandardClientScopes.join(" "),
           });
         }
@@ -931,11 +934,68 @@ describe("desktop-local startup bearer exchange", () => {
       }),
   );
 
+  it.effect("delayed rejections after clean polls retain growing recovery backoff", () =>
+    Effect.gen(function* () {
+      const endpoint = fakeBootstrapEndpoint(undefined, 3_600);
+      yield* Effect.gen(function* () {
+        const source = yield* PlatformConnectionSource.PlatformConnectionSource;
+        const store = yield* CredentialStore.ConnectionCredentialStore;
+        const poll = source.registrations.pipe(Stream.runHead, Effect.map(Option.getOrThrow));
+        const reject = (registration: PlatformConnectionRegistration) =>
+          Effect.gen(function* () {
+            if (registration._tag !== "BearerConnectionRegistration")
+              throw new Error("Expected bearer");
+            yield* store.put(registration.target.connectionId, registration.credential);
+            yield* store.removeIfMatches!(
+              registration.target.connectionId,
+              registration.credential,
+            );
+          });
+
+        const nextPoll = Effect.gen(function* () {
+          yield* TestClock.adjust("3 seconds");
+          return yield* poll;
+        });
+        const first = yield* poll;
+        yield* reject(first[0]!);
+        const recovered = yield* nextPoll;
+        expect(endpoint.tokenRequests).toHaveLength(2);
+        expect(yield* nextPoll).toEqual(recovered);
+        yield* reject(recovered[0]!);
+        expect(yield* nextPoll).toEqual(recovered);
+        for (let index = 0; index < 19; index++) {
+          expect(yield* nextPoll).toEqual(recovered);
+        }
+        expect(endpoint.tokenRequests).toHaveLength(2);
+        const retried = yield* nextPoll;
+        expect(endpoint.tokenRequests).toHaveLength(3);
+        for (let index = 0; index < 3; index++) {
+          expect(yield* nextPoll).toEqual(retried);
+        }
+        yield* reject(retried[0]!);
+        expect(yield* nextPoll).toEqual(retried);
+        for (let index = 0; index < 39; index++) {
+          expect(yield* nextPoll).toEqual(retried);
+        }
+        expect(endpoint.tokenRequests).toHaveLength(3);
+        const replacement = yield* nextPoll;
+        expect(endpoint.tokenRequests).toHaveLength(4);
+        expect(replacement[0]).not.toEqual(retried[0]);
+      }).pipe(
+        Effect.provide(
+          layerPlatformConnectionSource.pipe(Layer.provideMerge(layerTestCredentials)),
+        ),
+        Effect.provideService(FetchHttpClient.Fetch, globalThis.fetch),
+        Effect.scoped,
+      );
+    }),
+  );
+
   it.effect(
-    "recovers immediately from an independent revocation after healthy recovery polls",
+    "recovers immediately from an independent revocation after a sustained healthy recovery",
     () =>
       Effect.gen(function* () {
-        const endpoint = fakeBootstrapEndpoint();
+        const endpoint = fakeBootstrapEndpoint(undefined, 3_600);
         yield* Effect.gen(function* () {
           const source = yield* PlatformConnectionSource.PlatformConnectionSource;
           const store = yield* CredentialStore.ConnectionCredentialStore;
@@ -961,7 +1021,7 @@ describe("desktop-local startup bearer exchange", () => {
           yield* TestClock.adjust("60 seconds");
           const healthy = yield* poll;
           expect(endpoint.tokenRequests).toHaveLength(3);
-          for (let index = 0; index < 2; index++) {
+          for (let index = 0; index < 100; index++) {
             yield* TestClock.adjust("3 seconds");
             expect(yield* poll).toEqual(healthy);
           }
