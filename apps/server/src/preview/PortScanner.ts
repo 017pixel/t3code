@@ -1136,6 +1136,8 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
         (cause) => new PreviewStopLocalServerError({ reason: "signal-failed", cause }),
       ),
     );
+    // It exited after the scan, so there is nothing left to stop.
+    if (!table.has(input.pid)) return;
     const group = stoppableProcessGroup(table, input.pid, process.pid);
     if (group === null) return yield* new PreviewStopLocalServerError({ reason: "shared-group" });
     // False when the whole group already exited.
