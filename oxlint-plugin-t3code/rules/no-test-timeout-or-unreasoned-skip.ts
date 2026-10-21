@@ -100,7 +100,6 @@ export default defineRule({
 
     return {
       CallExpression(node) {
-        if (!checkTimeouts) return;
         const callee = unwrapExpression(node.callee);
         if (Option.isNone(callee)) return;
 
@@ -109,14 +108,14 @@ export default defineRule({
           Option.exists(chainRoot(callee.value.object), (name) => name === "vi") &&
           Option.exists(getPropertyName(callee.value.property), (name) => name === "setConfig")
         ) {
-          if (hasOption(node.arguments[0], SET_CONFIG_OPTIONS)) {
+          if (checkTimeouts && hasOption(node.arguments[0], SET_CONFIG_OPTIONS)) {
             context.report({ node, message: TIMEOUT_MESSAGE });
           }
           return;
         }
 
         if (callee.value.type === "Identifier" && HOOK_FUNCTIONS.has(callee.value.name)) {
-          if (isNumericLiteral(node.arguments[1])) {
+          if (checkTimeouts && isNumericLiteral(node.arguments[1])) {
             context.report({ node, message: TIMEOUT_MESSAGE });
           }
           return;
@@ -126,9 +125,10 @@ export default defineRule({
         const [, second, third] = node.arguments;
         // `test(name, { timeout }, fn)` is the options-first spelling of the same override.
         if (
-          isNumericLiteral(third) ||
-          hasOption(third, TIMEOUT_OPTIONS) ||
-          hasOption(second, TIMEOUT_OPTIONS)
+          checkTimeouts &&
+          (isNumericLiteral(third) ||
+            hasOption(third, TIMEOUT_OPTIONS) ||
+            hasOption(second, TIMEOUT_OPTIONS))
         ) {
           context.report({ node, message: TIMEOUT_MESSAGE });
         }

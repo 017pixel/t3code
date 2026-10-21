@@ -165,6 +165,15 @@ describe(RULE, () => {
   );
 });
 
+createOxlintRuleHarness(RULE, { filename: "Provider.live.test.ts" }).invalid(
+  "still flags an option-object skip in a live file",
+  `
+    import { it } from "vitest";
+    it("later", { skip: true }, () => {});
+  `,
+  assertSkipMessage,
+);
+
 createOxlintRuleHarness(RULE, { filename: "Provider.live.test.ts" }).valid(
   "allows timeouts in opt-in live provider suites",
   `
