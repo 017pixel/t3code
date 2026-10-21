@@ -4,7 +4,7 @@ import * as Option from "effect/Option";
 import { getPropertyName, isIdentifier, unwrapExpression } from "../utils.ts";
 
 const TEST_FILE_PATTERN = /\.(?:test|spec)\.[cm]?[jt]sx?$/u;
-const TEST_CLOCK_DRIVER_PATTERN = /\bTestClock\.(?:adjust|setTime)\b/u;
+const TEST_CLOCK_DRIVERS = new Set(["adjust", "setTime"]);
 const TIMER_PROMISES_MODULES = new Set(["node:timers/promises", "timers/promises"]);
 const TIMER_FUNCTIONS = new Set(["setTimeout", "setInterval", "setImmediate"]);
 const SCHEDULE_WAITS = new Set(["spaced", "fixed", "exponential"]);
@@ -178,7 +178,9 @@ export default defineRule({
   },
   create(context) {
     if (!TEST_FILE_PATTERN.test(context.filename)) return {};
-    const drivesTestClock = TEST_CLOCK_DRIVER_PATTERN.test(context.sourceCode.text);
+    let drivesTestClock = false;
+    // Whether the file drives the TestClock is only known after the whole file is walked.
+    const untilDrivenReports: Array<{ node: ESTree.Node; message: string }> = [];
     const timerPromiseLocals = new Set<string>();
     const timerPromiseNamespaces = new Set<string>();
 
@@ -227,9 +229,8 @@ export default defineRule({
           (isCallbackTimer(node.callee) && isInsidePromiseExecutor(node))
         ) {
           const tester = enclosingTester(node);
-          if (Option.isNone(tester)) return;
           reportFor(
-            tester.value === "effect"
+            Option.isSome(tester) && tester.value === "effect"
               ? `${REAL_CLOCK_MESSAGE} ${MIXED_CLOCK_MESSAGE}`
               : REAL_CLOCK_MESSAGE,
           );
@@ -239,6 +240,10 @@ export default defineRule({
         const name = memberCallName(node.callee);
         if (Option.isNone(name)) return;
         const [object, property] = name.value;
+        if (object === "TestClock" && TEST_CLOCK_DRIVERS.has(property)) {
+          drivesTestClock = true;
+          return;
+        }
         const isSleep = object === "Effect" && property === "sleep";
         const isWait =
           isSleep ||
@@ -250,14 +255,22 @@ export default defineRule({
         if (Option.isNone(tester)) {
           // A shared helper can serve TestClock tests, so only report it when nothing in
           // the file drives the TestClock or it polls in a loop, which only a real clock ends.
-          if (!drivesTestClock || isPollingLoopStep(node)) reportFor(REAL_CLOCK_MESSAGE);
+          if (isPollingLoopStep(node)) {
+            reportFor(REAL_CLOCK_MESSAGE);
+          } else {
+            untilDrivenReports.push({ node: node.callee, message: REAL_CLOCK_MESSAGE });
+          }
           return;
         }
         if (tester.value !== "effect") {
           reportFor(REAL_CLOCK_MESSAGE);
-        } else if (isSleep && !drivesTestClock) {
-          reportFor(UNDRIVEN_TEST_CLOCK_MESSAGE);
+        } else if (isSleep) {
+          untilDrivenReports.push({ node: node.callee, message: UNDRIVEN_TEST_CLOCK_MESSAGE });
         }
+      },
+      "Program:exit"() {
+        if (drivesTestClock) return;
+        for (const report of untilDrivenReports) context.report(report);
       },
     };
   },

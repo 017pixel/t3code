@@ -203,6 +203,41 @@ describe("t3code/no-real-time-wait-in-tests", () => {
   );
 
   rule.invalid(
+    "reports TestClock sleeps when TestClock.adjust appears only in a comment",
+    `
+      import { it } from "@effect/vitest";
+      import * as Effect from "effect/Effect";
+
+      // Callers would normally TestClock.adjust("1 minute") here.
+      const note = "TestClock.setTime";
+      it.effect("hangs", () => Effect.sleep("1 minute"));
+    `,
+    (output) => {
+      assert.match(output, UNDRIVEN);
+    },
+  );
+
+  rule.invalid(
+    "reports timers hidden in module-level helpers",
+    `
+      import { setTimeout as delay } from "node:timers/promises";
+      import { it } from "vitest";
+
+      const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+      const pause = () => delay(10);
+
+      it("waits", async () => {
+        await sleep(10);
+        await pause();
+      });
+    `,
+    (output) => {
+      assert.equal(output.match(/Real-clock wait in a test/g)?.length, 2);
+      assert.notMatch(output, MIXED);
+    },
+  );
+
+  rule.invalid(
     "reports awaited timers/promises sleeps",
     `
       import * as NodeTimers from "node:timers/promises";
