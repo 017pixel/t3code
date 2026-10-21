@@ -26,9 +26,6 @@ import { cn } from "~/lib/utils";
 import { AudioPreview } from "./AudioPreview";
 import { BrowserDocumentFrame } from "./BrowserDocumentFrame";
 import { DelimitedTablePreview } from "./DelimitedTablePreview";
-import { OfficeFilePreview } from "./OfficeFilePreview";
-import { FontFilePreview } from "./FontFilePreview";
-import { MermaidFilePreview } from "./MermaidFilePreview";
 import {
   FILE_SURFACE_SUBHEADER_CLASS,
   FileSurfaceAction,
@@ -36,6 +33,18 @@ import {
   FileSurfaceLoading,
   FileSurfaceNotice,
 } from "./fileSurfaceChrome";
+
+const OfficeFilePreview = lazy(() =>
+  import("./OfficeFilePreview").then((module) => ({ default: module.OfficeFilePreview })),
+);
+
+const FontFilePreview = lazy(() =>
+  import("./FontFilePreview").then((module) => ({ default: module.FontFilePreview })),
+);
+
+const MermaidFilePreview = lazy(() =>
+  import("./MermaidFilePreview").then((module) => ({ default: module.MermaidFilePreview })),
+);
 
 const SourcePreview = lazy(() => import("./ReadOnlySourcePreview"));
 
@@ -247,7 +256,9 @@ export function AttachmentFilePreview(props: {
     delimiter && rendered ? (
       <DelimitedTablePreview name={props.name} text={content.text} delimiter={delimiter} />
     ) : kind === "mermaid" && rendered ? (
-      <MermaidFilePreview text={content.text} />
+      <Suspense fallback={<FileSurfaceLoading />}>
+        <MermaidFilePreview text={content.text} />
+      </Suspense>
     ) : kind === "markdown" && rendered ? (
       <ScrollArea className="min-h-0 flex-1">
         <ChatMarkdown text={content.text} cwd={undefined} className="mx-auto max-w-4xl px-6 py-5" />
@@ -256,9 +267,18 @@ export function AttachmentFilePreview(props: {
       <ReadOnlySourcePreview name={props.name} text={content.text} />
     )
   ) : kind === "font" ? (
-    <FontFilePreview src={url} name={props.name} />
+    <Suspense fallback={<FileSurfaceLoading />}>
+      <FontFilePreview src={url} name={props.name} />
+    </Suspense>
   ) : officeKind ? (
-    <OfficeFilePreview src={url} name={props.name} kind={officeKind} sizeBytes={props.sizeBytes} />
+    <Suspense fallback={<FileSurfaceLoading />}>
+      <OfficeFilePreview
+        src={url}
+        name={props.name}
+        kind={officeKind}
+        sizeBytes={props.sizeBytes}
+      />
+    </Suspense>
   ) : kind === "pdf" || kind === "html" ? (
     <BrowserDocumentFrame
       src={url}

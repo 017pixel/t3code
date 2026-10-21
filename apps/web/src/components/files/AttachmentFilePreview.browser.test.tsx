@@ -1,6 +1,7 @@
 import { act, render, stubGlobal, type Screen } from "../../../test/render";
 import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
+import { page } from "vite-plus/test/browser";
 import "~/index.css";
 
 const { refresh } = vi.hoisted(() => ({ refresh: vi.fn<() => Promise<string | null>>() }));
@@ -699,20 +700,20 @@ it.each([60, 100])("renders all %i pages of a table-heavy Word report", async (p
   // Binary media must not consume the document's markup budget.
   archive.file("word/media/image.png", new Uint8Array(2_500_000));
   const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
-  const src = URL.createObjectURL(file);
-  try {
-    await using screen = await render(
-      <OfficeFilePreview src={src} name="report.docx" kind="docx" sizeBytes={file.size} />,
-    );
-    await vi.waitFor(
-      () => expect(screen.container.querySelector("iframe")?.srcdoc).toContain(`page ${pages}`),
-      { timeout: 30_000 },
-    );
-    expect(screen.container.textContent).not.toContain("Preview limited");
-    expect(screen.container.querySelector('[role="alert"]')).toBeNull();
-  } finally {
-    URL.revokeObjectURL(src);
-  }
+  await using screen = await render(
+    <AttachmentFilePreview
+      name="report.docx"
+      mimeType="application/octet-stream"
+      file={file}
+      sizeBytes={file.size}
+    />,
+  );
+  await vi.waitFor(
+    () => expect(screen.container.querySelector("iframe")?.srcdoc).toContain(`page ${pages}`),
+    { timeout: 30_000 },
+  );
+  expect(screen.container.textContent).not.toContain("Preview limited");
+  expect(screen.container.querySelector('[role="alert"]')).toBeNull();
 });
 
 describe("standalone Mermaid previews", () => {
@@ -876,4 +877,56 @@ describe("attachment HTML preview recovery", () => {
     expect(alert(screen)).toBeNull();
     expect(screen.container.querySelector("iframe")?.title).toBe("document.html");
   });
+});
+
+it("loads a font attachment through the lazy preview", async () => {
+  const { default: fontUrl } =
+    await import("../../../node_modules/@betteroffice/fonts/assets/Carlito-Regular.ttf?url");
+  const file = await (await fetch(fontUrl)).blob();
+  await using screen = await render(
+    <AttachmentFilePreview
+      name="Carlito.ttf"
+      mimeType="font/ttf"
+      sizeBytes={file.size}
+      file={file}
+    />,
+  );
+  await vi.waitFor(() => {
+    const frame = screen.container.querySelector("iframe");
+    expect(frame?.title).toBe("Carlito.ttf");
+    expect(frame?.srcdoc).toContain("@font-face");
+    expect(frame?.srcdoc).toContain("The quick brown fox");
+  });
+  expect(screen.container.querySelector('[role="alert"]')).toBeNull();
+});
+
+it("toggles a Mermaid attachment between diagram and source through the lazy preview", async () => {
+  const text = "flowchart LR\nA --> B";
+  const file = new Blob([text], { type: "text/vnd.mermaid" });
+  await using screen = await render(
+    <AttachmentFilePreview
+      name="diagram.mmd"
+      mimeType={file.type}
+      sizeBytes={file.size}
+      file={file}
+    />,
+  );
+  await vi.waitFor(() =>
+    expect(screen.container.querySelector("[data-markdown-mermaid] svg path")).not.toBeNull(),
+  );
+  await screen.getByRole("button", { name: "Expand diagram" }).click();
+  await vi.waitFor(() => {
+    const image = document.querySelector<HTMLImageElement>('[role="dialog"] img');
+    expect(image?.alt).toBe("Mermaid diagram");
+    expect(image?.naturalWidth).toBeGreaterThan(0);
+  });
+  await page.getByRole("button", { name: "Close image preview" }).click();
+  await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
+  await screen.getByRole("button", { name: "Show Mermaid source" }).click();
+  await vi.waitFor(() => expect(screen.container.querySelector("pre")?.textContent).toBe(text));
+  await screen.getByRole("button", { name: "Show rendered diagram" }).click();
+  await vi.waitFor(() =>
+    expect(screen.container.querySelector("[data-markdown-mermaid] svg path")).not.toBeNull(),
+  );
+  expect(screen.container.querySelector('[role="alert"]')).toBeNull();
 });

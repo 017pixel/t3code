@@ -43,7 +43,7 @@ import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
 import { FolderTree, Globe2, WrapTextIcon } from "lucide-react";
 import { Code2, Eye, Table2 } from "lucide";
 import * as Schema from "effect/Schema";
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 
 import { isBrowserPreviewFile, openFileInPreview } from "~/browser/openFileInPreview";
 import { useAssetUrlRefresh, useAssetUrlState } from "~/assets/assetUrls";
@@ -79,7 +79,6 @@ import { AttachmentFilePreview } from "./AttachmentFilePreview";
 import { AudioPreview } from "./AudioPreview";
 import { BrowserDocumentFrame, isPdfPreviewFile } from "./BrowserDocumentFrame";
 import { DelimitedTablePreview } from "./DelimitedTablePreview";
-import { MermaidFilePreview } from "./MermaidFilePreview";
 import FileBrowserPanel from "./FileBrowserPanel";
 import { FileBreadcrumbs } from "./FileBreadcrumbs";
 import { breadcrumbPathOf, retainedBreadcrumbTrail, trailChildOf } from "./filePath";
@@ -144,6 +143,10 @@ interface FilePreviewPanelProps {
   selectedFilePending: boolean;
   workspaceMutationId: string | null;
 }
+
+const MermaidFilePreview = lazy(() =>
+  import("./MermaidFilePreview").then((module) => ({ default: module.MermaidFilePreview })),
+);
 
 const FILE_EXPLORER_STORAGE_KEY = "t3code.fileExplorerOpen";
 const RENDER_MARKDOWN_STORAGE_KEY = "t3code.renderMarkdown";
@@ -1452,7 +1455,9 @@ export default function FilePreviewPanel({
             </div>
           ) : relativePath && file.data ? (
             renderMermaid ? (
-              <MermaidFilePreview text={file.data.contents} />
+              <Suspense fallback={<FileSurfaceLoading />}>
+                <MermaidFilePreview text={file.data.contents} />
+              </Suspense>
             ) : isMarkdown && renderMarkdown ? (
               <RenderedMarkdownSurface
                 key={relativePath}
