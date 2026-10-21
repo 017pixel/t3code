@@ -3921,10 +3921,12 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
   it.effect.each([
     { origin: "agent" as const, delivery: "queued" as const },
     { origin: "agent" as const, delivery: "after-completion" as const },
+    { origin: "agent" as const, delivery: "idle-queue" as const },
+    { origin: "child" as const, delivery: "after-completion" as const },
     { origin: "user" as const, delivery: "queued" as const },
     { origin: "user" as const, delivery: "after-completion" as const },
   ])(
-    "preserves work for agent messages and resets for user requests (%j)",
+    "preserves queued agent and child updates but resets fresh requests (%j)",
     ({ origin, delivery }) =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -3960,9 +3962,9 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         });
         const dispatchFollowUp = orchestrator.dispatch({
           type: "message.dispatch",
-          createdBy: origin,
-          creationSource: origin === "agent" ? "mcp" : "web",
-          ...(origin === "agent" ? { senderThreadId: ThreadId.make("sending-agent") } : {}),
+          createdBy: origin === "user" ? "user" : "agent",
+          creationSource: origin === "user" ? "web" : "mcp",
+          ...(origin === "user" ? {} : { senderThreadId: ThreadId.make("sending-agent") }),
           commandId: CommandId.make(`${threadId}-follow-up`),
           threadId,
           messageId: followUpMessageId,
@@ -3970,7 +3972,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           attachments: [],
           modelSelection,
           dispatchMode: {
-            type: delivery === "queued" ? "queue_after_active" : "start_immediately",
+            type: delivery === "after-completion" ? "start_immediately" : "queue_after_active",
           },
         });
         if (delivery === "queued") yield* dispatchFollowUp;
@@ -3989,6 +3991,41 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           (run) => run.userMessageId === originalMessageId,
         );
         assert.isDefined(original);
+        if (origin === "child") {
+          assert.isNotNull(original.rootNodeId);
+          yield* eventSink.write({
+            events: [
+              {
+                id: EventId.make(`${threadId}-child`),
+                type: "subagent.updated",
+                threadId,
+                runId: original.id,
+                occurredAt: original.requestedAt,
+                payload: {
+                  id: NodeId.make(`${threadId}-child`),
+                  threadId,
+                  runId: original.id,
+                  parentNodeId: original.rootNodeId,
+                  origin: "app_owned",
+                  createdBy: "agent",
+                  driver,
+                  providerInstanceId: original.providerInstanceId,
+                  providerThreadId: null,
+                  childThreadId: ThreadId.make("sending-agent"),
+                  nativeTaskRef: null,
+                  prompt: "Delegated work",
+                  title: null,
+                  model: null,
+                  status: "completed",
+                  result: "Done",
+                  startedAt: original.requestedAt,
+                  completedAt: original.requestedAt,
+                  updatedAt: original.requestedAt,
+                },
+              },
+            ],
+          });
+        }
         const originalStart = DateTime.makeUnsafe("2026-10-21T14:20:17.457Z");
         const completedAt = DateTime.makeUnsafe("2026-10-21T14:23:53.509Z");
         yield* eventSink.write({
@@ -4005,14 +4042,14 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
             },
           ],
         });
-        if (delivery === "after-completion") yield* dispatchFollowUp;
+        if (delivery !== "queued") yield* dispatchFollowUp;
         const startedRunId = delivery === "queued" ? yield* Queue.take(startedRunIds) : null;
         const followUp = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
           (run) => run.userMessageId === followUpMessageId,
         );
         assert.isDefined(followUp);
         if (delivery === "queued") assert.equal(startedRunId, followUp.id);
-        if (origin === "agent") {
+        if (origin === "child" || (origin === "agent" && delivery === "queued")) {
           assert.isDefined(followUp.workStartedAt);
           assert.equal(
             DateTime.toEpochMillis(followUp.workStartedAt),
