@@ -1557,7 +1557,7 @@ export const ServerSettingsPatch = Schema.Struct({
   easDeviceHosts: Schema.optionalKey(EasDeviceHostConfigs),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   idleCompaction: Schema.optionalKey(IdleCompactionMode),
-  // Sent by clients that predate `idleCompaction`, and by current clients for older servers.
+  // Sent by clients that predate `idleCompaction`.
   compactIdleThreads: Schema.optionalKey(Schema.Union([Schema.Boolean, IdleCompactionMode])),
   sidebarAutoSettleKeepPullRequests: Schema.optionalKey(Schema.Boolean),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),

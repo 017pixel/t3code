@@ -7,7 +7,6 @@ import { useEffect, useRef, useState } from "react";
 import {
   type DesktopUpdateChannel,
   IDLE_COMPACTION_MODES,
-  type IdleCompactionMode,
   ProviderDriverKind,
   type ProviderInstanceId,
   resolveDefaultIdleCompaction,
@@ -793,9 +792,6 @@ export function GeneralSettingsPanel() {
   const hasServerTargets = connectedEnvironments.length > 0;
   const mixedResponseStreamingMode = useScopedSettingsMixed(["responseStreamingMode"]);
   const idleCompaction = resolveDefaultIdleCompaction(settings);
-  // Servers that predate `idleCompaction` only read the beta switch.
-  const updateIdleCompaction = (mode: IdleCompactionMode) =>
-    updateSettings({ idleCompaction: mode, compactIdleThreads: mode === "beforeCacheExpires" });
   const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
     readLastEnabledProjectGroupingMode(),
   );
@@ -1009,7 +1005,9 @@ export function GeneralSettingsPanel() {
             idleCompaction !== DEFAULT_UNIFIED_SETTINGS.idleCompaction ? (
               <SettingResetButton
                 label="compact idle threads"
-                onClick={() => updateIdleCompaction(DEFAULT_UNIFIED_SETTINGS.idleCompaction)}
+                onClick={() =>
+                  updateSettings({ idleCompaction: DEFAULT_UNIFIED_SETTINGS.idleCompaction })
+                }
               />
             ) : null
           }
@@ -1018,7 +1016,7 @@ export function GeneralSettingsPanel() {
               value={idleCompaction}
               onValueChange={(value) => {
                 const mode = IDLE_COMPACTION_MODES.find((candidate) => candidate.value === value);
-                if (mode) updateIdleCompaction(mode.value);
+                if (mode) updateSettings({ idleCompaction: mode.value });
               }}
             >
               <SelectTrigger size="sm" className="w-full sm:w-56" aria-label="Compact idle threads">
