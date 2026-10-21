@@ -1,6 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- the stop test drives real server processes.
 import * as NodeChildProcess from "node:child_process";
-import * as NodeNet from "node:net";
 
 import { it as effectIt } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -9,6 +8,7 @@ import {
   PREVIEW_URL_MAX_LENGTH,
   type DiscoveredLocalServer,
 } from "@t3tools/contracts";
+import * as ProcessGroup from "@t3tools/provider-core/server/processGroup";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Duration from "effect/Duration";
@@ -19,11 +19,14 @@ import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
 import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
-import { expect } from "vite-plus/test";
+import { expect, vi } from "vite-plus/test";
 import { FetchHttpClient } from "effect/http";
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as PortScanner from "./PortScanner.ts";
+
+vi.mock("@t3tools/provider-core/server/processGroup", { spy: true });
+
 const processProbeFailure: ProcessRunner.ProcessRunner["Service"]["run"] = (input) =>
   Effect.fail(
     new ProcessRunner.ProcessSpawnError({
