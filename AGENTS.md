@@ -184,7 +184,7 @@ Open the named entry points first. Paths starting with `apps/`, `packages/`, or 
 - `packages/shared` - shared runtime utils, subpath exports, no barrel.
 - `packages/client-runtime` - client code shared by web and mobile. Start at `src/state/threads.ts`, `src/state/orchestrationV2Projection.ts` (applies events), `src/connection/supervisor.ts`.
 - Scripts: [Verifying](#verifying) lists the commands you need. Read a `package.json` only for others.
-- `.repos/` - vendored read-only references. Prefer their patterns over invented ones. Never edit or import from them. Sync with `vpr sync:repos` when bumping the matching dependency.
+- `.repos/` - vendored read-only references. Prefer their patterns over invented ones. Never edit or import from them. Sync with `vpr sync:repos` when bumping the matching dependency. If it is missing (sparse checkout), read a file with `git show origin/main:.repos/<path>`.
 
 ## Taste
 
