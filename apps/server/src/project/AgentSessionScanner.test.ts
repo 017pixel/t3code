@@ -1222,9 +1222,11 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         const claudeHomePath = yield* makeTempDir("t3code-record-budget-claude-");
         const codexHomePath = yield* makeTempDir("t3code-record-budget-codex-");
         const workspace = yield* makeTempDir("t3code-record-budget-workspace-");
-        for (const [sessionId, padding, mtimeMs] of [
-          ["excessive", "\n".repeat(100_001), nowMs],
-          ["older", "", nowMs - 1_000],
+        const exactLimit = makeRecordLimitTranscript(workspace, false);
+        // The newer transcript has 100,001 records; the older one has exactly 100,000.
+        for (const [sessionId, contents, mtimeMs] of [
+          ["excessive", exactLimit.replace("record-limit-session", "excessive") + "{}\n", nowMs],
+          ["older", exactLimit, nowMs - 1_000],
         ] as const) {
           yield* writeTranscript({
             filePath: path.join(
@@ -1235,17 +1237,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
               "24",
               `rollout-${sessionId}.jsonl`,
             ),
-            contents:
-              [
-                encodeTranscriptRecord({
-                  type: "session_meta",
-                  payload: { id: sessionId, cwd: workspace },
-                }),
-                encodeTranscriptRecord({
-                  type: "event_msg",
-                  payload: { type: "user_message", message: "Imported prompt" },
-                }),
-              ].join("\n") + padding,
+            contents,
             mtimeMs,
           });
         }
@@ -1255,7 +1247,9 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           workspaceRoot: workspace,
         });
         expect(outcomes.map((outcome) => outcome._tag)).toEqual(["Skipped", "Importable"]);
-        expect(outcomes[1]).toMatchObject({ thread: { providerSessionId: "older" } });
+        expect(outcomes[1]).toMatchObject({
+          thread: { providerSessionId: "record-limit-session" },
+        });
       }),
     );
 
