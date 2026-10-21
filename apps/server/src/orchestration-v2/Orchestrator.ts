@@ -407,7 +407,10 @@ function nextRunOrdinal(projection: Pick<OrchestrationV2ThreadProjection, "runs"
  */
 function wakeWorkStartedAt(
   runs: ReadonlyArray<OrchestrationV2Run>,
-  trigger: {
+  trigger: Pick<
+    OrchestrationV2ConversationMessage,
+    "createdBy" | "creationSource" | "senderThreadId"
+  > & {
     readonly notification?: unknown;
     readonly delegatedCompletion?: unknown;
     readonly restartContinuationOfRunId?: RunId | undefined;
@@ -416,7 +419,12 @@ function wakeWorkStartedAt(
   if (
     trigger.notification === undefined &&
     trigger.delegatedCompletion === undefined &&
-    trigger.restartContinuationOfRunId === undefined
+    trigger.restartContinuationOfRunId === undefined &&
+    !(
+      trigger.createdBy === "agent" &&
+      trigger.creationSource === "mcp" &&
+      trigger.senderThreadId !== undefined
+    )
   ) {
     return {};
   }
@@ -1824,6 +1832,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         startedAt: null,
         contextHandoffId: activeHandoff?.id ?? null,
         ...wakeWorkStartedAt(projection.runs, {
+          createdBy: queuedMessage.createdBy,
+          creationSource: queuedMessage.creationSource,
+          senderThreadId: queuedMessage.senderThreadId,
           notification: queuedMessage.notification,
           delegatedCompletion: queuedMessage.delegatedCompletion,
           restartContinuationOfRunId: queuedRun.restartContinuationOfRunId,

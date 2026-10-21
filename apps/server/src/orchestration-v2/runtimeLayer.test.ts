@@ -3918,6 +3918,116 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect.each([
+    { origin: "agent" as const, delivery: "queued" as const },
+    { origin: "agent" as const, delivery: "after-completion" as const },
+    { origin: "user" as const, delivery: "queued" as const },
+    { origin: "user" as const, delivery: "after-completion" as const },
+  ])(
+    "preserves work for agent messages and resets for user requests (%j)",
+    ({ origin, delivery }) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const threadId = ThreadId.make(`work-clock-${origin}-${delivery}`);
+        const originalMessageId = MessageId.make(`${threadId}-original`);
+        const followUpMessageId = MessageId.make(`${threadId}-follow-up`);
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`${threadId}-create`),
+          threadId,
+          projectId: ProjectId.make(`${threadId}-project`),
+          title: "Agent message work clock",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: process.cwd(),
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`${threadId}-original`),
+          threadId,
+          messageId: originalMessageId,
+          text: "Original user work",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" },
+        });
+        const dispatchFollowUp = orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: origin,
+          creationSource: origin === "agent" ? "mcp" : "web",
+          ...(origin === "agent" ? { senderThreadId: ThreadId.make("sending-agent") } : {}),
+          commandId: CommandId.make(`${threadId}-follow-up`),
+          threadId,
+          messageId: followUpMessageId,
+          text: "Follow-up work",
+          attachments: [],
+          modelSelection,
+          dispatchMode: {
+            type: delivery === "queued" ? "queue_after_active" : "start_immediately",
+          },
+        });
+        if (delivery === "queued") yield* dispatchFollowUp;
+        const startedRunIds = yield* Queue.unbounded<RunId>();
+        const afterSequence = yield* orchestrator.getThreadEventSequence(threadId);
+        yield* eventSink.stream({ threadId, afterSequence }).pipe(
+          Stream.runForEach((stored) =>
+            stored.event.type === "run.updated" && stored.event.payload.status === "starting"
+              ? Queue.offer(startedRunIds, stored.event.payload.id)
+              : Effect.void,
+          ),
+          Effect.forkScoped,
+        );
+        yield* Effect.yieldNow;
+        const original = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+          (run) => run.userMessageId === originalMessageId,
+        );
+        assert.isDefined(original);
+        const originalStart = DateTime.makeUnsafe("2026-10-21T14:20:17.457Z");
+        const completedAt = DateTime.makeUnsafe("2026-10-21T14:23:53.509Z");
+        yield* eventSink.write({
+          events: [
+            {
+              id: EventId.make(`${threadId}-completed`),
+              type: "run.updated",
+              threadId,
+              runId: original.id,
+              ...(original.rootNodeId === null ? {} : { nodeId: original.rootNodeId }),
+              providerInstanceId: original.providerInstanceId,
+              occurredAt: completedAt,
+              payload: { ...original, status: "completed", startedAt: originalStart, completedAt },
+            },
+          ],
+        });
+        if (delivery === "after-completion") yield* dispatchFollowUp;
+        const startedRunId = delivery === "queued" ? yield* Queue.take(startedRunIds) : null;
+        const followUp = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+          (run) => run.userMessageId === followUpMessageId,
+        );
+        assert.isDefined(followUp);
+        if (delivery === "queued") assert.equal(startedRunId, followUp.id);
+        if (origin === "agent") {
+          assert.isDefined(followUp.workStartedAt);
+          assert.equal(
+            DateTime.toEpochMillis(followUp.workStartedAt),
+            DateTime.toEpochMillis(originalStart),
+          );
+        } else {
+          assert.isUndefined(followUp.workStartedAt);
+          assert.notEqual(
+            DateTime.toEpochMillis(followUp.startedAt ?? followUp.requestedAt),
+            DateTime.toEpochMillis(originalStart),
+          );
+        }
+      }),
+  );
+
   it.effect.each(["usage_limit", "provider_error"] as const)(
     "handles a queued message after a %s failure",
     (failureClass) =>
