@@ -251,12 +251,14 @@ const ensureNoPendingLegacyThreads = Effect.fn("ensureDevDbNoPendingLegacyThread
       AND name IN ('projection_threads', 'orchestration_v2_projection_threads')`;
   const names = new Set(tables.map((table) => table.name));
   if (!names.has("projection_threads")) return;
-  // The V2 tables and application_event_version arrive in the same migration.
+  // The V2 tables, application_event_version, and the partial index arrive in
+  // the same migration. Without the hint SQLite scans each thread's stream.
   const [pending] = names.has("orchestration_v2_projection_threads")
     ? yield* sql<{ count: number }>`
         SELECT COUNT(*) AS count FROM projection_threads AS thread
         WHERE NOT EXISTS (
-          SELECT 1 FROM orchestration_events AS event
+          SELECT 1
+          FROM orchestration_events AS event INDEXED BY orchestration_events_v2_created_threads_idx
           WHERE event.application_event_version = 2
             AND event.aggregate_kind = 'thread'
             AND event.stream_id = thread.thread_id
