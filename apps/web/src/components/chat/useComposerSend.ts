@@ -22,6 +22,7 @@ import {
   type EnvironmentId,
   type ModelSelection,
   type PreviewAnnotationPayload,
+  type ScopedThreadRef,
   type ThreadId,
   ProviderInteractionMode,
   RuntimeMode,
@@ -86,6 +87,7 @@ import { useClientSettingsHydrated, useEnvironmentSettings } from "../../hooks/u
 import { environmentPresentations } from "../../state/presentation";
 import {
   approvalRedirectNotice,
+  linkCheckedOutPullRequest,
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
@@ -1042,6 +1044,22 @@ export function useComposerSend(input: ComposerSendInput) {
       );
     }
 
+    // A pull request checked out into the draft can only be linked once each thread it starts exists.
+    const checkedOutPullRequestUrl = isLocalDraftThread ? draftThread?.pullRequestUrl : null;
+    const linkStartedThread = (threadRef: ScopedThreadRef) =>
+      void linkCheckedOutPullRequest({
+        threadRef,
+        pullRequestUrl: checkedOutPullRequestUrl,
+        linking: pullRequestLinking,
+        onLinkFailed: (error) =>
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: "Could not link the pull request to this thread",
+              description: error instanceof Error ? error.message : undefined,
+            }),
+          ),
+      });
     const turnAttachmentsPromise = prepareTurnAttachments({
       environmentId,
       attachments: composerAttachmentsSnapshot,
@@ -1061,6 +1079,8 @@ export function useComposerSend(input: ComposerSendInput) {
         readFileBlockReason: () => readLiveAttachmentCapabilities().fileBlockReason,
         buildOutgoingMessageContext,
         isCurrentSend: () => composerSendGenerationRef.current === sendGeneration,
+        onThreadStarted: (startedThreadId) =>
+          linkStartedThread(scopeThreadRef(environmentId, startedThreadId)),
       });
       return;
     }
@@ -1263,25 +1283,7 @@ export function useComposerSend(input: ComposerSendInput) {
         failure = startResult;
       } else {
         turnStartSucceeded = true;
-        // A pull request checked out into the draft can only be linked now that its thread exists.
-        const checkedOutPullRequestUrl = sentDraftThreadRef ? draftThread?.pullRequestUrl : null;
-        if (
-          sentDraftThreadRef &&
-          checkedOutPullRequestUrl &&
-          pullRequestLinking.canLink(checkedOutPullRequestUrl)
-        ) {
-          void pullRequestLinking
-            .changeLink(sentDraftThreadRef, checkedOutPullRequestUrl, true)
-            .catch((error: unknown) => {
-              toastManager.add(
-                stackedThreadToast({
-                  type: "warning",
-                  title: "Could not link the pull request to this thread",
-                  description: error instanceof Error ? error.message : undefined,
-                }),
-              );
-            });
-        }
+        if (sentDraftThreadRef) linkStartedThread(sentDraftThreadRef);
         setKeepFullHistory(routeThreadKey, false);
         clearUsageLimitsFor(routeThreadKey);
         if (turnUsesAttachmentUploads) {
