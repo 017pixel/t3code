@@ -167,7 +167,7 @@ const makeStrictNdJsonRpcParser = () => {
   const decoder = new TextDecoder();
   let buffer = "";
   return {
-    decode: (bytes: Uint8Array | string): ReadonlyArray<unknown> => {
+    decode: (bytes: Uint8Array | string) => {
       buffer += typeof bytes === "string" ? bytes : decoder.decode(bytes, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
