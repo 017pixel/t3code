@@ -637,6 +637,68 @@ describe("resolveShortcutCommand", () => {
     );
   });
 
+  it.each(["MacIntel", "Win32", "Linux"])(
+    "leaves German mod+plus available for native zoom on %s",
+    (platform) => {
+      assert.isNull(
+        resolveShortcutCommand(
+          event({
+            key: "+",
+            code: "BracketRight",
+            metaKey: platform === "MacIntel",
+            ctrlKey: platform !== "MacIntel",
+          }),
+          DEFAULT_RESOLVED_KEYBINDINGS,
+          { platform },
+        ),
+      );
+    },
+  );
+
+  it.each(["MacIntel", "Win32", "Linux"])(
+    "preserves mod+] history navigation on %s",
+    (platform) => {
+      assert.strictEqual(
+        resolveShortcutCommand(
+          event({
+            key: "]",
+            code: "BracketRight",
+            metaKey: platform === "MacIntel",
+            ctrlKey: platform !== "MacIntel",
+          }),
+          DEFAULT_RESOLVED_KEYBINDINGS,
+          { platform },
+        ),
+        "navigation.forward",
+      );
+    },
+  );
+
+  it.each(["MacIntel", "Win32", "Linux"])(
+    "preserves shifted bracket thread navigation on %s",
+    (platform) => {
+      for (const [key, code, command] of [
+        ["{", "BracketLeft", "thread.previous"],
+        ["}", "BracketRight", "thread.next"],
+      ]) {
+        assert.strictEqual(
+          resolveShortcutCommand(
+            event({
+              key,
+              code,
+              shiftKey: true,
+              metaKey: platform === "MacIntel",
+              ctrlKey: platform !== "MacIntel",
+            }),
+            DEFAULT_RESOLVED_KEYBINDINGS,
+            { platform },
+          ),
+          command,
+        );
+      }
+    },
+  );
+
   it("matches punctuation shortcuts by physical key across keyboard layouts", () => {
     const keybindings = compile([
       { shortcut: modShortcut("'", { shiftKey: true }), command: "diff.toggle" },
