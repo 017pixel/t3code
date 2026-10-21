@@ -6,10 +6,11 @@ import { ComposerSurface } from "../../apps/web/src/components/chat/ComposerSurf
 export function mount(variant: "warning" | "error") {
   const host = document.createElement("div");
   host.id = "composer-banner-shadow-harness";
+  host.style.cssText = "position:fixed;inset:0;z-index:2147483647";
   document.body.append(host);
   const root = createRoot(host);
   root.render(
-    <div className="fixed inset-0 z-[9999] flex flex-col bg-background p-6 text-foreground">
+    <div className="fixed inset-0 flex flex-col bg-background p-6 text-foreground">
       <p>Harness only: {variant} collapsed stack</p>
       <div className="mt-auto mb-12 w-full max-w-3xl self-center">
         <ComposerSurface.Shell>
