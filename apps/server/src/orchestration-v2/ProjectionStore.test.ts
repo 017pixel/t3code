@@ -1110,7 +1110,7 @@ const assertProjectScopedShells = Effect.fn("assertProjectScopedShells")(functio
 });
 
 it.layer(layerTest)("ProjectionStoreV2", (it) => {
-  it.effect("uses the last-executed index in the thread-shell list query", () =>
+  it.effect("uses the lookup indexes in the thread-shell list query", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
       const sql = yield* SqlClient.SqlClient;
@@ -1138,6 +1138,59 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       assert.isFalse(
         subquerySteps.some((row) => row.detail.includes("TEMP B-TREE")),
         JSON.stringify(subquerySteps),
+      );
+      assert.lengthOf(
+        plan.filter((row) =>
+          row.detail.includes(
+            "SEARCH stop_request USING COVERING INDEX orchestration_v2_projection_turn_items_interrupt_idx (thread_id=? AND run_id=?)",
+          ),
+        ),
+        2,
+        JSON.stringify(plan),
+      );
+    }),
+  );
+
+  it.effect("uses a covering unfinished-status lookup in the recovery run query", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = yield* addRolledBackRecoveryCandidate("recovery-status-index");
+      // Reproduce the competing historical-type and ordered unfinished access paths.
+      yield* sql`CREATE INDEX orchestration_v2_projection_turn_items_thread_type_idx
+        ON orchestration_v2_projection_turn_items(thread_id, type)`;
+      yield* sql`CREATE INDEX orchestration_v2_projection_turn_items_active_idx
+        ON orchestration_v2_projection_turn_items(thread_id, ordinal, turn_item_id)
+        WHERE status IN ('pending','running','waiting')`;
+      yield* Effect.gen(function* () {
+        const { statements, tracer } = traceSqlStatements();
+        yield* projectionStore
+          .getRuntimeRecoveryProjection(threadId)
+          .pipe(Effect.withTracer(tracer));
+        const statement = statements.find((query) =>
+          query.includes("SELECT payload_json FROM orchestration_v2_projection_runs AS run"),
+        );
+        assert.isDefined(statement);
+        const plan = yield* sql.unsafe<{ readonly detail: string }>(
+          `EXPLAIN QUERY PLAN ${statement}`,
+        );
+        assert.isTrue(
+          plan.some((row) =>
+            row.detail.includes(
+              "SEARCH item USING COVERING INDEX orchestration_v2_projection_turn_items_unfinished_status_idx (thread_id=? AND status=? AND type=?",
+            ),
+          ),
+          JSON.stringify(plan),
+        );
+      }).pipe(
+        Effect.ensuring(
+          Effect.orDie(
+            Effect.gen(function* () {
+              yield* sql`DROP INDEX orchestration_v2_projection_turn_items_thread_type_idx`;
+              yield* sql`DROP INDEX orchestration_v2_projection_turn_items_active_idx`;
+            }),
+          ),
+        ),
       );
     }),
   );
@@ -5738,6 +5791,31 @@ const assertThreadShellIndexes = Effect.fn("test.assertThreadShellIndexes")(func
     interruptKeys.map((column) => column.desc),
     [0, 0],
   );
+  const unfinishedDefinitions = yield* sql<{ readonly sql: string }>`
+    SELECT sql FROM sqlite_master
+    WHERE type = 'index' AND name = 'orchestration_v2_projection_turn_items_unfinished_status_idx'
+  `;
+  assert.lengthOf(unfinishedDefinitions, 1);
+  assert.include(
+    normalizeIndexSql(unfinishedDefinitions[0]!.sql),
+    normalizeIndexSql(
+      "ON orchestration_v2_projection_turn_items(thread_id,status,type,run_id,node_id,provider_thread_id) WHERE status IN ('pending','running','waiting')",
+    ),
+  );
+  const unfinishedColumns = yield* sql<{
+    readonly name: string | null;
+    readonly desc: number;
+    readonly key: number;
+  }>`PRAGMA index_xinfo('orchestration_v2_projection_turn_items_unfinished_status_idx')`;
+  const unfinishedKeys = unfinishedColumns.filter((column) => column.key === 1);
+  assert.deepEqual(
+    unfinishedKeys.map((column) => column.name),
+    ["thread_id", "status", "type", "run_id", "node_id", "provider_thread_id"],
+  );
+  assert.deepEqual(
+    unfinishedKeys.map((column) => column.desc),
+    [0, 0, 0, 0, 0, 0],
+  );
 });
 
 const seedProjectionLookupRows = Effect.fn("test.seedProjectionLookupRows")(function* () {
@@ -5770,6 +5848,42 @@ const seedProjectionLookupRows = Effect.fn("test.seedProjectionLookupRows")(func
       (turn_item_id, thread_id, run_id, ordinal, type, status, updated_at, payload_json)
       VALUES (${id}, ${threadId}, ${runId}, 1, ${type}, 'completed', '2026-01-01', '{}')`;
   }
+  for (const [id, threadId, status, type, runId, nodeId, providerThreadId] of [
+    [
+      "unfinished-pending",
+      "lookup-thread",
+      "pending",
+      "command_execution",
+      "run-1",
+      "node-1",
+      "provider-1",
+    ],
+    ["unfinished-running", "lookup-thread", "running", "dynamic_tool", "run-2", null, "provider-2"],
+    ["unfinished-waiting", "lookup-thread", "waiting", "subagent", null, "node-3", null],
+    [
+      "finished-command",
+      "lookup-thread",
+      "completed",
+      "command_execution",
+      "run-1",
+      "node-1",
+      "provider-1",
+    ],
+    [
+      "other-thread-pending",
+      "other-thread",
+      "pending",
+      "command_execution",
+      "other-run",
+      "other-node",
+      "other-provider",
+    ],
+    ["pending-message", "lookup-thread", "pending", "assistant_message", "run-4", null, null],
+  ] as const) {
+    yield* sql`INSERT INTO orchestration_v2_projection_turn_items
+      (turn_item_id, thread_id, run_id, node_id, provider_thread_id, ordinal, type, status, updated_at, payload_json)
+      VALUES (${id}, ${threadId}, ${runId}, ${nodeId}, ${providerThreadId}, 2, ${type}, ${status}, '2026-01-01', '{}')`;
+  }
 });
 
 describe("ProjectionStoreV2 migration 68 thread-shell indexes", () => {
@@ -5801,8 +5915,25 @@ describe("ProjectionStoreV2 migration 68 thread-shell indexes", () => {
         interruptsBefore.map((row) => row.turn_item_id),
         ["interrupt-1", "interrupt-2"],
       );
+      const unfinishedLookup =
+        "WHERE thread_id = 'lookup-thread' AND status IN ('pending','running','waiting') AND type IN ('command_execution','dynamic_tool','subagent') ORDER BY turn_item_id";
+      const unfinishedBefore = yield* sql.unsafe<{ readonly turn_item_id: string }>(
+        `SELECT * FROM orchestration_v2_projection_turn_items NOT INDEXED ${unfinishedLookup}`,
+      );
+      assert.deepEqual(
+        unfinishedBefore.map((row) => row.turn_item_id),
+        ["unfinished-pending", "unfinished-running", "unfinished-waiting"],
+      );
       yield* runMigrations({ toMigrationInclusive: 68 });
       yield* assertThreadShellIndexes();
+      const unfinishedIndexed = yield* sql.unsafe(
+        `SELECT * FROM orchestration_v2_projection_turn_items INDEXED BY orchestration_v2_projection_turn_items_unfinished_status_idx ${unfinishedLookup}`,
+      );
+      const unfinishedUnindexed = yield* sql.unsafe(
+        `SELECT * FROM orchestration_v2_projection_turn_items NOT INDEXED ${unfinishedLookup}`,
+      );
+      assert.deepEqual(unfinishedIndexed, unfinishedBefore);
+      assert.deepEqual(unfinishedIndexed, unfinishedUnindexed);
       const interruptsIndexed = yield* sql.unsafe(
         `SELECT * FROM orchestration_v2_projection_turn_items INDEXED BY orchestration_v2_projection_turn_items_interrupt_idx ${interruptLookup}`,
       );

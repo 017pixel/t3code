@@ -17,4 +17,9 @@ export default Effect.gen(function* () {
     ON orchestration_v2_projection_turn_items(thread_id, run_id)
     WHERE type='run_interrupt_request'
   `;
+  yield* sql`
+    CREATE INDEX IF NOT EXISTS orchestration_v2_projection_turn_items_unfinished_status_idx
+    ON orchestration_v2_projection_turn_items(thread_id, status, type, run_id, node_id, provider_thread_id)
+    WHERE status IN ('pending','running','waiting')
+  `;
 });
