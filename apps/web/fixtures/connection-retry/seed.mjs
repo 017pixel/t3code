@@ -17,6 +17,7 @@ export async function setup(pairingUrl, pairedEnvironmentId) {
     : await connectPairing.run(appAtomRegistry, { pairingUrl });
   if (result._tag !== "Success") throw new Error("Synthetic remote pairing failed");
   const environmentId = result.value;
+  await waitState(environmentId, "connected");
   const project = createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "fixture:project",
     tag: "projects.mutate",
@@ -109,4 +110,47 @@ export async function waitState(environmentId, phase, minimumAttempt = 0) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`Timed out waiting for real supervisor ${phase}`);
+}
+
+export async function stack(environmentId, enabled) {
+  const { appAtomRegistry } = await import("../../src/rpc/atomRegistry.ts");
+  const { serverUpdateStateAtom } = await import("@t3tools/client-runtime/state/server");
+  appAtomRegistry.set(
+    serverUpdateStateAtom(environmentId),
+    enabled
+      ? {
+          status: "failed",
+          stage: "downloading",
+          fromVersion: "0.1.1",
+          targetVersion: "0.1.2",
+          message: "Synthetic update fixture: download unavailable.",
+        }
+      : { status: "idle" },
+  );
+}
+
+export async function trace(environmentId) {
+  const { appAtomRegistry } = await import("../../src/rpc/atomRegistry.ts");
+  const { environmentCatalog } = await import("../../src/connection/catalog.ts");
+  const rows = [];
+  const start = performance.now();
+  const atom = environmentCatalog.stateAtom(environmentId);
+  const stop = appAtomRegistry.subscribe(
+    atom,
+    () => {
+      const result = appAtomRegistry.get(atom);
+      if (result._tag === "Success") {
+        const s = result.value;
+        rows.push({
+          ms: Math.round(performance.now() - start),
+          phase: s.phase,
+          attempt: s.attempt,
+          retryAt: s.retryAt,
+          reason: s.lastFailure?.reason ?? null,
+        });
+      }
+    },
+    { immediate: true },
+  );
+  return { rows, stop };
 }

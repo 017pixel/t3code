@@ -8,7 +8,11 @@ const started = performance.now();
 const log = (event, extra = {}) =>
   console.log(JSON.stringify({ ms: Math.round(performance.now() - started), event, ...extra }));
 const server = http.createServer((req, res) => {
-  log("request", { method: req.method, path: req.url.split("?")[0], mode });
+  log("request", {
+    method: req.method,
+    path: req.url.startsWith("/api/assets/") ? "/api/assets/[redacted]" : req.url.split("?")[0],
+    mode,
+  });
   if (mode === "hold") return;
   if (mode === "fail") {
     res.writeHead(503, { "Access-Control-Allow-Origin": "*" });
