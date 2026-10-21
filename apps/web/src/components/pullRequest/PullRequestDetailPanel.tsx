@@ -54,6 +54,7 @@ import {
 } from "lucide-react";
 import {
   lazy,
+  memo,
   Suspense,
   type MouseEvent as ReactMouseEvent,
   useEffect,
@@ -68,6 +69,7 @@ import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { type PullRequestDetailTab, useRightPanelStore } from "~/rightPanelStore";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { useNewThreadHandler } from "~/hooks/useHandleNewThread";
+import { useStableCallback } from "~/hooks/useStableCallback";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { isCommandPaletteOpen } from "~/commandPaletteBus";
 import {
@@ -245,7 +247,9 @@ const TABS: ReadonlyArray<{ value: PullRequestDetailTab; label: string }> = [
 
 // The diff viewer pulls in its worker pool, so load it only when the reader approaches Code.
 const loadCodeTab = () => import("./PullRequestCodeTab");
-const PullRequestCodeTab = lazy(loadCodeTab);
+const PullRequestCodeTab = memo(lazy(loadCodeTab));
+const RetainedSummaryTab = memo(PullRequestSummaryTab);
+const RetainedTimelineTab = memo(PullRequestTimelineTab);
 
 /**
  * What the last hand-off wrote into each draft, kept outside React because the panel that wrote it
@@ -657,13 +661,13 @@ export function PullRequestDetailPanel({
   }>(() => ({ pullRequestKey, oid: null }));
   const selectedCodeCommitOid =
     codeCommitScope.pullRequestKey === pullRequestKey ? codeCommitScope.oid : null;
-  const selectCodeCommit = (oid: string | null) => {
+  const selectCodeCommit = useStableCallback((oid: string | null) => {
     setCodeCommitScope({ pullRequestKey, oid });
-  };
-  const openCommit = (oid: string) => {
+  });
+  const openCommit = useStableCallback((oid: string) => {
     selectCodeCommit(oid);
     selectTab("code");
-  };
+  });
   const [codeRevealRequest, setCodeRevealRequest] = useState<{
     readonly path: string;
     readonly nonce: number;
@@ -843,11 +847,11 @@ export function PullRequestDetailPanel({
   });
   const activityPending = activityQuery.isPending && activity === null;
   const activityError = activity === null ? activityQuery.error : null;
-  const refreshDetail = () => {
+  const refreshDetail = useStableCallback(() => {
     detailQuery.refresh();
     activityQuery.refresh();
     nativeStackQuery.refresh();
-  };
+  });
   const [refreshToken, setRefreshToken] = useState(0);
   const [activityRevision, setActivityRevision] = useState<{
     readonly key: string;
@@ -883,14 +887,14 @@ export function PullRequestDetailPanel({
   const invalidate = useAtomCommand(pullRequestEnvironment.invalidate, { reportFailure: false });
   const [isInvalidating, setIsInvalidating] = useState(false);
   const refreshing = isInvalidating || detailQuery.isPending;
-  const refreshFromHost = async () => {
+  const refreshFromHost = useStableCallback(async () => {
     setIsInvalidating(true);
     // Atom commands settle instead of throwing, so the reset below always runs.
     await invalidate({ environmentId, input: { reference } });
     refreshDetail();
     setRefreshToken((token) => token + 1);
     setIsInvalidating(false);
-  };
+  });
   const refreshFromHostOnRequest = useEffectEvent(() => void refreshFromHost());
   const appliedForcedToken = useRef(forcedRefreshToken);
   useEffect(() => {
@@ -1349,34 +1353,33 @@ export function PullRequestDetailPanel({
     );
   };
 
-  const addSelectionToAgent = (
-    selection: PullRequestAgentSelectionInput,
-    options?: { readonly keepGuide?: boolean },
-  ) => {
-    if (!detail) return;
-    void startAsk(
-      `selection:${selection.comment.id}`,
-      buildAddSelectionToAgentHandoff({
-        number: detail.number,
-        title: detail.title,
-        url: detail.url,
-        headBranch: detail.headBranch,
-        baseBranch: detail.baseBranch,
-        state: detail.state,
-        isDraft: detail.isDraft,
-        comment: selection.comment,
-        request: selection.request,
-      }),
-      options,
-    );
-  };
+  const addSelectionToAgent = useStableCallback(
+    (selection: PullRequestAgentSelectionInput, options?: { readonly keepGuide?: boolean }) => {
+      if (!detail) return;
+      void startAsk(
+        `selection:${selection.comment.id}`,
+        buildAddSelectionToAgentHandoff({
+          number: detail.number,
+          title: detail.title,
+          url: detail.url,
+          headBranch: detail.headBranch,
+          baseBranch: detail.baseBranch,
+          state: detail.state,
+          isDraft: detail.isDraft,
+          comment: selection.comment,
+          request: selection.request,
+        }),
+        options,
+      );
+    },
+  );
 
   const startCheckout = (mode: "worktree" | "local") => {
     if (!handoffSummary) return;
     void startHandoff(`checkout:${mode}`, null, mode);
   };
 
-  const startFixFinding = (finding: PullRequestFinding) => {
+  const startFixFinding = useStableCallback((finding: PullRequestFinding) => {
     if (!detail) return;
     void startHandoff(
       pullRequestFindingKey(finding),
@@ -1389,7 +1392,7 @@ export function PullRequestDetailPanel({
         finding,
       }),
     );
-  };
+  });
 
   const startFixFindings = () => {
     if (!detail) return;
@@ -2814,7 +2817,7 @@ export function PullRequestDetailPanel({
           <PullRequestMarkdownContext value={markdownContext}>
             {mountedTabs.has("summary") ? (
               <div className={cn("absolute inset-0", tab !== "summary" && "invisible")}>
-                <PullRequestSummaryTab
+                <RetainedSummaryTab
                   scrollerRef={scrollerRefs.summary}
                   environmentId={environmentId}
                   threadRef={threadRef}
@@ -2869,7 +2872,7 @@ export function PullRequestDetailPanel({
                     onRetry={activityQuery.refresh}
                   />
                 ) : (
-                  <PullRequestTimelineTab
+                  <RetainedTimelineTab
                     scrollerRef={scrollerRefs.timeline}
                     detail={detail}
                     environmentId={environmentId}
