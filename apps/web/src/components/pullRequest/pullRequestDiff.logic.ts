@@ -58,6 +58,19 @@ export interface DiffSlice {
   readonly omittedFileStats: ReadonlyArray<PullRequestOmittedFileStat>;
 }
 
+export function restartPullRequestDiffPagination(
+  key: string,
+  slices: ReadonlyArray<DiffSlice>,
+  refreshPage: (cursor: string | null) => void,
+) {
+  // Invalidate every loaded cursor, including cached pages inside their stale window.
+  // They are consumed again in order, since a refreshed response may change the cursors.
+  for (const cursor of new Set([null, ...slices.map((slice) => slice.cursor)])) {
+    refreshPage(cursor);
+  }
+  return { key, cursor: null, slices: [] as ReadonlyArray<DiffSlice> };
+}
+
 export function mergePullRequestDiffSlices(
   slices: ReadonlyArray<DiffSlice>,
   next: DiffSlice,

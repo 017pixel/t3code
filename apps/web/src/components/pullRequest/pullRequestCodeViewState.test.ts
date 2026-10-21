@@ -9,6 +9,7 @@ import {
 import {
   isFileDiffCollapsed,
   mergePullRequestDiffSlices,
+  restartPullRequestDiffPagination,
   type DiffSlice,
 } from "./pullRequestDiff.logic";
 import {
@@ -17,7 +18,11 @@ import {
   usePullRequestReviewStore,
 } from "./pullRequestReviewStore";
 
-import { PullRequestCodeScrollRestoration } from "./pullRequestCodeScroll.logic";
+import {
+  PullRequestCodeScrollRestoration,
+  savePullRequestCodeScroll,
+  pullRequestCodeScrollSurface,
+} from "./pullRequestCodeScroll.logic";
 import { resolvePullRequestSelectionFile } from "./pullRequestSelection.logic";
 
 const reference = {
@@ -123,6 +128,45 @@ describe("pull request Code tab session", () => {
 });
 
 describe("pull request refresh pages", () => {
+  it("revalidates numeric cursor pages even when the first page is unchanged", () => {
+    const first = { ...page(), nextCursor: "2" };
+    const second = { ...page("old second page"), cursor: "2", nextCursor: "3" };
+    const third = { ...page("old third page"), cursor: "3" };
+    const saved = [first, second, third];
+    const cache = new Map<string | null, DiffSlice>(saved.map((slice) => [slice.cursor, slice]));
+    const fresh = new Map<string | null, DiffSlice>([
+      [null, first],
+      ["2", { ...second, patch: page("new second page").patch }],
+      ["3", { ...third, patch: page("new third page").patch }],
+    ]);
+    const requested: (string | null)[] = [];
+    const restarted = restartPullRequestDiffPagination("review", saved, (cursor) => {
+      requested.push(cursor);
+      cache.delete(cursor);
+    });
+    expect(requested).toEqual([null, "2", "3"]);
+    const restore = new PullRequestCodeScrollRestoration({
+      scrollTop: 1800,
+      loadedPageCount: saved.length,
+    });
+    const surface = { scrollTop: 0, scrollHeight: 3000, clientHeight: 400 };
+    let slices = restarted.slices;
+    let cursor: string | null = restarted.cursor;
+    for (let index = 0; index < saved.length; index++) {
+      const next: DiffSlice = cache.get(cursor) ?? fresh.get(cursor)!;
+      slices = mergePullRequestDiffSlices(slices, next);
+      const result = restore.restore(surface, slices.length, next.nextCursor !== null);
+      if (result === "restored") break;
+      expect(result).toBe("load-more");
+      expect(surface.scrollTop).toBe(0);
+      cursor = next.nextCursor;
+    }
+    expect(slices).toEqual([...fresh.values()]);
+    expect(slices[0]).toBe(first);
+    expect(surface.scrollTop).toBe(1800);
+    expect(restore.pending).toBe(false);
+  });
+
   it.each([false, true])(
     "keeps all loaded pages when the first page is unchanged (new identity: %s)",
     (copy) => {
@@ -205,6 +249,72 @@ describe("pull request file keys", () => {
 });
 
 describe("pull request scroll restoration", () => {
+  it.each([570, 20_000_000, 29_999_590])(
+    "restores logical offset %s without sticky drift or physical window clamping",
+    (savedTop) => {
+      let logicalTop = 0;
+      const viewer = {
+        getScrollTop: () => logicalTop,
+        getScrollHeight: () => 30_000_000,
+        getHeight: () => 400,
+        getTopForItem: () => 80,
+        scrollTo: (target: { offset?: number; type: string }) => {
+          expect(target.type).toBe("item");
+          logicalTop = 80 - (target.offset ?? 0);
+        },
+        render: () => {},
+      };
+      const surface = pullRequestCodeScrollSurface(viewer, "first-file");
+      for (let trip = 0; trip < 3; trip++) {
+        const restore = new PullRequestCodeScrollRestoration({
+          scrollTop: savedTop,
+          loadedPageCount: 1,
+        });
+        logicalTop = 0;
+        expect(restore.restore(surface, 1, false)).toBe("restored");
+        expect(logicalTop).toBe(savedTop);
+      }
+    },
+  );
+
+  it("expands saved condensed chrome when restoration clamps to zero without a scroll event", () => {
+    const restore = new PullRequestCodeScrollRestoration({ scrollTop: 1800, loadedPageCount: 3 });
+    const surface = { scrollTop: 0, scrollHeight: 400, clientHeight: 400 };
+    expect(restore.restore(surface, 1, false)).toBe("restored");
+    const before = {
+      ...EMPTY_CODE_VIEW,
+      chromeCondensed: true,
+      scrollTop: 1800,
+      loadedPageCount: 3,
+    };
+    const after = savePullRequestCodeScroll(before, surface.scrollTop, 1);
+    expect(after.chromeCondensed).toBe(false);
+    expect(after.scrollTop).toBe(0);
+    expect(after.loadedPageCount).toBe(1);
+    expect(savePullRequestCodeScroll(after, 0, 1)).toBe(after);
+  });
+  it("waits for an in-flight page, then settles a clamp when that page fails", () => {
+    const restore = new PullRequestCodeScrollRestoration({ scrollTop: 1800, loadedPageCount: 3 });
+    const surface = { scrollTop: 0, scrollHeight: 600, clientHeight: 400 };
+    expect(restore.restore(surface, 1, false, true)).toBe("waiting");
+    expect(restore.pending).toBe(true);
+    expect(restore.restore(surface, 1, false, false)).toBe("restored");
+    expect(surface.scrollTop).toBe(200);
+    expect(restore.pending).toBe(false);
+  });
+
+  it("does not jump back after deliberate scrolling cancels a pending restore", () => {
+    const restore = new PullRequestCodeScrollRestoration({ scrollTop: 1800, loadedPageCount: 3 });
+    const surface = { scrollTop: 0, scrollHeight: 600, clientHeight: 400 };
+    expect(restore.restore(surface, 1, true)).toBe("load-more");
+    restore.cancel();
+    surface.scrollTop = 120;
+    surface.scrollHeight = 3000;
+    expect(restore.restore(surface, 3, false)).toBe("waiting");
+    expect(surface.scrollTop).toBe(120);
+    expect(restore.pending).toBe(false);
+  });
+
   it("waits for saved pages without overwriting the offset with a first-page clamp", () => {
     const saved = { scrollTop: 1800, loadedPageCount: 3 };
     const restore = new PullRequestCodeScrollRestoration(saved);

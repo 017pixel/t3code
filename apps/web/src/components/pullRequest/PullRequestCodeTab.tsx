@@ -23,7 +23,7 @@ import {
   TriangleAlertIcon,
 } from "lucide-react";
 import { ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown } from "lucide";
-import { useAtomRefresh } from "@effect/atom-react";
+import { RegistryContext, useAtomRefresh } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
   createContext,
@@ -98,13 +98,18 @@ import {
 } from "./PullRequestReviewAnnotation";
 import {
   mergePullRequestDiffSlices,
+  restartPullRequestDiffPagination,
   type DiffSlice,
   isFileDiffCollapsed,
   isLineInFileDiff,
   toggleFileDiffFoldForViewed,
 } from "./pullRequestDiff.logic";
 import { resolvePullRequestSelectionFile } from "./pullRequestSelection.logic";
-import { PullRequestCodeScrollRestoration } from "./pullRequestCodeScroll.logic";
+import {
+  PullRequestCodeScrollRestoration,
+  savePullRequestCodeScroll,
+  pullRequestCodeScrollSurface,
+} from "./pullRequestCodeScroll.logic";
 import { PullRequestDiffStat, PullRequestMetaLine } from "./pullRequestPresentation";
 import { PullRequestDiffUnavailableState } from "./PullRequestDiffUnavailableState";
 import { usePullRequestFilesViewed } from "./usePullRequestFilesViewed";
@@ -320,6 +325,7 @@ function PullRequestCodeTab({
     null,
   );
 
+  const registry = use(RegistryContext);
   const referenceKey = pullRequestReviewKey(reference);
   const commit = selectedCommitOid;
   const scopeKey = JSON.stringify([codeViewKey, commit]);
@@ -363,6 +369,8 @@ function PullRequestCodeTab({
   const data = diffQuery.data;
   if (
     data !== null &&
+    !diffQuery.isPending &&
+    diffQuery.error === null &&
     (appliedPage?.data !== data ||
       appliedPage.cursor !== cursor ||
       appliedPage.scopeKey !== scopeKey)
@@ -422,12 +430,43 @@ function PullRequestCodeTab({
   useEffect(() => {
     if (appliedRefreshToken.current === refreshToken) return;
     appliedRefreshToken.current = refreshToken;
-    setSliceState((previous) =>
-      previous.cursor === null ? previous : { ...previous, cursor: null },
+    const saved = readPullRequestCodeView(codeViewKey);
+    setScrollRestoration(
+      new PullRequestCodeScrollRestoration({
+        scrollTop: viewer?.getInstance()?.getScrollTop() ?? saved.scrollTop,
+        loadedPageCount: Math.max(loadedSlices.length, saved.loadedPageCount),
+      }),
     );
-    refreshFirstDiffPage();
+    // Numeric cursors do not identify content: an unchanged first page says nothing
+    // about later pages. Explicit refresh reloads the saved depth from page one.
+    setAppliedPage(null);
+    setSliceState(
+      restartPullRequestDiffPagination(scopeKey, loadedSlices, (pageCursor) => {
+        registry.refresh(
+          pullRequestEnvironment.diff({
+            environmentId,
+            input: {
+              ...reference,
+              ...(pageCursor === null ? {} : { cursor: pageCursor }),
+              ...(commit === null ? {} : { commit }),
+            },
+          }),
+        );
+      }),
+    );
     refreshFilesViewed();
-  }, [refreshToken, refreshFirstDiffPage, refreshFilesViewed]);
+  }, [
+    refreshToken,
+    refreshFilesViewed,
+    codeViewKey,
+    viewer,
+    loadedSlices,
+    scopeKey,
+    registry,
+    environmentId,
+    reference,
+    commit,
+  ]);
   const appliedBackgroundRefreshToken = useRef(backgroundRefreshToken);
   useEffect(() => {
     if (appliedBackgroundRefreshToken.current === backgroundRefreshToken) return;
@@ -665,9 +704,9 @@ function PullRequestCodeTab({
         fileDiff,
         annotations,
         collapsed,
-        // File identity survives refresh; the parser key still invalidates changed content.
+        // Only changes to this file or its review decorations invalidate the item.
         version: fnv1a32(
-          `${fileDiff.cacheKey}:${collapsed ? "1" : "0"}:${viewedMark}:${annotationsVersion}`,
+          `${buildFileDiffContentVersion(fileDiff)}:${collapsed ? "1" : "0"}:${viewedMark}:${annotationsVersion}`,
         ),
       };
     },
@@ -1311,7 +1350,13 @@ function PullRequestCodeTab({
   // The effects sit after every derivation: a hook between the diff's derivations and their
   // later readers (the viewer options, the reveal handler) would leave them uncached.
   useEffect(() => {
-    if (viewer === null || !scrollRestoration.pending) return;
+    if (!scrollRestoration.pending) return;
+    if (diffQuery.error !== null && !diffQuery.isPending && loadedSlices.length === 0) {
+      scrollRestoration.cancel();
+      updateCodeView(codeViewKey, (current) => savePullRequestCodeScroll(current, 0, 0));
+      return;
+    }
+    if (viewer === null) return;
     const instance = viewer.getInstance();
     const surface = instance?.getContainerElement();
     if (instance === undefined || surface === undefined) return;
@@ -1322,23 +1367,65 @@ function PullRequestCodeTab({
     const restore = () => {
       // A cold highlighter can defer layout until after the pages have arrived.
       instance.render(true);
+      const firstItem = items[0];
+      const scrollSurface =
+        firstItem === undefined ? surface : pullRequestCodeScrollSurface(instance, firstItem.id);
       const result = scrollRestoration.restore(
-        (content?.getBoundingClientRect().height ?? 0) > 0 ? surface : undefined,
+        (content?.getBoundingClientRect().height ?? 0) > 0 ? scrollSurface : undefined,
         loadedSlices.length,
-        hasUnloadedNextSlice,
+        canLoadNextSlice,
+        diffQuery.isPending,
       );
-      if (result === "restored") stopObserving();
+      if (result === "restored") {
+        stopObserving();
+        // A clamp to zero may not dispatch a scroll event to the panel.
+        updateCodeView(codeViewKey, (current) =>
+          savePullRequestCodeScroll(current, scrollSurface.scrollTop, loadedSlices.length),
+        );
+      }
       if (result === "load-more" && canLoadNextSlice) loadNextSlice();
     };
+    const cancel = () => {
+      scrollRestoration.cancel();
+      stopObserving();
+      updateCodeView(codeViewKey, (current) =>
+        savePullRequestCodeScroll(current, instance.getScrollTop(), loadedSlices.length),
+      );
+    };
+    const cancelOnKey = (event: KeyboardEvent) => {
+      if (
+        ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key) &&
+        !event
+          .composedPath()
+          .some(
+            (node) =>
+              node instanceof HTMLElement &&
+              (node.isContentEditable || node.matches("input, textarea")),
+          )
+      )
+        cancel();
+    };
+    surface.addEventListener("wheel", cancel, { passive: true });
+    surface.addEventListener("touchmove", cancel, { passive: true });
+    surface.addEventListener("keydown", cancelOnKey);
     restore();
-    return stopObserving;
+    return () => {
+      stopObserving();
+      surface.removeEventListener("wheel", cancel);
+      surface.removeEventListener("touchmove", cancel);
+      surface.removeEventListener("keydown", cancelOnKey);
+    };
   }, [
     viewer,
     scrollRestoration,
     loadedSlices,
-    hasUnloadedNextSlice,
+    items,
     canLoadNextSlice,
+    diffQuery.isPending,
+    diffQuery.error,
     loadNextSlice,
+    updateCodeView,
+    codeViewKey,
   ]);
   useEffect(() => {
     if (sentinel === null || !canLoadNextSlice) return;
@@ -1510,9 +1597,7 @@ function PullRequestCodeTab({
               onScroll={(scrollTop) => {
                 if (scrollRestoration.pending) return;
                 updateCodeView(codeViewKey, (current) =>
-                  current.scrollTop === scrollTop && current.loadedPageCount === loadedSlices.length
-                    ? current
-                    : { ...current, scrollTop, loadedPageCount: loadedSlices.length },
+                  savePullRequestCodeScroll(current, scrollTop, loadedSlices.length),
                 );
               }}
               viewerRef={setViewer}
