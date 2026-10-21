@@ -303,8 +303,10 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                       handleOptionSelection(activeQuestion.id, optionValue);
                     }}
                     // Native button keys: Enter answers on keydown, Space on keyup, and
-                    // blurring while Space is held cancels it.
+                    // blurring while Space is held cancels it. Modified keys stay with global
+                    // shortcuts such as Mod+Shift+Enter.
                     onKeyDown={(event) => {
+                      if (event.metaKey || event.ctrlKey || event.altKey) return;
                       if (event.key === "Enter") {
                         event.preventDefault();
                         handleOptionSelection(activeQuestion.id, optionValue);
@@ -317,6 +319,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                       if (event.key !== " ") return;
                       const pressed = spacePressedOptionRef.current === event.currentTarget;
                       spacePressedOptionRef.current = null;
+                      if (event.metaKey || event.ctrlKey || event.altKey) return;
                       if (pressed) handleOptionSelection(activeQuestion.id, optionValue);
                     }}
                     onBlur={() => {

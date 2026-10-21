@@ -222,4 +222,17 @@ it("answers an option with Space on keyup, once per press, and not after focus l
 
   await key("keydown", "Enter");
   expect(onToggleOption).toHaveBeenCalledTimes(2);
+
+  const modifiedEnter = new KeyboardEvent("keydown", {
+    key: "Enter",
+    metaKey: true,
+    shiftKey: true,
+    bubbles: true,
+    cancelable: true,
+  });
+  await act(() => {
+    option.dispatchEvent(modifiedEnter);
+  });
+  expect(modifiedEnter.defaultPrevented).toBe(false);
+  expect(onToggleOption).toHaveBeenCalledTimes(2);
 });
