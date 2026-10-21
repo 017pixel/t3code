@@ -1,28 +1,60 @@
 import type { PostRenderPhase } from "@pierre/diffs";
 import { useEffect, useLayoutEffect, useState } from "react";
 
+// Source offsets in selection order: the anchor stays put while the focus
+// follows the pointer or keyboard, as in the DOM Selection API.
 interface SourceSelection {
-  readonly start: number;
-  readonly end: number;
+  readonly anchor: number;
+  readonly focus: number;
 }
 
+interface DomPoint {
+  readonly node: Node;
+  readonly offset: number;
+}
+
+const LINE_FEED = 10;
+const CARRIAGE_RETURN = 13;
+
+// Matches how Pierre splits rows: `\r\n`, `\r`, and `\n` each end a line,
+// and a rendered row holds the line without its terminator.
 function getLineStarts(state: SourceTextSelection): number[] {
   if (state.lineStarts) return state.lineStarts;
+  const { text } = state;
   const starts = [0];
-  for (let index = state.text.indexOf("\n"); index !== -1;) {
+  for (let index = 0; index < text.length; index++) {
+    const char = text.charCodeAt(index);
+    if (char !== LINE_FEED && char !== CARRIAGE_RETURN) continue;
+    if (char === CARRIAGE_RETURN && text.charCodeAt(index + 1) === LINE_FEED) index++;
     starts.push(index + 1);
-    index = state.text.indexOf("\n", index + 1);
   }
   state.lineStarts = starts;
   return starts;
 }
 
-function lineBounds(state: SourceTextSelection, lineNumber: number): SourceSelection | null {
+function lineBounds(
+  state: SourceTextSelection,
+  lineNumber: number,
+): { start: number; end: number } | null {
   const starts = getLineStarts(state);
   const start = starts[lineNumber - 1];
   if (start === undefined) return null;
   const next = starts[lineNumber];
-  return { start, end: next === undefined ? state.text.length : next - 1 };
+  if (next === undefined) return { start, end: state.text.length };
+  const crlf = next - start >= 2 && state.text.charCodeAt(next - 2) === CARRIAGE_RETURN;
+  return { start, end: next - (crlf && state.text.charCodeAt(next - 1) === LINE_FEED ? 2 : 1) };
+}
+
+function lineAtOffset(state: SourceTextSelection, offset: number): number {
+  const starts = getLineStarts(state);
+  let low = 0;
+  let high = starts.length - 1;
+  while (low < high) {
+    const mid = (low + high + 1) >> 1;
+    if ((starts[mid] ?? 0) <= offset) low = mid;
+    else high = mid - 1;
+  }
+  return low + 1;
 }
 
 function renderedLine(element: Element): number | null {
@@ -30,17 +62,20 @@ function renderedLine(element: Element): number | null {
   return Number.isInteger(lineNumber) ? lineNumber : null;
 }
 
+// `inRow` maps only points inside a rendered row. A point the browser moved
+// to a container because its row was virtualized away carries no position.
 function domPointToOffset(
   state: SourceTextSelection,
-  node: Node,
-  nodeOffset: number,
+  point: DomPoint,
+  inRow: boolean,
 ): number | null {
+  const { node, offset } = point;
   const element = node instanceof Element ? node : node.parentElement;
   const lineElement = element?.closest("[data-line]");
   if (!lineElement) {
     // Drags past the first or last row end on the code column itself.
-    if (!(node instanceof Element)) return null;
-    const after = node.childNodes[nodeOffset];
+    if (inRow || !(node instanceof Element)) return null;
+    const after = node.childNodes[offset];
     const lineAfter =
       after instanceof Element
         ? after.matches("[data-line]")
@@ -61,14 +96,12 @@ function domPointToOffset(
   if (!bounds) return null;
   const prefix = document.createRange();
   prefix.setStart(lineElement, 0);
-  prefix.setEnd(node, nodeOffset);
+  prefix.setEnd(node, offset);
+  // Empty rows render a "\n" placeholder, so clamp to the line's own length.
   return Math.min(bounds.start + prefix.toString().length, bounds.end);
 }
 
-function offsetToDomPoint(
-  lineElement: Element,
-  column: number,
-): { node: Node; offset: number } | null {
+function offsetToDomPoint(lineElement: Element, column: number): DomPoint {
   const walker = document.createTreeWalker(lineElement, NodeFilter.SHOW_TEXT);
   let remaining = column;
   let last: Text | null = null;
@@ -80,66 +113,45 @@ function offsetToDomPoint(
   return last ? { node: last, offset: last.length } : { node: lineElement, offset: 0 };
 }
 
-function readDomSelection(root: ShadowRoot): AbstractRange | null {
+type ComposedRanges = (...args: unknown[]) => StaticRange[];
+
+function readComposedRange(selection: Selection, root: ShadowRoot): AbstractRange | null {
+  const getComposedRanges = selection.getComposedRanges as unknown as ComposedRanges;
+  try {
+    return getComposedRanges.call(selection, { shadowRoots: [root] })[0] ?? null;
+  } catch {
+    // Safari 17 takes the shadow roots as separate arguments.
+    return getComposedRanges.call(selection, root)[0] ?? null;
+  }
+}
+
+// The DOM selection's anchor and focus, with nodes inside `root` when the
+// selection is in this preview.
+function readDomSelection(root: ShadowRoot): { anchor: DomPoint; focus: DomPoint } | null {
   const selection = document.getSelection();
   if (!selection || selection.rangeCount === 0) return null;
-  if (typeof selection.getComposedRanges === "function") {
-    return selection.getComposedRanges({ shadowRoots: [root] })[0] ?? null;
-  }
-  return selection.getRangeAt(0);
-}
-
-function readSourceSelection(state: SourceTextSelection): SourceSelection | "outside" | null {
-  const root = state.host?.shadowRoot;
-  if (!root) return null;
-  const range = readDomSelection(root);
-  if (!range || range.collapsed) return null;
-  if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
-    return "outside";
-  }
-  const start = domPointToOffset(state, range.startContainer, range.startOffset);
-  const end = domPointToOffset(state, range.endContainer, range.endOffset);
-  if (start === null || end === null) return "outside";
-  return { start: Math.min(start, end), end: Math.max(start, end) };
-}
-
-function restoreDomSelection(state: SourceTextSelection) {
-  const root = state.host?.shadowRoot;
-  const source = state.selection;
-  if (!root || !source) return;
-  const lines = root.querySelectorAll("[data-line]");
-  const first = lines[0];
-  const last = lines[lines.length - 1];
-  const firstLine = first ? renderedLine(first) : null;
-  const lastLine = last ? renderedLine(last) : null;
-  const firstBounds = firstLine === null ? null : lineBounds(state, firstLine);
-  const lastBounds = lastLine === null ? null : lineBounds(state, lastLine);
-  const selection = document.getSelection();
-  if (!selection || !first || !last || !firstBounds || !lastBounds) return;
-  const start = Math.max(source.start, firstBounds.start);
-  const end = Math.min(source.end, lastBounds.end);
-  if (start >= end) {
-    state.restored = null;
-    if (readSourceSelection(state) !== null) selection.removeAllRanges();
-    return;
-  }
-  const point = (offset: number) => {
-    const starts = getLineStarts(state);
-    let low = 0;
-    let high = starts.length - 1;
-    while (low < high) {
-      const mid = (low + high + 1) >> 1;
-      if ((starts[mid] ?? 0) <= offset) low = mid;
-      else high = mid - 1;
+  let range: AbstractRange | null = null;
+  if (typeof selection.getComposedRanges === "function" && "direction" in selection) {
+    range = readComposedRange(selection, root);
+    if (!range) return null;
+  } else {
+    // Older Chromium exposes the shadow tree's selection, already directed.
+    const shadowSelection = (
+      root as ShadowRoot & { getSelection?: () => Selection | null }
+    ).getSelection?.();
+    if (shadowSelection?.anchorNode && shadowSelection.focusNode) {
+      return {
+        anchor: { node: shadowSelection.anchorNode, offset: shadowSelection.anchorOffset },
+        focus: { node: shadowSelection.focusNode, offset: shadowSelection.focusOffset },
+      };
     }
-    const element = root.querySelector(`[data-line="${low + 1}"]`);
-    return element ? offsetToDomPoint(element, offset - (starts[low] ?? 0)) : null;
-  };
-  const startPoint = point(start);
-  const endPoint = point(end);
-  if (!startPoint || !endPoint) return;
-  state.restored = { start, end };
-  selection.setBaseAndExtent(startPoint.node, startPoint.offset, endPoint.node, endPoint.offset);
+    range = selection.getRangeAt(0);
+  }
+  const start = { node: range.startContainer, offset: range.startOffset };
+  const end = { node: range.endContainer, offset: range.endOffset };
+  return selection.direction === "backward"
+    ? { anchor: end, focus: start }
+    : { anchor: start, focus: end };
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -153,10 +165,15 @@ class SourceTextSelection {
   lineStarts: number[] | null = null;
   host: HTMLElement | null = null;
   selection: SourceSelection | null = null;
-  // The range last drawn by restore, so its selectionchange is not read back
+  // The range last drawn by redraw, so its selectionchange is not read back
   // as a user selection clamped to the rendered rows.
-  restored: SourceSelection | null = null;
-  active = false;
+  drawn: SourceSelection | null = null;
+  // A pointer gesture that started in this preview is selecting. The browser
+  // owns the drawn selection until it ends.
+  dragging = false;
+  // The last pointer or focus interaction was in this preview, so its
+  // select all and an offscreen selection's copy belong here.
+  engaged = false;
 
   constructor(public text: string) {}
 
@@ -165,7 +182,21 @@ class SourceTextSelection {
     this.text = text;
     this.lineStarts = null;
     this.selection = null;
-    this.restored = null;
+    this.drawn = null;
+  }
+
+  scroller(): Element | null {
+    return this.host?.closest(".file-preview-virtualizer") ?? null;
+  }
+
+  // "outside" means the DOM selection is somewhere other than this preview.
+  read(): { anchor: DomPoint; focus: DomPoint } | "outside" | null {
+    const root = this.host?.shadowRoot;
+    if (!root) return null;
+    const points = readDomSelection(root);
+    if (!points) return null;
+    if (!root.contains(points.anchor.node) || !root.contains(points.focus.node)) return "outside";
+    return points;
   }
 
   onPostRender = (fileContainer: HTMLElement, phase: PostRenderPhase) => {
@@ -174,54 +205,156 @@ class SourceTextSelection {
       return;
     }
     this.host = fileContainer;
-    restoreDomSelection(this);
+    if (!this.dragging) this.redraw();
+  };
+
+  // Draws the part of the source selection that falls in the rendered rows.
+  redraw() {
+    const root = this.host?.shadowRoot;
+    const source = this.selection;
+    const selection = document.getSelection();
+    if (!root || !source || !selection) return;
+    const lines = root.querySelectorAll("[data-line]");
+    const first = lines[0];
+    const last = lines[lines.length - 1];
+    const firstLine = first ? renderedLine(first) : null;
+    const lastLine = last ? renderedLine(last) : null;
+    const firstBounds = firstLine === null ? null : lineBounds(this, firstLine);
+    const lastBounds = lastLine === null ? null : lineBounds(this, lastLine);
+    if (!firstBounds || !lastBounds) return;
+    const clamp = (offset: number) => Math.min(Math.max(offset, firstBounds.start), lastBounds.end);
+    const target = { anchor: clamp(source.anchor), focus: clamp(source.focus) };
+    const current = this.read();
+    if (target.anchor === target.focus) {
+      this.drawn = null;
+      if (current && current !== "outside") selection.removeAllRanges();
+      return;
+    }
+    if (current && current !== "outside") {
+      const anchor = domPointToOffset(this, current.anchor, true);
+      const focus = domPointToOffset(this, current.focus, true);
+      if (anchor === target.anchor && focus === target.focus) {
+        this.drawn = target;
+        return;
+      }
+    }
+    const point = (offset: number) => {
+      const line = lineAtOffset(this, offset);
+      const element = root.querySelector(`[data-line="${line}"]`);
+      const start = getLineStarts(this)[line - 1];
+      return element && start !== undefined ? offsetToDomPoint(element, offset - start) : null;
+    };
+    const anchor = point(target.anchor);
+    const focus = point(target.focus);
+    if (!anchor || !focus) return;
+    this.drawn = target;
+    selection.setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset);
+  }
+
+  onSelectionChange = () => {
+    const current = this.read();
+    if (current === null) return;
+    if (current === "outside") {
+      // A drag that began here keeps its selection even if the browser
+      // moves the range out while rows are replaced.
+      if (!this.dragging) this.selection = null;
+      return;
+    }
+    if (this.dragging) {
+      // The anchor stays where the gesture began. The browser's anchor drifts
+      // once its row is virtualized away, so only the first read counts.
+      const anchor = this.selection?.anchor ?? domPointToOffset(this, current.anchor, true);
+      const focus = domPointToOffset(this, current.focus, false);
+      if (anchor === null || focus === null) return;
+      this.selection = { anchor, focus };
+      this.drawn = null;
+      return;
+    }
+    const seen = {
+      anchor: domPointToOffset(this, current.anchor, false),
+      focus: domPointToOffset(this, current.focus, false),
+    };
+    // A collapsed selection is usually a range virtualized away. Deliberate
+    // collapses come from a click, which pointerdown already handled.
+    if (seen.anchor === null || seen.focus === null || seen.anchor === seen.focus) return;
+    // An endpoint still where redraw clamped it stands for the source one,
+    // so extending a selection keeps its offscreen anchor.
+    const { drawn, selection } = this;
+    const anchor =
+      drawn && selection && seen.anchor === drawn.anchor ? selection.anchor : seen.anchor;
+    const focus = drawn && selection && seen.focus === drawn.focus ? selection.focus : seen.focus;
+    this.drawn = { anchor: seen.anchor, focus: seen.focus };
+    this.selection = { anchor, focus };
   };
 
   listen(): () => void {
-    const onSelectionChange = () => {
-      const next = readSourceSelection(this);
-      if (next === null) return;
-      if (next === "outside") {
-        this.selection = null;
-        return;
-      }
-      if (this.restored && next.start === this.restored.start && next.end === this.restored.end) {
-        return;
-      }
-      this.restored = null;
-      this.selection = next;
-    };
     const onPointerDown = (event: PointerEvent) => {
-      const scroller = this.host?.closest(".file-preview-virtualizer");
+      const scroller = this.scroller();
       // The scrollbar belongs to the scroller; using it keeps the selection.
       if (scroller && event.target === scroller) return;
-      this.selection = null;
-      this.restored = null;
-      this.active = scroller ? event.composedPath().includes(scroller) : false;
+      const inside = scroller ? event.composedPath().includes(scroller) : false;
+      this.engaged = inside;
+      // A context menu click keeps the selection it opens on.
+      if (inside && event.button !== 0) return;
+      this.dragging = inside;
+      this.drawn = null;
+      // Shift-click extends from the existing anchor, even an offscreen one.
+      if (!(inside && event.shiftKey)) this.selection = null;
+    };
+    const onPointerEnd = () => {
+      if (!this.dragging) return;
+      this.dragging = false;
+      if (this.selection && this.selection.anchor === this.selection.focus) this.selection = null;
+      this.redraw();
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      const scroller = this.scroller();
+      this.engaged = scroller ? event.composedPath().includes(scroller) : false;
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key.toLowerCase() !== "a" || !(event.metaKey || event.ctrlKey) || event.altKey) {
         return;
       }
-      if (!this.active || isEditableTarget(event.target)) return;
+      if (!this.engaged || isEditableTarget(event.target)) return;
       event.preventDefault();
-      this.selection = { start: 0, end: this.text.length };
-      restoreDomSelection(this);
+      this.selection = { anchor: 0, focus: this.text.length };
+      this.redraw();
     };
     const onCopy = (event: ClipboardEvent) => {
       const source = this.selection;
-      if (!source || !event.clipboardData || isEditableTarget(document.activeElement)) return;
-      if (readSourceSelection(this) === "outside") return;
-      event.clipboardData.setData("text/plain", this.text.slice(source.start, source.end));
+      if (!source || source.anchor === source.focus || !event.clipboardData) return;
+      if (isEditableTarget(document.activeElement)) return;
+      const current = this.read();
+      if (current === "outside") return;
+      const drawnHere =
+        current !== null &&
+        (current.anchor.node !== current.focus.node ||
+          current.anchor.offset !== current.focus.offset);
+      // With nothing drawn, the selection is offscreen, and the copy is this
+      // preview's only while the user is still working in it.
+      if (!drawnHere && !this.engaged) return;
+      event.clipboardData.setData(
+        "text/plain",
+        this.text.slice(
+          Math.min(source.anchor, source.focus),
+          Math.max(source.anchor, source.focus),
+        ),
+      );
       event.preventDefault();
     };
-    document.addEventListener("selectionchange", onSelectionChange);
+    document.addEventListener("selectionchange", this.onSelectionChange);
     document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("pointerup", onPointerEnd, true);
+    document.addEventListener("pointercancel", onPointerEnd, true);
+    document.addEventListener("focusin", onFocusIn, true);
     document.addEventListener("keydown", onKeyDown, true);
     document.addEventListener("copy", onCopy, true);
     return () => {
-      document.removeEventListener("selectionchange", onSelectionChange);
+      document.removeEventListener("selectionchange", this.onSelectionChange);
       document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("pointerup", onPointerEnd, true);
+      document.removeEventListener("pointercancel", onPointerEnd, true);
+      document.removeEventListener("focusin", onFocusIn, true);
       document.removeEventListener("keydown", onKeyDown, true);
       document.removeEventListener("copy", onCopy, true);
     };
