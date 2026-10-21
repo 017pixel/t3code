@@ -315,7 +315,11 @@ export default defineConfig(() => {
           codeSplitting: {
             // Preview imports must not fold shared file icons back into main.
             groups: [
-              { name: "PierreEntryIcon", test: /\/components\/chat\/PierreEntryIcon\.tsx$/ },
+              {
+                name: "icons",
+                test: /\/(?:components\/chat\/PierreEntryIcon\.tsx|pierre-icons\.ts|mediaPreview\.ts)$/,
+                includeDependenciesRecursively: false,
+              },
             ],
           },
         },
