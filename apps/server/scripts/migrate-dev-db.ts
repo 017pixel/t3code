@@ -59,6 +59,18 @@ export class MigrateDevDbSourceIsDestinationError extends Schema.TaggedError<Mig
   }
 }
 
+export class MigrateDevDbLegacySourceError extends Schema.TaggedError<MigrateDevDbLegacySourceError>()(
+  "MigrateDevDbLegacySourceError",
+  {
+    sourcePath: Schema.String,
+    legacyThreads: Schema.Number,
+  },
+) {
+  override get message(): string {
+    return `Source database '${this.sourcePath}' predates the V2 thread tables and holds ${this.legacyThreads} legacy threads, which this command cannot carry over. Start a server on a copy of it once so it imports them, then use that copy as --source.`;
+  }
+}
+
 export class MigrateDevDbServerRunningError extends Schema.TaggedError<MigrateDevDbServerRunningError>()(
   "MigrateDevDbServerRunningError",
   {
@@ -222,6 +234,27 @@ const rootIsVisible = (sql: SqlClient.SqlClient) => sql`
   root.deleted_at IS NULL
   AND json_extract(root.payload_json, '$.deletedAt') IS NULL
   AND json_extract(root.payload_json, '$.archivedAt') IS NULL`;
+
+/**
+ * The server imports V1 threads into the V2 tables at runtime, not in a
+ * migration, so a pre-V2 source would migrate cleanly into a database with
+ * no threads at all.
+ */
+const ensureSourceIsV2 = Effect.fn("ensureDevDbSourceIsV2")(function* (sourcePath: string) {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql<{ name: string }>`
+    SELECT name FROM sqlite_master WHERE type = 'table'
+      AND name IN ('projection_threads', 'orchestration_v2_projection_threads')`;
+  const names = new Set(tables.map((table) => table.name));
+  if (names.has("orchestration_v2_projection_threads") || !names.has("projection_threads")) {
+    return;
+  }
+  const [legacy] = yield* sql<{ count: number }>`SELECT COUNT(*) AS count FROM projection_threads`;
+  const legacyThreads = Number(legacy?.count ?? 0);
+  if (legacyThreads > 0) {
+    return yield* new MigrateDevDbLegacySourceError({ sourcePath, legacyThreads });
+  }
+});
 
 /**
  * One transaction reads the source, so the copy is consistent while the real server writes.
@@ -474,6 +507,16 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
           (cause) => new MigrateDevDbPhaseError({ phase, databasePath: phaseDatabasePath, cause }),
         ),
       );
+
+  yield* ensureSourceIsV2(sourcePath).pipe(
+    Effect.provide(NodeSqliteClient.layer({ filename: sourcePath, readonly: true })),
+    Effect.catchTags({
+      SqlError: (cause) =>
+        Effect.fail(
+          new MigrateDevDbPhaseError({ phase: "snapshot", databasePath: sourcePath, cause }),
+        ),
+    }),
+  );
 
   yield* removeDatabaseFiles(snapshotPath);
   const { executedMigrations, pruned } = yield* Effect.gen(function* () {

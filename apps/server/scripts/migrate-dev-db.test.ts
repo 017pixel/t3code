@@ -252,11 +252,11 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
         }),
       );
 
-      const exit = yield* runMigrateDevDb(
+      const error = yield* runMigrateDevDb(
         { baseDir: destDir, source, projects: 5, threadsPerProject: 10 },
         { sharedHome: sourceDir },
-      ).pipe(Effect.exit);
-      assert.isTrue(exit._tag === "Failure", "a source whose threads would be dropped must fail");
+      ).pipe(Effect.flip);
+      assert.equal(error._tag, "MigrateDevDbLegacySourceError");
       assert.equal(yield* fs.exists(path.join(destDir, "userdata", "statev2.sqlite")), false);
     }),
   );
