@@ -1,5 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { resolve, join } from "node:path";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 
 const directory = process.argv[2];
 if (!directory || process.argv.length !== 3) {
@@ -8,11 +8,11 @@ if (!directory || process.argv.length !== 3) {
 
 // This synthetic launcher reproduces only the version-probe failure, not Muse setup or a turn.
 const fixture = JSON.parse(
-  await readFile(new URL("./fixtures/muse-uninitialized.json", import.meta.url), "utf8"),
+  await NodeFSP.readFile(new URL("./fixtures/muse-uninitialized.json", import.meta.url), "utf8"),
 );
-const binaryPath = join(resolve(directory), "muse");
-await mkdir(resolve(directory), { recursive: true });
-await writeFile(
+const binaryPath = NodePath.join(NodePath.resolve(directory), "muse");
+await NodeFSP.mkdir(NodePath.resolve(directory), { recursive: true });
+await NodeFSP.writeFile(
   binaryPath,
   `#!/usr/bin/env node
 if (process.argv.length !== 3 || process.argv[2] !== "--version") {
