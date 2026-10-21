@@ -33,4 +33,17 @@ describe("leaving a utility page", () => {
     await act(() => router.history.forward());
     expect(pathname()).toBe("/env/thread-b");
   });
+
+  it("returns to the remembered thread after its history entry is replaced", async () => {
+    await using screen = await render(<LeaveUtilityPage />, { router: "/settings" });
+    const router = screen.router!;
+    const pathname = () => router.state.location.pathname;
+
+    await act(() => router.navigate({ href: "/env/thread-a" }));
+    await act(() => router.history.back());
+    await act(() => router.navigate({ href: "/usage" }));
+    await act(() => router.navigate({ href: "/settings" }));
+    await screen.getByRole("button", { name: "Back" }).click();
+    expect(pathname()).toBe("/env/thread-a");
+  });
 });
