@@ -3791,7 +3791,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 latest.status = 'cancelled'
                 AND json_extract(latest.payload_json, '$.startedAt') IS NULL
               )
-            -- latestExecutedRun: the run that ended last (runRanAfter).
+              AND NOT (
+                latest.status = 'completed' AND (
+                  SELECT wake.type FROM orchestration_v2_projection_turn_items wake
+                  WHERE wake.run_id = latest.run_id
+                    AND wake.node_id IS NOT NULL
+                    AND wake.node_id IS json_extract(latest.payload_json, '$.rootNodeId')
+                    AND wake.type IN ('user_message', 'notification')
+                  ORDER BY wake.ordinal
+                  LIMIT 1
+                ) IS 'notification'
+              )
+            -- usageLimitBlockedRun: completed notification wakes preserve the limit.
             ORDER BY latest.completed_at IS NULL DESC, latest.completed_at DESC,
               latest.ordinal DESC, latest.run_id DESC
             LIMIT 1
@@ -5812,7 +5823,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   candidate.status = 'cancelled'
                   AND json_extract(candidate.payload_json, '$.startedAt') IS NULL
                 )
-              -- latestExecutedRun: the run that ended last (runRanAfter).
+                AND NOT (
+                  candidate.status = 'completed' AND (
+                    SELECT wake.type FROM orchestration_v2_projection_turn_items wake
+                    WHERE wake.run_id = candidate.run_id
+                      AND wake.node_id IS NOT NULL
+                      AND wake.node_id IS json_extract(candidate.payload_json, '$.rootNodeId')
+                      AND wake.type IN ('user_message', 'notification')
+                    ORDER BY wake.ordinal
+                    LIMIT 1
+                  ) IS 'notification'
+                )
+              -- usageLimitBlockedRun: completed notification wakes preserve the limit.
               ORDER BY candidate.completed_at IS NULL DESC, candidate.completed_at DESC,
                 candidate.ordinal DESC, candidate.run_id DESC
               LIMIT 1

@@ -80,7 +80,25 @@ export function usageLimitBlockedRun(
   turnItems: ReadonlyArray<OrchestrationV2TurnItem>,
   sessionError: string | null,
 ): OrchestrationV2Run | null {
-  const executed = latestExecutedRun(runs);
+  // A completed notification wake does not continue the work stopped by a limit.
+  const firstInputs = new Map<
+    NonNullable<OrchestrationV2TurnItem["nodeId"]>,
+    Extract<OrchestrationV2TurnItem, { type: "user_message" | "notification" }>
+  >();
+  for (const item of turnItems) {
+    if (item.nodeId === null || (item.type !== "user_message" && item.type !== "notification"))
+      continue;
+    const first = firstInputs.get(item.nodeId);
+    if (first === undefined || item.ordinal < first.ordinal) firstInputs.set(item.nodeId, item);
+  }
+  const executed = latestExecutedRun(
+    runs.filter(
+      (run) =>
+        run.status !== "completed" ||
+        run.rootNodeId === null ||
+        firstInputs.get(run.rootNodeId)?.type !== "notification",
+    ),
+  );
   if (executed?.status !== "failed") return null;
   const summary = threadErrorSummary(latestRootProviderFailure(executed, turnItems), sessionError);
   return summary.lastErrorClass === "usage_limit" ? executed : null;

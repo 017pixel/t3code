@@ -1040,7 +1040,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           "contextTransfers",
         ],
         {
-          turnItemTypes: ["user_message", "error"],
+          turnItemTypes: ["user_message", "error", "notification"],
           messageRoles: ["user"],
           omitSettledLeafNodes: true,
         },
@@ -2945,7 +2945,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const projection = yield* loadProjectionForCommand(
         command,
         ["runs", "runtimeRequests", "turnItems"],
-        { turnItemTypes: ["error"] },
+        { turnItemTypes: ["user_message", "error", "notification"] },
       );
       const run = usageLimitBlockedRun(projection.runs, projection.turnItems, null);
       const failure = latestRootProviderFailure(run, projection.turnItems);
@@ -11427,7 +11427,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const projection = yield* loadProjectionForCommand(
           command,
           ["runs", "turnItems", "providerSessions", "messages"],
-          { turnItemTypes: ["error"], messageRoles: ["user"] },
+          { turnItemTypes: ["user_message", "error", "notification"], messageRoles: ["user"] },
         );
         if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null) {
           return yield* new OrchestratorDispatchError({
