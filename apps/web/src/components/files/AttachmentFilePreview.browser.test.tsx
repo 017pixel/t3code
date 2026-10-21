@@ -170,6 +170,9 @@ it.each([
   "footer",
   "comments",
   "styles",
+  "style chain",
+  "style count",
+  "style visits",
   "numbering",
   "picture numbering",
 ])(
@@ -178,7 +181,11 @@ it.each([
     const { default: JSZip } = await import("jszip");
     const archive = new JSZip();
     const ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-    const type = role === "picture numbering" ? "numbering" : role;
+    const type = role.startsWith("style")
+      ? "styles"
+      : role === "picture numbering"
+        ? "numbering"
+        : role;
     archive.file(
       "_rels/.rels",
       '<Relationships><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
@@ -193,13 +200,15 @@ it.each([
       `<Relationships><Relationship Id="aux" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${type}" Target="media/aux.xml"/></Relationships>`,
     );
     const xml =
-      role === "styles"
-        ? `<w:styles xmlns:w="${ns}">${Array.from({ length: 100 }, (_, i) => `<w:style w:styleId="${"s".repeat(2_000)}${i}" w:type="paragraph"><w:basedOn w:val="s0"/><w:pPr><w:spacing w:after="120"/></w:pPr></w:style>`).join("")}</w:styles>`
-        : role.includes("numbering")
-          ? `<w:numbering xmlns:w="${ns}">${role === "picture numbering" ? '<w:numPicBullet w:numPicBulletId="1"/>' : ""}<w:abstractNum w:abstractNumId="1">${Array.from({ length: 9 }, (_, i) => `<w:lvl w:ilvl="${i}"><w:lvlText w:val="%1."/></w:lvl>`).join("")}</w:abstractNum>${Array.from({ length: 100 }, (_, i) => `<w:num w:numId="${i}"><w:abstractNumId w:val="1"/></w:num>`).join("")}</w:numbering>`
-          : role === "header" || role === "footer"
-            ? `<w:${role === "header" ? "hdr" : "ftr"} xmlns:w="${ns}">${text("omitted payload").repeat(2_000)}</w:${role === "header" ? "hdr" : "ftr"}>`
-            : `<w:${role} xmlns:w="${ns}"><w:${role.slice(0, -1)} w:id="1">${text("omitted payload").repeat(2_000)}</w:${role.slice(0, -1)}></w:${role}>`;
+      role === "style chain" || role === "style count" || role === "style visits"
+        ? `<w:styles xmlns:w="${ns}">${Array.from({ length: role === "style count" ? 3_000 : 1_000 }, (_, i) => `<w:style w:styleId="s${i}" w:type="paragraph">${i ? `<w:basedOn w:val="s${role === "style visits" && i >= 30 ? 29 : i - 1}"/>` : ""}<w:pPr><w:spacing w:after="120"/></w:pPr></w:style>`).join("")}</w:styles>`
+        : role === "styles"
+          ? `<w:styles xmlns:w="${ns}">${Array.from({ length: 100 }, (_, i) => `<w:style w:styleId="${"s".repeat(2_000)}${i}" w:type="paragraph"><w:basedOn w:val="s0"/><w:pPr><w:spacing w:after="120"/></w:pPr></w:style>`).join("")}</w:styles>`
+          : role.includes("numbering")
+            ? `<w:numbering xmlns:w="${ns}">${role === "picture numbering" ? '<w:numPicBullet w:numPicBulletId="1"/>' : ""}<w:abstractNum w:abstractNumId="1">${Array.from({ length: 9 }, (_, i) => `<w:lvl w:ilvl="${i}"><w:lvlText w:val="%1."/></w:lvl>`).join("")}</w:abstractNum>${Array.from({ length: 100 }, (_, i) => `<w:num w:numId="${i}"><w:abstractNumId w:val="1"/></w:num>`).join("")}</w:numbering>`
+            : role === "header" || role === "footer"
+              ? `<w:${role === "header" ? "hdr" : "ftr"} xmlns:w="${ns}">${text("omitted payload").repeat(2_000)}</w:${role === "header" ? "hdr" : "ftr"}>`
+              : `<w:${role} xmlns:w="${ns}"><w:${role.slice(0, -1)} w:id="1">${text("omitted payload").repeat(2_000)}</w:${role.slice(0, -1)}></w:${role}>`;
     archive.file("word/media/aux.xml", xml);
     const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
     const src = URL.createObjectURL(file);
@@ -231,6 +240,7 @@ it.each([
   "independent styles",
   "inherited styles",
   "python-docx package",
+  "default template styles",
   "binary package properties",
 ])(
   "retains Word %s without a limit warning",
@@ -306,6 +316,44 @@ it.each([
       "word/styles.xml",
       `<w:styles xmlns:w="${ns}"><w:docDefaults/><w:style w:type="paragraph" w:styleId="base"><w:rPr><w:b/></w:rPr></w:style>${Array.from({ length: 20 }, (_, i) => `<w:style w:styleId="s${i}" w:type="paragraph">${scenario === "inherited styles" ? '<w:basedOn w:val="base"/>' : ""}<w:rPr><w:color w:val="123456"/></w:rPr></w:style>`).join("")}</w:styles>`,
     );
+    if (scenario === "default template styles") {
+      const heading =
+        '<w:style w:type="paragraph" w:styleId="s19"><w:basedOn w:val="Normal"/><w:link w:val="HeadingChar"/><w:pPr><w:spacing w:after="120"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/><w:color w:val="123456"/></w:rPr></w:style>';
+      const conditions = [
+        "wholeTable",
+        "firstRow",
+        "lastRow",
+        "firstCol",
+        "lastCol",
+        "band1Horz",
+        "band2Horz",
+        "band1Vert",
+        "band2Vert",
+      ];
+      archive.file(
+        "word/styles.xml",
+        `<w:styles xmlns:w="${ns}"><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:latentStyles>${Array.from({ length: 276 }, (_, i) => `<w:lsdException w:name="latent ${i}" w:semiHidden="0" w:uiPriority="99"/>`).join("")}</w:latentStyles><w:style w:type="paragraph" w:styleId="Normal"/><w:style w:type="character" w:styleId="HeadingChar"><w:rPr><w:b/></w:rPr></w:style>${heading}${Array.from({ length: 61 }, (_, i) => `<w:style w:type="paragraph" w:styleId="p${i}"><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="120"/></w:pPr><w:rPr><w:color w:val="123456"/></w:rPr></w:style>`).join("")}${Array.from({ length: 100 }, (_, i) => `<w:style w:type="table" w:styleId="Table${i}">${i ? '<w:basedOn w:val="Table0"/>' : ""}<w:tblPr><w:tblCellMar><w:top w:w="0"/><w:left w:w="108"/><w:bottom w:w="0"/><w:right w:w="108"/></w:tblCellMar></w:tblPr>${conditions.map((type) => `<w:tblStylePr w:type="${type}"><w:pPr><w:spacing w:after="0"/></w:pPr><w:rPr><w:b/><w:color w:val="123456"/></w:rPr><w:tcPr><w:shd w:fill="D9E2F3"/></w:tcPr></w:tblStylePr>`).join("")}</w:style>`).join("")}</w:styles>`,
+      );
+      archive.file(
+        "word/_rels/document.xml.rels",
+        (await archive.file("word/_rels/document.xml.rels")!.async("string")).replace(
+          "</Relationships>",
+          `<Relationship Id="numbering" Type="${r}/numbering" Target="numbering.xml"/></Relationships>`,
+        ),
+      );
+      archive.file(
+        "word/numbering.xml",
+        `<w:numbering xmlns:w="${ns}">${Array.from({ length: 9 }, (_, i) => `<w:abstractNum w:abstractNumId="${i}"><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:tabs><w:tab w:val="num" w:pos="720"/></w:tabs><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="${i + 1}"><w:abstractNumId w:val="${i}"/></w:num>`).join("")}</w:numbering>`,
+      );
+      const document = await archive.file("word/document.xml")!.async("string");
+      archive.file(
+        "word/document.xml",
+        document.replace(
+          "<w:sectPr>",
+          '<w:tbl><w:tblPr><w:tblStyle w:val="Table99"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>styled cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr>',
+        ),
+      );
+    }
     const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
     const src = URL.createObjectURL(file);
     try {
@@ -319,6 +367,17 @@ it.each([
       expect(screen.container.textContent).not.toContain("Preview limited");
       const html = screen.container.querySelector("iframe")!.srcdoc;
       expect(html).toContain("docx_s19");
+      if (scenario === "default template styles") {
+        const document = new DOMParser().parseFromString(html, "text/html");
+        const css = [...document.querySelectorAll("style")]
+          .map((style) => style.textContent)
+          .join("");
+        expect(css).toContain("font-size: 16.00pt");
+        expect(css).toContain("background-color: #D9E2F3");
+        expect(css).toContain("table.docx_table99");
+        expect(css).not.toContain("latent");
+        expect(document.querySelector("table.docx_table99")?.textContent).toBe("styled cell");
+      }
       if (ordinary) {
         for (const label of [
           "header retained",

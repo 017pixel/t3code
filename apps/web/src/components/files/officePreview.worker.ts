@@ -453,10 +453,17 @@ function wordPartTypes() {
 // Count CSS expansion before docx-preview copies inherited styles and expands
 // each numbering instance into all of its abstract levels. Picture bullets
 // would also duplicate base64 images inside CSS, so omit those definitions.
+const WORD_STYLE_MAX_BYTES = 1024 * 1024;
+const WORD_STYLE_MAX_UNITS = 20_000;
+
 function wordXmlCost(xml: string, roles: Set<string> | undefined) {
   const parser = xmlParser();
   let depth = 0;
   let markup = 0;
+  const limit = Symbol("Word style budget");
+  const exceeded = { bytes: Infinity, markup: Infinity, pictures: false };
+  let styleCount = 0;
+  let ownUnits = 0;
   const styles = new Map<
     string,
     { properties: Map<string, number>; base: string; linked: string }
@@ -464,8 +471,10 @@ function wordXmlCost(xml: string, roles: Set<string> | undefined) {
   let style: { id: string; base: string; linked: string; properties: Map<string, number> } | null =
     null;
   const names: string[] = [];
-  let numbers = 0;
-  let numberIdLength = 16;
+  const definitions = new Map<string, { bytes: number; markup: number }>();
+  const references: { id: string; selector: number }[] = [];
+  let definition: { id: string; start: number; markup: number } | null = null;
+  let reference: { id: string; selector: number } | null = null;
   let pictures = false;
   parser.on("opentag", (tag) => {
     if (++depth > 64)
@@ -474,8 +483,10 @@ function wordXmlCost(xml: string, roles: Set<string> | undefined) {
     const attr = (name: string) =>
       Object.values(tag.attributes).find((a) => a.local === name)?.value ?? "";
     names.push(tag.local === "tblStylePr" ? `${tag.local}:${attr("type")}` : tag.local);
-    if (roles?.has("styles") && (tag.local === "style" || tag.local === "docDefaults"))
+    if (roles?.has("styles") && (tag.local === "style" || tag.local === "docDefaults")) {
+      if (++styleCount > 1_024 || attr("styleId").length > 256) throw limit;
       style = { id: attr("styleId"), properties: new Map(), base: "", linked: "" };
+    }
     if (style) {
       if (tag.local === "basedOn") style.base = attr("val");
       else if (tag.local === "link") style.linked = attr("val");
@@ -484,21 +495,38 @@ function wordXmlCost(xml: string, roles: Set<string> | undefined) {
         const size = new TextEncoder().encode(
           xml.slice(xml.lastIndexOf("<", parser.position - 1), parser.position),
         ).length;
+        if (++ownUnits > WORD_STYLE_MAX_UNITS) throw limit;
         style.properties.set(key, size);
       }
     }
-    if (tag.local === "num") {
-      numbers++;
-      numberIdLength = Math.max(
-        numberIdLength,
-        ...Object.values(tag.attributes)
-          .filter((attr) => attr.local === "numId")
-          .map((attr) => attr.value.length),
-      );
+    if (roles?.has("numbering")) {
+      if (tag.local === "abstractNum")
+        definition = {
+          id: attr("abstractNumId"),
+          start: xml.lastIndexOf("<", parser.position - 1),
+          markup: markup - 1,
+        };
+      if (tag.local === "num") {
+        if (references.length >= 2_000) throw limit;
+        reference = { id: "", selector: attr("numId").length + 32 };
+        references.push(reference);
+      }
+      if (tag.local === "abstractNumId" && reference) reference.id = attr("val");
     }
     if (tag.local === "numPicBullet") pictures = true;
   });
   parser.on("closetag", (tag) => {
+    if (definition && tag.local === "abstractNum") {
+      const previous = definitions.get(definition.id);
+      definitions.set(definition.id, {
+        bytes:
+          (previous?.bytes ?? 0) +
+          new TextEncoder().encode(xml.slice(definition.start, parser.position)).length,
+        markup: (previous?.markup ?? 0) + markup - definition.markup,
+      });
+      definition = null;
+    }
+    if (tag.local === "num") reference = null;
     if (style && (tag.local === "style" || tag.local === "docDefaults")) {
       styles.set(style.id, style);
       style = null;
@@ -506,36 +534,68 @@ function wordXmlCost(xml: string, roles: Set<string> | undefined) {
     names.pop();
     depth--;
   });
-  parser.write(xml).close();
-  const multiplier = Math.max(1, roles?.has("numbering") ? numbers : 1);
+  try {
+    parser.write(xml).close();
+  } catch (cause) {
+    if (cause !== limit) throw cause;
+    return exceeded;
+  }
   const rawBytes = new TextEncoder().encode(xml).length;
   if (roles?.has("styles")) {
-    // Match processStyles' ordered basedOn merges, including forward links and
-    // cycles. Overridden properties are copied once, not once per ancestor.
-    const expanded = new Map([...styles].map(([id, style]) => [id, style.properties]));
+    // Immutable parent pointers match processStyles' ordered merges (including
+    // forward links and cycles) without copying an expanding property map.
+    type Resolved = {
+      properties: Map<string, number>;
+      parent?: Resolved | undefined;
+      depth: number;
+    };
+    const resolved = new Map<string, Resolved>();
+    for (const [id, style] of styles) resolved.set(id, { properties: style.properties, depth: 1 });
     for (const [id, style] of styles) {
-      const base = expanded.get(style.base);
-      if (base && style.base) expanded.set(id, new Map([...base, ...style.properties]));
+      const parent = style.base ? resolved.get(style.base) : undefined;
+      if (parent && parent.depth >= 32) return exceeded;
+      resolved.set(id, { properties: style.properties, parent, depth: (parent?.depth ?? 0) + 1 });
     }
-    let bytes = rawBytes;
-    let expandedMarkup = markup;
+    let bytes = 0;
+    let expandedMarkup = 0;
+    let visited = 0;
+    let propertyVisits = 0;
     for (const [id, style] of styles) {
-      const properties = [
-        ...expanded.get(id)!.values(),
-        ...(style.linked ? (expanded.get(style.linked)?.values() ?? []) : []),
-      ];
-      // CSS adds selectors and may copy defaults for both root and style selectors.
-      bytes += properties.reduce((sum, size) => sum + (size * 2 + id.length + 32) * 2, 0);
-      expandedMarkup += properties.length * 2;
+      for (const root of [
+        resolved.get(id),
+        style.linked ? resolved.get(style.linked) : undefined,
+      ]) {
+        const seen = new Set<string>();
+        for (let node = root; node; node = node.parent) {
+          if (++visited > 8_192) return exceeded;
+          for (const [key, size] of node.properties) {
+            if (++propertyVisits > 100_000) return exceeded;
+            if (seen.has(key)) continue;
+            // Latent styles never enter properties. Charge each own property
+            // once per resolved style, including linked and default selectors.
+            const copies = id ? 1 : 2;
+            bytes += (size * 2 + id.length + 32) * copies;
+            expandedMarkup += copies;
+            if (bytes > WORD_STYLE_MAX_BYTES || expandedMarkup > WORD_STYLE_MAX_UNITS)
+              return exceeded;
+            seen.add(key);
+          }
+        }
+      }
     }
     return { bytes, markup: expandedMarkup, pictures };
   }
-  return {
-    bytes:
-      rawBytes * (roles?.has("numbering") ? Math.max(markup, numbers * numberIdLength) * 2 : 1),
-    markup: markup * multiplier,
-    pictures,
-  };
+  let bytes = rawBytes;
+  if (roles?.has("numbering")) {
+    for (const ref of references) {
+      const cost = definitions.get(ref.id);
+      if (!cost) continue;
+      bytes += cost.bytes * 2 + cost.markup * ref.selector;
+      markup += cost.markup;
+      if (bytes > 128 * 1024 || markup > 2_000) return exceeded;
+    }
+  }
+  return { bytes, markup, pictures };
 }
 
 // docx-preview copies notes for every reference and headers/footers for every
@@ -824,8 +884,9 @@ async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open"
       if (roles && [...roles].every((role) => WORD_DISABLED_PARTS.has(role))) continue;
       if (
         (roles?.has("numbering") && cost.pictures) ||
-        ((roles?.has("styles") || roles?.has("numbering")) &&
-          (cost.bytes > 128 * 1024 || cost.markup > 2_000))
+        (roles?.has("styles") &&
+          (cost.bytes > WORD_STYLE_MAX_BYTES || cost.markup > WORD_STYLE_MAX_UNITS)) ||
+        (roles?.has("numbering") && (cost.bytes > 128 * 1024 || cost.markup > 2_000))
       ) {
         wordInputTruncated = true;
         continue;
