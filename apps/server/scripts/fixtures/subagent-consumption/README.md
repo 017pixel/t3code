@@ -9,7 +9,8 @@ schema, then stop that server before seeding:
 
 ```sh
 python3 apps/server/scripts/fixtures/subagent-consumption/seed.py \
-  --home-dir /absolute/path/to/isolated/.t3 --server-stopped
+  --home-dir /absolute/path/to/isolated/.t3 --server-stopped \
+  --with-synthetic-catalog
 ```
 
 The command backs up the database and replaces only its named synthetic project,
@@ -26,10 +27,14 @@ V16 intentionally has a turn item without a matching subagent projection.
 Capture in en-US with a fixed browser clock of 2026-10-21T09:01:00Z, fonts ready,
 100% zoom, at 1440×900 and 390×844, in both light and dark appearances. The same
 fixture script can be run externally against the pinned baseline checkout.
-Provider catalog details are supplied by the environment; this seed does not
-change provider settings or credentials. V08's multiple-instance badge and
-matching catalog speed option require an appropriate synthetic provider catalog
-and are not proved by these rows alone.
+The optional `--with-synthetic-catalog` flag adds two disabled synthetic Codex
+instances to the isolated settings file, with a custom long model and explicit
+effort/speed descriptors for V08. It backs up that settings file first. These
+instances cannot start a provider; the fixture changes no credentials, auth,
+permissions, approvals, runtime modes or sandbox settings. Restore the isolated
+settings backup after capture if those catalog entries are no longer wanted.
+V02 includes eight synthetic neighboring child shells to exercise pagination
+and scroll in the Previous agents list.
 
 Projection-only SQL does not advance the event cursor. When reusing a Browser
 profile across revisions, leave the fixture route, discard only cached `thread`

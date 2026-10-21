@@ -8,6 +8,7 @@ import sqlite3
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--home-dir', type=Path, required=True)
 parser.add_argument('--server-stopped', action='store_true', required=True)
+parser.add_argument('--with-synthetic-catalog', action='store_true')
 args = parser.parse_args()
 home = args.home_dir.resolve()
 if home == Path.home() / '.t3' or 'userdata' == home.name:
@@ -15,6 +16,14 @@ if home == Path.home() / '.t3' or 'userdata' == home.name:
 db = home / 'userdata/statev2.sqlite'
 if not db.is_file():
     parser.error('Start the isolated server once to initialize its schema, then stop it')
+if args.with_synthetic_catalog:
+    settings_path = home / 'userdata/settings.json'
+    settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+    original = settings_path.with_name('before-subagent-consumption-settings.json')
+    if not original.exists():
+        original.write_text(json.dumps(settings, indent=2) + '\n')
+    settings.setdefault('providerInstances', {}).update(json.loads(Path(__file__).with_name('catalog.json').read_text()))
+    settings_path.write_text(json.dumps(settings, indent=2) + '\n')
 c = sqlite3.connect(db)
 backup = db.with_name('before-subagent-consumption-fixture.sqlite')
 with sqlite3.connect(backup) as destination:
@@ -48,17 +57,24 @@ with c:
         agenttitle=(title+' — synthetic long title for collision and truncation ' * 5) if case.get('long') else title
         thread(tid,title)
         if child: thread(child,agenttitle,tid,case.get('long',False))
+        if label == 'V02':
+            for neighbor in range(1, 9):
+                thread(tid+'-neighbor-'+str(neighbor), 'Synthetic previous neighbor '+str(neighbor), tid)
         run=dict(id=rid,threadId=tid,ordinal=1,providerInstanceId='claudeAgent',modelSelection=dict(instanceId='claudeAgent',model='claude-opus-5-5'),providerThreadId=None,userMessageId=tid+'-message',rootNodeId=node,activeAttemptId=tid+'-attempt',status='completed',queuePosition=None,requestedAt=T,startedAt=T,completedAt=END,checkpointId=None,contextHandoffId=None)
         payload('runs',run,dict(run_id=rid,thread_id=tid,ordinal=1,provider='claudeAgent',provider_instance_id='claudeAgent',provider_thread_id=None,status='completed',requested_at=T,completed_at=END))
         agent=dict(id=aid,threadId=tid,runId=rid,parentNodeId=node,origin='provider_native' if case.get('native') else 'app_owned',createdBy='agent',driver='claudeAgent',providerInstanceId='claudeAgent',providerThreadId=None,childThreadId=child,nativeTaskRef=None,prompt='Inspect the synthetic sample.',title=agenttitle,model=case.get('model','claude-opus-5-5'),status=status,result=case.get('result','Synthetic sample inspected successfully.'),startedAt=T if case.get('timing',True) else None,completedAt=END if case.get('timing',True) and status!='running' else None,updatedAt=END)
         if case.get('long'):
             agent['model']='synthetic-long-model-'+'sample-model-'*12
+            if args.with_synthetic_catalog:
+                agent['driver']='codex'
+                agent['providerInstanceId']='visual15429'
+                agent['modelSelection']={'instanceId':'visual15429','model':agent['model'],'options':[{'id':'effort','value':'high'},{'id':'serviceTier','value':'priority'}]}
             agent['result']=('Synthetic multiline sample result for truncation. '*7)+'\nSecond synthetic line.'
         if 'progress' in case:agent['progress']=case['progress']
         if 'usage' in case:agent['turnTokenUsage']={'usageScope':'main_agent','hasSubagents':False,**case['usage']}
         if case.get('native'):agent['workflow']=dict(name='Synthetic workflow',phases=[],agents=[dict(index=0,label='Synthetic member',state='completed',totalTokens=123)],totalTokens=70876)
         if not case.get('missing'):
-            payload('subagents',agent,dict(subagent_id=aid,thread_id=tid,run_id=rid,parent_node_id=node,provider='claudeAgent',driver='claudeAgent',provider_instance_id='claudeAgent',provider_thread_id=None,child_thread_id=child,origin=agent['origin'],status=status,started_at=agent['startedAt'],completed_at=agent['completedAt'],updated_at=END))
+            payload('subagents',agent,dict(subagent_id=aid,thread_id=tid,run_id=rid,parent_node_id=node,provider=agent['driver'],driver=agent['driver'],provider_instance_id=agent['providerInstanceId'],provider_thread_id=None,child_thread_id=child,origin=agent['origin'],status=status,started_at=agent['startedAt'],completed_at=agent['completedAt'],updated_at=END))
         base=dict(threadId=tid,runId=rid,nodeId=node,providerThreadId=None,providerTurnId=None,nativeItemRef=None,parentItemId=None,status='completed',title=None,startedAt=T,completedAt=END,updatedAt=END)
         message=dict(id=tid+'-message',threadId=tid,runId=rid,nodeId=node,createdBy='user',creationSource='web',role='user',text='Synthetic visual fixture '+label+'. No provider is running.',attachments=[],streaming=False,createdAt=T,updatedAt=T)
         payload('messages',message,dict(message_id=message['id'],thread_id=tid,run_id=rid,node_id=node,role='user',streaming=0,created_at=T,updated_at=T))
@@ -69,5 +85,5 @@ with c:
             items.append(dict(base,id=tid+'-item',ordinal=1000002,type='subagent',nodeId=aid,subagentId=aid,origin=agent['origin'],driver=agent['driver'],providerInstanceId=agent['providerInstanceId'],childThreadId=child,prompt=agent['prompt'],result=agent['result'],title=agenttitle,status=status,startedAt=agent['startedAt'],completedAt=agent['completedAt'],**({'progress':case['progress']} if 'progress' in case else {})))
         for item in items:
             payload('turn_items',item,dict(turn_item_id=item['id'],thread_id=tid,run_id=rid,node_id=item['nodeId'],provider_thread_id=None,provider_turn_id=None,parent_item_id=None,ordinal=item['ordinal'],type=item['type'],status=item['status'],updated_at=END))
-print('Seeded 16 synthetic visual threads. Event history, providers, scheduled work and auth were not changed.')
+print('Seeded 16 synthetic visual threads. Event history, scheduled work and auth were not changed.')
 print('Backup:',backup)
