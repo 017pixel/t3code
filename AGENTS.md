@@ -170,7 +170,7 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
 
 ## Where code lives
 
-Open the named entry points first. Paths are relative to the bullet's package.
+Open the named entry points first. Paths starting with `apps/`, `packages/`, or `.repos/` are from the repo root; others are relative to the bullet's package.
 
 - `apps/server` - WebSocket, orchestration, providers, checkpointing. Effect-heavy: read [Effect services](docs/internals/effect-services.md) before adding server code, and `.repos/effect-smol/LLMS.md` for the Effect library itself. Entry points:
   - `src/ws.ts` (RPC handlers), `src/server.ts` (HTTP routes, layer wiring).
