@@ -1487,7 +1487,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
       assert.strictEqual(mockedExecute.mock.calls.length, 1);
       assert.deepStrictEqual(coverage, [
         { repository: "acme/web", covered: true },
-        { repository: "acme/empty", covered: true },
+        { repository: "acme/empty", covered: false },
         { repository: "acme/skipped", covered: false },
         { repository: "acme/gated", covered: false },
       ]);

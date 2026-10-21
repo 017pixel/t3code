@@ -469,7 +469,10 @@ export class GitHubPullRequestApi extends Context.Service<
       readonly filters?: PullRequestListFilters | undefined;
     }) => Effect.Effect<GitHubPullRequestSearchBatch, GitHubPullRequestApiError>;
 
-    /** Whether search indexes each repository, including empty repositories. */
+    /**
+     * Whether search indexes each repository. An empty repository is uncovered: its first
+     * pull request can lag the search index, so only a search hit proves coverage.
+     */
     readonly searchCoverage: (input: {
       readonly cwd: string;
       readonly host: string;
@@ -1988,7 +1991,7 @@ export const make = Effect.gen(function* () {
                 const total = result.repository?.pullRequests.totalCount;
                 return {
                   repository,
-                  covered: total !== undefined && (total === 0 || result.search.issueCount > 0),
+                  covered: total !== undefined && result.search.issueCount > 0,
                 };
               }),
               // An unreadable alias must not discard coverage answers for the other repositories.
