@@ -47,6 +47,8 @@ const isMockingCall = (node: ESTree.CallExpression): boolean => {
   return Option.isSome(property) && MOCK_IMPLEMENTATIONS.has(property.value);
 };
 
+const EXECUTOR_WAITS = new Set(["requestAnimationFrame", "setTimeout", "setInterval"]);
+
 const isPromiseConstructor = (node: ESTree.Node | null | undefined): node is ESTree.NewExpression =>
   node?.type === "NewExpression" && isIdentifier(unwrapExpression(node.callee), "Promise");
 
@@ -127,8 +129,10 @@ export default defineRule({
       NewExpression(node) {
         if (!isPromiseConstructor(node)) return;
         const executor = node.arguments[0];
+        // `new Promise(setTimeout)` resolves on the next macrotask; `new Promise(requestAnimationFrame)`
+        // on the next frame. Both are the same wait with the function passed straight through.
         const name = globalName(executor);
-        if (executor && Option.isSome(name) && name.value === "requestAnimationFrame") {
+        if (executor && Option.isSome(name) && EXECUTOR_WAITS.has(name.value)) {
           context.report({ node: executor, message: MESSAGE });
         }
       },
