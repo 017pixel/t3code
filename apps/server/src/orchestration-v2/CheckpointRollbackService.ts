@@ -281,25 +281,12 @@ export const layer: Layer.Layer<
           turn.runAttemptId === null ||
           !liveAttemptIds.has(turn.runAttemptId)
             ? Effect.succeed(turn)
-            : session.interruptTurn({ providerThread, providerTurnId: turn.id }).pipe(
-                // Rewinding past work the provider still runs would leave it
-                // running, so only a turn that has since ended lets this go on.
-                Effect.catch((cause) =>
-                  projections
-                    .getProviderControlContext(input.threadId, {
-                      providerThreadId: providerThread.id,
-                      providerTurnId: turn.id,
-                    })
-                    .pipe(
-                      Effect.flatMap(({ providerTurn }) =>
-                        providerTurn === undefined || providerTurn.status === "running"
-                          ? Effect.fail(cause)
-                          : Effect.void,
-                      ),
-                    ),
-                ),
-                Effect.as({ ...turn, status: "interrupted" as const }),
-              ),
+            : // Rewinding past work the provider still runs would leave it
+              // running. A refused Stop fails the rollback even if the turn now
+              // reads as ended: a provider may settle a turn it could not stop.
+              session
+                .interruptTurn({ providerThread, providerTurnId: turn.id })
+                .pipe(Effect.as({ ...turn, status: "interrupted" as const })),
       );
 
       const snapshot =

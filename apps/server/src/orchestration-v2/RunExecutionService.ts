@@ -70,6 +70,7 @@ export interface ProviderEventRoutingState {
 export interface ProviderEventRouteIdentity {
   readonly threadId: ThreadId;
   readonly runId: OrchestrationV2Run["id"];
+  readonly runOrdinal: number;
   readonly attemptId: RunAttemptId;
   readonly providerThreadId: ProviderThreadId;
 }
@@ -514,7 +515,10 @@ export function routeProviderEvent(
       // The session manager hands live output to the command output hub; runs never see it.
       return [false, state];
     case "turn.terminal":
-      return event.providerTurnId === state.rootProviderTurnId
+      // A provider can hand an earlier run's still-open turn to this run, so
+      // the turn alone does not say whose terminal this is.
+      return event.providerTurnId === state.rootProviderTurnId &&
+        event.runOrdinal === input.runOrdinal
         ? [true, { ...state, rootTurnEnded: true }]
         : [false, state];
   }
@@ -965,6 +969,7 @@ export const layer: Layer.Layer<
         const routeIdentity: ProviderEventRouteIdentity = {
           threadId: input.run.threadId,
           runId: input.run.id,
+          runOrdinal: input.run.ordinal,
           attemptId: input.attempt.id,
           providerThreadId: input.providerThread.id,
         };

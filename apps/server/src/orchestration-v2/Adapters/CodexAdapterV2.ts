@@ -1948,6 +1948,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         // state now belongs to that run, so a Stop still pending for one of
         // these must not read or clear it.
         const takenOverTurns = new WeakSet<ActiveCodexTurnContext>();
+        // Native turns, by native thread, that the app settled after Codex
+        // refused to stop them. Codex may still be running one, so reverting
+        // its thread waits until Codex accepts a Stop or reports it ended.
+        const unstoppedNativeTurns = new Map<string, string>();
         const terminalizedNonCompletedNativeTurns = yield* Ref.make(new Set<string>());
         // Keep the run event stream open until descendant provider state is
         // terminal, otherwise the root terminal can strand child projections.
@@ -2040,6 +2044,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           readonly startedAt: DateTime.Utc;
           readonly waitForNativeStart?: boolean;
         }) {
+          unstoppedNativeTurns.delete(input.nativeTurnId);
           const existing = (yield* Ref.get(activeTurns)).get(input.nativeTurnId);
           if (existing !== undefined && existing.projectionRunId === input.turnInput.runId) {
             return existing;
@@ -6193,6 +6198,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
         yield* client.handleServerNotification("turn/completed", (payload) =>
           Effect.gen(function* () {
+            unstoppedNativeTurns.delete(payload.turn.id);
             const context = (yield* Ref.get(activeTurns)).get(payload.turn.id);
             if (context === undefined) {
               return;
@@ -7255,7 +7261,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   }),
                 );
               }).pipe(
-                Effect.onError(() => finalizeRemainingInterruptLineage),
+                Effect.onError(() =>
+                  Effect.gen(function* () {
+                    const stillActive = yield* Ref.get(activeTurns);
+                    for (const { context } of interruptTargets) {
+                      if (stillActive.get(context.nativeTurnId) !== context) continue;
+                      const nativeThreadId = context.providerThread.nativeThreadRef?.nativeId;
+                      if (nativeThreadId != null) {
+                        unstoppedNativeTurns.set(context.nativeTurnId, nativeThreadId);
+                      }
+                    }
+                    yield* finalizeRemainingInterruptLineage;
+                  }),
+                ),
                 Effect.ensuring(cleanupInterruptState),
               );
             },
@@ -7386,6 +7404,20 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           rollbackThread: Effect.fn("CodexAdapterV2.rollbackThread")(
             function* (threadInput) {
               const threadId = yield* getNativeThreadId(threadInput.providerThread);
+              for (const [nativeTurnId, nativeThreadId] of unstoppedNativeTurns) {
+                if (nativeThreadId !== threadId) continue;
+                yield* client.request("turn/interrupt", { threadId, turnId: nativeTurnId }).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderAdapter.ProviderAdapterRollbackThreadError({
+                        driver: CODEX_PROVIDER,
+                        providerThreadId: threadInput.providerThread.id,
+                        cause: `Codex has not confirmed turn ${nativeTurnId} stopped, so thread ${threadId} cannot be rolled back yet: ${String(cause)}`,
+                      }),
+                  ),
+                );
+                unstoppedNativeTurns.delete(nativeTurnId);
+              }
               const numTurns = yield* resolveCodexRollbackTurnCount(threadInput);
               const nativeConversationHeadRef =
                 threadInput.target.type === "provider_turn"

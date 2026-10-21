@@ -842,7 +842,8 @@ export const layer: Layer.Layer<
                     providerTurn.status !== "cancelled"
                   )
                     return;
-                  const key = `${input.providerInstanceId}:${providerTurn.id}`;
+                  // A provider turn handed on to a newer run ends once per run.
+                  const key = `${input.providerInstanceId}:${providerTurn.id}:${providerTurn.runAttemptId}`;
                   if (completedTurnAnalytics.has(key)) return;
                   completedTurnAnalytics.add(key);
                   if (completedTurnAnalytics.size > 4096) {

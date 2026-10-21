@@ -77,12 +77,14 @@ it.effect("routes shared-runtime events only to their owning root run", () =>
     const first: RunExecutionService.ProviderEventRouteIdentity = {
       threadId: ThreadId.make("thread:shared-runtime:first"),
       runId: RunId.make("run:shared-runtime:first"),
+      runOrdinal: 1,
       attemptId: RunAttemptId.make("attempt:shared-runtime:first"),
       providerThreadId: ProviderThreadId.make("provider-thread:shared-runtime:first"),
     };
     const second: RunExecutionService.ProviderEventRouteIdentity = {
       threadId: ThreadId.make("thread:shared-runtime:second"),
       runId: RunId.make("run:shared-runtime:second"),
+      runOrdinal: 1,
       attemptId: RunAttemptId.make("attempt:shared-runtime:second"),
       providerThreadId: ProviderThreadId.make("provider-thread:shared-runtime:second"),
     };
@@ -164,12 +166,56 @@ it.effect("routes shared-runtime events only to their owning root run", () =>
   }),
 );
 
+it("routes a reused provider turn's terminal only to the run it ended", () => {
+  // Codex can hand a retracted run's still-open native turn to the next run, so
+  // both runs know the same provider turn; the earlier run's late terminal must
+  // not close the newer one.
+  const providerTurnId = ProviderTurnId.make("provider-turn:reused");
+  const identity = (ordinal: number): RunExecutionService.ProviderEventRouteIdentity => ({
+    threadId: ThreadId.make("thread:reused"),
+    runId: RunId.make(`run:reused:${ordinal}`),
+    runOrdinal: ordinal,
+    attemptId: RunAttemptId.make(`attempt:reused:${ordinal}`),
+    providerThreadId: ProviderThreadId.make("provider-thread:reused"),
+  });
+  const terminal = (runOrdinal: number): ProviderAdapter.ProviderAdapterV2Event => ({
+    type: "turn.terminal",
+    driver,
+    providerThreadId: ProviderThreadId.make("provider-thread:reused"),
+    providerTurnId,
+    runOrdinal,
+    status: runOrdinal === 1 ? "interrupted" : "completed",
+    failure: null,
+    threadDisposition: "reusable",
+  });
+  const routes = [1, 2].map((ordinal) => ({
+    ordinal,
+    identity: identity(ordinal),
+    state: RunExecutionService.makeProviderEventRoutingState({
+      identity: identity(ordinal),
+      providerTurnId,
+    }),
+  }));
+
+  const accepted = [1, 2].map((terminalOrdinal) =>
+    routes
+      .filter(
+        ({ identity, state }) =>
+          RunExecutionService.routeProviderEvent(terminal(terminalOrdinal), identity, state)[0],
+      )
+      .map(({ ordinal }) => ordinal),
+  );
+
+  assert.deepEqual(accepted, [[1], [2]]);
+});
+
 it("routes only enrolled workflow members after the root turn ends", () => {
   const threadId = ThreadId.make("thread:late-child");
   const rootProviderTurnId = ProviderTurnId.make("provider-turn:late-child");
   const identity: RunExecutionService.ProviderEventRouteIdentity = {
     threadId,
     runId: RunId.make("run:late-child"),
+    runOrdinal: 1,
     attemptId: RunAttemptId.make("attempt:late-child"),
     providerThreadId: ProviderThreadId.make("provider-thread:late-child"),
   };
@@ -326,6 +372,7 @@ it("moves a child thread to the run that shows its subagent now", () => {
   const identity: RunExecutionService.ProviderEventRouteIdentity = {
     threadId,
     runId: RunId.make("run:handoff:1"),
+    runOrdinal: 1,
     attemptId: RunAttemptId.make("attempt:handoff:1"),
     providerThreadId: ProviderThreadId.make("provider-thread:handoff"),
   };
@@ -435,6 +482,7 @@ it("moves a child thread to the run that shows its subagent now", () => {
   const resuming: RunExecutionService.ProviderEventRouteIdentity = {
     ...identity,
     runId: RunId.make("run:handoff:2"),
+    runOrdinal: 1,
     attemptId: RunAttemptId.make("attempt:handoff:2"),
   };
   const resumingState = RunExecutionService.makeProviderEventRoutingState({
@@ -461,6 +509,7 @@ it("does not route a superseded attempt through a reused provider thread", () =>
   const oldAttempt: RunExecutionService.ProviderEventRouteIdentity = {
     threadId,
     runId: RunId.make("run:shared-runtime:restart"),
+    runOrdinal: 1,
     attemptId: RunAttemptId.make("attempt:shared-runtime:restart:old"),
     providerThreadId,
   };
@@ -501,6 +550,7 @@ it("routes only exact same-thread background items inherited from settled runs",
   const identity: RunExecutionService.ProviderEventRouteIdentity = {
     threadId,
     runId: currentRunId,
+    runOrdinal: 1,
     attemptId: RunAttemptId.make("attempt:inherited-background-routing:current"),
     providerThreadId: ProviderThreadId.make("provider-thread:inherited-background-routing:current"),
   };
@@ -705,6 +755,7 @@ it("does not carry interrupted or still-running child ownership into later attem
   const identity: RunExecutionService.ProviderEventRouteIdentity = {
     threadId,
     runId: RunId.make("run:related-child:next-attempt"),
+    runOrdinal: 1,
     attemptId: RunAttemptId.make("attempt:related-child:next-attempt"),
     providerThreadId: ProviderThreadId.make("provider-thread:related-child:next-attempt"),
   };

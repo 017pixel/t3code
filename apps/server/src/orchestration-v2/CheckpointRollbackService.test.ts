@@ -878,18 +878,21 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
       }),
     );
 
-    it.effect("rewinds when a refused stop finds the turn already ended", () =>
+    it.effect("fails when a refused stop has still settled the turn", () =>
       Effect.gen(function* () {
         const history = yield* seedRollbackHistory;
         yield* seedStreamingRun(history);
+        // A provider can settle a turn it refused to stop so the run does not
+        // spin, which says nothing about whether the provider stopped it.
         history.interruptFailure.current = setStreamingTurnStatus(history, "interrupted").pipe(
           Effect.orDie,
         );
 
-        yield* history.rollback(6);
+        const exit = yield* Effect.exit(history.rollback(6));
 
-        assert.deepEqual(history.rollbackCounts, [1]);
-        assert.equal(yield* runStatus(history, 8), "rolled_back");
+        assert.isTrue(Exit.isFailure(exit));
+        assert.deepEqual(history.rollbackCounts, []);
+        assert.deepEqual(history.restored, []);
       }),
     );
   },

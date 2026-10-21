@@ -273,6 +273,17 @@ it.effect("records accepted billed turn usage once without billing the context w
       interactionMode: "default",
       durationMs: 120,
     });
+
+    // Codex can hand a still-open turn to the next run; that run's completion
+    // is its own turn to record.
+    yield* ingestor.ingestNormalized({
+      ...input,
+      event: {
+        ...input.event,
+        providerTurn: { ...providerTurn, runAttemptId: RunAttemptId.make("reused-attempt") },
+      },
+    });
+    assert.lengthOf(recorded, 2);
   }).pipe(Effect.provide(layerTest.pipe(Layer.provide(layerAnalytics))));
 });
 
@@ -766,6 +777,7 @@ layer("ProviderEventIngestorV2", (it) => {
       const identity: ProviderEventRouteIdentity = {
         threadId: threadEvent.threadId,
         runId: currentRunId,
+        runOrdinal: 1,
         attemptId: RunAttemptId.make("attempt:provider-event-inherited:current"),
         providerThreadId,
       };
@@ -884,12 +896,14 @@ layer("ProviderEventIngestorV2", (it) => {
       const priorIdentity: ProviderEventRouteIdentity = {
         threadId: threadEvent.threadId,
         runId: priorRunId,
+        runOrdinal: 1,
         attemptId: RunAttemptId.make("attempt:provider-event-completed:prior"),
         providerThreadId,
       };
       const currentIdentity: ProviderEventRouteIdentity = {
         threadId: threadEvent.threadId,
         runId: currentRunId,
+        runOrdinal: 2,
         attemptId: RunAttemptId.make("attempt:provider-event-completed:current"),
         providerThreadId,
       };
