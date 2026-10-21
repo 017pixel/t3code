@@ -110,6 +110,22 @@ describe("pending context handoff", () => {
       resolvePendingHandoff(projection, { instanceId: from, model: "other" }, providers)?.to.model,
     ).toBe("other");
   });
+  it("previews a merged-back fork before the next turn consumes it", () => {
+    const merged = {
+      ...projection,
+      contextTransfers: [
+        {
+          type: "merge_back",
+          status: "pending",
+          sourceThreadId: "fork",
+          targetThreadId: "source-thread",
+          sourceProviderInstanceId: from,
+        },
+      ],
+    } as unknown as OrchestrationV2ThreadProjection;
+    const selection = { instanceId: from, model: "source" };
+    expect(resolvePendingHandoff(merged, selection, [])?.to).toEqual(selection);
+  });
   it("resumes compatible account overlays without showing a handoff", () => {
     const providers = [from, to].map((instanceId) => ({
       instanceId,
