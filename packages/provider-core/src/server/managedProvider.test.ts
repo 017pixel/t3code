@@ -7,6 +7,7 @@ import {
 } from "@t3tools/contracts";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -522,6 +523,132 @@ describe("makeManagedServerProvider", () => {
         assert.isAtLeast(calls, 2);
         assert.isAtMost(calls, 4);
         assert.strictEqual((yield* provider.getSnapshot).status, "error");
+      }),
+    ).pipe(Effect.provide(layerAlwaysRunTest)),
+  );
+
+  function settingsWithRefreshInterval(interval: Duration.Duration) {
+    return {
+      ...DEFAULT_SERVER_SETTINGS,
+      backgroundActivity: {
+        ...DEFAULT_SERVER_SETTINGS.backgroundActivity,
+        profile: "custom" as const,
+        overrides: { providerHealthRefreshInterval: interval },
+      },
+    };
+  }
+
+  it.effect("does not retry when background refreshes are off", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const checkCalls = yield* Ref.make(0);
+        const settings = settingsWithRefreshInterval(Duration.zero);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
+            Effect.as(timedOutSnapshot),
+          ),
+        }).pipe(
+          Effect.provide(
+            layerProviderHost({
+              runBackgroundWork: true,
+              settings: {
+                get: Effect.succeed(settings),
+                withSnapshot: (use) => use(settings),
+                changes: Stream.empty,
+                subscribe: Effect.succeed(Stream.empty),
+              },
+            }),
+          ),
+        );
+        yield* Stream.take(provider.streamChanges, 1).pipe(Stream.runDrain);
+
+        yield* TestClock.adjust(beforePeriodicRefresh);
+
+        assert.strictEqual(yield* Ref.get(checkCalls), 1);
+      }),
+    ),
+  );
+
+  it.effect("drops a pending retry when background refreshes are turned off", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const checkCalls = yield* Ref.make(0);
+        const settingsRef = yield* Ref.make(DEFAULT_SERVER_SETTINGS);
+        const settingsChanges = yield* PubSub.unbounded<typeof DEFAULT_SERVER_SETTINGS>();
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
+            Effect.as(timedOutSnapshot),
+          ),
+        }).pipe(
+          Effect.provide(
+            layerProviderHost({
+              runBackgroundWork: true,
+              settings: {
+                get: Ref.get(settingsRef),
+                withSnapshot: (use) => Ref.get(settingsRef).pipe(Effect.flatMap(use)),
+                changes: Stream.fromPubSub(settingsChanges),
+                subscribe: Effect.succeed(Stream.fromPubSub(settingsChanges)),
+              },
+            }),
+          ),
+        );
+        yield* Stream.take(provider.streamChanges, 1).pipe(Stream.runDrain);
+
+        const disabled = settingsWithRefreshInterval(Duration.zero);
+        yield* Ref.set(settingsRef, disabled);
+        yield* PubSub.publish(settingsChanges, disabled);
+        yield* TestClock.adjust(beforePeriodicRefresh);
+
+        assert.strictEqual(yield* Ref.get(checkCalls), 1);
+      }),
+    ),
+  );
+
+  it.effect("skips a retry once a manual refresh has probed in its place", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const checkCalls = yield* Ref.make(0);
+        const manualProbeStarted = yield* Deferred.make<void>();
+        const manualProbeGate = yield* Deferred.make<void>();
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Ref.updateAndGet(checkCalls, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === 1
+                ? Effect.succeed(timedOutSnapshot)
+                : Deferred.succeed(manualProbeStarted, undefined).pipe(
+                    Effect.andThen(Deferred.await(manualProbeGate)),
+                    Effect.as(refreshedSnapshot),
+                  ),
+            ),
+          ),
+        });
+        yield* Stream.take(provider.streamChanges, 1).pipe(Stream.runDrain);
+
+        // The retry fires while the manual probe still holds the refresh lock.
+        const manualRefresh = yield* Effect.forkChild(provider.refresh);
+        yield* Deferred.await(manualProbeStarted);
+        yield* TestClock.adjust("30 seconds");
+        yield* Deferred.succeed(manualProbeGate, undefined);
+        yield* Fiber.join(manualRefresh);
+        yield* TestClock.adjust("1 second");
+
+        assert.deepStrictEqual(yield* provider.getSnapshot, refreshedSnapshot);
+        assert.strictEqual(yield* Ref.get(checkCalls), 2);
       }),
     ).pipe(Effect.provide(layerAlwaysRunTest)),
   );
