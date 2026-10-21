@@ -10,6 +10,7 @@ import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import { acquireAudioSession, activateAudioSession, releaseAudioSession } from "./audioSession";
 import { ThreadFeed } from "../features/threads/ThreadFeed";
 import type { ThreadFeedEntry } from "./threadActivity";
+import type { MarkdownImageRenderer } from "../native/SelectableMarkdownText";
 
 const audio = vi.hoisted(() => ({
   status: {
@@ -168,8 +169,19 @@ vi.mock("../state/use-atom-query-runner", () => ({ useAtomQueryRunner: () => vi.
 vi.mock("../state/use-atom-command", () => ({}));
 vi.mock("../state/v2-item-support", () => ({}));
 vi.mock("../native/SelectableMarkdownText", () => ({
-  SelectableMarkdownText: (props: { markdown: string; onLinkPress(href: string): void }) =>
-    createElement("button", { onClick: () => props.onLinkPress("target.ts") }, props.markdown),
+  SelectableMarkdownText: (props: {
+    markdown: string;
+    onLinkPress(href: string): void;
+    renderImage?: MarkdownImageRenderer;
+  }) => {
+    const embed = props.markdown.match(/!\[([^\]]*)\]\(([^)]+)\)/);
+    return createElement(
+      "div",
+      null,
+      createElement("button", { onClick: () => props.onLinkPress("target.ts") }, props.markdown),
+      embed && props.renderImage?.({ href: embed[2]!, alt: embed[1]!, title: null }),
+    );
+  },
 }));
 vi.mock("@legendapp/list/keyboard", () => ({
   KeyboardAwareLegendList: (props: {
@@ -331,14 +343,23 @@ describe("ThreadInlineFilePreview playback", () => {
     };
   });
 
-  it.each(["user", "assistant"] as const)(
-    "cancels a pending file lookup when a %s attachment video starts inline",
-    async (role) => {
+  it.each(
+    (["user", "assistant"] as const).flatMap((role) =>
+      (["attachment", "markdown"] as const).flatMap((origin) =>
+        (["audio", "video"] as const).map((kind) => ({ role, origin, kind })),
+      ),
+    ),
+  )(
+    "cancels a pending file lookup when $role $origin $kind starts inline",
+    async ({ role, origin, kind }) => {
       (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
       const environmentId = EnvironmentId.make("environment-1");
       const threadId = ThreadId.make("thread-1");
       const messageId = MessageId.make("message-1");
       const timestamp = "2026-10-20T00:00:00.000Z";
+      const name = kind === "audio" ? "clip.mp3" : "clip.mp4";
+      const mimeType = kind === "audio" ? "audio/mpeg" : "video/mp4";
+      const uri = `https://example.com/${name}`;
       const feed: ThreadFeedEntry[] = [
         {
           type: "message",
@@ -347,10 +368,11 @@ describe("ThreadInlineFilePreview playback", () => {
           message: {
             id: messageId,
             role,
-            text: "open target.ts",
-            attachments: [
-              { type: "file", id: "clip", name: "clip.mp4", mimeType: "video/mp4", sizeBytes: 12 },
-            ],
+            text: `open target.ts${origin === "markdown" ? `\n\n![${name}](${uri})` : ""}`,
+            attachments:
+              origin === "attachment"
+                ? [{ type: "file", id: "clip", name, mimeType, sizeBytes: 12 }]
+                : [],
             createdAt: timestamp,
             updatedAt: timestamp,
             runId: null,
@@ -364,8 +386,10 @@ describe("ThreadInlineFilePreview playback", () => {
       const lookup = new Promise((resolve) => {
         finishLookup = resolve;
       });
-      audio.query.mockReturnValueOnce(lookup);
-      audio.refresh.mockResolvedValue("https://example.com/clip.mp4");
+      audio.query
+        .mockResolvedValue({ _tag: "Success", value: { kind: "file" } })
+        .mockReturnValueOnce(lookup);
+      audio.refresh.mockResolvedValue(uri);
       const container = document.createElement("div");
       root = createRoot(container);
       await act(async () =>
@@ -394,18 +418,18 @@ describe("ThreadInlineFilePreview playback", () => {
           }),
         ),
       );
-      const link = Array.from(container.querySelectorAll("button")).find(
-        (button) => button.textContent === "open target.ts",
+      const link = Array.from(container.querySelectorAll("button")).find((button) =>
+        button.textContent?.startsWith("open target.ts"),
       )!;
       await act(async () => link.click());
       const signal: AbortSignal = audio.query.mock.calls[0]![2].signal;
       expect(signal.aborted).toBe(false);
       expect(audio.navigate).not.toHaveBeenCalled();
+      const playLabel = kind === "audio" ? "Play audio" : `Play ${name}`;
       await act(async () =>
-        container.querySelector<HTMLButtonElement>('[aria-label="Play clip.mp4"]')!.click(),
+        container.querySelector<HTMLButtonElement>(`[aria-label="${playLabel}"]`)!.click(),
       );
-      expect(signal.aborted).toBe(true);
-      expect(audio.video.play).toHaveBeenCalled();
+      expect(kind === "audio" ? audio.played : audio.video.play).toHaveBeenCalled();
       expect(audio.sessionOwned).toBe(true);
       await act(async () =>
         finishLookup({
@@ -414,8 +438,11 @@ describe("ThreadInlineFilePreview playback", () => {
         }),
       );
       expect(audio.navigate).not.toHaveBeenCalled();
-      expect(container.querySelector('[aria-label="Play clip.mp4"]')).toBeNull();
-      expect(audio.video.playing).toBe(true);
+      expect(signal.aborted).toBe(true);
+      expect(container.querySelector(`[aria-label="${playLabel}"]`)).toBeNull();
+      if (kind === "audio")
+        expect(container.querySelector('[aria-label="Pause audio"]')).not.toBeNull();
+      else expect(audio.video.playing).toBe(true);
     },
   );
 

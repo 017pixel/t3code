@@ -539,7 +539,7 @@ function MessageAttachmentFile(props: {
   readonly environmentId: EnvironmentId;
   readonly attachment: ChatFileAttachment;
   readonly onPressPreview: (source: FilePreviewSource) => void;
-  readonly onPressVideo: () => void;
+  readonly onPlaybackStart: () => void;
 }) {
   const sourceIdentifier = useId();
   const navigation = useNavigation();
@@ -664,6 +664,7 @@ function MessageAttachmentFile(props: {
           }}
           sizeBytes={attachment.sizeBytes}
           onOpen={openAttachment}
+          onPlaybackStart={props.onPlaybackStart}
           onLongPress={() => shareFile(sourceIdentifier)}
         />
       </PresentationSource>
@@ -675,7 +676,7 @@ function MessageAttachmentFile(props: {
       <View className="my-1" style={{ width: 224, maxWidth: "100%" }}>
         <ThreadMarkdownVideo
           source={attachmentVideoPreviewSource(props.environmentId, attachment, sourceIdentifier)}
-          onPlaybackStart={props.onPressVideo}
+          onPlaybackStart={props.onPlaybackStart}
         />
       </View>
     );
@@ -1012,7 +1013,7 @@ function renderFeedEntry(
     readonly onToggleWorkRow: (rowId: string, anchorKey?: string, groupId?: string) => void;
     readonly onToggleTurnFold: (runId: RunId) => void;
     readonly onPressPreview: (source: FilePreviewSource) => void;
-    readonly onPressVideo: () => void;
+    readonly onPlaybackStart: () => void;
     readonly markdownLinkHandlers: MarkdownLinkHandlers;
     readonly renderMarkdownImage: MarkdownImageRenderer;
     readonly renderViewedImage: MarkdownImageRenderer;
@@ -1292,7 +1293,7 @@ function renderFeedEntry(
                       environmentId={props.environmentId}
                       attachment={attachment}
                       onPressPreview={props.onPressPreview}
-                      onPressVideo={props.onPressVideo}
+                      onPlaybackStart={props.onPlaybackStart}
                     />
                   ) : (
                     <MessageAttachmentUnknown key={attachment.id} name={attachment.name} />
@@ -1428,7 +1429,7 @@ function renderFeedEntry(
               environmentId={props.environmentId}
               attachment={attachment}
               onPressPreview={props.onPressPreview}
-              onPressVideo={props.onPressVideo}
+              onPlaybackStart={props.onPlaybackStart}
             />
           ) : (
             <MessageAttachmentUnknown key={attachment.id} name={attachment.name} />
@@ -1762,6 +1763,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const [expandedFile, setExpandedFile] = useState<FilePreviewSource | null>(null);
   const [expandedVideo, setExpandedVideo] = useState<VideoPreviewSource | null>(null);
   const markdownLinkRequest = useRef<AbortController | null>(null);
+  const onInlinePlaybackStart = () => {
+    markdownLinkRequest.current?.abort();
+  };
   useFocusEffect(useCallback(() => () => markdownLinkRequest.current?.abort(), []));
   const markdownLinkScope = JSON.stringify([
     props.environmentId,
@@ -2070,6 +2074,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         <ThreadMarkdownVideo
           key={image.href}
           source={{ ...media.source, name: image.alt ?? media.source.name }}
+          onPlaybackStart={onInlinePlaybackStart}
         />
       );
     }
@@ -2079,6 +2084,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           key={image.href}
           source={media.source}
           onOpen={() => onMarkdownLinkPress(image.href, true)}
+          onPlaybackStart={onInlinePlaybackStart}
         />
       );
     }
@@ -2503,9 +2509,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     markdownLinkRequest.current?.abort();
     setExpandedFile((current) => current ?? source);
   };
-  const onPressVideo = () => {
-    markdownLinkRequest.current?.abort();
-  };
 
   // Without this, every row above the viewport is assumed to be
   // estimatedItemSize tall, and scrolling up through unmeasured content
@@ -2592,7 +2595,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             onToggleWorkRow,
             onToggleTurnFold,
             onPressPreview,
-            onPressVideo,
+            onPlaybackStart: onInlinePlaybackStart,
             markdownLinkHandlers,
             renderMarkdownImage,
             renderViewedImage,

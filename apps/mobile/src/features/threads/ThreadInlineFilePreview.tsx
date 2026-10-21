@@ -24,6 +24,7 @@ type PreviewProps = {
   readonly source: FilePreviewSource;
   readonly sizeBytes?: number;
   readonly onOpen: () => void;
+  readonly onPlaybackStart?: () => void;
   readonly onLongPress?: () => void;
 };
 
@@ -127,6 +128,7 @@ function InlineAudio(props: PreviewProps & { readonly resolveUri: () => Promise<
       },
     );
     if (!isAudioSessionOwner(token)) return;
+    props.onPlaybackStart?.();
     audioToken.current = token;
     requestPlayback(true);
     const generation = ++requestGeneration.current;
