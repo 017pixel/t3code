@@ -351,6 +351,7 @@ export class PreviewStopLocalServerError extends Schema.TaggedError<PreviewStopL
   "PreviewStopLocalServerError",
   {
     reason: Schema.Literals(["not-found", "shared-group", "unsupported", "signal-failed"]),
+    cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message() {

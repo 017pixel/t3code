@@ -1121,7 +1121,9 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     );
     if (!listed) return yield* new PreviewStopLocalServerError({ reason: "not-found" });
     const table = yield* readProcessTable.pipe(
-      Effect.mapError(() => new PreviewStopLocalServerError({ reason: "signal-failed" })),
+      Effect.mapError(
+        (cause) => new PreviewStopLocalServerError({ reason: "signal-failed", cause }),
+      ),
     );
     const group = stoppableProcessGroup(table, input.pid, process.pid);
     if (group === null) return yield* new PreviewStopLocalServerError({ reason: "shared-group" });
@@ -1134,7 +1136,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
         } catch (cause) {
           return isNoSuchProcess(cause)
             ? Effect.succeed(false)
-            : Effect.fail(new PreviewStopLocalServerError({ reason: "signal-failed" }));
+            : Effect.fail(new PreviewStopLocalServerError({ reason: "signal-failed", cause }));
         }
       });
     if (!(yield* signalGroup("SIGTERM"))) return;
