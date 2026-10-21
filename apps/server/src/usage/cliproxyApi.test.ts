@@ -345,6 +345,77 @@ describe("CLIProxyAPI built-in management API", () => {
     }),
   );
 
+  // regression: #23057 a hub refresh dropped the Claude "Monthly spend" row
+  it.effect("maps the Claude monthly spend budget beside the rolling windows", () =>
+    Effect.gen(function* () {
+      const claude = (auth_index: string) => ({
+        ...accounts[0]!,
+        id: `${auth_index}.json`,
+        auth_index,
+        provider: "claude",
+      });
+      const rolling = {
+        five_hour: { utilization: 10, resets_at: null },
+        seven_day: { utilization: 50, resets_at: null },
+      };
+      const spend = {
+        a: {
+          spend: {
+            enabled: true,
+            used: { amount_minor: 2643, currency: "USD", exponent: 2 },
+            limit: { amount_minor: 10000, currency: "USD", exponent: 2 },
+          },
+        },
+        b: {
+          extra_usage: {
+            is_enabled: true,
+            monthly_limit: 10000,
+            used_credits: 102,
+            utilization: 1,
+          },
+        },
+        c: {
+          spend: { enabled: true, used: null, limit: null },
+          extra_usage: { is_enabled: false, monthly_limit: 10000, used_credits: 5000 },
+        },
+        d: { spend: "unexpected", extra_usage: null },
+      } as Record<string, object>;
+      const test = fixture({
+        accounts: ["a", "b", "c", "d"].map(claude),
+        upstream: (request) => ({
+          status: 200,
+          body: { ...rolling, ...spend[request.auth_index] },
+        }),
+      });
+      const api = yield* test.api;
+      const result = yield* api.readAccounts(config);
+      expect(
+        result.map((account) =>
+          account.usageLimits.windows.map((window) => [window.id, window.usedPercent]),
+        ),
+      ).toEqual([
+        [
+          ["five_hour", 10],
+          ["seven_day", 50],
+          ["monthly_spend", 26.43],
+        ],
+        [
+          ["five_hour", 10],
+          ["seven_day", 50],
+          ["monthly_spend", 1.02],
+        ],
+        [
+          ["five_hour", 10],
+          ["seven_day", 50],
+        ],
+        [
+          ["five_hour", 10],
+          ["seven_day", 50],
+        ],
+      ]);
+    }),
+  );
+
   it.effect("pins redemption to the displayed credit and clears only that account's cooldown", () =>
     Effect.gen(function* () {
       const test = fixture();
