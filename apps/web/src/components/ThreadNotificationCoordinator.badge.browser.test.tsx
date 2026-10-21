@@ -11,6 +11,8 @@ const state = vi.hoisted(() => ({
   mode: "notifications",
   inApp: false,
   toast: vi.fn(),
+  closeToast: vi.fn(),
+  params: {} as { environmentId?: string; threadId?: string },
   shells: null as unknown as { set: (id: string, value: unknown) => void },
   navigate: vi.fn(),
   sound: vi.fn(),
@@ -20,11 +22,18 @@ const state = vi.hoisted(() => ({
 vi.mock(import("@tanstack/react-router"), async (original) => ({
   ...(await original()),
   useNavigate: (() => state.navigate) as never,
-  useParams: (() => ({})) as never,
+  useParams: (() => state.params) as never,
 }));
 vi.mock(import("./ui/toast"), async (original) => {
   const actual = await original();
-  return { ...actual, toastManager: { ...actual.toastManager, add: state.toast as never } };
+  return {
+    ...actual,
+    toastManager: {
+      ...actual.toastManager,
+      add: state.toast as never,
+      close: state.closeToast as never,
+    },
+  };
 });
 vi.mock(import("../state/shell"), async (original) => {
   const actual = await original();
@@ -164,6 +173,7 @@ function setup() {
   stack.defer(() => testRegistry.dispose());
   state.mode = "notifications";
   state.inApp = false;
+  state.params = {};
   state.environmentIds = ["one", "two"];
   state.shells.set("one", shell());
   state.shells.set("two", shell());
@@ -215,3 +225,24 @@ it.each(["hasPendingApprovals", "hasPendingUserInput"] as const)(
     expect(notification.close).toHaveBeenCalled();
   },
 );
+
+it("closes a thread's in-app toast once the route opens that thread", async () => {
+  await using app = setup();
+  state.inApp = true;
+  state.params = { environmentId: "two", threadId: "other" };
+  focused = true;
+  state.toast.mockReturnValue("toast-1");
+  await app.render();
+  state.shells.set(
+    "one",
+    shell({
+      latestTurn: { turnId: "turn", state: "completed", completedAt: "2026-09-13T07:01:00Z" },
+    }),
+  );
+  await app.render();
+  expect(state.toast).toHaveBeenCalledTimes(1);
+
+  state.params = { environmentId: "one", threadId: "thread" };
+  await app.render();
+  expect(state.closeToast).toHaveBeenCalledWith("toast-1");
+});
