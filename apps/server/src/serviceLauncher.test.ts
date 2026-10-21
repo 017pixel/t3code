@@ -285,10 +285,12 @@ if (context.update?.status === "pending") {
           childSource,
         );
       }
-      yield* Effect.promise(() =>
-        writeServiceState(statePath, {
+      yield* fs.writeFileString(
+        statePath,
+        JSON.stringify({
           protocol: SERVICE_LAUNCHER_PROTOCOL,
           activeVersion: "1.0.0",
+          launcherVersion: "1.0.0",
         }),
       );
 
@@ -303,6 +305,8 @@ if (context.update?.status === "pending") {
       const state = yield* Effect.promise(() => readServiceState(statePath));
       assert.equal(state.activeVersion, "1.1.0");
       assert.equal(state.update?.status, "committed");
+      // The service unit still starts the launcher from 1.0.0.
+      assert.propertyVal(state, "launcherVersion", "1.0.0");
     }),
   );
 
