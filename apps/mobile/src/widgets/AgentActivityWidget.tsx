@@ -94,6 +94,8 @@ export function AgentActivityWidget(
     ? (props.subtitle ?? "No active agents")
     : "Open T3 Code to load agent activity";
 
+  // Widget taps open the containing app, and every build accepts the prod
+  // scheme as a link prefix, so dev and preview builds route this too.
   const linkRow = rows[0];
   const deepLink =
     linkRow && linkRow.deepLink.startsWith("/") && !linkRow.deepLink.startsWith("//")

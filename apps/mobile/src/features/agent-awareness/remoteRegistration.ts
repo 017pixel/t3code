@@ -95,9 +95,10 @@ const ACTIVITY_TOKEN_REREGISTER_INTERVAL_MS = 60_000;
 const LIVE_ACTIVITY_STALE_AFTER_MS = 10 * 60_000;
 const liveActivityStaleDate = () => new Date(Date.now() + LIVE_ACTIVITY_STALE_AFTER_MS);
 const registeredActivityPushTokens = new Map<string, number>();
-// A failed read keeps the current account's last rows, but must not leave the
-// widget claiming the user is signed out or showing a previous account.
-let widgetShowsCurrentAccount = false;
+// Set while the widget shows the signed-out or loading state instead of the
+// active account's rows. A failed read replaces only those; otherwise it keeps
+// the rows on screen, including ones persisted from before a cold start.
+let widgetAwaitsAccountRead = false;
 // Refreshes can overlap (sign-in, foreground, retry); only the newest read may
 // repaint, so a slow older response never overwrites newer rows.
 let widgetSnapshotReads = 0;
@@ -195,13 +196,11 @@ export function setAgentAwarenessRelayTokenProvider(
     if (relayTokenProviderIdentity && identity !== relayTokenProviderIdentity) {
       clearAndroidAgentNotifications();
     }
-    // Hide the previous account's rows while the new account's first read runs.
-    if (
-      provider &&
-      identity &&
-      relayTokenProviderIdentity &&
-      identity !== relayTokenProviderIdentity
-    ) {
+    // Sign-in, including an account switch after the old account signed out,
+    // shows loading until the first read. A cold start keeps the persisted
+    // rows, which belong to the last account that was signed in.
+    if (provider && identity && (relayTokenProviderIdentity || widgetAwaitsAccountRead)) {
+      widgetAwaitsAccountRead = true;
       publishWidget({ kind: "loading" });
     }
     androidDeviceReplayedAt = null;
@@ -209,7 +208,6 @@ export function setAgentAwarenessRelayTokenProvider(
     activeDeviceRegistration = null;
     pendingDeviceRegistration = null;
     registeredActivityPushTokens.clear();
-    widgetShowsCurrentAccount = false;
   }
   relayTokenProvider = provider;
   relayTokenProviderIdentity = provider ? (identity ?? null) : null;
@@ -226,6 +224,7 @@ export function setAgentAwarenessRelayTokenProvider(
     // Without a signed-in user the relay can no longer update or end these
     // activities, so they would sit orphaned on the lock screen.
     endLocalLiveActivities("live activity cleanup after cloud sign-out failed");
+    widgetAwaitsAccountRead = true;
     publishWidget({ kind: "signed-out" });
     setRegistrationStatus("unknown");
     void clearAgentAwarenessRegistrationRecord().catch((error: unknown) => {
@@ -936,7 +935,7 @@ export function __resetAgentAwarenessRemoteRegistrationForTest(): void {
   registrationStatusListeners.clear();
   registeredActivityPushTokens.clear();
   activityPushTokenLocks.clear();
-  widgetShowsCurrentAccount = false;
+  widgetAwaitsAccountRead = false;
   widgetSnapshotReads = 0;
 }
 
@@ -1090,9 +1089,9 @@ export const refreshActiveLiveActivityRemoteRegistration = Effect.fn(
       return undefined;
     }
     if (snapshot) {
-      widgetShowsCurrentAccount = true;
+      widgetAwaitsAccountRead = false;
       publishWidget({ kind: "snapshot", aggregate: snapshot.aggregate });
-    } else if (!widgetShowsCurrentAccount) {
+    } else if (widgetAwaitsAccountRead) {
       publishWidget({ kind: "unavailable" });
     }
     return { snapshot };
@@ -1145,6 +1144,11 @@ export const refreshActiveLiveActivityRemoteRegistration = Effect.fn(
           cause,
         }),
     }).pipe(Effect.orElseSucceed(() => null));
+    // A sign-out or account switch during the preference read already ended
+    // this account's cards; priming now would bring its rows back.
+    if (!relayTokenProvider || relayTokenProviderIdentity !== identity) {
+      return;
+    }
     if (preferences?.liveActivitiesEnabled !== false) {
       // The snapshot and preference reads yield; an arm-on-send may have
       // created the card in the meantime. Re-check so two cards are never started.

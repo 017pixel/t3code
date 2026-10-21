@@ -858,7 +858,7 @@ describe("makeRelayDeviceRegistrationRequest", () => {
       }).pipe(Effect.provide(relay));
     });
 
-    it.effect("keeps the last rows when a later read fails, but never the signed-out state", () => {
+    it.effect("a failed read keeps the shown rows, but never the signed-out state", () => {
       const relayDown = new ManagedRelay.ManagedRelayRequestFailedError({
         action: "read relay agent activity snapshot",
         transportFailed: true,
@@ -871,6 +871,12 @@ describe("makeRelayDeviceRegistrationRequest", () => {
       setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
 
       return Effect.gen(function* () {
+        // A cold start keeps the rows the widget persisted before the app quit.
+        yield* refreshActiveLiveActivityRemoteRegistration();
+        expect(publishWidgetMock).not.toHaveBeenCalled();
+
+        setAgentAwarenessRelayTokenProvider(null);
+        setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
         yield* refreshActiveLiveActivityRemoteRegistration();
         expect(publishWidgetMock).toHaveBeenLastCalledWith({ kind: "unavailable" });
 
@@ -938,10 +944,12 @@ describe("makeRelayDeviceRegistrationRequest", () => {
       }),
     );
 
-    it("hides the previous account's rows as soon as another account signs in", () => {
+    it("shows loading, not the sign-in prompt, while a switched account's first read runs", () => {
       setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token-a"), "user-a");
       expect(publishWidgetMock).not.toHaveBeenCalled();
 
+      // CloudAuthBridge deactivates the old account before activating the new one.
+      setAgentAwarenessRelayTokenProvider(null);
       setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token-b"), "user-b");
 
       expect(publishWidgetMock).toHaveBeenLastCalledWith({ kind: "loading" });
@@ -973,6 +981,34 @@ describe("makeRelayDeviceRegistrationRequest", () => {
         yield* Fiber.join(refresh);
 
         expect(publishWidgetMock).not.toHaveBeenCalledWith({ kind: "snapshot", aggregate });
+      }),
+    );
+
+    it.effect("does not prime a Live Activity after sign-out during the preference read", () =>
+      Effect.gen(function* () {
+        let markRequested = () => {};
+        const requested = new Promise<void>((resolve) => {
+          markRequested = resolve;
+        });
+        let resolvePreferences = (_preferences: Preferences) => {};
+        vi.mocked(loadPreferences).mockImplementationOnce(() => {
+          markRequested();
+          return new Promise((resolve) => {
+            resolvePreferences = resolve;
+          });
+        });
+        const relay = fakeRelay(() => Effect.succeed({ aggregate }));
+        setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
+
+        const refresh = yield* Effect.forkChild(
+          refreshActiveLiveActivityRemoteRegistration().pipe(Effect.provide(relay)),
+        );
+        yield* Effect.promise(() => requested);
+        setAgentAwarenessRelayTokenProvider(null);
+        resolvePreferences({ liveActivitiesEnabled: true } as Preferences);
+        yield* Fiber.join(refresh);
+
+        expect(widgetMocks.start).not.toHaveBeenCalled();
       }),
     );
   });
