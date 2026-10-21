@@ -1,9 +1,10 @@
 import { applyThreadPullRequestLinkUpdate } from "@t3tools/shared/threadPullRequests";
-import type {
-  OrchestrationV2DomainEvent,
-  OrchestrationV2Run,
-  OrchestrationV2ThreadProjection,
-  OrchestrationV2TurnItem,
+import {
+  isOrchestrationV2WorkActive,
+  type OrchestrationV2DomainEvent,
+  type OrchestrationV2Run,
+  type OrchestrationV2ThreadProjection,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import {
   createOrchestrationV2TurnItemVisibility,
@@ -326,22 +327,29 @@ export function applyOrchestrationV2ProjectionEvent(
       ) {
         return projection;
       }
+      const previous = itemIndex === -1 ? undefined : projection.turnItems[itemIndex];
+      // A delayed tool_use frame cannot restart work cancelled before execution.
+      const item =
+        previous?.toolNonExecutionKind === "cancelled" &&
+        (previous.type === "command_execution" || previous.type === "dynamic_tool") &&
+        isOrchestrationV2WorkActive(event.payload.status)
+          ? previous
+          : event.payload;
       const turnItems = [...projection.turnItems];
-      if (itemIndex === -1) turnItems.push(event.payload);
-      else turnItems[itemIndex] = event.payload;
+      if (itemIndex === -1) turnItems.push(item);
+      else turnItems[itemIndex] = item;
       const next = { ...base, turnItems };
       // Only interrupt requests can change another item's visibility. Streaming
       // text/tool updates must not recheck every row against every run.
-      const previous = itemIndex === -1 ? undefined : projection.turnItems[itemIndex];
       const visible =
-        event.payload.type === "run_interrupt_request" || previous?.type === "run_interrupt_request"
+        item.type === "run_interrupt_request" || previous?.type === "run_interrupt_request"
           ? { ...next, visibleTurnItems: activeVisibleTurnItems(next) }
           : next;
       return {
         ...next,
-        visibleTurnItems: shouldShowLocalTurnItem(next, event.payload)
-          ? upsertVisibleTurnItem(visible, event.payload, partialTimeline, latestLocalTurnOrdinal)
-          : removeVisibleItem(visible.visibleTurnItems, event.payload.id),
+        visibleTurnItems: shouldShowLocalTurnItem(next, item)
+          ? upsertVisibleTurnItem(visible, item, partialTimeline, latestLocalTurnOrdinal)
+          : removeVisibleItem(visible.visibleTurnItems, item.id),
       };
     }
     case "checkpoint-scope.created":
