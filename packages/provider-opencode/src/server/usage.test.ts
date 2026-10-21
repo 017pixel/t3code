@@ -241,6 +241,47 @@ describe("readOpenCodeUsage", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("counts each OpenCode fork's own replies after its boundary", () =>
+    Effect.gen(function* () {
+      const [source, fork] = openCodeForkSessions;
+      const sibling = { ...fork, id: "ses_siblingfork00000000000000", slug: "quiet-river" };
+      const { dir, db } = yield* recordedForkDatabase([...openCodeForkSessions, sibling]);
+      const insert = (id: string, sessionId: string, seq: number, created: number, data: string) =>
+        db.unsafe(
+          "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, 'assistant', ?, ?, ?, ?)",
+          [id, sessionId, seq, created, created, data],
+        );
+      const copied = openCodeForkMessages.find(
+        (message) => message.id === openCodeForkSourceAssistantId,
+      )!;
+      yield* insert("msg_siblingcopy_2", sibling.id, copied.seq, copied.time_created, copied.data);
+      // Sibling forks send identical replies at the same seq and millisecond.
+      const created = 1792620090000;
+      const reply = JSON.stringify({ ...JSON.parse(copied.data), time: { created } });
+      yield* insert("msg_forkreply000000000000003", fork.id, 3, created, reply);
+      yield* insert("msg_siblingreply0000000000003", sibling.id, 3, created, reply);
+
+      const records = (yield* readOpenCodeUsage(dir, 0)).files.flatMap((file) => file.records);
+      assert.deepStrictEqual(
+        records.map((record) => record.sessionId),
+        [source.id, fork.id, sibling.id],
+      );
+
+      // Deleting the source leaves the first fork holding the only copy.
+      yield* db.unsafe("DELETE FROM session_message WHERE session_id = ?", [source.id]);
+      yield* db.unsafe("DELETE FROM session_v2 WHERE id = ?", [source.id]);
+      const remaining = (yield* readOpenCodeUsage(dir, 0)).files.flatMap((file) => file.records);
+      assert.includeMembers(
+        remaining.map((record) => record.dedupeKey),
+        ["opencode:msg_1607ab38e001GxURO0NU4GY4Az_2", "opencode:msg_forkreply000000000000003"],
+      );
+      assert.notInclude(
+        remaining.map((record) => record.dedupeKey),
+        "opencode:msg_1607b8a6d001MA7a5GgmyUywMf_2",
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("counts identical OpenCode replies in sessions that were not forked", () =>
     Effect.gen(function* () {
       const { dir } = yield* recordedForkDatabase(
