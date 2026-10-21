@@ -4,12 +4,9 @@ import {
   mediaMimeTypeFromExtension,
 } from "./mediaPreview.ts";
 export {
-  fileIconPathForMimeType,
-  WORKSPACE_IMAGE_PREVIEW_EXTENSIONS,
   isWorkspaceAudioPreviewPath,
   isWorkspaceImagePreviewPath,
   mediaKindFromPath,
-  mediaMimeType,
   mediaMimeTypeFromExtension,
 } from "./mediaPreview.ts";
 import { videoMimeType } from "./video.ts";
