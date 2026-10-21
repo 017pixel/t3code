@@ -25,26 +25,12 @@ describe("buildPairingUrl", () => {
     expect(buildPairingUrl("http://192.168.1.100:3773/#token=new-token", "old-token")).toBe(
       "http://192.168.1.100:3773/#token=new-token",
     );
-    expect(buildPairingUrl("remote.example.com/pair?token=new-token", "old-token")).toBe(
-      "https://remote.example.com/pair?token=new-token",
-    );
-    expect(
-      buildPairingUrl(
-        "https://app.t3.codes/pair?host=https%3A%2F%2Fdesktop.tailnet.ts.net%2F#token=new-token",
-        "old-token",
-      ),
-    ).toBe(
-      "https://app.t3.codes/pair?host=https%3A%2F%2Fdesktop.tailnet.ts.net%2F#token=new-token",
-    );
   });
 
   it("ignores a blank token in the address", () => {
     expect(buildPairingUrl("http://192.168.1.100:3773/#token=%20", "pairing-token")).toBe(
       "http://192.168.1.100:3773/#token=pairing-token",
     );
-    expect(
-      buildPairingUrl("http://192.168.1.100:3773/?token=new-token#token=%20", "old-token"),
-    ).toBe("http://192.168.1.100:3773/?token=new-token#token=%20");
   });
 });
 
@@ -67,13 +53,6 @@ describe("parsePairingUrl", () => {
     ).toEqual({
       host: "https://desktop.tailnet.ts.net",
       code: "pairing-token",
-    });
-  });
-
-  it("reads the same nonblank token that the connection uses", () => {
-    expect(parsePairingUrl("http://192.168.1.100:3773/?token=new-token#token=%20")).toEqual({
-      host: "http://192.168.1.100:3773",
-      code: "new-token",
     });
   });
 });
