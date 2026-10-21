@@ -13,7 +13,7 @@ import {
 
 import { RelativeTime } from "~/components/RelativeTime";
 import { pullRequestEnvironment } from "~/state/pullRequests";
-import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
+import { useAtomCommand } from "~/state/use-atom-command";
 import { useEnvironmentQuery } from "~/state/query";
 
 import { PreviewCard, PreviewCardPopup, PreviewCardTrigger } from "../ui/preview-card";
@@ -57,11 +57,9 @@ export function PullRequestLinkPreview({
         })
       : null,
   );
-  // The hover card shares this query, so a click must not inherit a failed hover read.
-  const readPreview = useAtomQueryRunner(pullRequestEnvironment.preview, {
+  const readPreview = useAtomCommand(pullRequestEnvironment.resolvePreview, {
     reportFailure: false,
     reportDefect: false,
-    refresh: true,
   });
   const trigger =
     confirmBeforeOpen === true
@@ -71,13 +69,9 @@ export function PullRequestLinkPreview({
             event.preventDefault();
             event.stopPropagation();
             if (resolvingClick) return;
-            const joinedHoverRead = previewQuery.isPending;
             setOpen(false);
             setResolvingClick(true);
             void readPreview(target)
-              .then((result) =>
-                joinedHoverRead && result._tag === "Failure" ? readPreview(target) : result,
-              )
               .then(async (result) => {
                 if (isAtomCommandInterrupted(result)) return;
                 if (result._tag === "Success" && onOpenPullRequest?.(result.value.url)) return;

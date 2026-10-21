@@ -319,6 +319,14 @@ export function createPullRequestEnvironmentAtoms<R, E>(
     }),
     detail,
     preview,
+    // Its own request per click: a pending or failed hover read of `preview` must not decide where
+    // a click goes.
+    resolvePreview: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:pull-requests:resolve-preview",
+      tag: WS_METHODS.pullRequestsPreview,
+      execute: (input) => routedRequest(WS_METHODS.pullRequestsPreview, input),
+      scheduler: commandScheduler,
+    }),
     checks: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:pull-requests:checks",
       persistence: persistQuery(Schema.NullOr(PullRequestChecks)),
