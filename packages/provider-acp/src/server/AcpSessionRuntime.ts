@@ -1193,7 +1193,7 @@ export class AcpSessionRuntime extends Context.Service<
         readonly dispatched?: Deferred.Deferred<void>;
         readonly onBusy?: (retry: {
           readonly attempt: number;
-          readonly maxAttempts: number;
+          readonly maxAttempts: null;
           readonly retryDelayMs: number;
         }) => Effect.Effect<void>;
       },
@@ -1262,7 +1262,10 @@ interface EnsureActiveAssistantSegmentResult {
 interface AcpActivePrompt {
   readonly fiber: Fiber.Fiber<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
   readonly completed: Deferred.Deferred<void>;
-  readonly queueState: { phase: "dispatching" | "queued" | "cancelling" };
+  readonly queueState: {
+    phase: "dispatching" | "queued" | "cancelling";
+    cancelRequested: boolean;
+  };
   readonly queueCancelled: Deferred.Deferred<void>;
 }
 
@@ -2342,6 +2345,9 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
       sessionId: started.sessionId,
       ...(options.cancelMeta === undefined ? {} : { _meta: options.cancelMeta }),
     } satisfies EffectAcpSchema.CancelNotification;
+    if (Option.isSome(activePrompt)) {
+      activePrompt.value.queueState.cancelRequested = true;
+    }
     if (Option.isSome(activePrompt) && activePrompt.value.queueState.phase === "queued") {
       activePrompt.value.queueState.phase = "cancelling";
       return yield* acp.agent
@@ -2597,7 +2603,10 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
               } satisfies EffectAcpSchema.PromptRequest;
               const completed = yield* Deferred.make<void>();
               const queueCancelled = yield* Deferred.make<void>();
-              const queueState: AcpActivePrompt["queueState"] = { phase: "dispatching" };
+              const queueState: AcpActivePrompt["queueState"] = {
+                phase: "dispatching",
+                cancelRequested: false,
+              };
               const fiber = yield* Effect.gen(function* () {
                 // ACP v1 has no idle signal or steer/follow-up RPC. Only this explicit
                 // rejection guarantees the prompt was not accepted and is safe to queue.
@@ -2623,19 +2632,15 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
                   ) {
                     return yield* error;
                   }
-                  const retryDelayMs = delays[attempt];
-                  if (retryDelayMs === undefined) {
-                    return yield* new EffectAcpErrors.AcpRequestError({
-                      code: error.code,
-                      errorMessage:
-                        "The agent is still busy and could not accept your queued message. Wait for its current work to finish, then send the message again.",
-                    });
+                  if (queueState.cancelRequested) {
+                    return { stopReason: "cancelled" } satisfies EffectAcpSchema.PromptResponse;
                   }
+                  const retryDelayMs = delays[Math.min(attempt, delays.length - 1)]!;
                   queueState.phase = "queued";
                   yield* (
                     promptOptions?.onBusy?.({
                       attempt: attempt + 1,
-                      maxAttempts: delays.length,
+                      maxAttempts: null,
                       retryDelayMs,
                     }) ?? Effect.void
                   );
