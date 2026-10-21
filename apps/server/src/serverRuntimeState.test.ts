@@ -2,11 +2,13 @@ import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Runtime from "effect/Runtime";
+import * as TestClock from "effect/testing/TestClock";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { renderBootServicePlist, renderBootServiceUnit } from "./cloud/bootService.ts";
@@ -249,6 +251,27 @@ describe("server ownership", () => {
           // A second server can now lock a fresh file in the same home.
           yield* ServerOwnership.acquireServerOwnership(statePath);
           assert.equal((yield* owner.publish(state).pipe(Effect.result))._tag, "Failure");
+        }),
+      );
+    }).pipe(Effect.provide(layerOwnership)),
+  );
+
+  it.effect("stops a running owner once its lock file is removed", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-owner-watch-" });
+      const statePath = path.join(root, "server-runtime.json");
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const owner = yield* ServerOwnership.acquireServerOwnership(statePath);
+          const watch = yield* Effect.forkChild(owner.awaitLoss);
+          yield* TestClock.adjust("1 minute");
+          assert.isUndefined(watch.pollUnsafe());
+          yield* fs.remove(path.join(root, "server-owner.sqlite"));
+          yield* TestClock.adjust("1 minute");
+          const lost = yield* Fiber.join(watch).pipe(Effect.flip);
+          assert.equal(lost._tag, "ServerOwnershipLostError");
         }),
       );
     }).pipe(Effect.provide(layerOwnership)),

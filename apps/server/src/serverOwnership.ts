@@ -45,7 +45,7 @@ export class ServerAlreadyRunningError extends Schema.TaggedError<ServerAlreadyR
   override readonly [Runtime.errorExitCode] = SERVER_EXIT_CODE_STATE_DIR_OWNED;
 
   override get message(): string {
-    return `A T3 Code server already owns ${this.stateDir}. Stop that server, or use a separate T3 home and pair with it, then retry. No server was stopped.`;
+    return `A T3 Code server already owns ${this.stateDir}. Stop that server, or use a separate T3 home and pair with it, then retry. Never delete server-owner.sqlite: it is that server's lock, not a stale file. No server was stopped.`;
   }
 }
 
@@ -68,6 +68,18 @@ export class ServerOwnershipError extends Schema.TaggedError<ServerOwnershipErro
     return `Could not acquire server ownership of ${this.stateDir}.`;
   }
 }
+
+export class ServerOwnershipLostError extends Schema.TaggedError<ServerOwnershipLostError>()(
+  "ServerOwnershipLostError",
+  { stateDir: Schema.String },
+) {
+  override get message(): string {
+    return `server-owner.sqlite in ${this.stateDir} was deleted or replaced while this server owned it, so another T3 Code server can now start in the same T3 home. Stopping this server to protect its data. Never delete server-owner.sqlite while a server runs.`;
+  }
+}
+
+// One stat per interval; it bounds how long two servers can share a home.
+const OWNERSHIP_CHECK_INTERVAL = Duration.seconds(5);
 
 const isSqliteBusy = (cause: unknown) =>
   cause instanceof Error &&
@@ -188,29 +200,32 @@ export const acquireServerOwnership = Effect.fn("acquireServerOwnership")(functi
   statePath: string,
 ) {
   const stateDir = NodePath.dirname(statePath);
+  const lockPath = NodePath.join(stateDir, "server-owner.sqlite");
   const crypto = yield* Crypto.Crypto;
   const ownerId = yield* crypto
     .randomUUIDv4()
     .pipe(Effect.mapError((cause) => new ServerOwnershipError({ stateDir, cause })));
-  yield* Effect.acquireRelease(
+  const { lockFile } = yield* Effect.acquireRelease(
     Effect.try({
       try: () => {
         NodeFS.mkdirSync(stateDir, { recursive: true });
-        const db = new NodeSqlite.DatabaseSync(NodePath.join(stateDir, "server-owner.sqlite"));
+        const db = new NodeSqlite.DatabaseSync(lockPath);
         try {
           db.exec("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE;");
+          // The lock lives on this inode. Deleting or replacing the path
+          // leaves it held but lets the next server lock a fresh file.
+          return { db, lockFile: NodeFS.statSync(lockPath, { bigint: true }) };
         } catch (cause) {
           db.close();
           throw cause;
         }
-        return db;
       },
       catch: (cause) =>
         isSqliteBusy(cause)
           ? new ServerAlreadyRunningError({ stateDir })
           : new ServerOwnershipError({ stateDir, cause }),
     }),
-    (db) =>
+    ({ db }) =>
       readPersistedServerRuntimeState(statePath).pipe(
         Effect.flatMap((state) =>
           Option.isSome(state) && state.value.ownerId === ownerId
@@ -237,8 +252,35 @@ export const acquireServerOwnership = Effect.fn("acquireServerOwnership")(functi
     return yield* new OlderBootServiceError({ baseDir: olderServiceHome });
   }
 
+  // Other stat failures prove nothing about the lock, so only a missing or
+  // different file counts as lost.
+  const verify = Effect.try({
+    try: () => NodeFS.statSync(lockPath, { bigint: true, throwIfNoEntry: false }),
+    catch: (cause) => new ServerOwnershipError({ stateDir, cause }),
+  }).pipe(
+    Effect.flatMap((current) =>
+      current !== undefined && current.dev === lockFile.dev && current.ino === lockFile.ino
+        ? Effect.void
+        : Effect.fail(new ServerOwnershipLostError({ stateDir })),
+    ),
+  );
+
   return {
     publish: (state: PersistedServerRuntimeState) =>
-      persistServerRuntimeState({ path: statePath, state: { ...state, ownerId } }),
+      verify.pipe(
+        Effect.andThen(
+          persistServerRuntimeState({ path: statePath, state: { ...state, ownerId } }),
+        ),
+      ),
+    /** Fails once the lock file is gone or replaced. Never reacquires it. */
+    awaitLoss: verify.pipe(
+      Effect.catchTags({
+        ServerOwnershipError: (error) =>
+          Effect.logWarning("Could not check the server ownership lock", { cause: error }),
+      }),
+      Effect.andThen(Effect.sleep(OWNERSHIP_CHECK_INTERVAL)),
+      Effect.forever,
+      Effect.tapError((error) => Effect.logError(error.message)),
+    ),
   };
 });
