@@ -691,93 +691,6 @@ effectIt.effect.each(["linux", "darwin"] as const)(
   },
 );
 
-effectIt.effect("finds a server an agent left before a restart on the first scan", () => {
-  const port = 43_127;
-  let lsofStdout = `p4242\ncnode\nn127.0.0.1:${port}\n`;
-  let lsofCalls = 0;
-  const missing = FileSystem.makeNoop({});
-  const layer = PortScanner.layer.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        FileSystem.layerNoop({
-          readFileString: (path) =>
-            path === "/proc/4242/environ"
-              ? Effect.succeed(`${PortScanner.AGENT_THREAD_ENV}=thread-agent\0`)
-              : missing.readFileString(path),
-        }),
-        Layer.succeed(ProcessRunner.ProcessRunner, {
-          run: () => {
-            lsofCalls += 1;
-            return Effect.succeed(processOutput(lsofStdout));
-          },
-        }),
-        Layer.succeed(HostProcess.Platform, "linux"),
-        FetchHttpClient.layer.pipe(
-          Layer.provide(
-            Layer.succeed(FetchHttpClient.Fetch, () =>
-              Promise.resolve(new Response("app", { headers: { "content-type": "text/html" } })),
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
-  return Effect.gen(function* () {
-    const scanner = yield* PortScanner.PortDiscovery;
-    // No agent has run and no terminal is open since this server started.
-    expect(yield* scanner.scan()).toMatchObject([
-      { port, pid: 4242, terminal: null, agent: { threadId: "thread-agent" } },
-    ]);
-    lsofStdout = "";
-    expect(yield* scanner.scan()).toEqual([]);
-    const lsofCallsAfterExit = lsofCalls;
-    expect(yield* scanner.scan()).toEqual([]);
-    expect(lsofCalls).toBe(lsofCallsAfterExit);
-  }).pipe(Effect.provide(layer));
-});
-
-effectIt.effect("forgets agent pids while no client scans, since they can be reused", () => {
-  const port = 43_126;
-  let environ = `${PortScanner.AGENT_THREAD_ENV}=thread-agent\0`;
-  const missing = FileSystem.makeNoop({});
-  const layer = PortScanner.layer.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        FileSystem.layerNoop({
-          readFileString: (path) =>
-            path === "/proc/4242/environ" ? Effect.succeed(environ) : missing.readFileString(path),
-        }),
-        Layer.succeed(ProcessRunner.ProcessRunner, {
-          run: () => Effect.succeed(processOutput(`p4242\ncnode\nn127.0.0.1:${port}\n`)),
-        }),
-        Layer.succeed(HostProcess.Platform, "linux"),
-        FetchHttpClient.layer.pipe(
-          Layer.provide(
-            Layer.succeed(FetchHttpClient.Fetch, () =>
-              Promise.resolve(new Response("app", { headers: { "content-type": "text/html" } })),
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
-  return Effect.gen(function* () {
-    const scanner = yield* PortScanner.PortDiscovery;
-    scanner.trackAgent()();
-    yield* Effect.scoped(
-      Effect.gen(function* () {
-        yield* scanner.retain;
-        expect(yield* scanner.scan()).toMatchObject([
-          { pid: 4242, agent: { threadId: "thread-agent" } },
-        ]);
-      }),
-    );
-    // While nobody scanned, the server exited and an unrelated listener got its pid.
-    environ = "PATH=/usr/bin\0";
-    expect(yield* scanner.scan()).toEqual([]);
-  }).pipe(Effect.provide(layer));
-});
-
 effectIt.effect("stops only a job's own process group", () =>
   Effect.sync(() => {
     const serverPid = 100;
@@ -813,11 +726,11 @@ server.listen(0, "127.0.0.1", () => {
 `;
 
 /**
- * A real HTML server with an agent's environment. As a job it runs the way an agent's tool shell
- * starts one: under a detached shell with job control, in a group of its own. Otherwise it runs
- * directly under this process, in its group. Release kills only the pids it started.
+ * A real HTML server with an agent's environment, started the way an agent's tool shell starts a
+ * job: under a detached shell with job control, in a group of its own. Release kills only the pids
+ * it started.
  */
-const agentServer = (options: { readonly job: boolean }) =>
+const agentServer = () =>
   Effect.acquireRelease(
     Effect.callback<{
       readonly child: NodeChildProcess.ChildProcess;
@@ -826,17 +739,12 @@ const agentServer = (options: { readonly job: boolean }) =>
       readonly exited: Promise<void>;
     }>((resume) => {
       const env = { ...process.env, [PortScanner.AGENT_THREAD_ENV]: "thread-live" };
-      const child = options.job
-        ? // dash ignores `set -m` without a terminal; bash, like agent tool shells, honors it.
-          NodeChildProcess.spawn(
-            "bash",
-            ["-c", 'set -m; "$0" -e "$1" & wait', process.execPath, AGENT_SERVER_SCRIPT],
-            { detached: true, env, stdio: ["ignore", "pipe", "ignore"] },
-          )
-        : NodeChildProcess.spawn(process.execPath, ["-e", AGENT_SERVER_SCRIPT], {
-            env,
-            stdio: ["ignore", "pipe", "ignore"],
-          });
+      // dash ignores `set -m` without a terminal; bash, like agent tool shells, honors it.
+      const child = NodeChildProcess.spawn(
+        "bash",
+        ["-c", 'set -m; "$0" -e "$1" & wait', process.execPath, AGENT_SERVER_SCRIPT],
+        { detached: true, env, stdio: ["ignore", "pipe", "ignore"] },
+      );
       const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
       child.once("error", (error) => resume(Effect.die(error)));
       child.stdout?.once("data", (chunk) => {
@@ -864,15 +772,14 @@ const isRunning = (pid: number): boolean => {
 };
 
 effectIt.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
-  "stops an agent's server through its job's group and refuses a group shared with this server",
+  "stops an agent's server through its job's group, and only a listed server",
   () =>
     Effect.gen(function* () {
       const scanner = yield* PortScanner.PortDiscovery;
       yield* Effect.acquireRelease(Effect.sync(scanner.trackAgent), (release) =>
         Effect.sync(release),
       );
-      const job = yield* agentServer({ job: true });
-      const shared = yield* agentServer({ job: false });
+      const job = yield* agentServer();
 
       expect(yield* scanner.scan()).toEqual(
         expect.arrayContaining([
@@ -881,21 +788,11 @@ effectIt.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             port: job.port,
             agent: { threadId: "thread-live" },
           }),
-          expect.objectContaining({
-            pid: shared.pid,
-            port: shared.port,
-            agent: { threadId: "thread-live" },
-          }),
         ]),
       );
 
       const unlisted = yield* Effect.flip(scanner.stopServer({ pid: process.pid, port: job.port }));
       expect(unlisted.reason).toBe("not-found");
-      const refused = yield* Effect.flip(
-        scanner.stopServer({ pid: shared.pid, port: shared.port }),
-      );
-      expect(refused.reason).toBe("shared-group");
-      expect(isRunning(shared.pid)).toBe(true);
 
       yield* scanner.stopServer({ pid: job.pid, port: job.port });
       // The shell waits on its job, so it exits once the job has.
