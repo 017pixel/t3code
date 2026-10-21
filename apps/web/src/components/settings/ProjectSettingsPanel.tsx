@@ -312,12 +312,17 @@ function ProjectDetail({
     }
     savingFaviconRef.current = true;
     setIsSavingFavicon(true);
+    let result;
     try {
-      return await updateAllMembers(input, "Failed to update project icon", onFailure);
-    } finally {
+      result = await updateAllMembers(input, "Failed to update project icon", onFailure);
+    } catch (error) {
       savingFaviconRef.current = false;
       setIsSavingFavicon(false);
+      throw error;
     }
+    savingFaviconRef.current = false;
+    setIsSavingFavicon(false);
+    return result;
   };
 
   const hasMultipleCheckouts = group.memberProjects.length > 1;

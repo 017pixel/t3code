@@ -116,10 +116,9 @@ export function ProjectIconPickerDialog({
       onOpenChange(false);
     } catch (error) {
       setSaveError(projectIconSaveErrorMessage(error));
-    } finally {
-      savingRef.current = false;
-      setSaving(false);
     }
+    savingRef.current = false;
+    setSaving(false);
   };
 
   return (
