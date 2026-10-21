@@ -233,6 +233,17 @@ const resolveVitePlusDelegatedCommand = Effect.fn("resolveVitePlusDelegatedComma
   if (!isVitePlusGlobalCommandPath(context.resolvedCommandPath)) return context;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  // Vite+ 1.x ignores legacy shimMode settings and always runs managed packages.
+  // Read the shim's resolved version directory; bare `vp` can select a project CLI.
+  const vpBin = path.dirname(context.realCommandPath);
+  const vpVersion = path.basename(path.dirname(vpBin));
+  if (
+    !["vp", "vp.exe"].includes(path.basename(context.realCommandPath)) ||
+    path.basename(vpBin) !== "bin" ||
+    !/^0\.\d+\.\d+$/.test(vpVersion)
+  ) {
+    return context;
+  }
   const env = { ...(yield* HostProcess.Environment), ...context.env };
   const home = env.HOME ?? env.USERPROFILE ?? (yield* HostProcess.HomeDirectory);
   const legacyHome = path.join(home, ".vite-plus");

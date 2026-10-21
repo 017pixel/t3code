@@ -1209,6 +1209,8 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
 });
 
 for (const fixture of [
+  { layout: "legacy", config: '{"shimMode":"system_first"}', external: true, version: "1.3.0" },
+  { layout: "legacy", config: '{"shimMode":"system_first"}', external: true, version: "unknown" },
   { layout: "xdg", config: '{"shimMode":"system_first"}', external: true },
   { layout: "legacy", config: '{"shimMode":"system_first"}', external: true },
   { layout: "override", config: '{"shimMode":"system_first"}', external: true },
@@ -1218,7 +1220,7 @@ for (const fixture of [
   { layout: "xdg", config: '{"shimMode":"system_first"}', external: false },
 ]) {
   it.live.skipIf(windowsHost || !symlinksSupported)(
-    `updates the install a system_first Vite+ shim delegates to on PATH (${fixture.layout}, ${fixture.config}, external=${fixture.external})`,
+    `updates the install a system_first Vite+ shim delegates to on PATH (${fixture.layout}, ${fixture.config}, external=${fixture.external}, version=${"version" in fixture ? fixture.version : "0.3.0"})`,
     () =>
       Effect.gen(function* () {
         const tempDir = yield* makeTempDir("t3-vite-plus-system-first");
@@ -1229,7 +1231,8 @@ for (const fixture of [
           fixture.layout === "legacy"
             ? NodePath.join(tempDir, ".vite-plus")
             : NodePath.join(tempDir, ".local", "share", "vite-plus");
-        const vp = NodePath.join(vpHome, "current", "bin", "vp");
+        const version = "version" in fixture ? fixture.version : "0.3.0";
+        const vp = NodePath.join(vpHome, version, "bin", "vp");
         const shim = NodePath.join(vpHome, "bin", "opencode");
         const native = NodePath.join(tempDir, ".opencode", "bin", "opencode");
         const target = NodePath.join(tempDir, "node_modules", ".bin", "opencode");
@@ -1239,7 +1242,11 @@ for (const fixture of [
         NodeFS.mkdirSync(configDir, { recursive: true });
         NodeFS.writeFileSync(NodePath.join(configDir, "config.json"), fixture.config);
         writeExecutable(vp);
-        const delegates = fixture.external && fixture.config === '{"shimMode":"system_first"}';
+        NodeFS.symlinkSync(version, NodePath.join(vpHome, "current"));
+        const delegates =
+          version === "0.3.0" &&
+          fixture.external &&
+          fixture.config === '{"shimMode":"system_first"}';
         // Model Vite+'s system_first dispatch and managed fallback.
         NodeFS.writeFileSync(
           vp,
