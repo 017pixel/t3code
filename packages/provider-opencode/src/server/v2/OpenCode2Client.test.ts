@@ -49,109 +49,88 @@ describe("OpenCode2Client authorization", () => {
   );
 });
 
+const previous = {
+  id: "msg_repro088",
+  type: "synthetic",
+  text: "Fixture message 88",
+  time: { created: 1088 },
+};
+
+const compaction = (fields: Record<string, unknown>) => ({
+  type: "compaction",
+  id: "msg_repro089",
+  time: { created: 1089 },
+  reason: "manual",
+  summary: "Fixture compaction",
+  ...fields,
+});
+
+const listHistory = (messages: ReadonlyArray<unknown>) =>
+  Effect.gen(function* () {
+    const transport = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) =>
+        Effect.sync(() => {
+          assert.include(request.url, "/api/session/ses_repro/message");
+          return HttpClientResponse.fromWeb(
+            request,
+            new Response(JSON.stringify({ data: messages, cursor: {} }), {
+              headers: { "content-type": "application/json" },
+            }),
+          );
+        }),
+      ),
+    );
+    const opencode = yield* OpenCode2Client.OpenCode2Client.pipe(
+      Effect.provide(OpenCode2Client.layer.pipe(Layer.provide(transport))),
+    );
+    const { client } = yield* opencode.connect({
+      baseUrl: "http://127.0.0.1:4096",
+      password: "test-password",
+    });
+    return yield* client.message.list({ sessionID: Session.ID.make("ses_repro"), order: "asc" });
+  });
+
 describe("OpenCode2Client message history", () => {
   it.effect.each([
-    { status: "running", recentLocation: "metadata" },
-    { status: "completed", recentLocation: "metadata" },
-    { status: "running", recentLocation: "top-level" },
-    { status: "completed", recentLocation: "top-level" },
-  ] as const)(
-    "decodes $status compaction with $recentLocation recent",
-    ({ status, recentLocation }) =>
-      Effect.gen(function* () {
-        const previous = {
-          id: "msg_repro088",
-          type: "synthetic",
-          text: "Fixture message 88",
-          time: { created: 1088 },
-        };
-        const compaction = {
-          type: "compaction",
-          id: "msg_repro089",
-          time: { created: 1089 },
-          status,
-          reason: "manual",
-          summary: "Fixture compaction",
-          ...(recentLocation === "metadata"
-            ? { metadata: { recent: previous.id } }
-            : { recent: previous.id }),
-        };
-        const transport = Layer.succeed(
-          HttpClient.HttpClient,
-          HttpClient.make((request) =>
-            Effect.sync(() => {
-              assert.include(request.url, "/api/session/ses_repro/message");
-              return HttpClientResponse.fromWeb(
-                request,
-                new Response(JSON.stringify({ data: [previous, compaction], cursor: {} }), {
-                  headers: { "content-type": "application/json" },
-                }),
-              );
-            }),
-          ),
-        );
-        const opencode = yield* OpenCode2Client.OpenCode2Client.pipe(
-          Effect.provide(OpenCode2Client.layer.pipe(Layer.provide(transport))),
-        );
-        const { client } = yield* opencode.connect({
-          baseUrl: "http://127.0.0.1:4096",
-          password: "test-password",
-        });
-        const history = yield* client.message.list({
-          sessionID: Session.ID.make("ses_repro"),
-          order: "asc",
-        });
+    { status: "running", shape: "native keepID", fields: { metadata: { keepID: previous.id } } },
+    { status: "completed", shape: "native keepID", fields: { metadata: { keepID: previous.id } } },
+    { status: "running", shape: "native without metadata", fields: {} },
+    { status: "completed", shape: "native without metadata", fields: {} },
+    {
+      status: "completed",
+      shape: "legacy metadata",
+      fields: { metadata: { recent: previous.id } },
+    },
+    { status: "running", shape: "top-level", fields: { recent: previous.id } },
+  ] as const)("decodes a $status compaction in the $shape format", ({ status, fields }) =>
+    Effect.gen(function* () {
+      const history = yield* listHistory([previous, compaction({ status, ...fields })]);
 
-        assert.deepStrictEqual(
-          history.data.map((message) => message.id),
-          [previous.id, compaction.id],
-        );
-        assert.deepInclude(history.data[1], {
-          type: "compaction",
-          status,
-          summary: compaction.summary,
-        });
-      }),
+      assert.deepStrictEqual(
+        history.data.map((message) => message.id),
+        [previous.id, "msg_repro089"],
+      );
+      assert.deepInclude(history.data[1], {
+        type: "compaction",
+        status,
+        summary: "Fixture compaction",
+        recent:
+          "metadata" in fields && "recent" in fields.metadata ? previous.id : (fields.recent ?? ""),
+      });
+    }),
   );
 
-  it.effect("keeps a compaction without any recent an error", () =>
+  it.effect.each([
+    { field: "recent", fields: { status: "completed", recent: 42 } },
+    { field: "reason", fields: { status: "completed", reason: "scheduled", recent: previous.id } },
+  ] as const)("keeps a compaction with an invalid $field an error", ({ field, fields }) =>
     Effect.gen(function* () {
-      const compaction = {
-        type: "compaction",
-        id: "msg_repro089",
-        time: { created: 1089 },
-        status: "completed",
-        reason: "manual",
-        summary: "Fixture compaction",
-        metadata: {},
-      };
-      const transport = Layer.succeed(
-        HttpClient.HttpClient,
-        HttpClient.make((request) =>
-          Effect.succeed(
-            HttpClientResponse.fromWeb(
-              request,
-              new Response(JSON.stringify({ data: [compaction], cursor: {} }), {
-                headers: { "content-type": "application/json" },
-              }),
-            ),
-          ),
-        ),
-      );
-      const opencode = yield* OpenCode2Client.OpenCode2Client.pipe(
-        Effect.provide(OpenCode2Client.layer.pipe(Layer.provide(transport))),
-      );
-      const { client } = yield* opencode.connect({
-        baseUrl: "http://127.0.0.1:4096",
-        password: "test-password",
-      });
-      const error = yield* client.message
-        .list({ sessionID: Session.ID.make("ses_repro"), order: "asc" })
-        .pipe(Effect.flip);
+      const error = yield* listHistory([compaction(fields)]).pipe(Effect.flip);
 
       assert.strictEqual(error._tag, "ClientError");
       assert.isTrue(Schema.isSchemaError(error.cause));
-      assert.include(String(error.cause), "recent");
+      assert.include(String(error.cause), field);
     }),
   );
 });

@@ -162,24 +162,29 @@ const MessagePage = Schema.fromJsonString(
 const decodePage = Schema.decodeUnknownOption(MessagePage);
 const encodePage = Schema.encodeSync(MessagePage);
 
-const LegacyCompaction = Schema.Struct({
+const CompactionWithRecent = Schema.Struct({
   type: Schema.Literal("compaction"),
-  metadata: Schema.Struct({ recent: Schema.String }),
+  status: Schema.Literals(["running", "completed"]),
+  metadata: Schema.optionalKey(Schema.Unknown),
 });
-const isLegacyCompaction = Schema.is(LegacyCompaction);
+const isCompactionWithRecent = Schema.is(CompactionWithRecent);
+const isLegacyMetadata = Schema.is(Schema.Struct({ recent: Schema.String }));
 
-const liftCompactionRecent = (message: unknown) =>
-  isLegacyCompaction(message) && !("recent" in message)
-    ? { ...message, recent: message.metadata.recent }
+const fillCompactionRecent = (message: unknown) =>
+  isCompactionWithRecent(message) && !("recent" in message)
+    ? { ...message, recent: isLegacyMetadata(message.metadata) ? message.metadata.recent : "" }
     : message;
 
 /**
- * OpenCode 2.1 moved a compaction's `recent` into `metadata`, while the
- * bundled 2.0.28 schema still requires it at the top level. Lifting it keeps
- * history pages from either server decodable; any other shape still fails
- * downstream as before.
+ * OpenCode 2.1 dropped a compaction's `recent`, while the bundled 2.0.28 schema
+ * still requires it on running and completed compactions. Servers that migrated
+ * a pre-2.1 compaction keep its value under `metadata.recent`; native 2.1
+ * compactions carry `metadata.keepID` or no metadata at all. T3 never reads the
+ * field, so filling the gap keeps history pages from either server decodable
+ * while every other field, including a present but invalid `recent`, still
+ * fails validation downstream as before.
  */
-const liftCompactionRecents = HttpClient.transformResponse(
+const fillCompactionRecents = HttpClient.transformResponse(
   Effect.fnUntraced(function* (
     pending: Effect.Effect<HttpClientResponse.HttpClientResponse, HttpClientError.HttpClientError>,
   ) {
@@ -196,12 +201,12 @@ const liftCompactionRecents = HttpClient.transformResponse(
     const page = decodePage(text);
     // The response caches its body, so the untouched one still decodes downstream.
     if (Option.isNone(page)) return response;
-    const lifted = encodePage({ ...page.value, data: page.value.data.map(liftCompactionRecent) });
-    // The lifted body is longer than the one the server measured.
+    const filled = encodePage({ ...page.value, data: page.value.data.map(fillCompactionRecent) });
+    // The filled body is longer than the one the server measured.
     const { "content-length": _, ...headers } = response.headers;
     return HttpClientResponse.fromWeb(
       request,
-      new Response(lifted, { status: response.status, headers }),
+      new Response(filled, { status: response.status, headers }),
     );
   }),
 );
@@ -216,7 +221,7 @@ export const make = Effect.gen(function* () {
         HttpClientRequest.setHeader("Authorization", basicAuthorization(password)),
       );
       return OpenCode.make({ baseUrl }).pipe(
-        Effect.provideService(HttpClient.HttpClient, liftCompactionRecents(authenticated)),
+        Effect.provideService(HttpClient.HttpClient, fillCompactionRecents(authenticated)),
         Effect.map((client) => ({
           client,
           events: readEvents.pipe(
