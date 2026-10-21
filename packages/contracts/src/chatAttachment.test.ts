@@ -12,6 +12,25 @@ import {
 const decodeAttachment = Schema.decodeUnknownEffect(ChatAttachment);
 const decodeSnapShotAccessibility = Schema.decodeUnknownEffect(SnapShotAccessibility);
 
+it.effect("accepts SVG as a file attachment without relaxing the file upload limit", () =>
+  Effect.gen(function* () {
+    const svg = {
+      type: "file",
+      id: "thread-1-00000000-0000-4000-8000-000000000003-svg",
+      name: "diagram.svg",
+      mimeType: "image/svg+xml",
+      sizeBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES,
+    };
+    const attachment = yield* decodeAttachment(svg);
+    assert.strictEqual(attachment.type, "file");
+    assert.strictEqual(attachment.mimeType, "image/svg+xml");
+    const oversized = yield* Effect.exit(
+      decodeAttachment({ ...svg, sizeBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES + 1 }),
+    );
+    assert.strictEqual(Exit.isFailure(oversized), true);
+  }),
+);
+
 it.effect("tolerates attachment types from newer builds", () =>
   Effect.gen(function* () {
     const attachment = yield* decodeAttachment({

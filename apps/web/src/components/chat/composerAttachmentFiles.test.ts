@@ -10,6 +10,39 @@ import {
 } from "./composerAttachmentFiles";
 
 describe("composer attachment files", () => {
+  it("handles SVG clipboard files with the same text-paste behavior as ordinary files", () => {
+    const file = new File(['<svg xmlns="http://www.w3.org/2000/svg"/>'], "diagram.svg", {
+      type: "image/svg+xml",
+    });
+
+    expect(shouldHandleComposerAttachmentPaste({ files: [file], plainText: "" })).toBe(true);
+    expect(shouldHandleComposerAttachmentPaste({ files: [file], plainText: "Copied text" })).toBe(
+      false,
+    );
+  });
+
+  it("keeps the hard upload limit even when the server advertises a larger limit", () => {
+    const capability = {
+      attachmentUploadsCapabilityKnown: true,
+      supportsAttachmentUploads: true,
+      maxFileAttachmentBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES * 2,
+    };
+
+    expect(
+      fileAttachmentCapabilityBlockReason({
+        ...capability,
+        files: [{ name: "archive.zip", sizeBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES }],
+      }),
+    ).toBeNull();
+    const reason = fileAttachmentCapabilityBlockReason({
+      ...capability,
+      files: [{ name: "archive.zip", sizeBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES + 1 }],
+    });
+    expect(reason).toContain("archive.zip");
+    expect(reason).toContain("50 MB");
+    expect(reason).toMatch(/path/i);
+  });
+
   it("preserves text paste when an application adds a synthetic generic file", () => {
     const file = new File(["clipboard"], "clipboard.rtf", { type: "application/rtf" });
 
