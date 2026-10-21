@@ -1,11 +1,76 @@
-import sqlite3,json,sys
-c=sqlite3.connect(sys.argv[1]); c.row_factory=sqlite3.Row
-r=c.execute('select * from orchestration_v2_projection_runs limit 1').fetchone(); run=json.loads(r['payload_json']); tid=r['thread_id']; pid=run['providerThreadId']
-p=json.loads(c.execute('select payload_json from orchestration_v2_projection_provider_threads where provider_thread_id=?',(pid,)).fetchone()[0]);p['goal']={'objective':'Check the composer banners','status':'active','tokensUsed':1200,'tokenBudget':10000}
-c.execute('update orchestration_v2_projection_provider_threads set payload_json=? where provider_thread_id=?',(json.dumps(p),pid))
-t=json.loads(c.execute('select payload_json from orchestration_v2_projection_threads where thread_id=?',(tid,)).fetchone()[0]);t['title']='Composer banner shadow';t['settledAt']=None;t['settledOverride']=None
-c.execute('update orchestration_v2_projection_threads set title=?,payload_json=? where thread_id=?',(t['title'],json.dumps(t),tid))
-plan={'id':'issue-22819-tasks','threadId':tid,'runId':run['id'],'nodeId':run['rootNodeId'],'kind':'todo_list','status':'active','steps':[{'id':'one','text':'Inspect the banners','status':'completed'},{'id':'two','text':'Compare the shadow','status':'pending'},{'id':'three','text':'Capture the composer','status':'pending'}]}
-c.execute('insert or replace into orchestration_v2_projection_plans values (?,?,?,?,?,?,?)',(plan['id'],tid,run['id'],plan['nodeId'],plan['kind'],plan['status'],json.dumps(plan)))
-c.execute("update orchestration_v2_projection_messages set payload_json=json_set(payload_json, '$.text', 'Inspect the goal and task banners above the composer.') where thread_id=?", (tid,))
-c.commit();print(tid)
+"""Seed rendering projections in a stopped worktree's copied dev database.
+
+Run from the worktree after migrate-dev-db, with its dev server stopped:
+    python3 scripts/fixtures/composer-banner-shadow.py
+Requires a completed Claude run. This fixture does not prove orchestration.
+"""
+
+import json
+import sqlite3
+from pathlib import Path
+
+
+database = Path.cwd() / ".t3/userdata/statev2.sqlite"
+if not database.is_file():
+    raise SystemExit("Seed this worktree's .t3 with migrate-dev-db first.")
+
+with sqlite3.connect(database) as connection:
+    row = connection.execute(
+        """SELECT r.payload_json, p.payload_json, t.payload_json
+        FROM orchestration_v2_projection_runs r
+        JOIN orchestration_v2_projection_provider_threads p
+          ON p.provider_thread_id = json_extract(r.payload_json, '$.providerThreadId')
+        JOIN orchestration_v2_projection_threads t ON t.thread_id = r.thread_id
+        WHERE r.status = 'completed' AND p.driver = 'claudeAgent'
+          AND t.active_provider_thread_id = p.provider_thread_id
+        ORDER BY r.rowid LIMIT 1"""
+    ).fetchone()
+    if row is None:
+        raise SystemExit("The copied dev database needs a completed Claude run.")
+
+    run, provider_thread, thread = map(json.loads, row)
+    thread_id = thread["id"]
+    provider_thread["goal"] = {
+        "objective": "Check the composer banners",
+        "status": "active",
+        "tokensUsed": 1200,
+        "tokenBudget": 10000,
+    }
+    connection.execute(
+        "UPDATE orchestration_v2_projection_provider_threads SET payload_json=? "
+        "WHERE provider_thread_id=?",
+        (json.dumps(provider_thread), provider_thread["id"]),
+    )
+    thread.update(title="Composer banner shadow", settledAt=None, settledOverride=None)
+    connection.execute(
+        "UPDATE orchestration_v2_projection_threads SET title=?, payload_json=? "
+        "WHERE thread_id=?",
+        (thread["title"], json.dumps(thread), thread_id),
+    )
+    plan = {
+        "id": "composer-banner-shadow-tasks",
+        "threadId": thread_id,
+        "runId": run["id"],
+        "nodeId": run["rootNodeId"],
+        "kind": "todo_list",
+        "status": "active",
+        "steps": [
+            {"id": "one", "text": "Inspect the banners", "status": "completed"},
+            {"id": "two", "text": "Compare the shadow", "status": "pending"},
+            {"id": "three", "text": "Capture the composer", "status": "pending"},
+        ],
+    }
+    connection.execute(
+        """INSERT OR REPLACE INTO orchestration_v2_projection_plans
+        (plan_id, thread_id, run_id, node_id, kind, status, payload_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (plan["id"], thread_id, run["id"], plan["nodeId"], "todo_list", "active", json.dumps(plan)),
+    )
+    connection.execute(
+        """UPDATE orchestration_v2_projection_messages SET payload_json=
+        json_set(payload_json, '$.text', 'Inspect the goal and task banners above the composer.')
+        WHERE thread_id=?""",
+        (thread_id,),
+    )
+
+print(thread_id)
