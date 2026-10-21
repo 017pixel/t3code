@@ -412,6 +412,127 @@ const claudeUnrelatedChildren = [
 ];
 
 describe("AcpRegistryAdapterV2", () => {
+  it.effect("queues a user prompt rejected as busy after the preceding turn completes", () =>
+    Effect.gen(function* () {
+      const busy =
+        "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion.";
+      const session = yield* openClaudeReplaySession(
+        [
+          {
+            type: "expect_outbound",
+            frame: { kind: "request", method: "initialize", params: "<any>" },
+          },
+          {
+            type: "emit_inbound",
+            frame: {
+              kind: "response",
+              method: "initialize",
+              result: {
+                protocolVersion: 1,
+                agentInfo: { name: "issue-22660-fake-busy-agent", version: "1.0.0" },
+                agentCapabilities: {},
+                authMethods: [],
+              },
+            },
+          },
+          {
+            type: "expect_outbound",
+            frame: { kind: "request", method: "session/new", params: "<any>" },
+          },
+          {
+            type: "emit_inbound",
+            frame: {
+              kind: "response",
+              method: "session/new",
+              result: { sessionId: CLAUDE_ROOT_SESSION },
+            },
+          },
+          {
+            type: "expect_outbound",
+            frame: { kind: "request", method: "session/prompt", params: "<any>" },
+          },
+          claudeFrames.update(CLAUDE_ROOT_SESSION, {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "Press the key once more, waiting up to 4 minutes." },
+          }),
+          {
+            type: "emit_inbound",
+            frame: {
+              kind: "response",
+              method: "session/prompt",
+              result: { stopReason: "end_turn" },
+            },
+          },
+          {
+            type: "expect_outbound",
+            frame: {
+              kind: "request",
+              method: "session/prompt",
+              params: {
+                sessionId: CLAUDE_ROOT_SESSION,
+                prompt: [{ type: "text", text: "<any>нажал<any>" }],
+              },
+            },
+          },
+          {
+            type: "emit_inbound",
+            frame: {
+              kind: "response",
+              method: "session/prompt",
+              error: { code: -32603, message: busy },
+            },
+          },
+          {
+            type: "expect_outbound",
+            frame: {
+              kind: "request",
+              method: "session/prompt",
+              params: {
+                sessionId: CLAUDE_ROOT_SESSION,
+                prompt: [{ type: "text", text: "<any>нажал<any>" }],
+              },
+            },
+          },
+          claudeFrames.update(CLAUDE_ROOT_SESSION, {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "Received your confirmation." },
+          }),
+          {
+            type: "emit_inbound",
+            frame: {
+              kind: "response",
+              method: "session/prompt",
+              result: { stopReason: "end_turn" },
+            },
+          },
+        ],
+        undefined,
+        false,
+      );
+      yield* session.runtime.startTurn(session.turnInput(1));
+      const first = yield* session.terminal;
+      assert.equal(first.status, "completed");
+      const next = session.turnInput(2);
+      yield* session.runtime.startTurn({ ...next, message: { ...next.message, text: "нажал" } });
+      const events = yield* session.until((event) => event.type === "turn.terminal");
+      const second = events.at(-1)!;
+      assert.equal(second.type, "turn.terminal");
+      if (second.type !== "turn.terminal") throw new Error("Missing terminal");
+      assert.equal(second.status, "completed");
+      assert.isNull(second.failure);
+      assert.equal(second.runOrdinal, 2);
+      assert.equal(second.threadDisposition, "reusable");
+      assert.isTrue(
+        events.some(
+          (event) =>
+            event.type === "message.updated" &&
+            event.message.text === "Received your confirmation.",
+        ),
+        "the queued prompt must reach the agent and publish its reply",
+      );
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
   it("preserves and sanitizes structured ACP errors without exposing arbitrary defects", () => {
     const limit = new EffectAcpErrors.AcpRequestError({
       code: -31001,
