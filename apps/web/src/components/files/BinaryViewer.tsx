@@ -215,12 +215,11 @@ export default function BinaryViewer(props: {
             <div className="min-w-0 flex-1">
               <Select
                 value={selectedTable}
-                disabled={busy}
                 onValueChange={(value) => {
-                  if (value !== null) selectPage(0, value);
+                  if (!busy && value !== null) selectPage(0, value);
                 }}
               >
-                <SelectTrigger aria-label="Table" size="xs">
+                <SelectTrigger aria-label="Table" aria-disabled={busy} aria-busy={busy} size="xs">
                   <SelectValue>
                     {table.name} ({table.count.toLocaleString()} rows)
                   </SelectValue>
