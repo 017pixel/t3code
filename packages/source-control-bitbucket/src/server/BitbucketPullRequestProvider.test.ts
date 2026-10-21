@@ -67,6 +67,29 @@ it.effect.each([
 
     expect(detail).toMatchObject({ number: 897, headBranch: "feat/page" });
     expect(detail.headSha).toBe(headSha);
+
+    const previewProvider = yield* make.pipe(
+      Effect.provide(
+        Layer.mock(BitbucketPullRequestApi.BitbucketPullRequestApi)({
+          getPullRequest: () => Effect.succeed(pullRequest),
+        }),
+      ),
+    );
+    const preview = yield* previewProvider.getChangeRequestPreview!({
+      cwd: "/repo",
+      repository: "acme/web",
+      host: "bitbucket.org",
+      number: 897,
+    });
+    expect(preview).toEqual({
+      number: detail.number,
+      title: detail.title,
+      url: detail.url,
+      author: detail.author,
+      state: detail.state,
+      isDraft: detail.isDraft,
+      createdAt: detail.createdAt,
+    });
   }),
 );
 
