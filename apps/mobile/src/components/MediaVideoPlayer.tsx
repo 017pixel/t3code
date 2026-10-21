@@ -19,6 +19,7 @@ function LoadedMediaVideo(props: {
   readonly resolvePlaybackUri?: () => Promise<string | null>;
   readonly playRequested: boolean;
   readonly paused: boolean;
+  readonly onPlaybackStart?: () => void;
 }) {
   const focused = useIsFocused();
   const fullscreenVideoOpen = useFullscreenVideoOpen();
@@ -33,6 +34,7 @@ function LoadedMediaVideo(props: {
     player.bufferOptions = { preferredForwardBufferDuration: 5 };
   });
   const playback = useMemo(() => createAudioPlaybackSession(player, true), [player]);
+  const onPlaybackStart = useEffectEvent(() => props.onPlaybackStart?.());
   useEffect(() => {
     const subscription = player.addListener("playingChange", ({ isPlaying }) => {
       if (isPlaying && !active.current && !fullscreen.current) playback.pause();
@@ -42,7 +44,10 @@ function LoadedMediaVideo(props: {
       if (!isPlaybackRequested) {
         if (playback.requested) playback.pause();
       } else if (!active.current && !fullscreen.current) playback.pause();
-      else playback.playingChanged(true);
+      else {
+        onPlaybackStart();
+        playback.playingChanged(true);
+      }
     });
     const ended = player.addListener("playToEnd", () => playback.pause());
     const failed = player.addListener("statusChange", ({ status }) => {
@@ -165,6 +170,7 @@ function MediaVideoPlayerContent(props: MediaVideoPlayerProps) {
           resolvePlaybackUri={props.resolvePlaybackUri}
           playRequested={!props.expanded || props.autoPlay === true}
           paused={(props.paused ?? false) || mediaActions.sharing}
+          onPlaybackStart={props.onPlaybackStart}
         />
       ) : (
         <MediaActionsMenu media={mediaActions} inModal={props.expanded} style={{ flex: 1 }}>
