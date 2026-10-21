@@ -13,7 +13,7 @@ import {
 
 import { RelativeTime } from "~/components/RelativeTime";
 import { pullRequestEnvironment } from "~/state/pullRequests";
-import { useAtomCommand } from "~/state/use-atom-command";
+import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 import { useEnvironmentQuery } from "~/state/query";
 
 import { PreviewCard, PreviewCardPopup, PreviewCardTrigger } from "../ui/preview-card";
@@ -51,13 +51,13 @@ export function PullRequestLinkPreview({
   const [resolvingClick, setResolvingClick] = useState(false);
   const previewQuery = useEnvironmentQuery(
     open
-      ? pullRequestEnvironment.preview({
+      ? pullRequestEnvironment.previewCard({
           environmentId: target.environmentId,
           input: target.input,
         })
       : null,
   );
-  const readPreview = useAtomCommand(pullRequestEnvironment.resolvePreview, {
+  const readPreview = useAtomQueryRunner(pullRequestEnvironment.preview, {
     reportFailure: false,
     reportDefect: false,
   });
