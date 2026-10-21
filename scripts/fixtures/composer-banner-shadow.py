@@ -72,5 +72,12 @@ with sqlite3.connect(database) as connection:
         WHERE thread_id=?""",
         (thread_id,),
     )
+    connection.execute(
+        """UPDATE orchestration_v2_projection_turn_items SET payload_json=
+        json_set(payload_json, '$.text', 'Inspect the goal and task banners above the composer.')
+        WHERE thread_id=? AND json_extract(payload_json, '$.type')
+        IN ('user_message', 'assistant_message')""",
+        (thread_id,),
+    )
 
 print(thread_id)
