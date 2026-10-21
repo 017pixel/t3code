@@ -30,3 +30,10 @@ Provider catalog details are supplied by the environment; this seed does not
 change provider settings or credentials. V08's multiple-instance badge and
 matching catalog speed option require an appropriate synthetic provider catalog
 and are not proved by these rows alone.
+
+Projection-only SQL does not advance the event cursor. When reusing a Browser
+profile across revisions, leave the fixture route, discard only cached `thread`
+entries whose key contains `visual-15429-` from the `t3code:connection-runtime`
+IndexedDB database, then reload the fixture route. Otherwise a warm client can
+retain a baseline snapshot at the same cursor. Do not clear the catalog, auth,
+server configuration or unrelated thread caches.

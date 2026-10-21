@@ -64,7 +64,7 @@ with c:
         payload('messages',message,dict(message_id=message['id'],thread_id=tid,run_id=rid,node_id=node,role='user',streaming=0,created_at=T,updated_at=T))
         items=[dict(base,id=tid+'-user',ordinal=1000001,type='user_message',messageId=message['id'],inputIntent='turn_start',text=message['text'],attachments=[],createdBy='user',creationSource='web')]
         if case.get('caller')=='notification':
-            items.append(dict(base,id=tid+'-notification',ordinal=1000002,type='notification',source=dict(kind='background_task',work='subagent',childThreadId=child),outcome='completed'))
+            items.append(dict(base,id=tid+'-notification',ordinal=1000002,type='notification',source=dict(kind='background_task',work='subagent',childThreadId=child),outcome='completed',summary='Synthetic subagent completed.'))
         else:
             items.append(dict(base,id=tid+'-item',ordinal=1000002,type='subagent',nodeId=aid,subagentId=aid,origin=agent['origin'],driver=agent['driver'],providerInstanceId=agent['providerInstanceId'],childThreadId=child,prompt=agent['prompt'],result=agent['result'],title=agenttitle,status=status,startedAt=agent['startedAt'],completedAt=agent['completedAt'],**({'progress':case['progress']} if 'progress' in case else {})))
         for item in items:
