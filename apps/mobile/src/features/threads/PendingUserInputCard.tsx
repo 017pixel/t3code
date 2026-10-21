@@ -1,7 +1,10 @@
 import { Button } from "../../components/ui/Button";
 import { QuestionAttachments } from "./QuestionAttachments";
 import type { RuntimeRequestId } from "@t3tools/contracts";
-import type { ThreadUserInputQuestion } from "@t3tools/client-runtime/state/thread-requests";
+import {
+  isGenericUserInputQuestionHeader,
+  type ThreadUserInputQuestion,
+} from "@t3tools/client-runtime/state/thread-requests";
 import { useCallback, useRef } from "react";
 import { Platform, Pressable, ScrollView, View, type LayoutChangeEvent } from "react-native";
 import Animated, {
@@ -66,9 +69,8 @@ const EXPANDED_CARD_IS_OVERLAY = Platform.OS === "ios";
 
 const CARD_LAYOUT_TRANSITION = LinearTransition.duration(200);
 
-function QuestionText(props: { readonly markdown: string }) {
-  // The question is context for the options below it, so it reads as secondary text.
-  const styles = useMarkdownPreviewStyles("secondary");
+function QuestionText(props: { readonly markdown: string; readonly tone: "body" | "secondary" }) {
+  const styles = useMarkdownPreviewStyles(props.tone);
   const openLink = useOpenPullRequest();
   return (
     <SelectableMarkdownText
@@ -239,12 +241,21 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
         ) : null}
         {props.pendingUserInput.questions.map((question) => {
           const draft = props.drafts[question.id];
+          const showHeader = !isGenericUserInputQuestionHeader(question.header);
           return (
             <View key={question.id} className="gap-2 pt-1">
-              <QuestionText markdown={question.question} />
-              <View className="h-px bg-separator" />
               <View className="gap-0.5">
-                {question.options.map((option, index) => {
+                {showHeader ? (
+                  <Text className="font-t3-bold text-sm text-foreground">{question.header}</Text>
+                ) : null}
+                {/* Under a title the question is context; without one it leads. */}
+                <QuestionText
+                  markdown={question.question}
+                  tone={showHeader ? "secondary" : "body"}
+                />
+              </View>
+              <View className="gap-0.5">
+                {question.options.map((option) => {
                   const optionValue = option.value ?? option.label.trim();
                   const selected = isPendingUserInputOptionSelected(question, draft, optionValue);
                   const description =
@@ -257,7 +268,7 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
                       disabled={responseDisabled}
                       className={cn(
                         "min-h-12 w-full flex-row items-center gap-3 rounded-xl px-2 py-2",
-                        selected ? "bg-black/5" : "active:bg-row-hover",
+                        selected ? "bg-grouped-card" : "active:bg-row-hover",
                       )}
                       onPress={() =>
                         props.onSelectOption(
@@ -267,36 +278,30 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
                         )
                       }
                     >
-                      <View
-                        accessibilityElementsHidden
-                        importantForAccessibility="no-hide-descendants"
-                        className={cn(
-                          "size-6 items-center justify-center rounded-md border",
-                          selected ? "border-primary bg-primary" : "border-border bg-subtle",
-                        )}
-                      >
-                        {selected ? (
-                          <SymbolView
-                            name="checkmark"
-                            size={12}
-                            tintColorClassName="accent-primary-foreground"
-                            type="monochrome"
-                            weight="bold"
-                          />
-                        ) : (
-                          <Text className="font-t3-bold text-2xs text-foreground-muted">
-                            {index + 1}
-                          </Text>
-                        )}
-                      </View>
                       <View className="min-w-0 flex-1 gap-0.5">
-                        <Text className="font-t3-bold text-sm text-foreground">{option.label}</Text>
+                        <Text className="font-t3-medium text-sm text-foreground">
+                          {option.label}
+                        </Text>
                         {description ? (
                           <Text className="font-sans text-xs text-foreground-muted">
                             {description}
                           </Text>
                         ) : null}
                       </View>
+                      {selected ? (
+                        <View
+                          accessibilityElementsHidden
+                          importantForAccessibility="no-hide-descendants"
+                        >
+                          <SymbolView
+                            name="checkmark"
+                            size={16}
+                            tintColorClassName="accent-primary-text"
+                            type="monochrome"
+                            weight="bold"
+                          />
+                        </View>
+                      ) : null}
                     </Pressable>
                   );
                 })}

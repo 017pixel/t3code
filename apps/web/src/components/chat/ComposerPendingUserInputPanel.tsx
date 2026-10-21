@@ -257,16 +257,21 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
               <span className="w-(--composer-banner-icon-column)" />
               {prompt.dismissible ? <span className="w-(--composer-banner-icon-column)" /> : null}
             </span>
+            {showHeader ? (
+              <p className="text-sm/5 font-semibold text-foreground">{activeQuestion.header}</p>
+            ) : null}
             <ChatMarkdown
               text={activeQuestion.question}
               cwd={cwd}
               threadRef={threadRef}
-              className="text-xs/5 text-secondary-label"
+              className={
+                showHeader ? "text-xs/5 text-secondary-label" : "text-sm/5 text-foreground/85"
+              }
             />
             {activeQuestion.multiSelect ? (
               <p className="mt-1 text-secondary-label text-xs">Select one or more options.</p>
             ) : null}
-            <div className="mt-2 space-y-0.5 border-t border-border/60 pt-1.5">
+            <div className="mt-2 space-y-0.5">
               {activeQuestion.options.map((option, index) => {
                 const optionValue = option.value ?? option.label;
                 const isOptimisticallySelected =
@@ -284,30 +289,29 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                       handleOptionSelection(activeQuestion.id, optionValue);
                     }}
                     className={cn(
-                      "flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-foreground outline-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary/25",
-                      // A black overlay darkens the row on every theme surface, light or dark.
+                      "flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left outline-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary/25",
                       isSelected
-                        ? "bg-black/[0.045] dark:bg-black/20"
-                        : "bg-transparent hover:bg-muted/30",
+                        ? "bg-muted/55 text-foreground"
+                        : "bg-transparent text-foreground/85 hover:bg-muted/30",
                       (disabled || isResponding) && "opacity-50 cursor-not-allowed",
                       !disabled && !isResponding && "cursor-pointer",
                     )}
                   >
-                    <kbd
-                      data-pending-user-input-option-key
-                      className={cn(
-                        "flex size-5 shrink-0 items-center justify-center rounded border font-sans text-3xs font-medium tabular-nums transition-colors duration-150",
-                        isSelected
-                          ? "border-primary bg-primary text-primary-foreground"
-                          : "border-border bg-muted text-muted-foreground",
-                      )}
-                    >
-                      {isSelected ? <CheckIcon aria-hidden className="size-3" /> : index + 1}
-                    </kbd>
                     <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                      <span className="text-sm font-semibold">{option.label}</span>
+                      <span className="text-sm font-medium">{option.label}</span>
                       {option.description && option.description !== option.label ? (
                         <span className="text-secondary-label text-2xs">{option.description}</span>
+                      ) : null}
+                    </span>
+                    {/* The number and the check share one fixed box so selecting never resizes the row. */}
+                    <span
+                      data-pending-user-input-option-key
+                      className="flex size-5 shrink-0 items-center justify-center text-3xs font-medium text-muted-foreground tabular-nums"
+                    >
+                      {isSelected ? (
+                        <CheckIcon aria-hidden className="size-4 text-primary" strokeWidth={3} />
+                      ) : index < 9 ? (
+                        index + 1
                       ) : null}
                     </span>
                   </button>

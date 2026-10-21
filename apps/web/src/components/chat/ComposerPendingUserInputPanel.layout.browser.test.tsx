@@ -92,7 +92,7 @@ it("keeps a long question header inside the collapsed trigger row", async () => 
   });
 });
 
-it("selects an option without resizing its row or keycap", async () => {
+it("selects an option by swapping its number for a check without resizing the row", async () => {
   await renderPanel({ header: "Strategy" }, async (container, rerender) => {
     const measure = () => {
       const row = container.querySelector<HTMLElement>("button[aria-pressed]")!;
@@ -102,11 +102,17 @@ it("selects an option without resizing its row or keycap", async () => {
         key: key.getBoundingClientRect().toJSON(),
       };
     };
+    const key = () => container.querySelector("[data-pending-user-input-option-key]")!;
     const unselected = measure();
+    const rowRect = container.querySelector("button[aria-pressed]")!.getBoundingClientRect();
+    // The indicator trails the label at the row's right edge.
+    expect(unselected.key.left).toBeGreaterThan(rowRect.left + rowRect.width / 2);
+    expect(key().textContent).toBe("1");
     await rerender({ strategy: { selectedOptionValues: ["Rolling"] } });
     expect(container.querySelector("button[aria-pressed]")?.getAttribute("aria-pressed")).toBe(
       "true",
     );
+    expect(key().querySelector("svg")).not.toBeNull();
     expect(measure()).toEqual(unselected);
   });
 });
@@ -114,43 +120,60 @@ it("selects an option without resizing its row or keycap", async () => {
 it.each([
   ["mobile", 414],
   ["sm", 1024],
-])("centers the question and options inside the banner surface at %s width", async (_, width) => {
-  await page.viewport(width, 900);
-  const longQuestion = "Explain which rollout you prefer and why it fits this service. ".repeat(40);
-  for (const question of ["Pick one.", longQuestion]) {
-    await renderPanel({ header: "Strategy", question }, async (container) => {
-      const viewport = container.querySelector("[data-slot=scroll-area-viewport]")!;
-      if (question === longQuestion) {
-        await vi.waitFor(() => expect(viewport.hasAttribute("data-has-overflow-y")).toBe(true));
-      } else {
-        expect(viewport.hasAttribute("data-has-overflow-y")).toBe(false);
-      }
-      const surface = container.querySelector("[data-slot=composer-banner]")!;
-      const bounds = surface.getBoundingClientRect();
-      const gaps = (element: Element) => {
-        const rect = element.getBoundingClientRect();
-        return { left: rect.left - bounds.left, right: bounds.right - rect.right };
-      };
-      const row = gaps(container.querySelector("button[aria-pressed]")!);
-      expect(row.left).toBeCloseTo(16, 0);
-      expect(row.right).toBeCloseTo(row.left, 0);
-      expect(gaps(container.querySelector("p")!)).toEqual(row);
-    });
-  }
-});
+])(
+  "aligns the title, question and options inside the banner surface at %s width",
+  async (_, width) => {
+    await page.viewport(width, 900);
+    const longQuestion = "Explain which rollout you prefer and why it fits this service. ".repeat(
+      40,
+    );
+    for (const question of ["Pick one.", longQuestion]) {
+      await renderPanel({ header: "Strategy", question }, async (container) => {
+        const viewport = container.querySelector("[data-slot=scroll-area-viewport]")!;
+        if (question === longQuestion) {
+          await vi.waitFor(() => expect(viewport.hasAttribute("data-has-overflow-y")).toBe(true));
+        } else {
+          expect(viewport.hasAttribute("data-has-overflow-y")).toBe(false);
+        }
+        const surface = container.querySelector("[data-slot=composer-banner]")!;
+        const bounds = surface.getBoundingClientRect();
+        const gaps = (element: Element) => {
+          const rect = element.getBoundingClientRect();
+          return { left: rect.left - bounds.left, right: bounds.right - rect.right };
+        };
+        const row = gaps(container.querySelector("button[aria-pressed]")!);
+        expect(row.left).toBeCloseTo(16, 0);
+        expect(row.right).toBeCloseTo(row.left, 0);
+        const [title, questionParagraph] = container.querySelectorAll("p");
+        expect(gaps(title!)).toEqual(row);
+        expect(gaps(questionParagraph!)).toEqual(row);
+      });
+    }
+  },
+);
 
 it.each([
-  ["generic", "Question", "Pick one."],
-  ["distinct", "Strategy", "StrategyPick one."],
+  ["generic", "Question", ["Pick one."], "Pick one."],
+  ["distinct", "Strategy", ["Strategy", "Pick one."], "StrategyPick one."],
 ])(
-  "leads with the question while expanded and summarizes a %s header when collapsed",
-  async (_, header, collapsedText) => {
+  "leads with the %s header's content while expanded and summarizes it when collapsed",
+  async (_, header, expandedLines, collapsedText) => {
     await renderPanel({ header }, async (container) => {
       const trigger = container.querySelector<HTMLElement>("[data-pending-user-input-toggle]")!;
+      const paragraphs = () => [...container.querySelectorAll("p")];
       expect(trigger.dataset.pendingUserInputToggle).toBe("expanded");
       expect(trigger.textContent).toBe("");
       expect(trigger.getAttribute("aria-label")).toBe("Hide the question and its options");
-      expect(container.querySelector("p")?.textContent).toBe("Pick one.");
+      expect(paragraphs().map((paragraph) => paragraph.textContent)).toEqual(expandedLines);
+      // Whatever leads is set at the primary 14px size; a question under a title steps down.
+      const [lead, ...rest] = paragraphs();
+      expect(getComputedStyle(lead!).fontSize).toBe("14px");
+      for (const paragraph of rest) {
+        expect(paragraph.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+          lead!.getBoundingClientRect().bottom,
+        );
+        expect(Number.parseFloat(getComputedStyle(paragraph).fontSize)).toBeLessThan(14);
+      }
 
       await act(async () => trigger.click());
       expect(trigger.dataset.pendingUserInputToggle).toBe("collapsed");
@@ -164,25 +187,31 @@ it.each([
 );
 
 it.each([
-  ["mobile", 414],
-  ["sm", 1024],
+  ["generic header", "mobile", 414],
+  ["generic header", "sm", 1024],
+  ["title", "mobile", 414],
+  ["title", "sm", 1024],
 ])(
-  "starts the question beside the actions without overlapping them at %s width",
-  async (_, width) => {
+  "starts the leading %s beside the actions without overlapping them at %s width",
+  async (lead, _, width) => {
     await page.viewport(width, 900);
     // One unbreakable run fills every line, so only the first line's width reflects the actions.
+    const run = "x".repeat(200);
     await renderPanel(
-      { header: "Strategy", question: "x".repeat(200), questionCount: 3 },
+      lead === "title"
+        ? { header: run, question: "Pick one.", questionCount: 3 }
+        : { header: "Question", question: run, questionCount: 3 },
       async (container) => {
         const trigger = container.querySelector<HTMLElement>("[data-pending-user-input-toggle]")!;
         const actions = trigger.querySelector("[data-slot=composer-banner-actions]")!;
         const paragraph = container.querySelector("p")!;
+        expect(paragraph.textContent).toBe(run);
         const range = document.createRange();
         range.selectNodeContents(paragraph);
         const [firstLine, secondLine] = range.getClientRects();
         const actionsRect = actions.getBoundingClientRect();
         const paragraphRect = paragraph.getBoundingClientRect();
-        // The old header strip pushed the question below the whole trigger row.
+        // The old header strip pushed the content below the whole trigger row.
         expect(paragraphRect.top).toBeLessThan(trigger.getBoundingClientRect().bottom);
         const firstLineHeight = Number.parseFloat(getComputedStyle(paragraph).lineHeight);
         expect(paragraphRect.top + firstLineHeight / 2).toBeCloseTo(
