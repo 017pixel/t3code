@@ -158,7 +158,9 @@ export async function trace(environmentId) {
 export async function reset(environmentId) {
   const { appAtomRegistry } = await import("../../src/rpc/atomRegistry.ts");
   const { environmentCatalog } = await import("../../src/connection/catalog.ts");
-  await environmentCatalog.retryNow.run(appAtomRegistry, environmentId);
+  await environmentCatalog.setEnabled.run(appAtomRegistry, { environmentId, enabled: false });
+  await waitState(environmentId, "available");
+  await environmentCatalog.setEnabled.run(appAtomRegistry, { environmentId, enabled: true });
   const deadline = performance.now() + 45000;
   while (performance.now() < deadline) {
     const s = await state(environmentId);
