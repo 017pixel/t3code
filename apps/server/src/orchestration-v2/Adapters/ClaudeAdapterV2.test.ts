@@ -142,6 +142,28 @@ const CUSTOM_MODEL_CLAUDE_SETTINGS = Schema.decodeSync(ClaudeSettings)({
     },
   ],
 });
+const CUSTOM_THINKING_CLAUDE_SETTINGS = Schema.decodeSync(ClaudeSettings)({
+  customModels: [
+    {
+      slug: "claude-sonnet-4-5-20250929",
+      name: "Dated Sonnet",
+      capabilities: {
+        optionDescriptors: [
+          {
+            id: "effort",
+            label: "Effort",
+            type: "select",
+            options: [
+              { id: "low", label: "Low" },
+              { id: "high", label: "High" },
+            ],
+          },
+          { id: "thinking", label: "Thinking", type: "boolean" },
+        ],
+      },
+    },
+  ],
+});
 const CLAUDE_TEST_MODEL_SELECTION = {
   instanceId: ProviderInstanceId.make(ClaudeAdapterV2.CLAUDE_PROVIDER),
   model: "claude-sonnet-4-6",
@@ -2316,6 +2338,89 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
+
+  describe("custom Claude Thinking", () => {
+    const selection = (thinking: boolean): ModelSelection => ({
+      instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
+      model: "claude-sonnet-4-5-20250929",
+      options: [
+        { id: "effort", value: "high" },
+        { id: "thinking", value: thinking },
+      ],
+    });
+
+    it.effect("forwards custom Thinking false and explicit effort to SDK launch", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarnessWithOptions({
+          settings: CUSTOM_THINKING_CLAUDE_SETTINGS,
+        });
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("custom-thinking-launch"),
+            text: "Hello",
+            attachments: [],
+            modelSelection: selection(false),
+          }),
+        );
+        const options = harness.getOpenedOptions();
+        assert.equal(options?.model, "claude-sonnet-4-5-20250929");
+        assert.equal(options?.effort, "high");
+        assert.deepInclude(options?.settings, { alwaysThinkingEnabled: false });
+        assert.notDeepInclude(options?.settings, { showThinkingSummaries: true });
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    );
+
+    it.effect(
+      "reuses unchanged custom Thinking and replaces the query when toggled both ways",
+      () =>
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarnessWithOptions({
+            settings: CUSTOM_THINKING_CLAUDE_SETTINGS,
+            freshQueueOnReopen: true,
+          });
+          const now = yield* DateTime.now;
+          for (const [index, thinking] of [false, false, true, false].entries()) {
+            yield* harness.runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now,
+                attemptId: RunAttemptId.make(`custom-thinking-reuse-${index}`),
+                text: "Continue",
+                attachments: [],
+                providerTurnOrdinal: index + 1,
+                modelSelection: selection(thinking),
+              }),
+            );
+            assert.lengthOf(harness.processQueues, Math.max(1, index));
+            if (index >= 2) {
+              assert.deepInclude(harness.getOpenedOptions()?.settings, {
+                alwaysThinkingEnabled: thinking,
+              });
+              assert.equal(harness.getOpenedOptions()?.effort, "high");
+            }
+            yield* harness.offerAndWait(
+              makeResultFrame({ uuid: `custom-thinking-result-${index}`, result: "Done." }),
+            );
+            yield* Queue.take(harness.terminalReceipts);
+          }
+          assert.lengthOf(harness.offeredMessages, 4);
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+    );
+  });
 
   describe("Claude settings restrictions", () => {
     it.effect("resolves cached managed policy from the configured home through the real SDK", () =>
