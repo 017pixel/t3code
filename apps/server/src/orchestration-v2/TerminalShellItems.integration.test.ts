@@ -16,6 +16,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -45,6 +46,7 @@ const capabilities = {
 };
 
 it.effect.each([
+  "approval query failure after successor dispatch",
   "approval status",
   "approval shell selection",
   "confirmed background",
@@ -56,13 +58,20 @@ it.effect.each([
 ] as const)("runtime mode change and dispatch preserve terminal shell invariants: %s", (check) =>
   Effect.scoped(
     Effect.gen(function* () {
+      const testCapabilities =
+        check === "approval query failure after successor dispatch"
+          ? {
+              ...capabilities,
+              sessions: { ...capabilities.sessions, supportsRuntimeModeSwitchInSession: true },
+            }
+          : capabilities;
       const cwd = yield* checkpointWorkspace("terminal-shell-items");
       const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
       const started: ProviderAdapter.ProviderAdapterV2TurnInput[] = [];
       const adapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
         instanceId,
         driver,
-        getCapabilities: () => Effect.succeed(capabilities),
+        getCapabilities: () => Effect.succeed(testCapabilities),
         planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
         openSession: (input) =>
           Effect.gen(function* () {
@@ -78,7 +87,7 @@ it.effect.each([
                 status: "ready",
                 cwd,
                 model: modelSelection.model,
-                capabilities,
+                capabilities: testCapabilities,
                 createdAt: now,
                 updatedAt: now,
                 lastError: null,
@@ -365,6 +374,301 @@ it.effect.each([
             )?.status,
             "resolved",
           );
+        }
+        if (check === "approval query failure after successor dispatch") {
+          const secondCommand = {
+            ...commandItem,
+            id: TurnItemId.make("item:pending-shell-2"),
+            nodeId: NodeId.make("node:command-2"),
+            nativeItemRef: { ...commandItem.nativeItemRef, nativeId: "shell-native-2" },
+            ordinal: 101,
+          };
+          const secondRequestId = RuntimeRequestId.make("request:pending-shell-2");
+          const secondApprovalNodeId = NodeId.make("node:approval-2");
+          const secondIngested = yield* watch(
+            (event) =>
+              event.type === "runtime-request.updated" && event.payload.id === secondRequestId,
+          );
+          yield* Queue.offerAll(events, [
+            {
+              type: "node.updated",
+              driver,
+              node: {
+                ...commandNode,
+                id: secondCommand.nodeId,
+                nativeItemRef: secondCommand.nativeItemRef,
+              },
+            },
+            { type: "turn_item.updated", driver, turnItem: secondCommand },
+            {
+              type: "node.updated",
+              driver,
+              node: {
+                ...commandNode,
+                id: secondApprovalNodeId,
+                parentNodeId: secondCommand.nodeId,
+                kind: "approval_request",
+                status: "waiting",
+                runtimeRequestId: secondRequestId,
+              },
+            },
+            {
+              type: "turn_item.updated",
+              driver,
+              turnItem: {
+                ...secondCommand,
+                id: TurnItemId.make("item:approval-2"),
+                nodeId: secondApprovalNodeId,
+                type: "approval_request",
+                requestId: secondRequestId,
+                requestKind: "command",
+                status: "waiting",
+              },
+            },
+            {
+              type: "runtime_request.updated",
+              driver,
+              threadId,
+              runtimeRequest: {
+                id: secondRequestId,
+                nodeId: secondApprovalNodeId,
+                providerTurnId: turn.id,
+                nativeRequestRef: null,
+                kind: "command",
+                status: "pending",
+                responseCapability: {
+                  type: "live",
+                  providerSessionId: projection.providerSessions[0]!.id,
+                },
+                createdAt: now,
+                resolvedAt: null,
+              },
+            },
+          ]);
+          yield* Fiber.join(secondIngested);
+          const originals = [commandItem, secondCommand];
+          const requestIds = [requestId, secondRequestId];
+          const assertBlocked = (state: typeof projection) => {
+            assert.equal(state.runs.find((run) => run.id === first.runId)?.status, "running");
+            for (const original of originals) {
+              assert.equal(
+                state.turnItems.find((item) => item.id === original.id)?.status,
+                "running",
+              );
+            }
+            for (const id of requestIds) {
+              assert.equal(
+                state.runtimeRequests.find((request) => request.id === id)?.status,
+                "pending",
+              );
+            }
+          };
+          assertBlocked(yield* orchestrator.getThreadProjection(threadId));
+          yield* orchestrator.dispatch({
+            type: "thread.runtime-mode.set",
+            commandId: CommandId.make("incident-change-mode"),
+            threadId,
+            runtimeMode: "auto",
+          });
+          yield* worker.drain();
+          assertBlocked(yield* orchestrator.getThreadProjection(threadId));
+          const closeQuery = yield* Deferred.make<void>();
+          const failed = yield* watch(
+            (event) =>
+              event.type === "run.updated" &&
+              event.payload.id === first.runId &&
+              event.payload.status === "failed",
+          );
+          const successorRunning = yield* watch(
+            (event) =>
+              event.type === "provider-turn.updated" &&
+              event.payload.runAttemptId !== first.attemptId &&
+              event.payload.status === "running",
+          );
+          // Simulate the provider closing its query in response to the successor
+          // dispatch, with a latch so both approvals are observed pending first.
+          const queryClosed = yield* Effect.gen(function* () {
+            yield* Deferred.await(closeQuery);
+            yield* Queue.offerAll(events, [
+              {
+                type: "provider_turn.updated",
+                driver,
+                providerTurn: { ...turn, status: "failed", completedAt: now },
+              },
+              {
+                type: "turn.terminal",
+                driver,
+                providerThreadId: turn.providerThreadId,
+                providerTurnId: turn.id,
+                runOrdinal: first.runOrdinal,
+                status: "failed",
+                failureItemOrdinal: 200,
+                failure: {
+                  class: "provider_error",
+                  message: "Query closed after successor dispatch",
+                  code: null,
+                  retryable: null,
+                },
+                threadDisposition: "reusable",
+              },
+            ]);
+          }).pipe(Effect.forkScoped);
+          yield* dispatch("incident-successor");
+          const dispatched = yield* orchestrator.getThreadProjection(threadId);
+          assertBlocked(dispatched);
+          assert.equal(
+            dispatched.runs.find(
+              (run) => run.userMessageId === MessageId.make("message:incident-successor"),
+            )?.status,
+            "queued",
+          );
+          yield* Deferred.succeed(closeQuery, undefined);
+          yield* Fiber.join(queryClosed);
+          yield* Fiber.join(failed);
+          yield* worker.drain();
+          // A provider error holds queued work; resume the already-dispatched
+          // successor rather than sending another message after the failure.
+          yield* orchestrator.dispatch({
+            type: "queue.resume",
+            commandId: CommandId.make("resume-incident-successor"),
+            threadId,
+          });
+          yield* worker.drain();
+          assert.equal(started.length, 2);
+          yield* Fiber.join(successorRunning);
+          const successor = started[1]!;
+          assert.equal(successor.runtimePolicy.runtimeMode, "auto");
+          assert.equal(successor.message.messageId, MessageId.make("message:incident-successor"));
+          const successorProjection = yield* orchestrator.getThreadProjection(threadId);
+          assert.equal(
+            successorProjection.runs.find((run) => run.id === successor.runId)?.status,
+            "running",
+          );
+          const successorTurn = successorProjection.providerTurns.find(
+            (candidate) => candidate.runAttemptId === successor.attemptId,
+          )!;
+          for (const [index, original] of originals.entries()) {
+            const replacement = {
+              ...original,
+              id: TurnItemId.make(`item:successor-shell-${index}`),
+              runId: successor.runId,
+              nodeId: NodeId.make(`node:successor-command-${index}`),
+              providerThreadId: successorTurn.providerThreadId,
+              providerTurnId: successorTurn.id,
+              nativeItemRef: { ...original.nativeItemRef, nativeId: `successor-shell-${index}` },
+              status: "running" as const,
+            };
+            const replacementNode = {
+              ...commandNode,
+              id: replacement.nodeId,
+              runId: successor.runId,
+              parentNodeId: successor.rootNodeId,
+              rootNodeId: successor.rootNodeId,
+              providerThreadId: successorTurn.providerThreadId,
+              providerTurnId: successorTurn.id,
+              nativeItemRef: replacement.nativeItemRef,
+            };
+            const completed = yield* watch(
+              (event) =>
+                event.type === "turn-item.updated" &&
+                event.payload.id === replacement.id &&
+                event.payload.status === "completed",
+            );
+            yield* Queue.offerAll(events, [
+              { type: "node.updated", driver, node: replacementNode },
+              { type: "turn_item.updated", driver, turnItem: replacement },
+              {
+                type: "node.updated",
+                driver,
+                node: { ...replacementNode, status: "completed", completedAt: now },
+              },
+              {
+                type: "turn_item.updated",
+                driver,
+                turnItem: { ...replacement, status: "completed", completedAt: now },
+              },
+            ]);
+            yield* Fiber.join(completed);
+          }
+          const settled = yield* watch(
+            (event) =>
+              event.type === "run.updated" &&
+              event.payload.id === successor.runId &&
+              event.payload.status === "waiting",
+          );
+          yield* Queue.offerAll(events, [
+            {
+              type: "provider_turn.updated",
+              driver,
+              providerTurn: { ...successorTurn, status: "completed", completedAt: now },
+            },
+            {
+              type: "turn.terminal",
+              driver,
+              providerThreadId: successorTurn.providerThreadId,
+              providerTurnId: successorTurn.id,
+              runOrdinal: successor.runOrdinal,
+              status: "completed",
+              failure: null,
+              threadDisposition: "reusable",
+            },
+          ]);
+          yield* Fiber.join(settled);
+          yield* worker.drain();
+          const final = yield* orchestrator.getThreadProjection(threadId);
+          assert.equal(final.runs.find((run) => run.id === first.runId)?.status, "failed");
+          const finished = final.runs.find((run) => run.id === successor.runId)!;
+          assert.equal(finished.status, "completed");
+          assert.isNotNull(finished.completedAt);
+          assert.isNotNull(finished.checkpointId);
+          assert.equal(
+            final.checkpoints.find((checkpoint) => checkpoint.id === finished.checkpointId)?.status,
+            "ready",
+          );
+          for (const [index, original] of originals.entries()) {
+            const cancelled = final.turnItems.find((item) => item.id === original.id)!;
+            assert.equal(cancelled.status, "cancelled");
+            assert.equal(cancelled.toolNonExecutionKind, "cancelled");
+            assert.isNotNull(cancelled.completedAt);
+            assert.equal(
+              final.nodes.find((node) => node.id === original.nodeId)?.status,
+              "cancelled",
+            );
+            assert.equal(
+              final.turnItems.find(
+                (item) => item.id === TurnItemId.make(`item:successor-shell-${index}`),
+              )?.status,
+              "completed",
+            );
+          }
+          for (const id of requestIds) {
+            const request = final.runtimeRequests.find((candidate) => candidate.id === id)!;
+            assert.equal(request.status, "cancelled");
+            assert.isNotNull(request.resolvedAt);
+            assert.equal(request.responseCapability.type, "not_resumable");
+            assert.equal(
+              final.nodes.find((node) => node.id === request.nodeId)?.status,
+              "cancelled",
+            );
+            assert.equal(
+              final.turnItems.find(
+                (item) => item.type === "approval_request" && item.requestId === id,
+              )?.status,
+              "cancelled",
+            );
+          }
+          const freshShell = (yield* projections.getShellSnapshot()).threads.find(
+            (thread) => thread.id === threadId,
+          )!;
+          assert.ok(freshShell);
+          for (const original of originals) {
+            assert.isFalse(
+              (freshShell.pendingBackgroundTasks ?? []).some(
+                (task) => task.taskId === original.nativeItemRef.nativeId,
+              ),
+            );
+          }
+          return;
         }
         const failed = yield* watch(
           (event) =>
