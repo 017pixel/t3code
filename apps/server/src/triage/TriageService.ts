@@ -74,33 +74,26 @@ const make = Effect.gen(function* () {
   // seconds, and the user is writing their description meanwhile.
   const serviceScope = yield* Effect.scope;
 
-  const cloneSource = Effect.fn("TriageService.cloneSource")(function* (ref: string) {
+  // Fetches the exact commit `ls-remote` resolved, so the folder the session
+  // names is the one that appears even when main moves meanwhile.
+  const cloneSource = Effect.fn("TriageService.cloneSource")(function* (commit: string) {
     const staging = yield* fs.makeTempDirectory({ directory: sourceDir, prefix: ".clone-" });
+    const directory = path.join(sourceDir, commit);
     yield* Effect.gen(function* () {
+      yield* runGit("initSource", staging, ["init", "--quiet"], 10_000);
       yield* runGit(
-        "cloneSource",
-        sourceDir,
-        [
-          "clone",
-          "--depth",
-          "1",
-          "--filter=blob:none",
-          "--branch",
-          ref,
-          "--",
-          T3CODE_REPOSITORY_URL,
-          staging,
-        ],
+        "addSourceRemote",
+        staging,
+        ["remote", "add", "origin", T3CODE_REPOSITORY_URL],
+        10_000,
+      );
+      yield* runGit(
+        "fetchSource",
+        staging,
+        ["fetch", "--depth", "1", "--filter=blob:none", "origin", commit],
         600_000,
       );
-      // main can move between ls-remote and clone, so name the folder by what landed.
-      const commit = (yield* runGit(
-        "readSourceCommit",
-        staging,
-        ["rev-parse", "HEAD"],
-        10_000,
-      )).stdout.trim();
-      const directory = path.join(sourceDir, commit);
+      yield* runGit("checkoutSource", staging, ["checkout", "--quiet", "FETCH_HEAD"], 600_000);
       yield* fs.rename(staging, directory).pipe(
         // A concurrent session cloned the same commit first; keep theirs.
         Effect.catch((error) =>
@@ -139,7 +132,7 @@ const make = Effect.gen(function* () {
     if (yield* fs.exists(directory)) {
       return { _tag: "cloned", directory, serverVersion, ...source } as const;
     }
-    yield* cloneSource(source.ref).pipe(
+    yield* cloneSource(source.commit).pipe(
       Effect.ignoreCause({ log: true }),
       Effect.forkIn(serviceScope),
     );
