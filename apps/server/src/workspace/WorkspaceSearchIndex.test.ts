@@ -4,6 +4,7 @@ import {
   type GrepCursor,
   type GrepOptions,
   type GrepResult,
+  type MixedItem,
 } from "@ff-labs/fff-node";
 import { afterEach, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -59,6 +60,43 @@ it.effect("filters image searches before applying the result limit", () =>
       expect(resultWithDirectoryKind.entries).toEqual([{ kind: "file", path: "public/icon.svg" }]);
       expect(fileSearch).toHaveBeenCalledTimes(2);
       expect(fileSearch).toHaveBeenCalledWith("", { pageSize: 25_002 });
+    }),
+  ),
+);
+
+// regression: #5501
+it.effect("lists paths that differ only by edge whitespace once, as the client receives them", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const directoryItem = (relativePath: string): MixedItem => ({
+        type: "directory",
+        item: { relativePath, dirName: relativePath, maxAccessFrecency: 0 },
+      });
+      const items: MixedItem[] = [
+        { type: "file", item: fileItem("pkg/notes.txt") },
+        { type: "file", item: fileItem("pkg/notes.txt\n") },
+        directoryItem("docs /"),
+        { type: "file", item: fileItem("docs /guide.md") },
+      ];
+      const finder = {
+        destroy: vi.fn(),
+        waitForIndexReady: vi.fn(async () => ({ ok: true as const, value: true })),
+        mixedSearch: vi.fn(() => ({
+          ok: true as const,
+          value: { items, scores: [], totalMatched: items.length, totalFiles: 3, totalDirs: 1 },
+        })),
+      } as unknown as FileFinder;
+      vi.spyOn(FileFinder, "create").mockReturnValueOnce({ ok: true, value: finder });
+
+      const searchIndex = yield* WorkspaceSearchIndex.make("/workspace/project");
+      const { entries } = yield* searchIndex.list();
+
+      expect(entries).toEqual([
+        { kind: "directory", path: "docs" },
+        { kind: "file", path: "docs /guide.md" },
+        { kind: "directory", path: "pkg" },
+        { kind: "file", path: "pkg/notes.txt" },
+      ]);
     }),
   ),
 );

@@ -141,7 +141,9 @@ function parentPathOf(input: string): string | undefined {
 }
 
 function toProjectEntry(item: MixedItem): ProjectEntry | null {
-  const normalizedPath = trimDirectorySeparator(toPosixPath(item.item.relativePath));
+  // ProjectEntry.path trims on the wire, so dedupe on the trimmed path or "a" and "a\n" reach
+  // the client as duplicates and the file tree throws.
+  const normalizedPath = trimDirectorySeparator(toPosixPath(item.item.relativePath)).trim();
   if (!normalizedPath) {
     return null;
   }
@@ -283,12 +285,12 @@ function isWholeWordRange(
 function withDirectoryAncestors(entries: ReadonlyArray<ProjectEntry>): ProjectEntry[] {
   const entryByPath = new Map(entries.map((entry) => [entry.path, entry]));
   for (const entry of entries) {
-    let parentPath = parentPathOf(entry.path);
+    let parentPath = parentPathOf(entry.path)?.trim();
     while (parentPath) {
       if (!entryByPath.has(parentPath)) {
         entryByPath.set(parentPath, { path: parentPath, kind: "directory" });
       }
-      parentPath = parentPathOf(parentPath);
+      parentPath = parentPathOf(parentPath)?.trim();
     }
   }
   return [...entryByPath.values()];
