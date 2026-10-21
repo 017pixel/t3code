@@ -228,7 +228,11 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
     }),
   );
 
-  it.effect("refuses a V1 source with threads instead of dropping them", () =>
+  // A V2 source that never booted still holds V1 threads the importer has not run on.
+  it.effect.each([
+    { label: "a V1 source", toMigrationInclusive: 54 },
+    { label: "a V2 source that never booted", toMigrationInclusive: undefined },
+  ])("refuses $label with threads instead of dropping them", ({ toMigrationInclusive }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -243,7 +247,7 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
         source,
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
-          yield* runMigrations({ toMigrationInclusive: 54 });
+          yield* runMigrations({ toMigrationInclusive });
           yield* sql`INSERT INTO projection_threads
             (thread_id, project_id, title, model_selection_json, runtime_mode, created_at, updated_at)
             VALUES ('v1-thread', 'project-1', 'V1 thread', '{}', 'full-access', '2026-08-01', '2026-08-01')`;

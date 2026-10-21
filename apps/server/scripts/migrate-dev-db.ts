@@ -250,11 +250,17 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
   const threadIdNullable = new Map(threadColumns.map((row) => [row.name, row.notnull === 0]));
   const tables = schema.filter((entry) => entry.type === "table");
   const filtered = tables.some((table) => table.name === "orchestration_v2_projection_threads");
-  // No migration imports V1 threads, and the prune keeps only V2 threads.
-  const [legacyThreads] =
-    !filtered && tables.some((table) => table.name === "projection_threads")
-      ? yield* sql<{ count: number }>`SELECT COUNT(*) AS count FROM src.projection_threads`
-      : [];
+  // No migration imports V1 threads, and the prune keeps only V2 threads. Same
+  // predicate as LegacyV1ThreadImporter.reconcileShells, so a V2 source that
+  // never booted is caught too.
+  const [legacyThreads] = !tables.some((table) => table.name === "projection_threads")
+    ? []
+    : filtered
+      ? yield* sql<{ count: number }>`SELECT COUNT(*) AS count FROM src.projection_threads thread
+          WHERE NOT EXISTS (SELECT 1 FROM src.orchestration_events event
+            WHERE event.application_event_version = 2 AND event.aggregate_kind = 'thread'
+              AND event.stream_id = thread.thread_id AND event.event_type = 'thread.created')`
+      : yield* sql<{ count: number }>`SELECT COUNT(*) AS count FROM src.projection_threads`;
 
   yield* sql.withTransaction(
     Effect.gen(function* () {
