@@ -71,6 +71,8 @@ it.layer(NodeServices.layer)("Muse status", (it) => {
         expect(snapshot.installed).toBe(true);
         expect(snapshot.status).toBe("error");
         expect(snapshot.message).not.toContain("secret-test-value");
+        // regression: #22299, an uninitialized launcher exits nonzero until `muse --version` runs once.
+        expect(snapshot.message).toContain("Run `muse --version` on this T3 server host");
         expect(createHost).not.toHaveBeenCalled();
       }),
     ),

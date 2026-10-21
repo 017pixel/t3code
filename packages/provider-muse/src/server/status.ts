@@ -113,7 +113,9 @@ export const checkMuseProviderStatus = Effect.fn("checkMuseProviderStatus")(func
       version,
       status: "error",
       auth: { status: "unknown" },
-      message: "Muse Code CLI is installed but failed to run.",
+      // T3 sets MUSE_NO_AUTO_UPDATE, so a freshly upgraded launcher cannot install its runtime here.
+      message:
+        "Muse Code CLI is installed but failed to run. Run `muse --version` on this T3 server host to finish its setup, then refresh Muse Code.",
     });
   }
 
