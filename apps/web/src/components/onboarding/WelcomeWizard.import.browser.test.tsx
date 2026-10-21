@@ -230,8 +230,9 @@ async function mountImport(remote = false) {
 }
 
 // The mocked modules read `state`, so every test starts by replacing all of it.
+// Returns the clock spy so each test can `using` it; the spy would otherwise outlive the test.
 function setup() {
-  vi.spyOn(Date, "now").mockReturnValue(NOW);
+  const now = vi.spyOn(Date, "now").mockReturnValue(NOW);
   state.sessions.clear();
   for (const id of [primaryId, remoteId]) {
     state.sessions.set(
@@ -257,10 +258,11 @@ function setup() {
   state.onDone.mockReset();
   state.scan.mockReset();
   state.refreshScan.mockReset();
+  return now;
 }
 
 it("rechecks after project creation and can retry its history without recreating the project", async () => {
-  setup();
+  using _now = setup();
   const creation = deferred<void>();
   state.createProject.mockImplementationOnce(async (input: CreateProjectInput) => {
     await creation.promise;
@@ -287,7 +289,7 @@ it("rechecks after project creation and can retry its history without recreating
 });
 
 it("completes accepted imports when permission is revoked after the final server write", async () => {
-  setup();
+  using _now = setup();
   state.candidates = state.candidates.slice(0, 1);
   const imported = deferred<{ importedCount: number; skippedCount: number }>();
   state.importThreads.mockImplementationOnce(async () =>
