@@ -433,64 +433,60 @@ it.each([
   "style visits",
   "numbering",
   "picture numbering",
-])(
-  "keeps the body and warns when omitting expanded %s",
-  async (role) => {
-    const { default: JSZip } = await import("jszip");
-    const archive = new JSZip();
-    const ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-    const type = role.startsWith("style")
-      ? "styles"
-      : role === "picture numbering"
-        ? "numbering"
-        : role;
-    archive.file(
-      "_rels/.rels",
-      '<Relationships><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+])("keeps the body and warns when omitting expanded %s", async (role) => {
+  const { default: JSZip } = await import("jszip");
+  const archive = new JSZip();
+  const ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+  const type = role.startsWith("style")
+    ? "styles"
+    : role === "picture numbering"
+      ? "numbering"
+      : role;
+  archive.file(
+    "_rels/.rels",
+    '<Relationships><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+  );
+  const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
+  archive.file(
+    "word/document.xml",
+    `<w:document xmlns:w="${ns}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${text("body retained")}${Array.from({ length: 500 }, () => `<w:p><w:r><w:footnoteReference w:id="1"/><w:endnoteReference w:id="1"/><w:commentReference w:id="1"/><w:br w:type="page"/></w:r></w:p>`).join("")}<w:sectPr><w:headerReference w:type="default" r:id="aux"/><w:footerReference w:type="default" r:id="aux"/></w:sectPr></w:body></w:document>`,
+  );
+  archive.file(
+    "word/_rels/document.xml.rels",
+    `<Relationships><Relationship Id="aux" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${type}" Target="media/aux.xml"/></Relationships>`,
+  );
+  const xml =
+    role === "style chain" || role === "style count" || role === "style visits"
+      ? `<w:styles xmlns:w="${ns}">${Array.from({ length: role === "style count" ? 3_000 : 1_000 }, (_, i) => `<w:style w:styleId="s${i}" w:type="paragraph">${i ? `<w:basedOn w:val="s${role === "style visits" && i >= 30 ? 29 : i - 1}"/>` : ""}<w:pPr><w:spacing w:after="120"/></w:pPr></w:style>`).join("")}</w:styles>`
+      : role === "styles"
+        ? `<w:styles xmlns:w="${ns}">${Array.from({ length: 100 }, (_, i) => `<w:style w:styleId="${"s".repeat(2_000)}${i}" w:type="paragraph"><w:basedOn w:val="s0"/><w:pPr><w:spacing w:after="120"/></w:pPr></w:style>`).join("")}</w:styles>`
+        : role.includes("numbering")
+          ? `<w:numbering xmlns:w="${ns}">${role === "picture numbering" ? '<w:numPicBullet w:numPicBulletId="1"/>' : ""}<w:abstractNum w:abstractNumId="1">${Array.from({ length: 9 }, (_, i) => `<w:lvl w:ilvl="${i}"><w:lvlText w:val="%1."/></w:lvl>`).join("")}</w:abstractNum>${Array.from({ length: 100 }, (_, i) => `<w:num w:numId="${i}"><w:abstractNumId w:val="1"/></w:num>`).join("")}</w:numbering>`
+          : role === "header" || role === "footer"
+            ? `<w:${role === "header" ? "hdr" : "ftr"} xmlns:w="${ns}">${text("omitted payload").repeat(2_000)}</w:${role === "header" ? "hdr" : "ftr"}>`
+            : `<w:${role} xmlns:w="${ns}"><w:${role.slice(0, -1)} w:id="1">${text("omitted payload").repeat(2_000)}</w:${role.slice(0, -1)}></w:${role}>`;
+  archive.file("word/media/aux.xml", xml);
+  const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
+  const src = URL.createObjectURL(file);
+  try {
+    await using screen = await render(
+      <OfficeFilePreview src={src} name="expanded.docx" kind="docx" sizeBytes={file.size} />,
     );
-    const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
-    archive.file(
-      "word/document.xml",
-      `<w:document xmlns:w="${ns}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${text("body retained")}${Array.from({ length: 500 }, () => `<w:p><w:r><w:footnoteReference w:id="1"/><w:endnoteReference w:id="1"/><w:commentReference w:id="1"/><w:br w:type="page"/></w:r></w:p>`).join("")}<w:sectPr><w:headerReference w:type="default" r:id="aux"/><w:footerReference w:type="default" r:id="aux"/></w:sectPr></w:body></w:document>`,
+    await vi.waitFor(
+      () => {
+        expect(screen.container.querySelector('[role="alert"]')?.textContent ?? "").toBe("");
+        expect(screen.container.querySelector("iframe")?.srcdoc).toContain("body retained");
+      },
+      { timeout: 30_000 },
     );
-    archive.file(
-      "word/_rels/document.xml.rels",
-      `<Relationships><Relationship Id="aux" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${type}" Target="media/aux.xml"/></Relationships>`,
-    );
-    const xml =
-      role === "style chain" || role === "style count" || role === "style visits"
-        ? `<w:styles xmlns:w="${ns}">${Array.from({ length: role === "style count" ? 3_000 : 1_000 }, (_, i) => `<w:style w:styleId="s${i}" w:type="paragraph">${i ? `<w:basedOn w:val="s${role === "style visits" && i >= 30 ? 29 : i - 1}"/>` : ""}<w:pPr><w:spacing w:after="120"/></w:pPr></w:style>`).join("")}</w:styles>`
-        : role === "styles"
-          ? `<w:styles xmlns:w="${ns}">${Array.from({ length: 100 }, (_, i) => `<w:style w:styleId="${"s".repeat(2_000)}${i}" w:type="paragraph"><w:basedOn w:val="s0"/><w:pPr><w:spacing w:after="120"/></w:pPr></w:style>`).join("")}</w:styles>`
-          : role.includes("numbering")
-            ? `<w:numbering xmlns:w="${ns}">${role === "picture numbering" ? '<w:numPicBullet w:numPicBulletId="1"/>' : ""}<w:abstractNum w:abstractNumId="1">${Array.from({ length: 9 }, (_, i) => `<w:lvl w:ilvl="${i}"><w:lvlText w:val="%1."/></w:lvl>`).join("")}</w:abstractNum>${Array.from({ length: 100 }, (_, i) => `<w:num w:numId="${i}"><w:abstractNumId w:val="1"/></w:num>`).join("")}</w:numbering>`
-            : role === "header" || role === "footer"
-              ? `<w:${role === "header" ? "hdr" : "ftr"} xmlns:w="${ns}">${text("omitted payload").repeat(2_000)}</w:${role === "header" ? "hdr" : "ftr"}>`
-              : `<w:${role} xmlns:w="${ns}"><w:${role.slice(0, -1)} w:id="1">${text("omitted payload").repeat(2_000)}</w:${role.slice(0, -1)}></w:${role}>`;
-    archive.file("word/media/aux.xml", xml);
-    const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
-    const src = URL.createObjectURL(file);
-    try {
-      await using screen = await render(
-        <OfficeFilePreview src={src} name="expanded.docx" kind="docx" sizeBytes={file.size} />,
-      );
-      await vi.waitFor(
-        () => {
-          expect(screen.container.querySelector('[role="alert"]')?.textContent ?? "").toBe("");
-          expect(screen.container.querySelector("iframe")?.srcdoc).toContain("body retained");
-        },
-        { timeout: 30_000 },
-      );
-      expect(screen.container.textContent).toContain("Preview limited");
-      const frame = screen.container.querySelector("iframe")!;
-      expect(frame.srcdoc).not.toContain("omitted payload");
-      expect(frame.srcdoc.length).toBeLessThan(500_000);
-    } finally {
-      URL.revokeObjectURL(src);
-    }
-  },
-  35_000,
-);
+    expect(screen.container.textContent).toContain("Preview limited");
+    const frame = screen.container.querySelector("iframe")!;
+    expect(frame.srcdoc).not.toContain("omitted payload");
+    expect(frame.srcdoc.length).toBeLessThan(500_000);
+  } finally {
+    URL.revokeObjectURL(src);
+  }
+});
 
 it.each([
   "ordinary parts",
@@ -500,162 +496,158 @@ it.each([
   "python-docx package",
   "default template styles",
   "binary package properties",
-])(
-  "retains Word %s without a limit warning",
-  async (scenario) => {
-    const { default: JSZip } = await import("jszip");
-    const archive = new JSZip();
-    const ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-    const r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
-    const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
+])("retains Word %s without a limit warning", async (scenario) => {
+  const { default: JSZip } = await import("jszip");
+  const archive = new JSZip();
+  const ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+  const r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+  const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
+  archive.file(
+    "_rels/.rels",
+    `<Relationships><Relationship Id="doc" Type="${r}/officeDocument" Target="word/document.xml"/></Relationships>`,
+  );
+  if (scenario === "python-docx package" || scenario === "binary package properties") {
+    const packageRelationships = "http://schemas.openxmlformats.org/package/2006/relationships";
     archive.file(
       "_rels/.rels",
-      `<Relationships><Relationship Id="doc" Type="${r}/officeDocument" Target="word/document.xml"/></Relationships>`,
+      `<Relationships xmlns="${packageRelationships}"><Relationship Id="doc" Type="${r}/officeDocument" Target="word/document.xml"/><Relationship Id="thumbnail" Type="${packageRelationships}/metadata/thumbnail" Target="docProps/thumbnail.jpeg"/><Relationship Id="core" Type="${packageRelationships}/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="app" Type="${r}/extended-properties" Target="docProps/app.xml"/><Relationship Id="custom" Type="${r}/custom-properties" Target="docProps/custom.xml"/><Relationship Id="signature" Type="${packageRelationships}/digital-signature/origin" Target="_xmlsignatures/origin.sigs"/></Relationships>`,
     );
-    if (scenario === "python-docx package" || scenario === "binary package properties") {
-      const packageRelationships = "http://schemas.openxmlformats.org/package/2006/relationships";
+    archive.file(
+      "[Content_Types].xml",
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="jpeg" ContentType="image/jpeg"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="sigs" ContentType="application/vnd.openxmlformats-package.digital-signature-origin"/></Types>',
+    );
+    archive.file(
+      "docProps/thumbnail.jpeg",
+      new Uint8Array([255, 216, 255, 224, 0, 16, 74, 70, 73, 70]),
+    );
+    archive.file("_xmlsignatures/origin.sigs", new Uint8Array());
+    for (const part of ["core", "app", "custom"])
+      archive.file(`docProps/${part}.xml`, '<properties xmlns="urn:properties"/>');
+    if (scenario === "binary package properties") {
+      const roles = [
+        `${packageRelationships}/metadata/core-properties`,
+        `${r}/extended-properties`,
+        `${packageRelationships}/metadata/custom-properties`,
+        `${packageRelationships}/digital-signature/signature`,
+      ];
       archive.file(
         "_rels/.rels",
-        `<Relationships xmlns="${packageRelationships}"><Relationship Id="doc" Type="${r}/officeDocument" Target="word/document.xml"/><Relationship Id="thumbnail" Type="${packageRelationships}/metadata/thumbnail" Target="docProps/thumbnail.jpeg"/><Relationship Id="core" Type="${packageRelationships}/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="app" Type="${r}/extended-properties" Target="docProps/app.xml"/><Relationship Id="custom" Type="${r}/custom-properties" Target="docProps/custom.xml"/><Relationship Id="signature" Type="${packageRelationships}/digital-signature/origin" Target="_xmlsignatures/origin.sigs"/></Relationships>`,
+        `<Relationships><Relationship Id="doc" Type="${r}/officeDocument" Target="word/document.xml"/>${roles.map((role, i) => `<Relationship Id="metadata${i}" Type="${role}" Target="docProps/metadata${i}.dat"/>`).join("")}</Relationships>`,
       );
-      archive.file(
-        "[Content_Types].xml",
-        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="jpeg" ContentType="image/jpeg"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="sigs" ContentType="application/vnd.openxmlformats-package.digital-signature-origin"/></Types>',
-      );
-      archive.file(
-        "docProps/thumbnail.jpeg",
-        new Uint8Array([255, 216, 255, 224, 0, 16, 74, 70, 73, 70]),
-      );
-      archive.file("_xmlsignatures/origin.sigs", new Uint8Array());
-      for (const part of ["core", "app", "custom"])
-        archive.file(`docProps/${part}.xml`, '<properties xmlns="urn:properties"/>');
-      if (scenario === "binary package properties") {
-        const roles = [
-          `${packageRelationships}/metadata/core-properties`,
-          `${r}/extended-properties`,
-          `${packageRelationships}/metadata/custom-properties`,
-          `${packageRelationships}/digital-signature/signature`,
-        ];
-        archive.file(
-          "_rels/.rels",
-          `<Relationships><Relationship Id="doc" Type="${r}/officeDocument" Target="word/document.xml"/>${roles.map((role, i) => `<Relationship Id="metadata${i}" Type="${role}" Target="docProps/metadata${i}.dat"/>`).join("")}</Relationships>`,
-        );
-        for (const i of roles.keys())
-          archive.file(`docProps/metadata${i}.dat`, new Uint8Array([255, 216, 255, 0]));
-      }
+      for (const i of roles.keys())
+        archive.file(`docProps/metadata${i}.dat`, new Uint8Array([255, 216, 255, 0]));
     }
-    const ordinary = scenario === "ordinary parts";
+  }
+  const ordinary = scenario === "ordinary parts";
+  archive.file(
+    "word/document.xml",
+    `<w:document xmlns:w="${ns}" xmlns:r="${r}"><w:body>${text("ordinary body")}<w:p><w:pPr><w:pStyle w:val="s19"/></w:pPr><w:r><w:t>styled body</w:t>${ordinary ? '<w:footnoteReference w:id="1"/><w:footnoteReference w:id="1"/><w:endnoteReference w:id="1"/><w:commentReference w:id="1"/>' : ""}</w:r></w:p><w:sectPr>${ordinary ? '<w:headerReference w:type="default" r:id="header"/><w:footerReference w:type="default" r:id="footer"/>' : ""}</w:sectPr></w:body></w:document>`,
+  );
+  archive.file(
+    "word/_rels/document.xml.rels",
+    `<Relationships>${["header", "footer", "footnotes", "endnotes", "comments", "fontTable", "styles"].map((role) => `<Relationship Id="${role}" Type="${r}/${role}" Target="${role}.xml"/>`).join("")}</Relationships>`,
+  );
+  for (const [role, root] of [
+    ["header", "hdr"],
+    ["footer", "ftr"],
+  ])
     archive.file(
-      "word/document.xml",
-      `<w:document xmlns:w="${ns}" xmlns:r="${r}"><w:body>${text("ordinary body")}<w:p><w:pPr><w:pStyle w:val="s19"/></w:pPr><w:r><w:t>styled body</w:t>${ordinary ? '<w:footnoteReference w:id="1"/><w:footnoteReference w:id="1"/><w:endnoteReference w:id="1"/><w:commentReference w:id="1"/>' : ""}</w:r></w:p><w:sectPr>${ordinary ? '<w:headerReference w:type="default" r:id="header"/><w:footerReference w:type="default" r:id="footer"/>' : ""}</w:sectPr></w:body></w:document>`,
+      `word/${role}.xml`,
+      `<w:${root} xmlns:w="${ns}">${text(`${role} retained`)}</w:${root}>`,
+    );
+  for (const role of ["footnotes", "endnotes", "comments"])
+    archive.file(
+      `word/${role}.xml`,
+      `<w:${role} xmlns:w="${ns}"><w:${role.slice(0, -1)} w:id="1" w:author="reviewer" w:date="2026-10-01T00:00:00Z">${text(`${role} retained`)}</w:${role.slice(0, -1)}></w:${role}>`,
+    );
+  archive.file(
+    "word/fontTable.xml",
+    `<w:fonts xmlns:w="${ns}"><w:font w:name="unused"/></w:fonts>`,
+  );
+  archive.file(
+    "word/styles.xml",
+    `<w:styles xmlns:w="${ns}"><w:docDefaults/><w:style w:type="paragraph" w:styleId="base"><w:rPr><w:b/></w:rPr></w:style>${Array.from({ length: 20 }, (_, i) => `<w:style w:styleId="s${i}" w:type="paragraph">${scenario === "inherited styles" ? '<w:basedOn w:val="base"/>' : ""}<w:rPr><w:color w:val="123456"/></w:rPr></w:style>`).join("")}</w:styles>`,
+  );
+  if (scenario === "default template styles") {
+    const heading =
+      '<w:style w:type="paragraph" w:styleId="s19"><w:basedOn w:val="Normal"/><w:link w:val="HeadingChar"/><w:pPr><w:spacing w:after="120"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/><w:color w:val="123456"/></w:rPr></w:style>';
+    const conditions = [
+      "wholeTable",
+      "firstRow",
+      "lastRow",
+      "firstCol",
+      "lastCol",
+      "band1Horz",
+      "band2Horz",
+      "band1Vert",
+      "band2Vert",
+    ];
+    archive.file(
+      "word/styles.xml",
+      `<w:styles xmlns:w="${ns}"><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:latentStyles>${Array.from({ length: 276 }, (_, i) => `<w:lsdException w:name="latent ${i}" w:semiHidden="0" w:uiPriority="99"/>`).join("")}</w:latentStyles><w:style w:type="paragraph" w:styleId="Normal"/><w:style w:type="character" w:styleId="HeadingChar"><w:rPr><w:b/></w:rPr></w:style>${heading}${Array.from({ length: 61 }, (_, i) => `<w:style w:type="paragraph" w:styleId="p${i}"><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="120"/></w:pPr><w:rPr><w:color w:val="123456"/></w:rPr></w:style>`).join("")}${Array.from({ length: 100 }, (_, i) => `<w:style w:type="table" w:styleId="Table${i}">${i ? '<w:basedOn w:val="Table0"/>' : ""}<w:tblPr><w:tblCellMar><w:top w:w="0"/><w:left w:w="108"/><w:bottom w:w="0"/><w:right w:w="108"/></w:tblCellMar></w:tblPr>${conditions.map((type) => `<w:tblStylePr w:type="${type}"><w:pPr><w:spacing w:after="0"/></w:pPr><w:rPr><w:b/><w:color w:val="123456"/></w:rPr><w:tcPr><w:shd w:fill="D9E2F3"/></w:tcPr></w:tblStylePr>`).join("")}</w:style>`).join("")}</w:styles>`,
     );
     archive.file(
       "word/_rels/document.xml.rels",
-      `<Relationships>${["header", "footer", "footnotes", "endnotes", "comments", "fontTable", "styles"].map((role) => `<Relationship Id="${role}" Type="${r}/${role}" Target="${role}.xml"/>`).join("")}</Relationships>`,
-    );
-    for (const [role, root] of [
-      ["header", "hdr"],
-      ["footer", "ftr"],
-    ])
-      archive.file(
-        `word/${role}.xml`,
-        `<w:${root} xmlns:w="${ns}">${text(`${role} retained`)}</w:${root}>`,
-      );
-    for (const role of ["footnotes", "endnotes", "comments"])
-      archive.file(
-        `word/${role}.xml`,
-        `<w:${role} xmlns:w="${ns}"><w:${role.slice(0, -1)} w:id="1" w:author="reviewer" w:date="2026-10-01T00:00:00Z">${text(`${role} retained`)}</w:${role.slice(0, -1)}></w:${role}>`,
-      );
-    archive.file(
-      "word/fontTable.xml",
-      `<w:fonts xmlns:w="${ns}"><w:font w:name="unused"/></w:fonts>`,
+      (await archive.file("word/_rels/document.xml.rels")!.async("string")).replace(
+        "</Relationships>",
+        `<Relationship Id="numbering" Type="${r}/numbering" Target="numbering.xml"/></Relationships>`,
+      ),
     );
     archive.file(
-      "word/styles.xml",
-      `<w:styles xmlns:w="${ns}"><w:docDefaults/><w:style w:type="paragraph" w:styleId="base"><w:rPr><w:b/></w:rPr></w:style>${Array.from({ length: 20 }, (_, i) => `<w:style w:styleId="s${i}" w:type="paragraph">${scenario === "inherited styles" ? '<w:basedOn w:val="base"/>' : ""}<w:rPr><w:color w:val="123456"/></w:rPr></w:style>`).join("")}</w:styles>`,
+      "word/numbering.xml",
+      `<w:numbering xmlns:w="${ns}">${Array.from({ length: 9 }, (_, i) => `<w:abstractNum w:abstractNumId="${i}"><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:tabs><w:tab w:val="num" w:pos="720"/></w:tabs><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="${i + 1}"><w:abstractNumId w:val="${i}"/></w:num>`).join("")}</w:numbering>`,
     );
+    const document = await archive.file("word/document.xml")!.async("string");
+    archive.file(
+      "word/document.xml",
+      document.replace(
+        "<w:sectPr>",
+        '<w:tbl><w:tblPr><w:tblStyle w:val="Table99"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>styled cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr>',
+      ),
+    );
+  }
+  const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
+  const src = URL.createObjectURL(file);
+  try {
+    await using screen = await render(
+      <OfficeFilePreview src={src} name="ordinary.docx" kind="docx" />,
+    );
+    await vi.waitFor(
+      () => expect(screen.container.querySelector("iframe")?.srcdoc).toContain("ordinary body"),
+      { timeout: 30_000 },
+    );
+    expect(screen.container.textContent).not.toContain("Preview limited");
+    const html = screen.container.querySelector("iframe")!.srcdoc;
+    expect(html).toContain("docx_s19");
     if (scenario === "default template styles") {
-      const heading =
-        '<w:style w:type="paragraph" w:styleId="s19"><w:basedOn w:val="Normal"/><w:link w:val="HeadingChar"/><w:pPr><w:spacing w:after="120"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/><w:color w:val="123456"/></w:rPr></w:style>';
-      const conditions = [
-        "wholeTable",
-        "firstRow",
-        "lastRow",
-        "firstCol",
-        "lastCol",
-        "band1Horz",
-        "band2Horz",
-        "band1Vert",
-        "band2Vert",
-      ];
-      archive.file(
-        "word/styles.xml",
-        `<w:styles xmlns:w="${ns}"><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:latentStyles>${Array.from({ length: 276 }, (_, i) => `<w:lsdException w:name="latent ${i}" w:semiHidden="0" w:uiPriority="99"/>`).join("")}</w:latentStyles><w:style w:type="paragraph" w:styleId="Normal"/><w:style w:type="character" w:styleId="HeadingChar"><w:rPr><w:b/></w:rPr></w:style>${heading}${Array.from({ length: 61 }, (_, i) => `<w:style w:type="paragraph" w:styleId="p${i}"><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="120"/></w:pPr><w:rPr><w:color w:val="123456"/></w:rPr></w:style>`).join("")}${Array.from({ length: 100 }, (_, i) => `<w:style w:type="table" w:styleId="Table${i}">${i ? '<w:basedOn w:val="Table0"/>' : ""}<w:tblPr><w:tblCellMar><w:top w:w="0"/><w:left w:w="108"/><w:bottom w:w="0"/><w:right w:w="108"/></w:tblCellMar></w:tblPr>${conditions.map((type) => `<w:tblStylePr w:type="${type}"><w:pPr><w:spacing w:after="0"/></w:pPr><w:rPr><w:b/><w:color w:val="123456"/></w:rPr><w:tcPr><w:shd w:fill="D9E2F3"/></w:tcPr></w:tblStylePr>`).join("")}</w:style>`).join("")}</w:styles>`,
-      );
-      archive.file(
-        "word/_rels/document.xml.rels",
-        (await archive.file("word/_rels/document.xml.rels")!.async("string")).replace(
-          "</Relationships>",
-          `<Relationship Id="numbering" Type="${r}/numbering" Target="numbering.xml"/></Relationships>`,
-        ),
-      );
-      archive.file(
-        "word/numbering.xml",
-        `<w:numbering xmlns:w="${ns}">${Array.from({ length: 9 }, (_, i) => `<w:abstractNum w:abstractNumId="${i}"><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:tabs><w:tab w:val="num" w:pos="720"/></w:tabs><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="${i + 1}"><w:abstractNumId w:val="${i}"/></w:num>`).join("")}</w:numbering>`,
-      );
-      const document = await archive.file("word/document.xml")!.async("string");
-      archive.file(
-        "word/document.xml",
-        document.replace(
-          "<w:sectPr>",
-          '<w:tbl><w:tblPr><w:tblStyle w:val="Table99"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>styled cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr>',
-        ),
-      );
+      const document = new DOMParser().parseFromString(html, "text/html");
+      const css = [...document.querySelectorAll("style")]
+        .map((style) => style.textContent)
+        .join("");
+      expect(css).toContain("font-size: 16.00pt");
+      expect(css).toContain("background-color: #D9E2F3");
+      expect(css).toContain("table.docx_table99");
+      expect(css).not.toContain("latent");
+      expect(document.querySelector("table.docx_table99")?.textContent).toBe("styled cell");
     }
-    const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
-    const src = URL.createObjectURL(file);
-    try {
-      await using screen = await render(
-        <OfficeFilePreview src={src} name="ordinary.docx" kind="docx" />,
-      );
-      await vi.waitFor(
-        () => expect(screen.container.querySelector("iframe")?.srcdoc).toContain("ordinary body"),
-        { timeout: 30_000 },
-      );
-      expect(screen.container.textContent).not.toContain("Preview limited");
-      const html = screen.container.querySelector("iframe")!.srcdoc;
-      expect(html).toContain("docx_s19");
-      if (scenario === "default template styles") {
-        const document = new DOMParser().parseFromString(html, "text/html");
-        const css = [...document.querySelectorAll("style")]
-          .map((style) => style.textContent)
-          .join("");
-        expect(css).toContain("font-size: 16.00pt");
-        expect(css).toContain("background-color: #D9E2F3");
-        expect(css).toContain("table.docx_table99");
-        expect(css).not.toContain("latent");
-        expect(document.querySelector("table.docx_table99")?.textContent).toBe("styled cell");
-      }
-      if (ordinary) {
-        for (const label of [
-          "header retained",
-          "footer retained",
-          "endnotes retained",
-          "comments retained",
-        ])
-          expect(html).toContain(label);
-        expect(html.match(/footnotes retained/g)).toHaveLength(2);
-        const document = new DOMParser().parseFromString(html, "text/html");
-        const marker = document.querySelector(".docx-comment-ref")!;
-        expect(marker.textContent).toBe("");
-        expect(marker.getAttribute("aria-label")).toBe("Comment");
-      } else expect(html).not.toContain("footnotes retained");
-    } finally {
-      URL.revokeObjectURL(src);
-    }
-  },
-  35_000,
-);
+    if (ordinary) {
+      for (const label of [
+        "header retained",
+        "footer retained",
+        "endnotes retained",
+        "comments retained",
+      ])
+        expect(html).toContain(label);
+      expect(html.match(/footnotes retained/g)).toHaveLength(2);
+      const document = new DOMParser().parseFromString(html, "text/html");
+      const marker = document.querySelector(".docx-comment-ref")!;
+      expect(marker.textContent).toBe("");
+      expect(marker.getAttribute("aria-label")).toBe("Comment");
+    } else expect(html).not.toContain("footnotes retained");
+  } finally {
+    URL.revokeObjectURL(src);
+  }
+});
 
 it("bounds shared-string text per cell and across sheets in the worker and viewer", async () => {
   const { default: JSZip } = await import("jszip");
@@ -725,28 +717,29 @@ it("bounds shared-string text per cell and across sheets in the worker and viewe
     const horizontal = table.parentElement!;
     const header = headers[0]!.parentElement!;
     const top = header.getBoundingClientRect().top;
-    await act(async () => {
+    await act(() => {
       scroll.dispatchEvent(
         new WheelEvent("wheel", { deltaY: 200, bubbles: true, cancelable: true }),
       );
       horizontal.scrollLeft = 200;
-      await new Promise(requestAnimationFrame);
     });
-    expect(header.getBoundingClientRect().top).toBeCloseTo(top, 0);
-    expect(firstRow.getBoundingClientRect().left).toBeCloseTo(
-      horizontal.getBoundingClientRect().left,
-      0,
-    );
-    expect(label.getBoundingClientRect().top).toBeGreaterThanOrEqual(
-      header.getBoundingClientRect().bottom,
-    );
-    expect(label.getBoundingClientRect().bottom).toBeLessThan(
-      scroll.getBoundingClientRect().bottom,
-    );
+    await vi.waitFor(() => {
+      expect(header.getBoundingClientRect().top).toBeCloseTo(top, 0);
+      expect(firstRow.getBoundingClientRect().left).toBeCloseTo(
+        horizontal.getBoundingClientRect().left,
+        0,
+      );
+      expect(label.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+        header.getBoundingClientRect().bottom,
+      );
+      expect(label.getBoundingClientRect().bottom).toBeLessThan(
+        scroll.getBoundingClientRect().bottom,
+      );
+    });
   } finally {
     URL.revokeObjectURL(src);
   }
-}, 35_000);
+});
 
 it("charges auxiliary XML once per Word render batch", async () => {
   const { default: JSZip } = await import("jszip");
@@ -954,45 +947,41 @@ it("keeps spreadsheet dates on their calendar day west of UTC", async () => {
   }
 });
 
-it.each([60, 100])(
-  "renders all %i pages of a table-heavy Word report",
-  async (pages) => {
-    const { default: JSZip } = await import("jszip");
-    const archive = new JSZip();
-    const paragraph = (text: string) =>
-      `<w:p><w:pPr><w:spacing w:after="120"/><w:jc w:val="left"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Calibri"/><w:sz w:val="22"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`;
-    archive.file(
-      "word/document.xml",
-      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${Array.from({ length: pages }, (_, page) => paragraph(`page ${page + 1}`) + `<w:tbl>${Array.from({ length: 10 }, () => `<w:tr>${Array.from({ length: 5 }, () => `<w:tc><w:tcPr><w:tcW w:w="1800"/></w:tcPr>${paragraph("report entry")}</w:tc>`).join("")}</w:tr>`).join("")}</w:tbl>`).join("")}</w:body></w:document>`,
+it.each([60, 100])("renders all %i pages of a table-heavy Word report", async (pages) => {
+  const { default: JSZip } = await import("jszip");
+  const archive = new JSZip();
+  const paragraph = (text: string) =>
+    `<w:p><w:pPr><w:spacing w:after="120"/><w:jc w:val="left"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Calibri"/><w:sz w:val="22"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`;
+  archive.file(
+    "word/document.xml",
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${Array.from({ length: pages }, (_, page) => paragraph(`page ${page + 1}`) + `<w:tbl>${Array.from({ length: 10 }, () => `<w:tr>${Array.from({ length: 5 }, () => `<w:tc><w:tcPr><w:tcW w:w="1800"/></w:tcPr>${paragraph("report entry")}</w:tc>`).join("")}</w:tr>`).join("")}</w:tbl>`).join("")}</w:body></w:document>`,
+  );
+  archive.file(
+    "_rels/.rels",
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+  );
+  archive.file(
+    "[Content_Types].xml",
+    '<Types><Default Extension="png" ContentType="image/png"/></Types>',
+  );
+  // Binary media must not consume the document's markup budget.
+  archive.file("word/media/image.png", new Uint8Array(2_500_000));
+  const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
+  const src = URL.createObjectURL(file);
+  try {
+    await using screen = await render(
+      <OfficeFilePreview src={src} name="report.docx" kind="docx" sizeBytes={file.size} />,
     );
-    archive.file(
-      "_rels/.rels",
-      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+    await vi.waitFor(
+      () => expect(screen.container.querySelector("iframe")?.srcdoc).toContain(`page ${pages}`),
+      { timeout: 30_000 },
     );
-    archive.file(
-      "[Content_Types].xml",
-      '<Types><Default Extension="png" ContentType="image/png"/></Types>',
-    );
-    // Binary media must not consume the document's markup budget.
-    archive.file("word/media/image.png", new Uint8Array(2_500_000));
-    const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
-    const src = URL.createObjectURL(file);
-    try {
-      await using screen = await render(
-        <OfficeFilePreview src={src} name="report.docx" kind="docx" sizeBytes={file.size} />,
-      );
-      await vi.waitFor(
-        () => expect(screen.container.querySelector("iframe")?.srcdoc).toContain(`page ${pages}`),
-        { timeout: 30_000 },
-      );
-      expect(screen.container.textContent).not.toContain("Preview limited");
-      expect(screen.container.querySelector('[role="alert"]')).toBeNull();
-    } finally {
-      URL.revokeObjectURL(src);
-    }
-  },
-  35_000,
-);
+    expect(screen.container.textContent).not.toContain("Preview limited");
+    expect(screen.container.querySelector('[role="alert"]')).toBeNull();
+  } finally {
+    URL.revokeObjectURL(src);
+  }
+});
 
 describe("standalone Mermaid previews", () => {
   it.each([
@@ -1017,12 +1006,15 @@ describe("standalone Mermaid previews", () => {
   it.each(["<-->", "<==>", "<-.->", "-->"])("renders the %s arrow", async (arrow) => {
     await using screen = await render(<MermaidFilePreview text={`flowchart LR\nA ${arrow} B`} />);
     await vi.waitFor(
-      () => expect(screen.container.querySelector("svg .edgePaths path")).not.toBeNull(),
+      () => {
+        const diagram = screen.container.querySelector("svg");
+        expect(diagram?.querySelector("path")).not.toBeNull();
+        expect(diagram?.textContent).toContain("A");
+        expect(diagram?.textContent).toContain("B");
+      },
       { timeout: 10_000 },
     );
     expect(screen.container.querySelector('[role="alert"]')).toBeNull();
-    expect(screen.container.textContent).toContain("A");
-    expect(screen.container.textContent).toContain("B");
   });
 });
 
