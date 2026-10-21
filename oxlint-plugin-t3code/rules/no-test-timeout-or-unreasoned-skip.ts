@@ -7,7 +7,7 @@ const TEST_FILE_PATTERN = /\.(?:test|spec)\.[cm]?[jt]sx?$/u;
 // Opt-in suites that drive real provider agents through whole turns; minutes are the
 // expected cost there, not a hidden wait.
 const LIVE_TEST_FILE_PATTERN = /\.live\.(?:test|spec)\.[cm]?[jt]sx?$/u;
-const TEST_FUNCTIONS = new Set(["describe", "it", "test"]);
+const TEST_FUNCTIONS = new Set(["describe", "it", "suite", "test"]);
 const HOOK_FUNCTIONS = new Set(["afterAll", "afterEach", "beforeAll", "beforeEach"]);
 const FOCUS_OR_SKIP_MODIFIERS = new Set(["only", "skip", "todo"]);
 const FOCUS_OR_SKIP_FUNCTIONS = new Set(["fdescribe", "fit", "xdescribe", "xit", "xtest"]);
@@ -117,6 +117,13 @@ export default defineRule({
           hasOption(second, TIMEOUT_OPTIONS)
         ) {
           context.report({ node, message: TIMEOUT_MESSAGE });
+        }
+        // `test(name, { skip: true }, fn)` is the options spelling of `test.skip`.
+        if (
+          hasOption(second, FOCUS_OR_SKIP_MODIFIERS) ||
+          hasOption(third, FOCUS_OR_SKIP_MODIFIERS)
+        ) {
+          reportUnlessQuarantined(node);
         }
       },
       Identifier(node) {

@@ -129,6 +129,24 @@ describe(RULE, () => {
   );
 
   rule.invalid(
+    "flags the suite alias and option-object skips",
+    `
+      import { suite, test } from "vitest";
+      suite.skip("later", () => {});
+    `,
+    assertSkipMessage,
+  );
+
+  rule.invalid(
+    "flags a skip option without a quarantine issue",
+    `
+      import { test } from "vitest";
+      test("later", { skip: true }, () => {});
+    `,
+    assertSkipMessage,
+  );
+
+  rule.invalid(
     "flags a bracket-access skip without a quarantine issue",
     `
       import { it } from "vitest";
