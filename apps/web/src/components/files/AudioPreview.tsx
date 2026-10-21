@@ -48,6 +48,7 @@ function AudioChip(props: AudioPreviewProps) {
   const audio = useRef<HTMLAudioElement | null>(null);
   const onUnmount = useContext(AudioPreviewUnmountContext);
   const [playing, setPlaying] = useState(false);
+  const [ready, setReady] = useState(false);
   const [duration, setDuration] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const audioRef = useStableCallback((element: HTMLAudioElement | null) => {
@@ -59,7 +60,7 @@ function AudioChip(props: AudioPreviewProps) {
         audio.current = null;
       };
   });
-  const loading = !props.failed && duration === 0;
+  const loading = !props.failed && !ready;
   const open = props.onOpen ?? (props.failed ? props.onRetry : undefined);
   const action = props.failed
     ? props.onOpen
@@ -130,9 +131,11 @@ function AudioChip(props: AudioPreviewProps) {
           ? "Unavailable"
           : loading
             ? "..."
-            : elapsed > 0 || playing
-              ? `${audioTime(elapsed)} / ${audioTime(duration)}`
-              : audioTime(duration)}
+            : duration > 0
+              ? elapsed > 0 || playing
+                ? `${audioTime(elapsed)} / ${audioTime(duration)}`
+                : audioTime(duration)
+              : audioTime(elapsed)}
       </span>
       {props.src && !props.failed ? (
         <audio
@@ -142,6 +145,13 @@ function AudioChip(props: AudioPreviewProps) {
           src={props.src}
           aria-label={props.name}
           onLoadedMetadata={(event) => {
+            setReady(true);
+            const value = event.currentTarget.duration;
+            setDuration(Number.isFinite(value) ? value : 0);
+          }}
+          onLoadedData={() => setReady(true)}
+          onCanPlay={() => setReady(true)}
+          onDurationChange={(event) => {
             const value = event.currentTarget.duration;
             setDuration(Number.isFinite(value) ? value : 0);
           }}
