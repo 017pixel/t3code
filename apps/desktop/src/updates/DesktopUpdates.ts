@@ -606,14 +606,19 @@ export const make = Effect.gen(function* () {
   const encodeUpdateMarker = Schema.encodeEffect(
     Schema.fromJsonString(Schema.Struct({ startedAt: Schema.Number, expiresAt: Schema.Number })),
   );
+  const updateInProgressTempPath = `${updateInProgressMarkerPath}.tmp`;
   const writeUpdateInProgressMarker = Effect.gen(function* () {
     const startedAt = DateTime.toEpochMillis(yield* DateTime.now);
     const contents = yield* encodeUpdateMarker({
       startedAt,
       expiresAt: startedAt + DESKTOP_UPDATE_IN_PROGRESS_TTL_MS,
     });
-    yield* fileSystem.writeFileString(updateInProgressMarkerPath, contents);
+    yield* fileSystem.writeFileString(updateInProgressTempPath, contents);
+    yield* fileSystem.rename(updateInProgressTempPath, updateInProgressMarkerPath);
   }).pipe(
+    Effect.ensuring(
+      fileSystem.remove(updateInProgressTempPath, { force: true }).pipe(Effect.ignore),
+    ),
     Effect.catch((error) =>
       logUpdaterWarning("Could not write the update-in-progress marker.", { errorTag: error._tag }),
     ),

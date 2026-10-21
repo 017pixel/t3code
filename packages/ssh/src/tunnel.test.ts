@@ -403,13 +403,13 @@ describe("SSH launch during desktop update", () => {
   it.effect.each([
     ["malformed", "broken"],
     ["future", { startedAt: 1_000, expiresAt: 61_000 }],
-    ["unbounded", { startedAt: 0, expiresAt: 600_000 }],
+    ["missing fields", {}],
     ["numeric strings", { startedAt: "0", expiresAt: "60000" }],
-  ] as const)("removes %s markers without waiting", ([, marker]) =>
+  ] as const)("preserves %s markers without waiting", ([, marker]) =>
     Effect.gen(function* () {
       const result = runLauncher(yield* captureLauncher, { marker });
       assert.equal(result.now, 0);
-      assert.isFalse(result.markerExists);
+      assert.isTrue(result.markerExists);
       assert.deepEqual(result.output, { remotePort: 5999, serverKind: "managed" });
     }),
   );
@@ -522,12 +522,29 @@ describe("SSH launch during desktop update", () => {
     }),
   );
 
-  it.effect("starts immediately when no marker and no server exist", () =>
+  it.effect.each([false, true])("starts immediately without a marker (archive: %s)", (archive) =>
     Effect.gen(function* () {
-      const result = runLauncher(yield* captureLauncher, {});
+      const script = archive
+        ? yield* captureLauncherFor({ archiveVersion: "1.2.3" })
+        : yield* captureLauncher;
+      const result = runLauncher(script, { archive });
       assert.deepEqual(result.output, { remotePort: 5999, serverKind: "managed" });
       assert.equal(result.now, 0);
       assert.equal(result.events.filter((event) => event.startsWith("start ")).length, 1);
+      assert.equal(result.events.filter((event) => event.startsWith("marker ")).length, 1);
+      assert.equal(result.events.filter((event) => event.startsWith("runtime ")).length, 1);
+    }),
+  );
+
+  it.effect("caps a longer host TTL and preserves its marker", () =>
+    Effect.gen(function* () {
+      const result = runLauncher(yield* captureLauncher, {
+        marker: { startedAt: 0, expiresAt: 600_000 },
+      });
+      assert.deepEqual(result.output, { remotePort: 5999, serverKind: "managed" });
+      assert.equal(result.now, 60_000);
+      assert.isTrue(result.markerExists);
+      assert.equal(result.events.filter((event) => event.startsWith("marker ")).length, 61);
     }),
   );
 

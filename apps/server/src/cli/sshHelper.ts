@@ -9,6 +9,7 @@ import { DESKTOP_UPDATE_IN_PROGRESS_TTL_MS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Clock from "effect/Clock";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { Argument, Command } from "effect/cli";
 
@@ -130,7 +131,7 @@ const runtimePort = Command.make("runtime-port", {
 );
 
 const UpdateMarker = Schema.fromJsonString(
-  Schema.Struct({ startedAt: Schema.Number, expiresAt: Schema.Number }),
+  Schema.Struct({ startedAt: Schema.optional(Schema.Unknown), expiresAt: Schema.Number }),
 );
 
 export const updateRemaining = Effect.fn("sshHelper.updateRemaining")(function* (
@@ -141,20 +142,21 @@ export const updateRemaining = Effect.fn("sshHelper.updateRemaining")(function* 
   const marker = yield* fs
     .readFileString(markerFile)
     .pipe(Effect.flatMap(Schema.decodeUnknownEffect(UpdateMarker)), Effect.option);
-  if (marker._tag === "Some") {
+  if (Option.isSome(marker)) {
     const { startedAt, expiresAt } = marker.value;
-    if (
-      Number.isSafeInteger(startedAt) &&
-      Number.isSafeInteger(expiresAt) &&
+    if (Number.isFinite(expiresAt) && expiresAt <= now) {
+      yield* fs.remove(markerFile, { force: true }).pipe(Effect.ignore);
+    } else if (
+      typeof startedAt === "number" &&
+      Number.isFinite(startedAt) &&
+      Number.isFinite(expiresAt) &&
       startedAt <= now &&
       expiresAt > now &&
-      expiresAt > startedAt &&
-      expiresAt - startedAt <= DESKTOP_UPDATE_IN_PROGRESS_TTL_MS
+      expiresAt > startedAt
     ) {
-      return String(expiresAt - now);
+      return String(Math.min(expiresAt - now, DESKTOP_UPDATE_IN_PROGRESS_TTL_MS));
     }
   }
-  yield* fs.remove(markerFile, { force: true }).pipe(Effect.ignore);
   return "";
 });
 

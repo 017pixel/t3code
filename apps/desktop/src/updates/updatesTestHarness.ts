@@ -27,6 +27,7 @@ export interface UpdatesHarnessOptions {
   readonly setDisableDifferentialDownload?: Effect.Effect<void>;
   readonly downloadUpdate?: Effect.Effect<void>;
   readonly quitAndInstall?: Effect.Effect<void, ElectronUpdater.ElectronUpdaterQuitAndInstallError>;
+  readonly failMarkerRename?: boolean;
   readonly stopBackend?: Effect.Effect<void>;
   readonly startBackend?: Effect.Effect<void>;
   readonly backendDesiredRunning?: boolean;
@@ -215,6 +216,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
 
   const updateRestartMarkers = new Set<string>();
   const updateMarkerContents = new Map<string, string>();
+  const markerOperations: string[] = [];
   const installRecords = new Map<string, string>();
   let previousInstallRecord = options.installRecord;
   const isInstallRecord = (path: string) =>
@@ -241,10 +243,28 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       Effect.sync(() => {
         if (isInstallRecord(path)) installRecords.set(path, data);
         else {
+          markerOperations.push(`write ${path}`);
           if (path.endsWith("/desktop-update-restart")) updateRestartMarkers.add(path);
           updateMarkerContents.set(path, data);
         }
       }),
+    rename: (from, to) =>
+      options.failMarkerRename
+        ? Effect.fail(
+            PlatformError.systemError({
+              module: "FileSystem",
+              method: "rename",
+              _tag: "PermissionDenied",
+              pathOrDescriptor: from,
+            }),
+          )
+        : Effect.sync(() => {
+            const contents = updateMarkerContents.get(from);
+            if (contents === undefined) throw new Error(`missing rename source: ${from}`);
+            markerOperations.push(`rename ${from} ${to}`);
+            updateMarkerContents.set(to, contents);
+            updateMarkerContents.delete(from);
+          }),
     remove: (path) =>
       Effect.sync(() => {
         updateRestartMarkers.delete(path);
@@ -280,6 +300,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     installSteps,
     updateRestartMarkers,
     updateMarkerContents,
+    markerOperations,
     installRecords,
     previousInstallRecord: () => previousInstallRecord,
     downloadCount: () => downloadCount,

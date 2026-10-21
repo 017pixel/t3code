@@ -111,6 +111,9 @@ case "\${2:-}" in
     NOW="$(cat "$HOME/clock")"
     printf 'probe %s %s\\n' "$2" "$NOW" >> "$HOME/events"
     [ "$2" = 5999 ] || { [ "$NOW" -ge "$TEST_READY_AT" ] && [ "$2" = 4888 ]; } ;;
+  */desktop-update-in-progress)
+    printf 'marker %s\\n' "$(cat "$HOME/clock")" >> "$HOME/events"
+    exec "$TEST_REAL_NODE" --require "$HOME/clock.cjs" "$@" ;;
   *) exec "$TEST_REAL_NODE" --require "$HOME/clock.cjs" "$@" ;;
 esac`,
     );
@@ -125,10 +128,6 @@ if [ -n "$TEST_CLOCK_JUMP" ] && [ ! -e "$HOME/jumped" ]; then
   printf '%s' "$TEST_CLOCK_JUMP" > "$HOME/clock"
   touch "$HOME/jumped"
 fi`,
-    );
-    executable(
-      "date",
-      `"$TEST_REAL_NODE" -e 'const fs=require("node:fs");const now=Number(fs.readFileSync(process.env.HOME+"/clock","utf8"));console.log(process.argv[1].includes("%s%3N") ? now : Math.floor(now/1000))' "\${1:-}"`,
     );
     executable("nohup", ":");
     if (options.recordedKind) {
@@ -162,7 +161,7 @@ set -eu
 if [ "$1" = --version ]; then printf 1.2.3; exit; fi
 [ "$1" = __ssh-helper ]
 case "$2" in
-  update-remaining) exec "$TEST_REAL_NODE" --require "$HOME/clock.cjs" "$HOME/helper.ts" "$3" ;;
+  update-remaining) printf 'marker %s\\n' "$(cat "$HOME/clock")" >> "$HOME/events"; exec "$TEST_REAL_NODE" --require "$HOME/clock.cjs" "$HOME/helper.ts" "$3" ;;
   runtime-port | pick-port | wait-ready) exec "$HOME/bin/test-node" - "$3" ;;
   *) exit 1 ;;
 esac

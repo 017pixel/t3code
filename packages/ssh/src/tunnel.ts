@@ -647,16 +647,13 @@ const path = process.argv[2];
 try {
   const { startedAt, expiresAt } = JSON.parse(fs.readFileSync(path, "utf8"));
   const now = Date.now();
-  if (Number.isSafeInteger(startedAt) && Number.isSafeInteger(expiresAt) &&
-      startedAt <= now && expiresAt > now && expiresAt > startedAt &&
-      expiresAt - startedAt <= @@T3_UPDATE_TTL_MS@@) {
-    process.stdout.write(String(expiresAt - now));
-  } else {
+  if (Number.isFinite(startedAt) && Number.isFinite(expiresAt) &&
+      startedAt <= now && expiresAt > now && expiresAt > startedAt) {
+    process.stdout.write(String(Math.min(expiresAt - now, @@T3_UPDATE_TTL_MS@@)));
+  } else if (Number.isFinite(expiresAt) && expiresAt <= now) {
     fs.rmSync(path, { force: true });
   }
-} catch {
-  try { fs.rmSync(path, { force: true }); } catch {}
-}
+} catch {}
 NODE
 }
 REMOTE_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
@@ -740,9 +737,12 @@ fi
 if [ -z "$REMOTE_PORT" ]; then
   # The sleep count bounds a host clock that stops advancing.
   UPDATE_WAITED=0
-  while [ "$UPDATE_WAITED" -lt @@T3_UPDATE_TTL_SECONDS@@ ]; do
+  UPDATE_SAW_MARKER=0
+  while [ "$UPDATE_WAITED" -le @@T3_UPDATE_TTL_SECONDS@@ ]; do
     UPDATE_REMAINING="$(update_remaining 2>/dev/null || true)"
     [ -n "$UPDATE_REMAINING" ] || break
+    UPDATE_SAW_MARKER=1
+    [ "$UPDATE_WAITED" -lt @@T3_UPDATE_TTL_SECONDS@@ ] || break
     if adopt_default_server; then break; fi
     REMOTE_PID=""
     REMOTE_PORT=""
@@ -750,9 +750,8 @@ if [ -z "$REMOTE_PORT" ]; then
     sleep 1
     UPDATE_WAITED=$((UPDATE_WAITED + 1))
   done
-  update_remaining >/dev/null 2>&1 || true
   # Readiness clears the marker, so refresh once more before falling back.
-  if [ -z "$REMOTE_PORT" ] && ! adopt_default_server; then
+  if [ "$UPDATE_SAW_MARKER" -eq 1 ] && [ -z "$REMOTE_PORT" ] && ! adopt_default_server; then
     REMOTE_PID=""
     REMOTE_PORT=""
     REMOTE_MANAGED=""
