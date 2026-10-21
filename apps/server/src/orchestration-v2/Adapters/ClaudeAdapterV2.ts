@@ -7801,7 +7801,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           if (
             message.type === "system" &&
             (message.subtype === "model_refusal_fallback" ||
-              (message.subtype === "informational" && message.level !== "info"))
+              (message.subtype === "informational" &&
+                message.level !== "info" &&
+                !(
+                  message.level === "notice" &&
+                  message.content.startsWith("Stop says: ") &&
+                  message.prevent_continuation !== true
+                )))
           ) {
             const now = yield* DateTime.now;
             const nativeItemId = message.uuid;
