@@ -1,4 +1,4 @@
-import { RegistryContext } from "@effect/atom-react";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { EnvironmentId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
@@ -12,7 +12,6 @@ const state = vi.hoisted(() => ({
   inApp: false,
   toast: vi.fn(),
   closeToast: vi.fn(),
-  params: {} as { environmentId?: string; threadId?: string },
   shells: null as unknown as { set: (id: string, value: unknown) => void },
   navigate: vi.fn(),
   sound: vi.fn(),
@@ -22,7 +21,7 @@ const state = vi.hoisted(() => ({
 vi.mock(import("@tanstack/react-router"), async (original) => ({
   ...(await original()),
   useNavigate: (() => state.navigate) as never,
-  useParams: (() => state.params) as never,
+  useParams: (() => useAtomValue(paramsAtom)) as never,
 }));
 vi.mock(import("./ui/toast"), async (original) => {
   const actual = await original();
@@ -67,6 +66,11 @@ import { ThreadNotificationCoordinator } from "./ThreadNotificationCoordinator";
 
 let registry: AtomRegistry.AtomRegistry;
 const shellAtom = Atom.family((_id: string) => Atom.make<unknown>(null));
+// The real `useParams` subscribes to the router; a plain getter would let memoized children miss
+// route changes.
+const paramsAtom = Atom.make<{ environmentId?: string; threadId?: string }>({});
+const setParams = (params: { environmentId?: string; threadId?: string }) =>
+  registry.set(paramsAtom, params);
 state.shells = { set: (id, value) => registry.set(shellAtom(id), value) };
 
 class TestNotification extends EventTarget {
@@ -173,7 +177,6 @@ function setup() {
   stack.defer(() => testRegistry.dispose());
   state.mode = "notifications";
   state.inApp = false;
-  state.params = {};
   state.environmentIds = ["one", "two"];
   state.shells.set("one", shell());
   state.shells.set("two", shell());
@@ -229,7 +232,7 @@ it.each(["hasPendingApprovals", "hasPendingUserInput"] as const)(
 it("closes a thread's in-app toast once the route opens that thread", async () => {
   await using app = setup();
   state.inApp = true;
-  state.params = { environmentId: "two", threadId: "other" };
+  setParams({ environmentId: "two", threadId: "other" });
   focused = true;
   state.toast.mockReturnValue("toast-1");
   await app.render();
@@ -242,7 +245,7 @@ it("closes a thread's in-app toast once the route opens that thread", async () =
   await app.render();
   expect(state.toast).toHaveBeenCalledTimes(1);
 
-  state.params = { environmentId: "one", threadId: "thread" };
+  setParams({ environmentId: "one", threadId: "thread" });
   await app.render();
   expect(state.closeToast).toHaveBeenCalledWith("toast-1");
 });

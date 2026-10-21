@@ -119,6 +119,16 @@ function EnvironmentNotifications({
     strict: false,
   });
   const previous = useRef(new Map<ThreadId, NotificationState>());
+  const toasts = useRef(new Map<string, ThreadId>());
+
+  useEffect(() => {
+    if (activeEnvironmentId !== environmentId) return;
+    for (const [toastId, threadId] of toasts.current) {
+      if (threadId !== activeThreadId) continue;
+      toasts.current.delete(toastId);
+      toastManager.close(toastId);
+    }
+  }, [activeEnvironmentId, activeThreadId, environmentId]);
 
   useEffect(() => {
     if (threads === null) {
@@ -185,6 +195,9 @@ function EnvironmentNotifications({
           type: kind === "completion" ? "success" : status === "failed" ? "error" : "warning",
           title,
           description: thread.title,
+          onClose: () => {
+            toasts.current.delete(toastId);
+          },
           data: {
             hideCopyButton: true,
             leadingIcon:
@@ -209,6 +222,7 @@ function EnvironmentNotifications({
             },
           },
         });
+        toasts.current.set(toastId, thread.id);
         continue;
       }
       if (
