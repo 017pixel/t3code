@@ -1,4 +1,7 @@
 import { vi } from "vite-plus/test";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Stand in for the login-shell PATH probe without launching the user's shell.
+import * as NodeChildProcess from "node:child_process";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as CodexInstallation from "./CodexInstallation.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -8,8 +11,10 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -64,9 +69,11 @@ import type {
 } from "@t3tools/provider-core/server/driver";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import * as ProviderRegistry from "./ProviderRegistry.ts";
+import { fixPath } from "../os-jank.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "@t3tools/provider-core/server/maintenanceResolver";
 vi.mock("@anthropic-ai/claude-agent-sdk", { spy: true });
+vi.mock("node:child_process", { spy: true });
 
 const decodeServerProvider = Schema.decodeSync(ServerProvider);
 const encodeServerProvider = Schema.encodeSync(ServerProvider);
@@ -1927,6 +1934,136 @@ it.layer(
           assert.strictEqual(reprobedCodex?.installed, false);
         }).pipe(Effect.provide(runtimeServices));
       }),
+    );
+
+    it.effect(
+      "re-probes providers with the login-shell PATH once a timed-out startup shell recovers",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const userBin = path.join(
+            yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-login-shell-path-" }),
+            ".local",
+            "bin",
+          );
+          yield* fileSystem.makeDirectory(userBin, { recursive: true });
+          yield* fileSystem.writeFileString(path.join(userBin, "claude"), "#!/bin/sh\n");
+          yield* fileSystem.chmod(path.join(userBin, "claude"), 0o755);
+
+          const originalPath = process.env.PATH;
+          const originalShell = process.env.SHELL;
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              process.env.PATH = originalPath;
+              process.env.SHELL = originalShell;
+            }),
+          );
+          process.env.PATH = "/usr/bin:/bin";
+          process.env.SHELL = "/bin/bash";
+          let shellRecovered = false;
+          const shellProbe = vi.spyOn(NodeChildProcess, "execFileSync").mockImplementation(() => {
+            if (!shellRecovered) {
+              throw Object.assign(new Error("spawnSync /bin/bash ETIMEDOUT"), {
+                code: "ETIMEDOUT",
+              });
+            }
+            return `__T3CODE_ENV_PATH_START__\n${userBin}:/usr/bin:/bin\n__T3CODE_ENV_PATH_END__\n`;
+          });
+          yield* Effect.addFinalizer(() => Effect.sync(() => shellProbe.mockRestore()));
+
+          yield* fixPath().pipe(Effect.provideService(HostProcess.Platform, "linux"));
+          assert.strictEqual(process.env.PATH, "/usr/bin:/bin");
+
+          const claudeLaunchPaths: Array<{ readonly instance: string; readonly path: string }> = [];
+          const serverSettings = yield* makeMutableServerSettingsService(
+            decodeServerSettings(
+              deepMerge(encodedDefaultServerSettings, {
+                providerInstances: {
+                  ...disabledDefaultSlots("codex", "cursor", "grok", "opencode"),
+                  [ProviderInstanceId.make("claudeAgent")]: {
+                    driver: ProviderDriverKind.make("claudeAgent"),
+                    enabled: true,
+                    config: { binaryPath: "claude" },
+                  },
+                  [ProviderInstanceId.make("claude_override")]: {
+                    driver: ProviderDriverKind.make("claudeAgent"),
+                    enabled: true,
+                    environment: [
+                      { name: "T3_TEST_INSTANCE", value: "override", sensitive: false },
+                    ],
+                    config: { binaryPath: "claude" },
+                  },
+                },
+              }),
+            ),
+          );
+          const scope = yield* Scope.make();
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+          const runtimeServices = yield* Layer.build(
+            ProviderRegistry.layer.pipe(
+              Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
+              Layer.provideMerge(AntigravityInstallation.AntigravityInstallation.layer),
+              Layer.provideMerge(
+                Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
+              ),
+              Layer.provideMerge(ServerSecretStore.layer),
+              Layer.provideMerge(
+                ServerConfig.layerTest(process.cwd(), { prefix: "t3-provider-registry-path-" }),
+              ),
+              Layer.provideMerge(layerTestHttpClient),
+              Layer.provideMerge(
+                Layer.succeed(
+                  ProviderEventLoggers.ProviderEventLoggers,
+                  ProviderEventLoggers.NoOpProviderEventLoggers,
+                ),
+              ),
+              Layer.provideMerge(ProviderLatestVersions.layer),
+              Layer.provideMerge(McpProviderSessions.layer),
+              Layer.provideMerge(ModelManifest.layerTest),
+              Layer.provideMerge(ResetCreditCoordinator.layerTest),
+              Layer.provideMerge(
+                OpenCodeRuntime.layer.pipe(Layer.provide(OpenCodeServerLedger.layerTest)),
+              ),
+              Layer.updateService(ChildProcessSpawner.ChildProcessSpawner, (spawner) =>
+                ChildProcessSpawner.make((command) => {
+                  if (command._tag !== "StandardCommand") return spawner.spawn(command);
+                  const env = command.options.env ?? {};
+                  if (command.command.endsWith("claude")) {
+                    claudeLaunchPaths.push({
+                      instance: env.T3_TEST_INSTANCE ?? "bare",
+                      path: env.PATH ?? "",
+                    });
+                  }
+                  // Never launch a real CLI: this machine may have one installed.
+                  return Effect.succeed(
+                    mockHandle({ stdout: "", stderr: "claude: not found\n", code: 127 }),
+                  );
+                }),
+              ),
+              Layer.provideMerge(NodeServices.layer),
+              Layer.provideMerge(layerBackgroundPolicyAlwaysRun),
+            ),
+          ).pipe(Scope.provide(scope));
+
+          yield* Effect.gen(function* () {
+            const registry = yield* ProviderRegistry.ProviderRegistry;
+            yield* registry.refresh();
+
+            shellRecovered = true;
+            claudeLaunchPaths.length = 0;
+            yield* registry.refresh();
+
+            const launches = claudeLaunchPaths.map(({ instance, path }) => ({
+              instance,
+              sawUserBin: path.split(":").includes(userBin),
+            }));
+            expect(new Set(launches.map((launch) => launch.instance))).toEqual(
+              new Set(["bare", "override"]),
+            );
+            expect(launches.filter((launch) => !launch.sawUserBin)).toEqual([]);
+          }).pipe(Effect.provide(runtimeServices));
+        }).pipe(Effect.provide(NodeServices.layer)),
     );
 
     it.effect("includes unavailable instance snapshots in getProviders", () =>
