@@ -39,6 +39,7 @@ const server = http.createServer((req, res) => {
   req.pipe(upstream);
 });
 server.on("connection", (s) => {
+  s.on("error", () => s.destroy());
   sockets.add(s);
   s.on("close", () => sockets.delete(s));
 });
