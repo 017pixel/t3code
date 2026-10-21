@@ -77,7 +77,9 @@ function subscriptionUsageProps(
         const expiresAt = Math.min(
           checkedAt + SNAPSHOT_MAX_AGE,
           ...pool.windows.flatMap((window) =>
-            window.resets.filter((reset) => reset.at > checkedAt).map((reset) => reset.at),
+            window.resets
+              .filter((reset) => reset.at > Date.parse(reset.member.account.limits.checkedAt))
+              .map((reset) => reset.at),
           ),
         );
         const fresh = Number.isFinite(expiresAt) && expiresAt > now;
@@ -109,9 +111,12 @@ function subscriptionUsageProps(
                 label: window.label,
                 remaining: Math.round(window.remainingPercent),
                 reset: window.resets[0]
-                  ? `${window.resets[0].at > checkedAt ? "Next reset" : "Reset"} ${new Date(
-                      window.resets[0].at,
-                    ).toLocaleString(undefined, {
+                  ? `${
+                      window.resets[0].at >
+                      Date.parse(window.resets[0].member.account.limits.checkedAt)
+                        ? "Next reset"
+                        : "Reset"
+                    } ${new Date(window.resets[0].at).toLocaleString(undefined, {
                       month: "short",
                       day: "numeric",
                       hour: "numeric",

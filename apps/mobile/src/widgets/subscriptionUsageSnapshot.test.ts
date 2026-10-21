@@ -252,6 +252,58 @@ describe("subscription widget expiry", () => {
     ]);
   });
 
+  it.each([
+    {
+      observation: "newer",
+      resetAccount: 1,
+      expiresAt: "2026-10-21T16:55:00.000Z",
+      resetLabel: /^Reset /,
+    },
+    {
+      observation: "older",
+      resetAccount: 0,
+      expiresAt: "2026-10-21T16:42:00.000Z",
+      resetLabel: /^Next reset /,
+    },
+  ])(
+    "compares a pooled reset with its $observation account observation",
+    ({ resetAccount, expiresAt, resetLabel }) => {
+      const stored = buildSubscriptionUsageSnapshot(
+        presentations(
+          ["2026-10-21T16:40:00.000Z", observedAt].map((accountCheckedAt, index) =>
+            provider({
+              instanceId: ProviderInstanceId.make(`codex-${index}`),
+              auth: { status: "authenticated", email: `account-${index}@example.com` },
+              usageLimits: {
+                checkedAt: accountCheckedAt,
+                windows: [
+                  {
+                    ...window,
+                    resetsAt:
+                      index === resetAccount
+                        ? "2026-10-21T16:42:00.000Z"
+                        : "2026-10-21T17:30:00.000Z",
+                  },
+                ],
+              },
+            }),
+          ),
+        ),
+        deepLink,
+      );
+      expect(stored.checkedAt).toBe(Date.parse("2026-10-21T16:40:00.000Z"));
+      expect(stored.providers[0]).toMatchObject({
+        detail: "2 accounts · pooled",
+        expiresAt: Date.parse(expiresAt),
+        totalWindows: 1,
+        windows: [{ remaining: 60, reset: expect.stringMatching(resetLabel) }],
+      });
+      expect(
+        subscriptionUsageTimeline(stored, observedNow)[0]?.props.providers[0]?.windows,
+      ).toHaveLength(resetAccount === 1 ? 1 : 0);
+    },
+  );
+
   it("keeps both rows in the current timeline entry despite the past session reset", () => {
     const timeline = subscriptionUsageTimeline(snapshot(), observedNow);
     expect(timeline.map((entry) => entry.date.toISOString())).toEqual([
