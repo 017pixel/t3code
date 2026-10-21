@@ -9,9 +9,9 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 
 export async function setup(pairingUrl, pairedEnvironmentId) {
-  const { appAtomRegistry } = await import("../../src/rpc/atomRegistry.ts");
-  const { connectionAtomRuntime } = await import("../../src/connection/runtime.ts");
-  const { connectPairing } = await import("../../src/connection/onboarding.ts");
+  const { appAtomRegistry } = await import("../../../src/rpc/atomRegistry.ts");
+  const { connectionAtomRuntime } = await import("../../../src/connection/runtime.ts");
+  const { connectPairing } = await import("../../../src/connection/onboarding.ts");
   const result = pairedEnvironmentId
     ? { _tag: "Success", value: pairedEnvironmentId }
     : await connectPairing.run(appAtomRegistry, { pairingUrl });
@@ -60,8 +60,8 @@ export async function setup(pairingUrl, pairedEnvironmentId) {
 }
 
 export async function state(environmentId) {
-  const { appAtomRegistry } = await import("../../src/rpc/atomRegistry.ts");
-  const { connectionAtomRuntime } = await import("../../src/connection/runtime.ts");
+  const { appAtomRegistry } = await import("../../../src/rpc/atomRegistry.ts");
+  const { connectionAtomRuntime } = await import("../../../src/connection/runtime.ts");
   const command = createRuntimeCommand(connectionAtomRuntime, {
     label: "fixture:connection-retry:state",
     execute: () =>
@@ -80,8 +80,8 @@ export async function state(environmentId) {
 }
 
 export async function label(environmentId) {
-  const { appAtomRegistry } = await import("../../src/rpc/atomRegistry.ts");
-  const { connectionAtomRuntime } = await import("../../src/connection/runtime.ts");
+  const { appAtomRegistry } = await import("../../../src/rpc/atomRegistry.ts");
+  const { connectionAtomRuntime } = await import("../../../src/connection/runtime.ts");
   const { ConnectionOnboarding } = await import("@t3tools/client-runtime/connection");
   return createRuntimeCommand(connectionAtomRuntime, {
     label: "fixture:label",
@@ -113,7 +113,7 @@ export async function waitState(environmentId, phase, minimumAttempt = 0) {
 }
 
 export async function stack(environmentId, enabled) {
-  const { appAtomRegistry } = await import("../../src/rpc/atomRegistry.ts");
+  const { appAtomRegistry } = await import("../../../src/rpc/atomRegistry.ts");
   const { serverUpdateStateAtom } = await import("@t3tools/client-runtime/state/server");
   appAtomRegistry.set(
     serverUpdateStateAtom(environmentId),
@@ -130,8 +130,8 @@ export async function stack(environmentId, enabled) {
 }
 
 export async function trace(environmentId) {
-  const { appAtomRegistry } = await import("../../src/rpc/atomRegistry.ts");
-  const { environmentCatalog } = await import("../../src/connection/catalog.ts");
+  const { appAtomRegistry } = await import("../../../src/rpc/atomRegistry.ts");
+  const { environmentCatalog } = await import("../../../src/connection/catalog.ts");
   const rows = [];
   const start = performance.now();
   const atom = environmentCatalog.stateAtom(environmentId);
@@ -156,8 +156,8 @@ export async function trace(environmentId) {
 }
 
 export async function reset(environmentId) {
-  const { appAtomRegistry } = await import("../../src/rpc/atomRegistry.ts");
-  const { environmentCatalog } = await import("../../src/connection/catalog.ts");
+  const { appAtomRegistry } = await import("../../../src/rpc/atomRegistry.ts");
+  const { environmentCatalog } = await import("../../../src/connection/catalog.ts");
   const result = await environmentCatalog.setEnabled.run(appAtomRegistry, {
     environmentId,
     enabled: true,
