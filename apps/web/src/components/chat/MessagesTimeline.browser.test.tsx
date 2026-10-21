@@ -1,4 +1,5 @@
-import { EnvironmentId, MessageId } from "@t3tools/contracts";
+import { EnvironmentId, MessageId, RunId, ThreadId, TurnItemId } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import type { LegendListRef } from "@legendapp/list/react";
 import { createRef, type ComponentProps, type ReactElement } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -6,6 +7,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import "~/index.css";
 
 import { act, render } from "../../../test/render";
+import { deriveTimelineEntriesFromVisibleTurnItems } from "../../session-logic";
 import { MessagesTimeline } from "./MessagesTimeline";
 import { remarkThoughtPreview } from "./TimelineWorkEntryRow.logic";
 import { parseMarkdownWithMath } from "@t3tools/shared/markdownMath";
@@ -161,6 +163,52 @@ describe("MessagesTimeline messages", () => {
     expect(screen.container.innerHTML).not.toContain("javascript:");
     await click(screen.button("Safe details"));
     expect((globalThis as { __t3Xss?: number }).__t3Xss).toBeUndefined();
+  });
+});
+
+describe("MessagesTimeline usage limit notice", () => {
+  it("labels the retry time with the viewer's timezone", async () => {
+    const threadId = ThreadId.make("usage-limit-thread");
+    const at = DateTime.makeUnsafe(CREATED_AT);
+    const entries = deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: [
+        {
+          position: 0,
+          visibility: "local",
+          sourceThreadId: threadId,
+          sourceItemId: TurnItemId.make("usage-limit"),
+          item: {
+            id: TurnItemId.make("usage-limit"),
+            threadId,
+            runId: RunId.make("usage-limit-run"),
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 0,
+            title: null,
+            startedAt: at,
+            completedAt: at,
+            updatedAt: at,
+            type: "error",
+            status: "failed",
+            failure: {
+              class: "usage_limit",
+              message: "You've hit your usage limit.",
+              code: null,
+              retryable: true,
+              resetAt: "2026-03-17T19:30:00.000Z",
+            },
+          },
+        },
+      ],
+      optimisticMessages: [],
+    });
+    await using screen = await renderTimeline(entries);
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    expect(screen.text()).toMatch(/Usage limit reached\. Retry after .+\./);
+    expect(screen.text()).toContain(`(${timeZone})`);
   });
 });
 
