@@ -2096,7 +2096,7 @@ export const make = Effect.gen(function* () {
           if (target) {
             targetRepository = `${target.host}/${target.owner}/${target.name}`.toLowerCase();
           }
-        } else if (headContext.isCrossRepository && handle.context) {
+        } else if (handle.context) {
           targetRepository = normalizeGitRemoteUrl(handle.context.remoteUrl);
         }
         if (targetRepository) {

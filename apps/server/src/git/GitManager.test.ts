@@ -742,6 +742,7 @@ function preparePullRequestThread(
 function makeManager(input?: {
   ghScenario?: FakeGhScenario;
   sourceControlProvider?: SourceControlProvider["Service"];
+  sourceControlContext?: SourceControlProviderRegistry.SourceControlProviderHandle["context"];
   textGeneration?: Partial<FakeGitTextGeneration>;
   serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
   setupScriptRunner?: ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"];
@@ -840,7 +841,8 @@ function makeManager(input?: {
         SourceControlProviderRegistry.SourceControlProviderRegistry.of({
           resolveLink: (input) => provider.resolveLink?.(input),
           get: () => Effect.succeed(provider),
-          resolveHandle: () => Effect.succeed({ provider, context: null }),
+          resolveHandle: () =>
+            Effect.succeed({ provider, context: input?.sourceControlContext ?? null }),
           resolve: () => Effect.succeed(provider),
           discover: Effect.succeed([]),
         }),
@@ -3584,6 +3586,63 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
               expect.objectContaining({ kind: "phase_started", phase: "pr", label: message }),
             );
         }
+      }),
+  );
+
+  it.effect.each([false, true])(
+    "keeps a published non-GitHub base with a bound target context (fork: %s)",
+    (fork) =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        const originDir = yield* createBareRemote();
+        const publishDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", originDir]);
+        yield* runGit(repoDir, ["remote", "add", "publish", fork ? publishDir : originDir]);
+        yield* runGit(repoDir, ["push", "origin", "main"]);
+        yield* runGit(repoDir, ["checkout", "-b", "parent"]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "parent.txt"), "parent work\n");
+        yield* runGit(repoDir, ["add", "."]);
+        yield* runGit(repoDir, ["commit", "-m", "Parent commit"]);
+        yield* runGit(repoDir, ["push", "origin", "parent"]);
+        yield* runGit(repoDir, ["checkout", "-b", "child"]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "child.txt"), "child work\n");
+        yield* runGit(repoDir, ["add", "."]);
+        yield* runGit(repoDir, ["commit", "-m", "Child commit"]);
+        yield* runGit(repoDir, ["push", "-u", "publish", "child"]);
+        yield* runGit(repoDir, ["config", "branch.child.gh-merge-base", "parent"]);
+        // A narrow refspec keeps parent cached only under origin, even after status refreshes.
+        yield* runGit(repoDir, [
+          "config",
+          "remote.publish.fetch",
+          "+refs/heads/child:refs/remotes/publish/child",
+        ]);
+        const { service } = createGitHubProviderWithFakeGh({
+          defaultBranch: "main",
+          prListSequence: ["[]", "[]"],
+        });
+        const kind = SourceControlProviderKind.make("gitcafe");
+        const generatedInputs: TextGeneration.PrContentGenerationInput[] = [];
+        const { manager } = yield* makeManager({
+          sourceControlProvider: { ...service, kind },
+          sourceControlContext: {
+            provider: { kind, name: "GitCafe", baseUrl: "https://git.cafe" },
+            remoteName: "origin",
+            remoteUrl: originDir,
+          },
+          textGeneration: {
+            generatePrContent: (input) => {
+              generatedInputs.push(input);
+              return Effect.succeed({ title: "Child PR", body: "Child body" });
+            },
+          },
+        });
+        const result = yield* runStackedAction(manager, { cwd: repoDir, action: "create_pr" });
+
+        expect(result.pr.baseBranch).toBe("parent");
+        expect(result.toast.description).not.toContain("unavailable");
+        expect(generatedInputs[0]!.commitSummary).toContain("Child commit");
+        expect(generatedInputs[0]!.commitSummary).not.toContain("Parent commit");
       }),
   );
 
