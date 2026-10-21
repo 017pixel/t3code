@@ -4,12 +4,19 @@ import { describe, expect, it } from "vite-plus/test";
 import type { ComposerFileAttachment, ComposerImageAttachment } from "../../composerDraftStore";
 import {
   attachmentsToReleaseOnUploadCapabilityLoss,
+  classifyComposerAttachmentFile,
   fileAttachmentCapabilityBlockReason,
   fileAttachmentStagingLimit,
   shouldHandleComposerAttachmentPaste,
 } from "./composerAttachmentFiles";
 
 describe("composer attachment files", () => {
+  it("attaches a DNG photo as an ordinary file when the browser reports its raw MIME type", () => {
+    const file = new File(["dng"], "IMG_3921_7-50-59.DNG", { type: "image/x-adobe-dng" });
+
+    expect(classifyComposerAttachmentFile(file)).toBe("file");
+  });
+
   it("preserves text paste when an application adds a synthetic generic file", () => {
     const file = new File(["clipboard"], "clipboard.rtf", { type: "application/rtf" });
 
