@@ -1,12 +1,28 @@
 #!/usr/bin/env python3
 """Seed public composer proof into a stopped, migrated, isolated dev home.
 
-Usage: python3 scripts/seed-issue-22997.py /tmp/issue-22997/after-home
-Start that home once with `node scripts/dev-runner.ts dev --home-dir HOME`,
-then stop its server before seeding. Re-run while stopped to reset projections;
-clear browser drafts via the UI before repeating gestures. No editor document
-is seeded. Schema: orchestration V2 (migration 67). The JSON fixes IDs and clock;
-freeze the browser clock to fixedClock separately when capturing comparisons.
+From the pinned checkout, migrate a fresh isolated home (keep the terminal
+session; wait for Listening, then stop this process with Ctrl+C):
+  export PATH="$PWD/node_modules/.bin:$PATH"
+  T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD=0 node scripts/dev-runner.ts dev --home-dir /tmp/issue-22997/after-proof
+With that server stopped:
+  python3 scripts/seed-issue-22997.py /tmp/issue-22997/after-proof
+Restart using the identical bootstrap-disabled command above. Pair through the
+startup URL privately. Use real UI Settings for rich text and theme. Never send
+the proof draft to a provider. To reset, stop this server, rerun the seed command,
+restart, and clear each browser draft with Ctrl+A then Backspace in the editor.
+The default bootstrap MUST be disabled: it creates event history this script
+refuses. Before comparison uses the same commands and a separate before-proof
+home, running the pinned before checkout. Use a separate node_modules/.vite
+cache for the before web app; sharing that cache causes Outdated Optimize Dep.
+
+Schema: orchestration V2 (migration 67). No editor document is seeded. Freeze
+the browser clock after every page reload, before opening comparison threads,
+through preview_evaluate with this expression (does not change editor state):
+  (()=>{const D=Date;const fixed=D.parse('2026-10-21T12:00:00.000Z');window.Date=class extends D {constructor(...a){super(...(a.length?a:[fixed]))}static now(){return fixed}};return new Date().toISOString()})()
+The fixture fixes IDs and timestamps. Use UTC, wait for document.fonts.ready,
+match viewport/theme/scroll and sidebar, and click a blank main-area point to
+blur. Save preview_snapshot PNGs and retain recordings proving the key gestures.
 Only use an empty proof home: this script deliberately refuses event history.
 """
 import hashlib
