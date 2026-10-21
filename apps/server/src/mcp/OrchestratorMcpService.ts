@@ -1000,16 +1000,15 @@ const make = Effect.gen(function* () {
   ): Effect.fn.Return<ScheduledTask["workspaceStrategy"], OrchestratorMcpFailure> {
     if (boundToThread) return { type: "root" };
     const project = yield* requireProject(projectId);
-    const baseRef = yield* gitDriver.resolvePrimaryRemoteName(project.workspaceRoot).pipe(
-      Effect.flatMap((remoteName) =>
-        gitDriver.resolveDefaultBranchName(project.workspaceRoot, remoteName),
-      ),
-      Effect.mapError(() =>
-        failure("orchestration_error", "Could not detect the project's default branch."),
-      ),
-    );
+    const baseRef = yield* gitDriver
+      .resolveDefaultWorktreeBaseRef(project.workspaceRoot)
+      .pipe(
+        Effect.mapError(() =>
+          failure("orchestration_error", "Could not detect the project's default branch."),
+        ),
+      );
     if (baseRef === null) {
-      return yield* failure("invalid_request", "The project's remote default branch is unknown.");
+      return yield* failure("invalid_request", "The project's default branch is unknown.");
     }
     return { type: "worktree", baseRef, startFromOrigin: true };
   });

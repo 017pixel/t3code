@@ -1668,6 +1668,32 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     });
   });
 
+  const resolveDefaultWorktreeBaseRef = Effect.fn("GitVcsDriver.resolveDefaultWorktreeBaseRef")(
+    function* (cwd: string) {
+      const remotes = yield* listRemoteNames(cwd);
+      const remoteName = remotes.includes("origin") ? "origin" : remotes[0];
+      if (remoteName !== undefined) {
+        const cached = yield* resolveDefaultBranchName(cwd, remoteName);
+        if (cached !== null) return cached;
+        // Empty clones do not cache remote HEAD, even after the first push.
+        const advertised = yield* executeGit(
+          "GitVcsDriver.resolveDefaultWorktreeBaseRef.remoteHead",
+          cwd,
+          ["ls-remote", "--symref", "--", remoteName, "HEAD"],
+          { timeoutMs: 20_000 },
+        );
+        return /^ref: refs\/heads\/([^\t\r\n]+)\tHEAD\r?$/m.exec(advertised.stdout)?.[1] ?? null;
+      }
+      // A local-only repository has no advertised default. Prefer conventional
+      // branches before falling back to its checked-out branch.
+      return (
+        (yield* resolveBranchName(cwd, "refs/heads/main")) ??
+        (yield* resolveBranchName(cwd, "refs/heads/master")) ??
+        (yield* resolveBranchName(cwd, "HEAD"))
+      );
+    },
+  );
+
   const resolvePushRemoteName = Effect.fn("resolvePushRemoteName")(function* (
     cwd: string,
     refName: string,
@@ -4485,6 +4511,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     refreshCheckedOutBranch: (input) =>
       withListRefsInvalidation(input.cwd, refreshCheckedOutBranch(input)),
     ensureRemote: (input) => withListRefsInvalidation(input.cwd, ensureRemote(input)),
+    resolveDefaultWorktreeBaseRef,
     resolvePrimaryRemoteName,
     resolveDefaultBranchName,
     fetchRemote: (input) =>
