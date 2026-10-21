@@ -1050,29 +1050,27 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             ),
           );
 
-        // Context limits by `provider/model`, read once per session. The list
-        // only sets the meter's ceiling, so a slow or missing `provider.list`
-        // (older servers, test doubles) yields an unknown limit rather than a
-        // failed session or a late terminal. Not an `sdkCall`: the whole model
-        // catalog is too much for the protocol log.
-        const contextWindows = yield* Effect.cached(
-          OpenCodeRuntime.runOpenCodeSdk("provider.list", (signal) =>
-            client.provider.list(undefined, { signal }),
-          ).pipe(
-            Effect.timeout("5 seconds"),
-            Effect.map((list) => {
+        // Fetch the optional ceiling in the background; turn completion must
+        // never wait for the catalog. Skip protocol logging for this large list.
+        let contextWindows = new Map<string, number>();
+        yield* OpenCodeRuntime.runOpenCodeSdk("provider.list", (signal) =>
+          client.provider.list(undefined, { signal }),
+        ).pipe(
+          Effect.timeout("5 seconds"),
+          Effect.tap((list) =>
+            Effect.sync(() => {
               const windows = new Map<string, number>();
               for (const provider of list.data?.all ?? []) {
                 for (const model of Object.values(provider.models)) {
                   windows.set(`${provider.id}/${model.id}`, model.limit.context);
                 }
               }
-              return windows;
+              contextWindows = windows;
             }),
-            Effect.orElseSucceed(() => new Map<string, number>()),
           ),
+          Effect.ignore,
+          Effect.forkIn(scope),
         );
-        yield* Effect.forkIn(contextWindows, scope);
 
         const abortDescendants = Effect.fn("OpencodeAdapter.abortDescendants")(function* (
           rootId: string,
@@ -1165,7 +1163,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           const maxTokens =
             lastStep === undefined
               ? null
-              : ((yield* contextWindows).get(turn.modelSelection.model.trim()) ?? null);
+              : (contextWindows.get(turn.modelSelection.model.trim()) ?? null);
           const providerTurn: OrchestrationV2ProviderTurn = {
             ...turn.providerTurn,
             nativeTurnRef:
