@@ -260,6 +260,50 @@ it.effect.each([
             },
           });
           yield* Queue.offer(events, {
+            type: "turn_item.updated",
+            driver,
+            turnItem: {
+              ...commandItem,
+              id: TurnItemId.make("item:approval"),
+              nodeId: approvalNodeId,
+              type: "approval_request",
+              requestId,
+              requestKind: "command",
+              status: "waiting",
+            },
+          });
+          yield* Queue.offer(events, {
+            type: "node.updated",
+            driver,
+            node: {
+              ...commandNode,
+              id: NodeId.make("node:unrelated-approval"),
+              parentNodeId: first.rootNodeId,
+              kind: "approval_request",
+              status: "waiting",
+              runtimeRequestId: RuntimeRequestId.make("request:unrelated"),
+            },
+          });
+          yield* Queue.offer(events, {
+            type: "runtime_request.updated",
+            driver,
+            threadId,
+            runtimeRequest: {
+              id: RuntimeRequestId.make("request:unrelated"),
+              nodeId: NodeId.make("node:unrelated-approval"),
+              providerTurnId: turn.id,
+              nativeRequestRef: null,
+              kind: "command",
+              status: "pending",
+              responseCapability: {
+                type: "live",
+                providerSessionId: projection.providerSessions[0]!.id,
+              },
+              createdAt: now,
+              resolvedAt: null,
+            },
+          });
+          yield* Queue.offer(events, {
             type: "runtime_request.updated",
             driver,
             threadId,
@@ -290,8 +334,14 @@ it.effect.each([
         );
         const ingestedProjection = yield* orchestrator.getThreadProjection(threadId);
         if (approvalPending) {
-          assert.equal(ingestedProjection.runtimeRequests[0]?.status, "pending");
-          assert.equal(ingestedProjection.runtimeRequests[0]?.nodeId, NodeId.make("node:approval"));
+          assert.equal(
+            ingestedProjection.runtimeRequests.find((request) => request.id === requestId)?.status,
+            "pending",
+          );
+          assert.equal(
+            ingestedProjection.runtimeRequests.find((request) => request.id === requestId)?.nodeId,
+            NodeId.make("node:approval"),
+          );
           assert.equal(
             ingestedProjection.nodes.find((node) => node.id === NodeId.make("node:approval"))
               ?.parentNodeId,
@@ -310,7 +360,9 @@ it.effect.each([
           });
           yield* worker.drain();
           assert.equal(
-            (yield* orchestrator.getThreadProjection(threadId)).runtimeRequests[0]?.status,
+            (yield* orchestrator.getThreadProjection(threadId)).runtimeRequests.find(
+              (request) => request.id === requestId,
+            )?.status,
             "resolved",
           );
         }
@@ -339,7 +391,8 @@ it.effect.each([
         assert.equal(after.runs.find((run) => run.id === first.runId)?.status, "failed");
         const item = after.turnItems.find((item) => item.id === commandItem.id)!;
         if (check === "approval status" || check === "dynamic approval" || check === "pending") {
-          assert.include(["interrupted", "cancelled"], item.status);
+          assert.equal(item.status, "cancelled");
+          assert.equal(after.nodes.find((node) => node.id === commandNode.id)?.status, "cancelled");
           assert.isNotNull(item.completedAt);
           assert.equal(item.toolNonExecutionKind, "cancelled");
           const lateEvent: OrchestrationV2DomainEvent = {
@@ -368,6 +421,48 @@ it.effect.each([
           assert.equal(
             pending.some((task) => task.taskId === "shell-native"),
             check !== "completed",
+          );
+        }
+        if (approvalPending) {
+          const unrelated = after.runtimeRequests.find(
+            (request) => request.id === RuntimeRequestId.make("request:unrelated"),
+          )!;
+          assert.equal(unrelated.status, "pending");
+          assert.equal(unrelated.responseCapability.type, "live");
+          assert.equal(after.nodes.find((node) => node.id === unrelated.nodeId)?.status, "waiting");
+        }
+        if (approvalPending && check !== "accepted approval") {
+          assert.equal(item.status, "cancelled");
+          const request = after.runtimeRequests.find((request) => request.id === requestId)!;
+          assert.equal(request.status, "cancelled");
+          assert.deepEqual(request.responseCapability, {
+            type: "not_resumable",
+            reason: "The tool was cancelled before this approval was resolved.",
+          });
+          assert.isNotNull(request.resolvedAt);
+          const approvalNode = after.nodes.find((node) => node.id === request.nodeId)!;
+          assert.equal(approvalNode.status, "cancelled");
+          assert.isNotNull(approvalNode.completedAt);
+          const approvalItem = after.turnItems.find(
+            (item) => item.id === TurnItemId.make("item:approval"),
+          )!;
+          assert.equal(approvalItem.status, "cancelled");
+          assert.isNotNull(approvalItem.completedAt);
+          const response = yield* orchestrator
+            .dispatch({
+              type: "runtime-request.respond",
+              commandId: CommandId.make("late-approve"),
+              threadId,
+              requestId,
+              decision: "accept",
+            })
+            .pipe(Effect.flip);
+          assert.equal(response._tag, "OrchestratorDispatchError");
+          assert.equal(response.cause, `Runtime request ${requestId} is cancelled.`);
+        } else if (check === "accepted approval") {
+          assert.equal(
+            after.runtimeRequests.find((request) => request.id === requestId)?.status,
+            "resolved",
           );
         }
       }).pipe(

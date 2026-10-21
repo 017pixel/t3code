@@ -2590,7 +2590,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 payload_json = excluded.payload_json
               WHERE NOT (
                 orchestration_v2_projection_turn_items.type IN ('command_execution', 'dynamic_tool')
-                AND json_extract(orchestration_v2_projection_turn_items.payload_json, '$.toolNonExecutionKind') IS 'cancelled'
+                AND CASE WHEN orchestration_v2_projection_turn_items.status = 'cancelled'
+                  THEN json_extract(orchestration_v2_projection_turn_items.payload_json, '$.toolNonExecutionKind') IS 'cancelled'
+                  ELSE FALSE END
                 AND excluded.status IN ('pending', 'running', 'waiting')
               )
             `;

@@ -719,6 +719,7 @@ export const layer: Layer.Layer<
                 : [],
             ),
           );
+          const cancelledToolNodeIds = new Set<NodeId>();
           for (const item of turnItems) {
             // Claude marks tool_use as running before asking permission. Only its
             // pending approval child proves that a running tool never started.
@@ -749,6 +750,7 @@ export const layer: Layer.Layer<
                 updatedAt: completedAt,
               },
             });
+            if (item.nodeId !== null) cancelledToolNodeIds.add(item.nodeId);
             const node = nodes.find((candidate) => candidate.id === item.nodeId);
             if (node !== undefined && isOrchestrationV2WorkActive(node.status)) {
               cancelledToolEvents.push({
@@ -760,6 +762,69 @@ export const layer: Layer.Layer<
                 providerInstanceId: input.run.providerInstanceId,
                 occurredAt: completedAt,
                 payload: { ...node, status: "cancelled", completedAt },
+              });
+            }
+          }
+          for (const approvalNode of nodes) {
+            if (
+              approvalNode.kind !== "approval_request" ||
+              approvalNode.runId !== input.run.id ||
+              approvalNode.threadId !== input.run.threadId ||
+              approvalNode.parentNodeId === null ||
+              !cancelledToolNodeIds.has(approvalNode.parentNodeId)
+            )
+              continue;
+            const request = runtimeRequests.find(
+              (candidate) => candidate.nodeId === approvalNode.id && candidate.status === "pending",
+            );
+            if (request === undefined) continue;
+            cancelledToolEvents.push(
+              {
+                id: yield* allocateEventId(),
+                type: "runtime-request.updated",
+                threadId: input.run.threadId,
+                runId: input.run.id,
+                nodeId: approvalNode.id,
+                providerInstanceId: input.run.providerInstanceId,
+                occurredAt: completedAt,
+                payload: {
+                  ...request,
+                  status: "cancelled",
+                  responseCapability: {
+                    type: "not_resumable",
+                    reason: "The tool was cancelled before this approval was resolved.",
+                  },
+                  resolvedAt: completedAt,
+                },
+              },
+              {
+                id: yield* allocateEventId(),
+                type: "node.updated",
+                threadId: input.run.threadId,
+                runId: input.run.id,
+                nodeId: approvalNode.id,
+                providerInstanceId: input.run.providerInstanceId,
+                occurredAt: completedAt,
+                payload: { ...approvalNode, status: "cancelled", completedAt },
+              },
+            );
+            for (const approvalItem of turnItems) {
+              if (approvalItem.type !== "approval_request" || approvalItem.requestId !== request.id)
+                continue;
+              cancelledToolEvents.push({
+                id: yield* allocateEventId(),
+                type: "turn-item.updated",
+                threadId: input.run.threadId,
+                ...(approvalItem.runId === null ? {} : { runId: approvalItem.runId }),
+                ...(approvalItem.nodeId === null ? {} : { nodeId: approvalItem.nodeId }),
+                providerInstanceId: input.run.providerInstanceId,
+                occurredAt: completedAt,
+                payload: {
+                  ...approvalItem,
+                  status: "cancelled",
+                  completedAt,
+                  updatedAt: completedAt,
+                },
               });
             }
           }
