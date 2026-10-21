@@ -217,11 +217,37 @@ it.effect("falls back when REST checks are unavailable without retrying unsuppor
   Effect.gen(function* () {
     let probes = 0;
     let reads = 0;
+    let headUnavailable = true;
     const revalidate = yield* makeChecksRevalidator.pipe(
       Effect.provide(
         Layer.mock(GitHubRest.GitHubRest)({
-          rest: () => {
+          rest: ({ path }) => {
             probes++;
+            if (!headUnavailable && path.endsWith("/pulls/1")) {
+              return Effect.succeed({
+                status: 200,
+                headers: {},
+                body: encodeJson({
+                  head: { sha: "a".repeat(40), repo: { id: 1 } },
+                  base: { repo: { id: 1 } },
+                }),
+                truncated: false,
+                invalidUtf8: false,
+              });
+            }
+            if (path.includes("/status")) {
+              return Effect.yieldNow.pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new GitHubRequestPolicy.GitHubApiResponseError({
+                      host: "github.com",
+                      operation: "revalidateChecks",
+                      status: 502,
+                    }),
+                  ),
+                ),
+              );
+            }
             return Effect.fail(
               new GitHubRequestPolicy.GitHubApiNotFoundError({
                 host: "github.com",
@@ -242,5 +268,16 @@ it.effect("falls back when REST checks are unavailable without retrying unsuppor
       );
     expect(probes).toBe(1);
     expect(reads).toBe(2);
+    headUnavailable = false;
+    probes = 0;
+    for (let tick = 0; tick < 2; tick++)
+      yield* revalidate(reference, read).pipe(
+        Effect.provideService(GitHubRequestPolicy.PinnedGitHubCredential, {
+          ...credential,
+          credentialFingerprint: "two",
+        }),
+      );
+    expect(probes).toBe(3);
+    expect(reads).toBe(4);
   }),
 );
