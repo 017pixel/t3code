@@ -81,6 +81,11 @@ export interface ThreadPendingUserInput {
   readonly dismissible: boolean;
 }
 
+// Adapters fall back to "Question" or "Question N" when the provider sends no title.
+export function isGenericUserInputQuestionHeader(header: string) {
+  return /^question(?:\s+\d+)?$/i.test(header.trim());
+}
+
 export interface PendingThreadRequests {
   readonly approvals: ReadonlyArray<ThreadPendingApproval>;
   readonly userInputs: ReadonlyArray<ThreadPendingUserInput>;

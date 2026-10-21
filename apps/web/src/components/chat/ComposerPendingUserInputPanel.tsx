@@ -1,3 +1,4 @@
+import { isGenericUserInputQuestionHeader } from "@t3tools/client-runtime/state/thread-requests";
 import { type RuntimeRequestId, type ScopedThreadRef } from "@t3tools/contracts";
 import { memo, useEffect, useEffectEvent, useRef, useState } from "react";
 import { useStableCallback } from "~/hooks/useStableCallback";
@@ -176,6 +177,10 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   if (!activeQuestion) {
     return null;
   }
+  const showHeader = !isGenericUserInputQuestionHeader(activeQuestion.header);
+  const toggleLabel = isCollapsed
+    ? "Show the question and its options"
+    : "Hide the question and its options";
 
   return (
     <Collapsible
@@ -186,22 +191,28 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     >
       <CollapsibleTrigger
         render={<ComposerBanner.Row render={<button type="button" />} />}
-        title={
-          isCollapsed ? "Show the question and its options" : "Hide the question and its options"
-        }
+        title={toggleLabel}
+        aria-label={isCollapsed || showHeader ? undefined : toggleLabel}
         data-pending-user-input-toggle={isCollapsed ? "collapsed" : "expanded"}
       >
-        <ComposerBanner.Icon />
-        <ComposerBanner.Content>
-          <span className="min-w-0 truncate font-medium text-muted-foreground">
-            {activeQuestion.header}
-          </span>
-          {isCollapsed ? (
-            <span className="min-w-0 flex-1 truncate text-secondary-label">
-              {activeQuestion.question}
-            </span>
-          ) : null}
-        </ComposerBanner.Content>
+        {/* Without a header, the expanded trigger keeps only its actions so the question leads. */}
+        {isCollapsed || showHeader ? (
+          <>
+            <ComposerBanner.Icon />
+            <ComposerBanner.Content>
+              {showHeader ? (
+                <span className="min-w-0 truncate font-medium text-muted-foreground">
+                  {activeQuestion.header}
+                </span>
+              ) : null}
+              {isCollapsed ? (
+                <span className="min-w-0 flex-1 truncate text-secondary-label">
+                  {activeQuestion.question}
+                </span>
+              ) : null}
+            </ComposerBanner.Content>
+          </>
+        ) : null}
         <ComposerBanner.Actions>
           {prompt.questions.length > 1 ? (
             <span className="text-3xs font-medium text-muted-foreground tabular-nums">
@@ -233,7 +244,8 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
       </CollapsibleTrigger>
       <CollapsiblePanel>
         <ComposerBanner.Scroll>
-          <ComposerBanner.Body className="pe-1 pb-1 wrap-anywhere">
+          {/* Both sides sit 16px in with the banner's px-1; the overflow scrollbar gutter takes 8px of the right. */}
+          <ComposerBanner.Body className="ps-3 pe-3 pb-1 wrap-anywhere sm:ps-3 [[data-has-overflow-y]>*>&]:pe-1">
             <ChatMarkdown
               text={activeQuestion.question}
               cwd={cwd}

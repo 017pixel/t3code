@@ -1,7 +1,10 @@
 import { Button } from "../../components/ui/Button";
 import { QuestionAttachments } from "./QuestionAttachments";
 import type { RuntimeRequestId } from "@t3tools/contracts";
-import type { ThreadUserInputQuestion } from "@t3tools/client-runtime/state/thread-requests";
+import {
+  isGenericUserInputQuestionHeader,
+  type ThreadUserInputQuestion,
+} from "@t3tools/client-runtime/state/thread-requests";
 import { useCallback, useRef } from "react";
 import { Platform, Pressable, ScrollView, View, type LayoutChangeEvent } from "react-native";
 import Animated, {
@@ -241,9 +244,11 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
           const draft = props.drafts[question.id];
           return (
             <View key={question.id} className="gap-2 pt-1">
-              <Text className="font-t3-bold text-xs uppercase tracking-[1px] text-foreground-muted">
-                {question.header}
-              </Text>
+              {isGenericUserInputQuestionHeader(question.header) ? null : (
+                <Text className="font-t3-bold text-xs uppercase tracking-[1px] text-foreground-muted">
+                  {question.header}
+                </Text>
+              )}
               <QuestionText markdown={question.question} />
               <View className="h-px bg-separator" />
               <View className="gap-0.5">
