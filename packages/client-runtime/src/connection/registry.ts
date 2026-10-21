@@ -38,7 +38,6 @@ import { ConnectionBlockedError } from "./model.ts";
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionDriver from "./driver.ts";
-export { ConnectionDriver } from "./driver.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
 import {
   GitHubRoutingPermissions,
@@ -374,14 +373,18 @@ export const make = Effect.gen(function* () {
                 ) {
                   return yield* driver.connect(current, reportProgress);
                 }
-                const before = yield* credentials.get(target.connectionId);
+                const before = yield* credentials
+                  .get(target.connectionId)
+                  .pipe(Effect.orElseSucceed(() => Option.none<ConnectionCredential>()));
                 return yield* driver.connect(current, reportProgress).pipe(
                   Effect.tapError((error) =>
                     error._tag === "ConnectionBlockedError" && error.reason === "authentication"
                       ? Effect.gen(function* () {
-                          const stored = yield* credentials.get(target.connectionId);
-                          if (Option.isSome(before) && Equal.equals(before, stored)) {
-                            yield* credentials.remove(target.connectionId);
+                          if (Option.isSome(before)) {
+                            yield* (
+                              credentials.removeIfMatches?.(target.connectionId, before.value) ??
+                                Effect.void
+                            );
                           }
                         }).pipe(Effect.ignore)
                       : Effect.void,
@@ -664,24 +667,31 @@ export const make = Effect.gen(function* () {
           // the resolver's bearer broker looks it up.
           let bearerReplaced = false;
           if (registration._tag === "BearerConnectionRegistration") {
-            const stored = yield* credentials
-              .get(registration.target.connectionId)
-              .pipe(Effect.orElseSucceed(() => Option.none<ConnectionCredential>()));
-            const changed =
-              Option.isSome(stored) && !Equal.equals(stored.value, registration.credential);
-            // Only a bearer that was actually stored can be retried with; a
-            // failed write leaves the rejected one in place.
-            bearerReplaced = yield* credentials
-              .put(registration.target.connectionId, registration.credential)
-              .pipe(
-                Effect.as(changed),
-                Effect.catch((error) =>
-                  Effect.logWarning("Could not store the platform bearer credential.", {
-                    environmentId: target.environmentId,
-                    error,
-                  }).pipe(Effect.as(false)),
-                ),
-              );
+            const rejected = yield* (
+              credentials
+                .wasRejected?.(registration.target.connectionId, registration.credential)
+                .pipe(Effect.orElseSucceed(() => false)) ?? Effect.succeed(false)
+            );
+            if (!rejected) {
+              const stored = yield* credentials
+                .get(registration.target.connectionId)
+                .pipe(Effect.orElseSucceed(() => Option.none<ConnectionCredential>()));
+              const changed =
+                Option.isNone(stored) || !Equal.equals(stored.value, registration.credential);
+              // Only a bearer that was actually stored can be retried with; a
+              // failed write leaves the rejected one in place.
+              bearerReplaced = yield* credentials
+                .put(registration.target.connectionId, registration.credential)
+                .pipe(
+                  Effect.as(changed),
+                  Effect.catch((error) =>
+                    Effect.logWarning("Could not store the platform bearer credential.", {
+                      environmentId: target.environmentId,
+                      error,
+                    }).pipe(Effect.as(false)),
+                  ),
+                );
+            }
           }
 
           if (persisted) {
@@ -705,14 +715,22 @@ export const make = Effect.gen(function* () {
             );
           }
 
+          const existingScope = (yield* SubscriptionRef.get(serviceScopes)).get(
+            target.environmentId,
+          );
           yield* installEntryLocked(entry, { retainEquivalentRuntime: true });
 
-          if (registration._tag === "BearerConnectionRegistration") {
+          if (
+            existingScope !== undefined &&
+            bearerReplaced &&
+            registration._tag === "BearerConnectionRegistration"
+          ) {
             const scope = (yield* SubscriptionRef.get(serviceScopes)).get(target.environmentId);
             if (scope !== undefined) {
               const state = yield* SubscriptionRef.get(scope.supervisor.state);
               if (
-                (bearerReplaced && (state.phase === "connecting" || state.phase === "backoff")) ||
+                state.phase === "connecting" ||
+                state.phase === "backoff" ||
                 (state.phase === "blocked" &&
                   state.lastFailure?._tag === "ConnectionBlockedError" &&
                   state.lastFailure.reason === "authentication")

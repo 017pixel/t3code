@@ -1,3 +1,5 @@
+import * as TestClock from "effect/testing/TestClock";
+import * as Equal from "effect/Equal";
 import {
   type DesktopSshEnvironmentTarget,
   EnvironmentId,
@@ -150,6 +152,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
   initialCredentials: ReadonlyArray<readonly [string, ConnectionCredential]> = [],
   options?: {
     readonly prepareError?: ConnectionBlockedError;
+    readonly credentialReadFailureAt?: number;
     readonly beforeSessionConnect?: (environmentId: EnvironmentId) => Effect.Effect<void>;
     readonly beforeRegistrationRegister?: (
       registration: ConnectionRegistration,
@@ -331,15 +334,32 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
         return next;
       }),
   });
+  let credentialReads = 0;
+  const rejectedCredentials = new Map<string, ConnectionCredential>();
   const credentialStore = ConnectionCredentialStore.ConnectionCredentialStore.of({
     get: (connectionId) =>
-      Ref.get(storedCredentials).pipe(
-        Effect.map((current) => Option.fromUndefinedOr(current.get(connectionId))),
-      ),
+      Effect.gen(function* () {
+        if (++credentialReads === options?.credentialReadFailureAt)
+          return yield* new ConnectionTransientError({
+            reason: "remote-unavailable",
+            detail: "Credential storage unavailable",
+          });
+        return Option.fromUndefinedOr((yield* Ref.get(storedCredentials)).get(connectionId));
+      }),
     put: (connectionId, credential) =>
       Ref.update(storedCredentials, (current) => {
         const next = new Map(current);
         next.set(connectionId, credential);
+        return next;
+      }),
+    wasRejected: (connectionId, credential) =>
+      Effect.sync(() => Equal.equals(rejectedCredentials.get(connectionId), credential)),
+    removeIfMatches: (connectionId, credential) =>
+      Ref.update(storedCredentials, (current) => {
+        if (!Equal.equals(current.get(connectionId), credential)) return current;
+        rejectedCredentials.set(connectionId, credential);
+        const next = new Map(current);
+        next.delete(connectionId);
         return next;
       }),
     remove: (connectionId) =>
@@ -1384,13 +1404,41 @@ describe("EnvironmentRegistry", () => {
   );
 
   it.effect(
+    "a failed eviction snapshot read does not block an otherwise valid platform connection",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness([], [], [], { credentialReadFailureAt: 2 });
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.reconcilePlatform([
+            new BearerConnectionRegistration({
+              target: BEARER_TARGET,
+              profile: BEARER_PROFILE,
+              credential: BEARER_CREDENTIAL,
+            }),
+          ]);
+          yield* awaitConnectionState(
+            registry,
+            BEARER_TARGET.environmentId,
+            (state) => state.phase === "connected",
+          );
+          expect(
+            (yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId),
+          ).toEqual(BEARER_CREDENTIAL);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
+
+  it.effect(
     "evicts a revoked platform bearer before the next reconcile installs a fresh exchange",
     () =>
       Effect.gen(function* () {
+        let attempts = 0;
         let storedCredentials: Ref.Ref<Map<string, ConnectionCredential>> | undefined;
         const harness = yield* makeHarness([], [], [], {
           beforePrepareRoute: () =>
             Effect.gen(function* () {
+              attempts += 1;
               const credential =
                 storedCredentials === undefined
                   ? undefined
@@ -1420,6 +1468,16 @@ describe("EnvironmentRegistry", () => {
           expect((yield* Ref.get(harness.storedCredentials)).has(BEARER_TARGET.connectionId)).toBe(
             false,
           );
+          yield* TestClock.adjust("3 seconds");
+          yield* registry.reconcilePlatform([registration]);
+          yield* TestClock.adjust("3 seconds");
+          yield* registry.reconcilePlatform([registration]);
+          expect(attempts).toBe(1);
+          expect((yield* Ref.get(harness.storedCredentials)).has(BEARER_TARGET.connectionId)).toBe(
+            false,
+          );
+          expect(yield* Ref.get(harness.cacheClears)).toEqual([]);
+          expect(yield* Ref.get(harness.ownedDataClears)).toEqual([]);
           yield* registry.reconcilePlatform([
             new BearerConnectionRegistration({
               target: BEARER_TARGET,
