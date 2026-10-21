@@ -9,6 +9,8 @@ import {
 } from "@t3tools/contracts";
 import { ServerProviderUpdateError } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -16,6 +18,7 @@ import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -1278,11 +1281,18 @@ describe("ProviderInstallLock", () => {
       const runs = yield* Ref.make(0);
       yield* fileSystem.writeFileString(`${lockFile(directory, "k")}.reclaim`, String(deadPid));
       yield* fileSystem.utimes(`${lockFile(directory, "k")}.reclaim`, 0, 0);
-      // Hold the lock long enough for the other reclaimer to finish its attempt.
-      // @effect-diagnostics-next-line globalTimers:off
-      const hold = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 100)));
+      // The winner holds the lock until the other reclaimer has finished its attempt.
+      const loserDone = yield* Deferred.make<void>();
       const attempt = (lock: typeof first) =>
-        lock.tryRun("k", () => Ref.update(runs, (count) => count + 1).pipe(Effect.andThen(hold)));
+        lock
+          .tryRun("k", () =>
+            Ref.update(runs, (count) => count + 1).pipe(Effect.andThen(Deferred.await(loserDone))),
+          )
+          .pipe(
+            Effect.tap((result) =>
+              Option.isNone(result) ? Deferred.succeed(loserDone, undefined) : Effect.void,
+            ),
+          );
 
       const results = yield* Effect.all([attempt(first), attempt(second)], {
         concurrency: "unbounded",
@@ -1290,33 +1300,6 @@ describe("ProviderInstallLock", () => {
 
       assert.strictEqual(results.filter(Option.isSome).length, 1);
       assert.strictEqual(yield* Ref.get(runs), 1);
-    }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("untilIdle waits for a held lock, then resumes", () =>
-    Effect.gen(function* () {
-      const { directory, first } = yield* withHome;
-      const fileSystem = yield* FileSystem.FileSystem;
-      yield* fileSystem.makeDirectory(directory, { recursive: true });
-      yield* fileSystem.writeFileString(lockFile(directory, "k"), String(process.pid));
-      const resumed = yield* Deferred.make<void>();
-      yield* first.untilIdle.pipe(
-        Effect.andThen(Deferred.succeed(resumed, undefined)),
-        Effect.forkScoped,
-      );
-
-      // The lock files are read from disk, so give each clock tick real time to settle.
-      // @effect-diagnostics-next-line globalTimers:off
-      const settle = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)));
-      const tick = TestClock.adjust(Duration.seconds(1)).pipe(Effect.andThen(settle));
-      yield* Effect.all([tick, tick, tick]);
-      assert.isFalse(yield* Deferred.isDone(resumed));
-
-      yield* fileSystem.remove(lockFile(directory, "k"));
-      for (let attempt = 0; attempt < 50 && !(yield* Deferred.isDone(resumed)); attempt += 1) {
-        yield* tick;
-      }
-      assert.isTrue(yield* Deferred.isDone(resumed));
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -1351,11 +1334,9 @@ describe("ProviderInstallLock", () => {
       assert.isTrue(yield* second.anyHeld);
       assert.deepStrictEqual(yield* second.tryRun("k", () => Effect.void), Option.none());
 
-      for (let attempt = 0; attempt < 100 && !(yield* fileSystem.exists(marker)); attempt += 1) {
-        yield* Effect.sleep(Duration.millis(100));
-      }
+      // The wrapper releases the lock only after the installer exits.
+      yield* second.untilIdle;
       assert.strictEqual(yield* fileSystem.readFileString(marker), "finished");
-      yield* Effect.sleep(Duration.millis(200));
       assert.isFalse(yield* second.anyHeld);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
