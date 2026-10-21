@@ -418,7 +418,12 @@ describe("AssetAccess", () => {
         const separator = suffix.indexOf("/");
         const token = suffix.slice(0, separator);
         const name = suffix.slice(separator + 1);
-        const expected = { kind: "file", path: canonicalFile, mimeType: "image/svg+xml" };
+        const expected = {
+          kind: "file",
+          path: canonicalFile,
+          mimeType: "image/svg+xml",
+          cacheControl: "private, no-store",
+        };
         expect(yield* resolveAsset(token, name)).toMatchObject(expected);
         yield* fs.remove(aliasPath);
         yield* fs.symlink(replacementPath, aliasPath);
@@ -640,10 +645,12 @@ describe("AssetAccess", () => {
       expect(yield* resolveAsset(token, "report.html")).toEqual({
         kind: "file",
         path: canonicalHtmlPath,
+        cacheControl: "private, no-store",
       });
       expect(yield* resolveAsset(token, "report.css")).toEqual({
         kind: "file",
         path: canonicalCssPath,
+        cacheControl: "private, no-store",
       });
       expect(yield* resolveAsset(token, "../secret.txt")).toBeNull();
       expect(yield* resolveAsset(token, ".env")).toBeNull();
@@ -708,7 +715,11 @@ describe("AssetAccess", () => {
         const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
         const token = suffix.slice(0, suffix.indexOf("/"));
 
-        expect(yield* resolveAsset(token, name)).toEqual({ kind: "file", path: canonicalFile });
+        expect(yield* resolveAsset(token, name)).toEqual({
+          kind: "file",
+          path: canonicalFile,
+          cacheControl: "private, no-store",
+        });
         if (name.endsWith(".png")) {
           expect(yield* resolveAsset(token, "other.png")).toBeNull();
         }

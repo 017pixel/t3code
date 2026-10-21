@@ -175,6 +175,7 @@ export type ResolvedAsset =
   | {
       readonly kind: "file";
       readonly path: string;
+      readonly cacheControl?: string;
       readonly download?: boolean;
       readonly fileName?: string;
       readonly mimeType?: string;
@@ -953,7 +954,13 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
       Effect.orElseSucceed(() => null),
     );
     return file
-      ? ({ kind: "file", path: canonicalFile, mimeType, file } satisfies ResolvedAsset)
+      ? ({
+          kind: "file",
+          path: canonicalFile,
+          mimeType,
+          file,
+          cacheControl: "private, no-store",
+        } satisfies ResolvedAsset)
       : null;
   }
   if (claims.kind === "workspace-file-exact") {
@@ -963,7 +970,11 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
       relativePath: claims.relativePath,
     });
     return exactWorkspaceFile
-      ? ({ kind: "file", path: exactWorkspaceFile } satisfies ResolvedAsset)
+      ? ({
+          kind: "file",
+          path: exactWorkspaceFile,
+          cacheControl: "private, no-store",
+        } satisfies ResolvedAsset)
       : null;
   }
   const segments = decodedPath.split(/[\\/]/);
@@ -981,5 +992,11 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
     workspaceRoot: claims.workspaceRoot,
     relativePath: joinedRelativePath,
   });
-  return workspaceFile ? ({ kind: "file", path: workspaceFile } satisfies ResolvedAsset) : null;
+  return workspaceFile
+    ? ({
+        kind: "file",
+        path: workspaceFile,
+        cacheControl: "private, no-store",
+      } satisfies ResolvedAsset)
+    : null;
 });

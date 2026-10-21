@@ -534,11 +534,26 @@ describe("video asset byte ranges", () => {
         const file = yield* openMediaFile(canonicalPath);
         if (!file) throw new Error("Expected an opened image file");
         for (const asset of [{ path: canonicalPath, file }, { path: canonicalPath }]) {
-          const response = HttpServerResponse.toWeb(yield* assetFileResponse(asset));
+          const response = HttpServerResponse.toWeb(
+            yield* assetFileResponse({ ...asset, cacheControl: "private, no-store" }),
+          );
           expect(response.headers.get("cache-control")).toBe("private, no-store");
           expect(yield* Effect.promise(() => response.text())).toBe(bytes);
         }
       }
+    }).pipe(Effect.provide(layerFileResponse)),
+  );
+
+  it.effect("keeps immutable image files cacheable", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-immutable-image-" });
+      const filePath = path.join(directory, "image.png");
+      yield* fs.writeFileString(filePath, "image bytes");
+      const response = HttpServerResponse.toWeb(yield* assetFileResponse({ path: filePath }));
+      expect(response.headers.get("cache-control")).toBe("private, max-age=3600");
+      expect(yield* Effect.promise(() => response.text())).toBe("image bytes");
     }).pipe(Effect.provide(layerFileResponse)),
   );
 

@@ -168,6 +168,7 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
     readonly fileName?: string;
     readonly mimeType?: string;
     readonly file?: OpenMediaFile;
+    readonly cacheControl?: string;
     readonly renderIntent?: "mcp-app";
   },
   rangeHeader?: string,
@@ -194,11 +195,12 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
   }
   // Host images can be overwritten while a signed URL is still valid.
   if (
+    asset.cacheControl !== undefined &&
     (headers["Content-Type"] ?? Option.getOrElse(Mime.getType(asset.path), () => "")).startsWith(
       "image/",
     )
   ) {
-    headers["Cache-Control"] = "private, no-store";
+    headers["Cache-Control"] = asset.cacheControl;
   }
   const mediaFile = asset.file;
   const mediaInfo = mediaFile ? yield* statMediaFile(asset.path, mediaFile) : undefined;
