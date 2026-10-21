@@ -324,6 +324,16 @@ packageExtensions:
   "@effect/vitest@*":
     dependencies:
       vite-plus: "catalog:"
+  # These types import packages they get only through another dependency.
+  # TypeScript has no NODE_PATH, so with the global virtual store (see
+  # .pnpmfile.cjs) the hoisted copies are out of reach and mobile's
+  # navigator types become `any`.
+  "@react-navigation/native-stack@*":
+    dependencies:
+      "@react-navigation/core": 7.24.0
+  "@react-navigation/native@*":
+    dependencies:
+      "@react-navigation/routers": ^7.6.5
 
 patchedDependencies:
   react-native-image-viewing@0.2.2: patches/react-native-image-viewing@0.2.2.patch

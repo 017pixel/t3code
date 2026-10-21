@@ -79,13 +79,20 @@ if (installStatus !== 0 || cancelSignal) {
 }
 
 // pnpm cannot clone or hardlink across filesystems, so a store on another
-// device silently turns every worktree install into a full copy.
-const storeDir: unknown = JSON.parse(
-  NodeFS.readFileSync(NodePath.join(worktree, "node_modules", ".modules.yaml"), "utf8"),
-).storeDir;
+// device than the virtual store silently turns every install into a full
+// copy. The global virtual store lives inside the store, so it never warns.
+const modulesDir = NodePath.join(worktree, "node_modules");
+const modulesState: { storeDir?: unknown; virtualStoreDir?: unknown } = JSON.parse(
+  NodeFS.readFileSync(NodePath.join(modulesDir, ".modules.yaml"), "utf8"),
+);
+const { storeDir } = modulesState;
+const virtualStoreDir = NodePath.resolve(
+  modulesDir,
+  typeof modulesState.virtualStoreDir === "string" ? modulesState.virtualStoreDir : ".pnpm",
+);
 if (
   typeof storeDir === "string" &&
-  NodeFS.statSync(storeDir).dev !== NodeFS.statSync(NodePath.join(worktree, "node_modules")).dev
+  NodeFS.statSync(storeDir).dev !== NodeFS.statSync(virtualStoreDir).dev
 ) {
   process.stderr.write(
     [

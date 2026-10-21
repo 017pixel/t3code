@@ -1,21 +1,65 @@
-// Windows WSL dev mode runs the server under Linux from the same node_modules
-// as the Windows client, so Windows installs also need Linux x64 glibc native
-// modules. Other platforms install only their own binaries; setting this
-// everywhere added ~2.2 GB of foreign binaries to every macOS install.
-// Release scripts stage their own installs with explicit architectures.
+// oxlint-disable t3code/no-global-process-runtime -- pnpm loads this file before any Effect runtime exists.
 module.exports = {
   hooks: {
-    updateConfig(config) {
-      // oxlint-disable-next-line t3code/no-global-process-runtime -- pnpm loads this file before any Effect runtime exists.
-      if (process.platform !== "win32") return config;
+    // Many React libraries ship types that import "react" without declaring
+    // @types/react. TypeScript then finds @types/react only by walking up
+    // node_modules from the library's real path. The global virtual store
+    // has no hoisted copy on that path, so the types become `any`. An
+    // optional peer links the consumer's @types/react next to the library.
+    // Our own packages are private (npm never publishes those) and are left
+    // alone: pnpm checks local `file:` packages against the lockfile without
+    // this hook.
+    readPackage(manifest) {
+      if (manifest.private) return manifest;
+      const declaresReact =
+        manifest.peerDependencies?.react !== undefined ||
+        manifest.dependencies?.react !== undefined;
+      if (!declaresReact || manifest.name === "@types/react") return manifest;
+      if (
+        manifest.dependencies?.["@types/react"] !== undefined ||
+        manifest.peerDependencies?.["@types/react"] !== undefined
+      ) {
+        return manifest;
+      }
       return {
-        ...config,
-        supportedArchitectures: {
+        ...manifest,
+        peerDependencies: { ...manifest.peerDependencies, "@types/react": "*" },
+        peerDependenciesMeta: {
+          ...manifest.peerDependenciesMeta,
+          "@types/react": { optional: true },
+        },
+      };
+    },
+    updateConfig(config) {
+      const next = { ...config };
+      // Dev machines link packages from one shared copy in <storeDir>/links,
+      // so a worktree install takes seconds and a worktree delete is instant.
+      // CI keeps per-project stores: pnpm 12 honors an explicit setting there
+      // too, and a fresh runner has nothing to share. Windows is left out:
+      // WSL dev runs the server from the same node_modules, and store links
+      // across that boundary are untested.
+      // T3CODE_PNPM_GLOBAL_VIRTUAL_STORE=0 opts a dev machine out.
+      if (
+        !process.env.CI &&
+        process.platform !== "win32" &&
+        process.env.T3CODE_PNPM_GLOBAL_VIRTUAL_STORE !== "0"
+      ) {
+        next.virtualStoreType = "global";
+      }
+      // Windows WSL dev mode runs the server under Linux from the same
+      // node_modules as the Windows client, so Windows installs also need
+      // Linux x64 glibc native modules. Other platforms install only their own
+      // binaries; setting this everywhere added ~2.2 GB of foreign binaries to
+      // every macOS install. Release scripts stage their own installs with
+      // explicit architectures.
+      if (process.platform === "win32") {
+        next.supportedArchitectures = {
           os: ["current", "linux"],
           cpu: ["current", "x64"],
           libc: ["current", "glibc"],
-        },
-      };
+        };
+      }
+      return next;
     },
   },
 };

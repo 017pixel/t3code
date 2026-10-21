@@ -34,7 +34,77 @@ const resolveShikiDependencyRoot = (packageName) => {
   return currentDir;
 };
 
-config.watchFolders = [...new Set([...(config.watchFolders ?? []), workspaceRoot])];
+// With pnpm's global virtual store (see .pnpmfile.cjs), package files live in
+// the shared store, outside the workspace, and Metro only reads files inside
+// watchFolders. Watch the store slot of each package reachable from this app,
+// not the whole store: it holds every project's packages. A slot's
+// node_modules holds the package and links to its dependencies.
+const modulesState = JSON.parse(
+  fs.readFileSync(path.join(workspaceRoot, "node_modules", ".modules.yaml"), "utf8"),
+);
+const isInWorkspace = (dir) => !path.relative(workspaceRoot, dir).startsWith("..");
+const usesGlobalStore = !isInWorkspace(
+  path.resolve(workspaceRoot, "node_modules", modulesState.virtualStoreDir),
+);
+// pnpm still hoists every package here. Store packages are not below it, so
+// Node reaches it through NODE_PATH, and Metro through nodeModulesPaths. Some
+// packages import dependencies they never declare.
+const hoistedModulesDir = path.join(workspaceRoot, "node_modules", ".pnpm", "node_modules");
+
+function globalStoreSlotDirs() {
+  const slotDirs = new Set();
+  const visited = new Set();
+  const pending = [
+    path.join(__dirname, "node_modules"),
+    path.join(workspaceRoot, "node_modules"),
+    hoistedModulesDir,
+  ];
+  while (pending.length > 0) {
+    const modulesDir = pending.pop();
+    if (visited.has(modulesDir)) continue;
+    visited.add(modulesDir);
+    let entries;
+    try {
+      entries = fs.readdirSync(modulesDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    const scoped = path.basename(modulesDir).startsWith("@");
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      const entryPath = path.join(modulesDir, entry.name);
+      if (!scoped && entry.name.startsWith("@")) {
+        pending.push(entryPath);
+        continue;
+      }
+      let realDir;
+      try {
+        realDir = fs.realpathSync(entryPath);
+      } catch {
+        continue;
+      }
+      if (isInWorkspace(realDir)) {
+        // A workspace package: its own node_modules links into the store.
+        pending.push(path.join(realDir, "node_modules"));
+        continue;
+      }
+      const slotDir = scoped ? path.dirname(path.dirname(realDir)) : path.dirname(realDir);
+      if (!slotDirs.has(slotDir)) {
+        slotDirs.add(slotDir);
+        pending.push(slotDir);
+      }
+    }
+  }
+  return [...slotDirs];
+}
+
+config.watchFolders = [
+  ...new Set([
+    ...(config.watchFolders ?? []),
+    workspaceRoot,
+    ...(usesGlobalStore ? globalStoreSlotDirs() : []),
+  ]),
+];
 config.resolver = {
   ...config.resolver,
   blockList: [
@@ -45,6 +115,9 @@ config.resolver = {
         : []),
     new RegExp(`${escapedWorkspaceRoot}[/\\\\]\\.t3[/\\\\].*`),
   ],
+  ...(usesGlobalStore && {
+    nodeModulesPaths: [...(config.resolver?.nodeModulesPaths ?? []), hoistedModulesDir],
+  }),
   extraNodeModules: {
     ...config.resolver?.extraNodeModules,
     "@t3tools/mobile-third-party-licenses": generatedLicenseModuleRoot,
