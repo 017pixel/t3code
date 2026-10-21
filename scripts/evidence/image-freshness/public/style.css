@@ -1,0 +1,9 @@
+body {
+  font: 16px sans-serif;
+  margin: 24px;
+}
+img {
+  width: 100px;
+  height: 100px;
+  margin-right: 24px;
+}
