@@ -23,11 +23,20 @@ const MOCK_METHODS = new Set([
 const MESSAGE =
   "Wall-clock reading in a test; elapsed-time assertions pass or fail with runner load. Use TestClock/`Clock` under `it.effect`, `vi.setSystemTime`, or a fixed epoch. Benchmarks live behind an env gate.";
 
+const isStringLiteral = (node: unknown) =>
+  Option.exists(
+    unwrapExpression(node),
+    (expression) => expression.type === "Literal" && typeof expression.value === "string",
+  );
+
 const memberPath = (node: unknown): Option.Option<ReadonlyArray<string>> => {
   const expression = unwrapExpression(node);
   if (Option.isNone(expression)) return Option.none();
   if (expression.value.type === "Identifier") return Option.some([expression.value.name]);
   if (expression.value.type !== "MemberExpression") return Option.none();
+  // `Date[now]` with a variable key is unknowable; only a literal key names a member.
+  if (expression.value.computed && !isStringLiteral(expression.value.property))
+    return Option.none();
   const property = getPropertyName(expression.value.property);
   if (Option.isNone(property)) return Option.none();
   return Option.map(memberPath(expression.value.object), (path) => [...path, property.value]);

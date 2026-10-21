@@ -8,6 +8,18 @@ const rule = createOxlintRuleHarness("t3code/no-wall-clock-in-tests", {
 
 describe("t3code/no-wall-clock-in-tests", () => {
   rule.valid(
+    "ignores a computed member with a variable key",
+    `
+      import { it } from "vitest";
+      it("parses", () => {
+        const now = "parse";
+        const parsed = Date[now]("2026-01-01");
+        const literal = Date["parse"]("2026-01-01");
+      });
+    `,
+  );
+
+  rule.valid(
     "allows fixed dates and readings that seed mocks",
     `
       import { vi } from "vitest";
