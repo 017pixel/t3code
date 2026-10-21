@@ -1302,15 +1302,18 @@ describe("native provider presentation in the v2 timeline", () => {
     const requestId = RuntimeRequestId.make("late-question");
     const inRun = (item: OrchestrationV2TurnItem, runId: string, ordinal: number) =>
       visible({ ...item, runId: RunId.make(runId), ordinal });
-    const userMessage = (id: string, text: string): OrchestrationV2TurnItem => ({
+    const userMessage = (
+      id: string,
+      text: string,
+    ): Extract<OrchestrationV2TurnItem, { type: "user_message" }> => ({
       ...base,
       id: TurnItemId.make(id),
       type: "user_message",
       messageId: MessageId.make(id),
-      inputIntent: "queue",
+      inputIntent: "queued_turn",
       text,
       createdBy: "user",
-      creationSource: "client",
+      creationSource: "web",
       attachments: [],
     });
     const assistantMessage = (id: string, text: string): OrchestrationV2TurnItem => ({
