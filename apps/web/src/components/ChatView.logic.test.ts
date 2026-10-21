@@ -6,6 +6,7 @@ import {
   snapshotComposerSend,
   withMessageContext,
   deriveAvailableRevertTurnCounts,
+  deriveThreadPendingBackgroundTasks,
   deriveWorkspaceMutationId,
 } from "./ChatView.logic";
 import { recallCheckoutIsRepo, rememberCheckoutIsRepo } from "./ChatView.logic";
@@ -1237,5 +1238,34 @@ describe("deriveWorkspaceMutationId", () => {
     expect(deriveWorkspaceMutationId([item("reply", "assistant_message", "completed")], null)).toBe(
       null,
     );
+  });
+});
+
+describe("deriveThreadPendingBackgroundTasks", () => {
+  it("keeps an earlier run's background shell while a follow-up run runs a foreground command", () => {
+    const base = makeThreadProjectionFixture();
+    const run = (ordinal: number, status: string) => ({
+      id: RunId.make(`run-${ordinal}`),
+      ordinal,
+      status,
+    });
+    const shell = (ordinal: number, command: string) => ({
+      id: TurnItemId.make(`shell-${ordinal}`),
+      type: "command_execution",
+      status: "running",
+      title: null,
+      runId: RunId.make(`run-${ordinal}`),
+      nativeItemRef: { nativeId: `native-shell-${ordinal}` },
+      input: command,
+    });
+    const projection = {
+      ...base,
+      runs: [run(1, "completed"), run(2, "running")],
+      turnItems: [shell(1, "sleep 600"), shell(2, "sleep 15")],
+    } as unknown as ReturnType<typeof makeThreadProjectionFixture>;
+
+    expect(deriveThreadPendingBackgroundTasks(projection)).toEqual([
+      { taskId: "native-shell-1", description: "sleep 600", kind: "command" },
+    ]);
   });
 });
