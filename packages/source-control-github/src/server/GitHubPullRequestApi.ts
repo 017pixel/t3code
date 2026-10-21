@@ -342,7 +342,12 @@ const isRefusedCheckContext = ({ path, type, message }: GraphQlResponseError) =>
   type === "FORBIDDEN" &&
   (message === "Resource not accessible by personal access token" ||
     message === "Resource not accessible by integration") &&
-  path?.length === 8 &&
+  (path?.length === 8 ||
+    (path?.length === 10 &&
+      path[8] === "nodes" &&
+      typeof path[9] === "number" &&
+      Number.isInteger(path[9]) &&
+      path[9] >= 0)) &&
   path[0] === "repository" &&
   path[1] === "pullRequest" &&
   path[2] === "commits" &&

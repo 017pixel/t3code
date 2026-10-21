@@ -3130,6 +3130,80 @@ layer("GitHubPullRequestApi.layer", (it) => {
       }),
   );
 
+  it.effect("recovers per-check PAT denials adapted from the parent issue", () =>
+    Effect.gen(function* () {
+      // Sanitized adaptation of [#15229](https://github.com/pingdotgg/t3code/issues/15229):
+      // the reported list path uses pullRequests; this detail fixture uses pullRequest/commits.
+      // Partial data and the HTTP envelope are constructed, not a live-recorded response.
+      const answer = coreResponse({
+        body: "Keep the full description",
+        additions: 42,
+        labels: { nodes: [{ name: "bug", color: "ff0000" }] },
+        commits: {
+          nodes: [
+            {
+              commit: {
+                statusCheckRollup: { state: "SUCCESS", contexts: { nodes: [null, null] } },
+              },
+            },
+          ],
+        },
+      });
+      mockedExecute.mockReturnValueOnce(
+        Effect.succeed(
+          output(
+            encodeJson({
+              ...answer,
+              errors: [0, 1].map((index) => ({
+                type: "FORBIDDEN",
+                message: "Resource not accessible by personal access token",
+                path: [
+                  "repository",
+                  "pullRequest",
+                  "commits",
+                  "nodes",
+                  0,
+                  "commit",
+                  "statusCheckRollup",
+                  "contexts",
+                  "nodes",
+                  index,
+                ],
+              })),
+            }),
+          ),
+        ),
+      );
+      mockedExecute.mockReturnValueOnce(
+        Effect.succeed(
+          output(
+            encodeJson(
+              coreResponse({
+                ...answer.data.repository.pullRequest,
+                commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+              }),
+            ),
+          ),
+        ),
+      );
+      const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+      const detail = yield* cli.getPullRequestDetail(pullRequestInput);
+      expect(detail).toMatchObject({
+        number: 7,
+        title: "Pull request 7",
+        body: "Keep the full description",
+        additions: 42,
+        headSha: "abc123",
+        labels: [{ name: "bug", color: "ff0000" }],
+        checksState: "passing",
+        checksUnavailable: expect.stringMatching(/\S/),
+        checks: [{ name: "Overall check status", status: "success" }],
+      });
+      expect(variablesOf("PullRequestCore").map((v) => v["detailedChecks"])).toEqual([true, false]);
+      expect(mockedExecute).toHaveBeenCalledTimes(2);
+    }),
+  );
+
   it.effect.each([
     { aggregate: "SUCCESS", status: "success", checksState: "passing", httpStatus: 200 },
     { aggregate: "SUCCESS", status: "success", checksState: "passing", httpStatus: 403 },
@@ -3222,9 +3296,14 @@ layer("GitHubPullRequestApi.layer", (it) => {
       }),
   );
 
-  it.effect.each([false, true])(
-    "handles combined detail denials without masking unrelated errors: %s",
-    (unrelatedError) =>
+  it.effect.each([
+    { unrelatedError: false, perNode: false },
+    { unrelatedError: true, perNode: false },
+    { unrelatedError: false, perNode: true },
+    { unrelatedError: true, perNode: true },
+  ])(
+    "handles combined detail denials: unrelated=$unrelatedError perNode=$perNode",
+    ({ unrelatedError, perNode }) =>
       Effect.gen(function* () {
         mockedExecute.mockReturnValueOnce(
           Effect.succeed(
@@ -3245,6 +3324,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
                       "commit",
                       "statusCheckRollup",
                       "contexts",
+                      ...(perNode ? ["nodes", 0] : []),
                     ],
                   },
                   ...(unrelatedError
@@ -3294,9 +3374,14 @@ layer("GitHubPullRequestApi.layer", (it) => {
       }),
   );
 
-  it.effect.each([false, true])(
-    "recovers a paginated checks refusal and preserves reviewer fallback: %s",
-    (reviewerRefused) =>
+  it.effect.each([
+    { reviewerRefused: false, perNode: false },
+    { reviewerRefused: true, perNode: false },
+    { reviewerRefused: false, perNode: true },
+    { reviewerRefused: true, perNode: true },
+  ])(
+    "recovers paginated checks refusal: reviewer=$reviewerRefused perNode=$perNode",
+    ({ reviewerRefused, perNode }) =>
       Effect.gen(function* () {
         const response = coreResponse({
           commits: {
@@ -3331,6 +3416,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
                       "commit",
                       "statusCheckRollup",
                       "contexts",
+                      ...(perNode ? ["nodes", 1] : []),
                     ],
                   },
                 ],
@@ -3432,6 +3518,48 @@ layer("GitHubPullRequestApi.layer", (it) => {
     }),
   );
 
+  it.effect.each([
+    { name: "negative index", suffix: ["nodes", -1] },
+    { name: "fractional index", suffix: ["nodes", 0.5] },
+    { name: "string index", suffix: ["nodes", "0"] },
+    { name: "connection field", suffix: ["totalCount"] },
+    { name: "node field", suffix: ["nodes", 0, "name"] },
+    { name: "other collection", suffix: ["edges", 0] },
+  ])("does not degrade a PAT denial at an unrelated path: $name", ({ suffix }) =>
+    Effect.gen(function* () {
+      mockedExecute.mockReturnValueOnce(
+        Effect.succeed(
+          output(
+            encodeJson({
+              data: null,
+              errors: [
+                {
+                  type: "FORBIDDEN",
+                  message: "Resource not accessible by personal access token",
+                  path: [
+                    "repository",
+                    "pullRequest",
+                    "commits",
+                    "nodes",
+                    0,
+                    "commit",
+                    "statusCheckRollup",
+                    "contexts",
+                    ...suffix,
+                  ],
+                },
+              ],
+            }),
+          ),
+        ),
+      );
+      const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+      const result = yield* Effect.result(cli.getPullRequestDetail(pullRequestInput));
+      expect(result._tag).toBe("Failure");
+      expect(mockedExecute).toHaveBeenCalledOnce();
+    }),
+  );
+
   it.effect("keeps GraphQL network errors as failures rather than unavailable checks", () =>
     Effect.gen(function* () {
       mockedTransportFailure.mockReturnValue(true);
@@ -3450,22 +3578,39 @@ layer("GitHubPullRequestApi.layer", (it) => {
     () =>
       Effect.gen(function* () {
         const sha = "a".repeat(40);
-        mockedExecute.mockImplementation((call) => {
-          if (call.kind === "rest") {
-            if (call.path.endsWith("/pulls/7"))
-              return Effect.succeed(
-                output(encodeJson({ head: { sha, repo: { id: 1 } }, base: { repo: { id: 1 } } })),
-              );
-            expect(call.path).toContain("/check-runs?");
-            return Effect.fail(
-              new GitHubRequestPolicy.GitHubApiResponseError({
-                host: "github.com",
-                operation: "revalidateChecks",
-                status: 403,
-                githubErrors: ["Resource not accessible by personal access token"],
-              }),
+        const restPaths: string[] = [];
+        const restHttp = Layer.succeed(
+          HttpClient.HttpClient,
+          HttpClient.make((request) => {
+            restPaths.push(new URL(request.url).pathname);
+            const isPullRequest = request.url.endsWith("/pulls/7");
+            if (!isPullRequest) expect(request.url).toContain("/check-runs?");
+            // REST body reported in [#15229](https://github.com/pingdotgg/t3code/issues/15229).
+            return Effect.succeed(
+              HttpClientResponse.fromWeb(
+                request,
+                new Response(
+                  encodeJson(
+                    isPullRequest
+                      ? { head: { sha, repo: { id: 1 } }, base: { repo: { id: 1 } } }
+                      : {
+                          message: "Resource not accessible by personal access token",
+                          documentation_url:
+                            "https://docs.github.com/rest/checks/runs#list-check-runs-for-a-git-reference",
+                          status: "403",
+                        },
+                  ),
+                  {
+                    status: isPullRequest ? 200 : 403,
+                    headers: { "content-type": "application/json" },
+                  },
+                ),
+              ),
             );
-          }
+          }),
+        );
+        mockedExecute.mockImplementation((call) => {
+          expect(call.kind).toBe("graphql");
           const reads = mockedExecute.mock.calls.filter(([c]) => c.kind === "graphql").length;
           return Effect.succeed(
             output(
@@ -3498,7 +3643,16 @@ layer("GitHubPullRequestApi.layer", (it) => {
             ),
           );
         });
-        const provider = yield* GitHubPullRequestProvider.make;
+        const provider = yield* GitHubPullRequestProvider.make.pipe(
+          Effect.provide(
+            GitHubPullRequestApi.layer.pipe(
+              Layer.provide(GitHubRest.layer.pipe(Layer.provide(restHttp))),
+              Layer.provide(TestSourceControlHost.layer()),
+              Layer.provide(NodeServices.layer),
+              Layer.fresh,
+            ),
+          ),
+        );
         assert.ok(provider.getChangeRequestChecks);
         const checks = yield* provider.getChangeRequestChecks(pullRequestInput).pipe(
           Effect.provideService(GitHubRequestPolicy.PinnedGitHubCredential, {
@@ -3515,7 +3669,10 @@ layer("GitHubPullRequestApi.layer", (it) => {
             url: "https://github.com/acme/web/pull/7/checks",
           },
         ]);
-        expect(mockedExecute.mock.calls.filter(([c]) => c.kind === "rest")).toHaveLength(2);
+        expect(restPaths).toEqual([
+          "/repos/acme/web/pulls/7",
+          `/repos/acme/web/commits/${sha}/check-runs`,
+        ]);
         expect(mockedExecute.mock.calls.filter(([c]) => c.kind === "graphql")).toHaveLength(2);
       }),
   );
