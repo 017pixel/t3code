@@ -7,6 +7,8 @@ import {
   resolvePreviewMiniPlayerFrame,
 } from "./previewMiniPlayerLayout";
 
+const HANDLE_TAP_SLOP_PX = 6;
+
 type Direction = BrowserViewportResizeDirection | null;
 interface PointerInput {
   readonly pointerId: number;
@@ -60,6 +62,7 @@ export function createPreviewMiniPlayerGesture() {
       },
       direction: Direction,
     ) {
+      if (gesture && !gesture.target.hasPointerCapture(gesture.pointerId)) gesture = null;
       if (event.button !== 0 || gesture) return false;
       const preview = event.currentTarget.closest("[data-preview-mini-player]");
       if (!preview) return false;
@@ -105,7 +108,7 @@ export function createPreviewMiniPlayerGesture() {
       }
       if (!container) return;
       const delta = { x: event.clientX - active.clientX, y: event.clientY - active.clientY };
-      if (!active.moved && Math.hypot(delta.x, delta.y) < 6) return;
+      if (!active.moved && Math.hypot(delta.x, delta.y) < HANDLE_TAP_SLOP_PX) return;
       active.moved = true;
       active.currentFrame =
         active.direction === null

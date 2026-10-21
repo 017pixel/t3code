@@ -197,6 +197,23 @@ describe("floating preview gestures", () => {
     expect(commit).toHaveBeenCalledTimes(1);
   });
 
+  it("discards a gesture whose handle lost capture before a new pointerdown", () => {
+    const { gesture, down, commit, target } = setup();
+    expect(gesture.begin(down, "east")).toBe(true);
+    gesture.move({ ...down, clientX: 400 }, container, commit);
+    commit.mockClear();
+    target.hasPointerCapture.mockReturnValueOnce(false);
+    const next = { ...down, pointerId: 8 };
+    expect(gesture.begin(next, null)).toBe(true);
+    expect(commit).not.toHaveBeenCalled();
+    expect(target.releasePointerCapture).not.toHaveBeenCalled();
+    expect(target.setPointerCapture).toHaveBeenLastCalledWith(8);
+    gesture.move({ ...down, clientX: 500 }, container, commit);
+    expect(commit).not.toHaveBeenCalled();
+    gesture.move({ ...next, clientX: next.clientX + 10 }, container, commit);
+    expect(commit).toHaveBeenCalledExactlyOnceWith({ ...baseline, x: baseline.x + 10 }, null);
+  });
+
   it.each(["mouse", "touch", "pen"])("supports %s drag and no-motion release", (pointerType) => {
     const { gesture, down, commit } = setup();
     const event = { ...down, pointerType };
