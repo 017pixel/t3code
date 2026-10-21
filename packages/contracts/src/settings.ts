@@ -660,18 +660,6 @@ export const legacyCompactIdleThreadsMode = (
   value: boolean | IdleCompactionMode,
 ): IdleCompactionMode =>
   value === true ? "beforeCacheExpires" : value === false ? "onReturn" : value;
-const CompactIdleThreadsSwitch = Schema.Union([
-  Schema.Boolean,
-  IdleCompactionMode.pipe(
-    Schema.decodeTo(
-      Schema.Boolean,
-      SchemaTransformation.transform({
-        decode: (mode) => mode === "beforeCacheExpires",
-        encode: legacyCompactIdleThreadsMode,
-      }),
-    ),
-  ),
-]);
 
 const INSTANCE_IDLE_COMPACTION_MODES = [
   { value: "default", label: "Use default" },
@@ -1215,10 +1203,11 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed("onReturn" as const)),
   ),
   /**
-   * True when `idleCompaction` is "beforeCacheExpires", for clients that predate it.
-   * Servers that predate `idleCompaction` send only this.
+   * True when `idleCompaction` is "beforeCacheExpires", for clients that predate it. The
+   * server always stores a boolean here; a mode string only arrives from servers that
+   * predate `idleCompaction`.
    */
-  compactIdleThreads: CompactIdleThreadsSwitch.pipe(
+  compactIdleThreads: Schema.Union([Schema.Boolean, IdleCompactionMode]).pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
   snoozeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -1399,7 +1388,9 @@ const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 export const resolveDefaultIdleCompaction = (
   settings: Pick<ServerSettings, "idleCompaction" | "compactIdleThreads">,
 ): IdleCompactionMode =>
-  settings.compactIdleThreads ? "beforeCacheExpires" : settings.idleCompaction;
+  settings.compactIdleThreads === false
+    ? settings.idleCompaction
+    : legacyCompactIdleThreadsMode(settings.compactIdleThreads);
 
 export const resolveIdleCompaction = (
   settings: Pick<ServerSettings, "providerInstances" | "idleCompaction" | "compactIdleThreads">,

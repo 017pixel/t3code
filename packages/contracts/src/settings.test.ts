@@ -159,14 +159,15 @@ describe("resolveIdleCompaction", () => {
     expect(resolveIdleCompaction(settings, ProviderInstanceId.make("claudeAgent"))).toBe("off");
   });
 
-  it.each([true, "beforeCacheExpires"])(
-    "reads compactIdleThreads: %s from servers that predate idleCompaction",
-    (compactIdleThreads) => {
+  it.each([
+    [true, "beforeCacheExpires"],
+    ["beforeCacheExpires", "beforeCacheExpires"],
+    ["off", "off"],
+  ] as const)(
+    "reads compactIdleThreads: %s from servers that predate idleCompaction as %s",
+    (compactIdleThreads, mode) => {
       const settings = decodeServerSettings({ compactIdleThreads });
-      expect(resolveIdleCompaction(settings, ProviderInstanceId.make("claudeAgent"))).toBe(
-        "beforeCacheExpires",
-      );
-      expect(encodeServerSettings(settings).compactIdleThreads).toBe(true);
+      expect(resolveIdleCompaction(settings, ProviderInstanceId.make("claudeAgent"))).toBe(mode);
     },
   );
 
