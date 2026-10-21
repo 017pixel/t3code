@@ -1536,11 +1536,11 @@ export function planComposerTurn(input: {
     isFirstMessage && input.sendEnvMode === "worktree" && !input.worktreePath;
   // A stale Claude session compacts before this message so the turn does not re-read the
   // old history. The message queues behind the /compact run, since steering into it is
-  // rejected.
+  // rejected. A /compact send, with or without instructions, already is that compaction.
   const compactBeforeSend =
     input.resumeCompactionTokens !== null &&
     !input.keepFullHistory &&
-    input.messageText.toLowerCase() !== "/compact";
+    !/^\/compact(?:\s|$)/i.test(input.messageText);
   return {
     // In worktree mode, require an explicit base branch so we don't silently
     // fall back to local execution when branch selection is missing.
