@@ -3178,7 +3178,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   );
 
   it.effect(
-    "applies model, effort and Fast changes to a process running a background shell, but not thinking or a cleared effort",
+    "applies model, effort and Fast changes to a process running a background shell, but not thinking or a cleared effort, and resends the model only when it changes",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -3227,8 +3227,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           yield* settle;
           yield* harness.runtime.startTurn(turn(4, { ...normal, model: "claude-sonnet-4-6" }));
           yield* settle;
+          // Resending an unchanged model can override one a wrapper selected (#22265).
           assert.deepEqual(harness.liveSelectionChanges, [
-            { model: "claude-opus-5-5" },
             { effortLevel: "xhigh", fastMode: true, ultracode: true },
             { model: "claude-sonnet-4-6" },
             { effortLevel: "high", fastMode: null, ultracode: null },
@@ -3253,7 +3253,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }
           assert.strictEqual(harness.getOpenedOptions(), originalOptions);
           assert.lengthOf(harness.offeredMessages, 4);
-          assert.lengthOf(harness.liveSelectionChanges, 4);
+          assert.lengthOf(harness.liveSelectionChanges, 3);
           assert.isTrue(yield* harness.hasPendingBackgroundWork);
         }).pipe(
           Effect.provide(
