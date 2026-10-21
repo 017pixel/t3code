@@ -181,6 +181,11 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   const toggleLabel = isCollapsed
     ? "Show the question and its options"
     : "Hide the question and its options";
+  const questionCount =
+    prompt.questions.length > 1 ? `${questionIndex + 1}/${prompt.questions.length}` : null;
+  // Pulls the caret's icon-box padding in so the count and caret read as one cluster.
+  const questionCountClassName =
+    "-me-2 text-3xs font-medium text-muted-foreground tabular-nums sm:-me-1.5";
 
   return (
     <Collapsible
@@ -189,14 +194,17 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
         setCollapsedQuestionId(open ? null : activeQuestion.id);
       }}
     >
+      {/* Expanded, the trigger shrinks to its actions and the question rises beside them. */}
       <CollapsibleTrigger
         render={<ComposerBanner.Row render={<button type="button" />} />}
+        className={cn(
+          !isCollapsed && "relative z-10 ms-auto -mb-(--composer-banner-icon-column) flex w-fit",
+        )}
         title={toggleLabel}
-        aria-label={isCollapsed || showHeader ? undefined : toggleLabel}
+        aria-label={isCollapsed ? undefined : toggleLabel}
         data-pending-user-input-toggle={isCollapsed ? "collapsed" : "expanded"}
       >
-        {/* Without a header, the expanded trigger keeps only its actions so the question leads. */}
-        {isCollapsed || showHeader ? (
+        {isCollapsed ? (
           <>
             <ComposerBanner.Icon />
             <ComposerBanner.Content>
@@ -205,20 +213,14 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                   {activeQuestion.header}
                 </span>
               ) : null}
-              {isCollapsed ? (
-                <span className="min-w-0 flex-1 truncate text-secondary-label">
-                  {activeQuestion.question}
-                </span>
-              ) : null}
+              <span className="min-w-0 flex-1 truncate text-secondary-label">
+                {activeQuestion.question}
+              </span>
             </ComposerBanner.Content>
           </>
         ) : null}
         <ComposerBanner.Actions>
-          {prompt.questions.length > 1 ? (
-            <span className="text-3xs font-medium text-muted-foreground tabular-nums">
-              {questionIndex + 1}/{prompt.questions.length}
-            </span>
-          ) : null}
+          {questionCount ? <span className={questionCountClassName}>{questionCount}</span> : null}
           <ComposerBanner.ToggleIcon expanded={!isCollapsed} />
           {prompt.dismissible ? (
             <ComposerBanner.Dismiss
@@ -244,8 +246,17 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
       </CollapsibleTrigger>
       <CollapsiblePanel>
         <ComposerBanner.Scroll>
-          {/* Both sides sit 16px in with the banner's px-1; the overflow scrollbar gutter takes 8px of the right. */}
-          <ComposerBanner.Body className="ps-3 pe-3 pb-1 wrap-anywhere sm:ps-3 [[data-has-overflow-y]>*>&]:pe-1">
+          {/* Both sides sit 16px in with the banner's px-1; the overflow scrollbar gutter takes 8px of the right.
+              The top inset centers the first 20px line on the 28px (24px from sm) actions row. */}
+          <ComposerBanner.Body className="ps-3 pe-3 pt-1 pb-1 wrap-anywhere sm:ps-3 sm:pt-0.5 [[data-has-overflow-y]>*>&]:pe-1">
+            {/* Mirrors the overlaid actions so only the first line wraps clear of them; the end margin cancels the 12px body inset. */}
+            <span aria-hidden className="invisible float-end ms-2 -me-3 flex h-5 gap-1">
+              {questionCount ? (
+                <span className={questionCountClassName}>{questionCount}</span>
+              ) : null}
+              <span className="w-(--composer-banner-icon-column)" />
+              {prompt.dismissible ? <span className="w-(--composer-banner-icon-column)" /> : null}
+            </span>
             <ChatMarkdown
               text={activeQuestion.question}
               cwd={cwd}

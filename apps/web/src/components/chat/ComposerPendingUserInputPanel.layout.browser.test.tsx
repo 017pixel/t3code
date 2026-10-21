@@ -8,7 +8,9 @@ import { page } from "vite-plus/test/browser";
 
 vi.mock(import("../ChatMarkdown"), async (importOriginal) => ({
   ...(await importOriginal()),
-  default: (({ text }: { text: string }) => <p>{text}</p>) as never,
+  default: (({ text, className }: { text: string; className?: string }) => (
+    <p className={className}>{text}</p>
+  )) as never,
 }));
 
 import type { PendingUserInputDraftAnswer } from "../../pendingUserInput";
@@ -18,7 +20,11 @@ import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 const threadRef = { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") };
 
 async function renderPanel(
-  { header, question = "Pick one." }: { header: string; question?: string },
+  {
+    header,
+    question = "Pick one.",
+    questionCount = 1,
+  }: { header: string; question?: string; questionCount?: number },
   run: (
     container: HTMLDivElement,
     rerender: (answers: Record<string, PendingUserInputDraftAnswer>) => Promise<void>,
@@ -40,15 +46,13 @@ async function renderPanel(
                 createdAt: "2026-10-20T00:00:00.000Z",
                 dismissible: true,
                 responseCapability: "live",
-                questions: [
-                  {
-                    id: "strategy",
-                    header,
-                    question,
-                    options: [{ label: "Rolling", description: "One node at a time" }],
-                    multiSelect: false,
-                  },
-                ],
+                questions: Array.from({ length: questionCount }, (_, index) => ({
+                  id: index === 0 ? "strategy" : `strategy-${index}`,
+                  header,
+                  question,
+                  options: [{ label: "Rolling", description: "One node at a time" }],
+                  multiSelect: false,
+                })),
               },
             ]}
             cwd="/repo"
@@ -73,10 +77,11 @@ async function renderPanel(
   }
 }
 
-it("keeps a long question header inside the trigger row", async () => {
+it("keeps a long question header inside the collapsed trigger row", async () => {
   const header = "Which of these deployment strategies should the extension use? ".repeat(4);
   await renderPanel({ header }, async (container) => {
     const trigger = container.querySelector<HTMLElement>("[data-pending-user-input-toggle]")!;
+    await act(async () => trigger.click());
     const headerElement = [...trigger.querySelectorAll("span")].find(
       (element) => element.textContent === header,
     )!;
@@ -134,20 +139,68 @@ it.each([
   }
 });
 
-it("drops a generic header from the trigger while keeping the toggle working", async () => {
-  await renderPanel({ header: "Question" }, async (container) => {
-    const trigger = container.querySelector<HTMLElement>("[data-pending-user-input-toggle]")!;
-    expect(trigger.dataset.pendingUserInputToggle).toBe("expanded");
-    expect(trigger.textContent).toBe("");
-    expect(trigger.getAttribute("aria-label")).toBe("Hide the question and its options");
-    expect(container.querySelector("p")?.textContent).toBe("Pick one.");
+it.each([
+  ["generic", "Question", "Pick one."],
+  ["distinct", "Strategy", "StrategyPick one."],
+])(
+  "leads with the question while expanded and summarizes a %s header when collapsed",
+  async (_, header, collapsedText) => {
+    await renderPanel({ header }, async (container) => {
+      const trigger = container.querySelector<HTMLElement>("[data-pending-user-input-toggle]")!;
+      expect(trigger.dataset.pendingUserInputToggle).toBe("expanded");
+      expect(trigger.textContent).toBe("");
+      expect(trigger.getAttribute("aria-label")).toBe("Hide the question and its options");
+      expect(container.querySelector("p")?.textContent).toBe("Pick one.");
 
-    await act(async () => trigger.click());
-    expect(trigger.dataset.pendingUserInputToggle).toBe("collapsed");
-    expect(trigger.textContent).toBe("Pick one.");
+      await act(async () => trigger.click());
+      expect(trigger.dataset.pendingUserInputToggle).toBe("collapsed");
+      expect(trigger.textContent).toBe(collapsedText);
 
-    await act(async () => trigger.click());
-    expect(trigger.dataset.pendingUserInputToggle).toBe("expanded");
-    expect(trigger.textContent).toBe("");
-  });
-});
+      await act(async () => trigger.click());
+      expect(trigger.dataset.pendingUserInputToggle).toBe("expanded");
+      expect(trigger.textContent).toBe("");
+    });
+  },
+);
+
+it.each([
+  ["mobile", 414],
+  ["sm", 1024],
+])(
+  "starts the question beside the actions without overlapping them at %s width",
+  async (_, width) => {
+    await page.viewport(width, 900);
+    // One unbreakable run fills every line, so only the first line's width reflects the actions.
+    await renderPanel(
+      { header: "Strategy", question: "x".repeat(200), questionCount: 3 },
+      async (container) => {
+        const trigger = container.querySelector<HTMLElement>("[data-pending-user-input-toggle]")!;
+        const actions = trigger.querySelector("[data-slot=composer-banner-actions]")!;
+        const paragraph = container.querySelector("p")!;
+        const range = document.createRange();
+        range.selectNodeContents(paragraph);
+        const [firstLine, secondLine] = range.getClientRects();
+        const actionsRect = actions.getBoundingClientRect();
+        const paragraphRect = paragraph.getBoundingClientRect();
+        // The old header strip pushed the question below the whole trigger row.
+        expect(paragraphRect.top).toBeLessThan(trigger.getBoundingClientRect().bottom);
+        const firstLineHeight = Number.parseFloat(getComputedStyle(paragraph).lineHeight);
+        expect(paragraphRect.top + firstLineHeight / 2).toBeCloseTo(
+          actionsRect.top + actionsRect.height / 2,
+          0,
+        );
+        expect(firstLine!.right).toBeLessThanOrEqual(actionsRect.left);
+        expect(secondLine!.right).toBeGreaterThan(actionsRect.left);
+
+        const count = [...actions.querySelectorAll("span")].find(
+          (element) => element.textContent === "1/3",
+        )!;
+        const caret = actions.querySelector("svg")!;
+        const countToCaret =
+          caret.getBoundingClientRect().left - count.getBoundingClientRect().right;
+        expect(countToCaret).toBeGreaterThanOrEqual(0);
+        expect(countToCaret).toBeLessThanOrEqual(4);
+      },
+    );
+  },
+);
