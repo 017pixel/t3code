@@ -15,6 +15,8 @@ import { useThreadLifecycle } from "./chat/useThreadLifecycle";
 import { useRightPanelActions } from "./chat/useRightPanelActions";
 import { type TerminalLaunchContext, useChatTerminalActions } from "./chat/useChatTerminalActions";
 import { useComposerSend } from "./chat/useComposerSend";
+import { useComposerResume } from "./chat/useComposerResume";
+import { useImplementPlanInNewThread } from "./chat/useProposedPlanSend";
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
@@ -2923,7 +2925,44 @@ export default function ChatView(props: ChatViewProps) {
     setPendingServerThreadStartFromOriginByThreadId,
     scheduleComposerFocus,
   });
-  const { onSend, onResume, onImplementPlanInNewThread, isResuming } = useComposerSend({
+  const { onResume, isResuming } = useComposerResume({
+    environmentId,
+    routeThreadKey,
+    currentRouteThreadKeyRef,
+    activeThread,
+    resumableRunId,
+    hasHeldQueuedRuns,
+    isSendBusy,
+    isConnecting,
+    isRevertingCheckpoint,
+    threadDetailLoading,
+    activeEnvironmentUnavailable,
+    runtimeMode,
+    interactionMode,
+    localCheckoutBranchMismatch,
+    composerRef,
+    persistThreadSettingsForNextTurn,
+    clearUsageLimitsFor,
+    scrollToEnd,
+    setThreadError,
+  });
+  const onImplementPlanInNewThread = useImplementPlanInNewThread({
+    environmentId,
+    routeThreadKey,
+    activeThread,
+    activeThreadBranch,
+    activeProposedPlan,
+    isServerThread,
+    isSendBusy,
+    isConnecting,
+    composerRef,
+    beginLocalDispatch,
+    resetLocalDispatch,
+    activeProject,
+    activeEnvironmentUnavailable,
+    defaultRuntimeMode,
+  });
+  const { onSend } = useComposerSend({
     environmentId,
     routeThreadKey,
     currentRouteThreadKeyRef,
@@ -2939,24 +2978,13 @@ export default function ChatView(props: ChatViewProps) {
     isServerThread,
     isLocalDraftThread,
     isGitRepo,
-    hasHeldQueuedRuns,
-    resumableRunId,
     phase,
     runtimeMode,
-    defaultRuntimeMode,
-    interactionMode,
     sendEnvMode,
     startFromOrigin,
     localCheckoutBranchMismatch,
-    settings,
-    clientSettingsHydrated,
-    serverConfig,
-    environmentById,
     logicalProjectEnvironments,
     providerInstanceEntries,
-    supportsAttachmentUploads,
-    referencedThreadContexts,
-    composerHasNonPromptContent,
     composerRef,
     composerDraftTarget,
     promptRef,
@@ -2997,10 +3025,8 @@ export default function ChatView(props: ChatViewProps) {
     setSetupQueueSendThreadKey,
     setOptimisticUserMessages,
     setFeedbackSubmissionsByThreadKey,
-    setMultipleModelSelections,
     setThreadError,
     setKeepFullHistory,
-    scrollToEnd,
     anchorNewTurn,
     acknowledgeActiveThreadWoke,
     handleInteractionModeChange,
