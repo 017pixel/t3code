@@ -3508,6 +3508,85 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       }),
   );
 
+  it.effect("does not create a pull request against a base that exists only locally", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["branch", "local-only-parent"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/from-local-parent"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "feature.txt"), "feature\n");
+      yield* runGit(repoDir, ["add", "feature.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Feature commit"]);
+      yield* runGit(repoDir, [
+        "config",
+        "branch.feature/from-local-parent.gh-merge-base",
+        "local-only-parent",
+      ]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/from-local-parent"]);
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", "[]"] },
+      });
+
+      const error = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "create_pr",
+      }).pipe(Effect.flip);
+
+      expect(error).toMatchObject({
+        _tag: "GitManagerError",
+        detail:
+          "Base branch 'local-only-parent' does not exist on the remote. Push it, or set the pull request base to a branch that does.",
+      });
+      expect(ghCalls.some((call) => call.startsWith("pr create "))).toBe(false);
+
+      yield* runGit(repoDir, ["push", "origin", "local-only-parent"]);
+      const pushed = yield* runStackedAction(manager, { cwd: repoDir, action: "create_pr" });
+      expect(pushed.pr.status).toBe("created");
+      expect(pushed.pr.baseBranch).toBe("local-only-parent");
+      expect(
+        ghCalls.some((call) =>
+          call.includes("pr create --base local-only-parent --head feature/from-local-parent"),
+        ),
+      ).toBe(true);
+    }),
+  );
+
+  it.effect("keeps a non-default pull request base that exists only on another remote", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const originDir = yield* createBareRemote();
+      const upstreamDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", originDir]);
+      yield* runGit(repoDir, ["remote", "add", "upstream", upstreamDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "release/1.2"]);
+      yield* runGit(repoDir, ["push", "upstream", "release/1.2"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/stacked"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "feature.txt"), "feature\n");
+      yield* runGit(repoDir, ["add", "feature.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Feature commit"]);
+      yield* runGit(repoDir, ["config", "branch.feature/stacked.gh-merge-base", "release/1.2"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/stacked"]);
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", "[]"] },
+      });
+
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "create_pr" });
+
+      expect(result.pr.status).toBe("created");
+      expect(result.pr.baseBranch).toBe("release/1.2");
+      expect(
+        ghCalls.some((call) =>
+          call.includes("pr create --base release/1.2 --head feature/stacked"),
+        ),
+      ).toBe(true);
+    }),
+  );
+
   it.effect("generates PR content from the created worktree's selected remote base", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");

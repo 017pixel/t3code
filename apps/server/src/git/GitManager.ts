@@ -2014,6 +2014,20 @@ export const make = Effect.gen(function* () {
     };
   });
 
+  // Hosts reject a pull request base that is not a remote branch ("base invalid").
+  const localBaseIsOnRemote = Effect.fn("localBaseIsOnRemote")(function* (
+    cwd: string,
+    branchName: string,
+  ) {
+    const listed = yield* gitCore.execute({
+      operation: "GitManager.localBaseIsOnRemote",
+      cwd,
+      args: ["for-each-ref", "--format=%(refname)", `refs/remotes/*/${branchName}`],
+      allowNonZeroExit: true,
+    });
+    return listed.exitCode === 0 && listed.stdout.trim().length > 0;
+  });
+
   const resolvePrBase = Effect.fn("resolvePrBase")(function* (
     cwd: string,
     branch: string,
@@ -2031,6 +2045,13 @@ export const make = Effect.gen(function* () {
       const localRef = configured.startsWith("refs/") ? configured : `refs/heads/${configured}`;
       const localBranch = yield* gitCore.resolveBranchName(cwd, localRef);
       if (localBranch) {
+        if (!(yield* localBaseIsOnRemote(cwd, localBranch))) {
+          return yield* new GitManagerError({
+            operation: "runPrStep",
+            cwd,
+            detail: `Base branch '${localBranch}' does not exist on the remote. Push it, or set the pull request base to a branch that does.`,
+          });
+        }
         const shadowsRemote =
           configured.includes("/") &&
           !configured.startsWith("refs/") &&
