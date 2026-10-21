@@ -198,16 +198,22 @@ function mapMixedSearchResult(
   result: MixedSearchResult,
   limit: number,
 ): { readonly entries: ProjectEntry[]; readonly truncated: boolean } {
-  const entries: ProjectEntry[] = [];
+  const entryByPath = new Map<string, ProjectEntry>();
   for (const item of result.items) {
     const entry = toProjectEntry(item);
-    if (entry) {
-      entries.push(entry);
+    // Edge-whitespace twins share one trimmed path; the entry named exactly that path wins.
+    if (
+      entry &&
+      (!entryByPath.has(entry.path) ||
+        trimDirectorySeparator(toPosixPath(item.item.relativePath)) === entry.path)
+    ) {
+      entryByPath.set(entry.path, entry);
     }
-    if (entries.length >= limit) {
+    if (entryByPath.size >= limit) {
       break;
     }
   }
+  const entries = [...entryByPath.values()];
 
   const rootDirectoryCount = result.items.some(
     (item) => item.type === "directory" && item.item.relativePath.length === 0,

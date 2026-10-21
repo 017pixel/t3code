@@ -77,6 +77,10 @@ it.effect("lists paths that differ only by edge whitespace once, as the client r
         { type: "file", item: fileItem("pkg/notes.txt\n") },
         directoryItem("docs /"),
         { type: "file", item: fileItem("docs /guide.md") },
+        { type: "file", item: fileItem("lib") },
+        directoryItem("lib "),
+        directoryItem("bin"),
+        { type: "file", item: fileItem("bin ") },
       ];
       const finder = {
         destroy: vi.fn(),
@@ -92,8 +96,10 @@ it.effect("lists paths that differ only by edge whitespace once, as the client r
       const { entries } = yield* searchIndex.list();
 
       expect(entries).toEqual([
+        { kind: "directory", path: "bin" },
         { kind: "directory", path: "docs" },
         { kind: "file", path: "docs /guide.md" },
+        { kind: "file", path: "lib" },
         { kind: "directory", path: "pkg" },
         { kind: "file", path: "pkg/notes.txt" },
       ]);
