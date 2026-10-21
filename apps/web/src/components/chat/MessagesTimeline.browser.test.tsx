@@ -7,6 +7,7 @@ import "~/index.css";
 
 import { act, render, stubGlobal } from "../../../test/render";
 import { MessagesTimeline, remarkThoughtPreview } from "./MessagesTimeline";
+import { AudioPreview } from "../files/AudioPreview";
 import { parseMarkdownWithMath } from "@t3tools/shared/markdownMath";
 
 const pullRequestQuery = vi.hoisted(() => ({ error: "Pull request not found" }));
@@ -176,6 +177,59 @@ describe("MessagesTimeline messages", () => {
 });
 
 describe("MessagesTimeline attachments", () => {
+  it.each(["loadedmetadata", "loadeddata", "canplay"])(
+    "plays audio with unknown duration after %s and updates the total later",
+    async (readyEvent) => {
+      const onOpen = vi.fn();
+      const preview = (failed = false) => (
+        <AudioPreview
+          compact
+          src="data:audio/webm;base64,"
+          name="recording.webm"
+          failed={failed}
+          onOpen={onOpen}
+        />
+      );
+      await using screen = await renderElement(preview());
+      const audio = screen.container.querySelector("audio")!;
+      const duration = vi.spyOn(audio, "duration", "get").mockReturnValue(Infinity);
+      const play = vi.spyOn(audio, "play").mockResolvedValue();
+      expect(screen.button("Loading recording.webm")).toHaveProperty("disabled", true);
+      await act(() => audio.dispatchEvent(new Event(readyEvent)));
+      expect(screen.button("Play recording.webm")).toHaveProperty("disabled", false);
+      expect(screen.text()).toContain("0:00");
+      expect(screen.text()).not.toContain("/");
+      await click(screen.button("Play recording.webm"));
+      expect(play).toHaveBeenCalledOnce();
+      await act(() => {
+        vi.spyOn(audio, "currentTime", "get").mockReturnValue(3);
+        audio.dispatchEvent(new Event("play"));
+        audio.dispatchEvent(new Event("timeupdate"));
+      });
+      expect(screen.button("Pause recording.webm")).toHaveProperty("disabled", false);
+      expect(screen.text()).toContain("0:03");
+      const progress = screen.container.querySelector<HTMLElement>("span[aria-hidden]")!;
+      expect(progress.style.width).toBe("0%");
+      await act(() => {
+        duration.mockReturnValue(10);
+        audio.dispatchEvent(new Event("durationchange"));
+      });
+      expect(screen.text()).toContain("0:03 / 0:10");
+      expect(progress.style.width).toBe("30%");
+      await act(() => {
+        duration.mockReturnValue(NaN);
+        audio.dispatchEvent(new Event("durationchange"));
+      });
+      expect(screen.text()).not.toContain("/");
+      expect(progress.style.width).toBe("0%");
+      expect(screen.button("Pause recording.webm")).toHaveProperty("disabled", false);
+      await screen.rerender(preview(true));
+      expect(screen.text()).toContain("Unavailable");
+      await click(screen.button("Audio unavailable. Open recording.webm"));
+      expect(onOpen).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each(["pause", "error"])("unpins audio after %s", async (event) => {
     const NativeObserver = IntersectionObserver;
     using _observer = stubGlobal(
