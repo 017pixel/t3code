@@ -253,7 +253,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                   isOptimisticallySelected || draftSelectedOptions?.[index] === true;
                 const shortcutKey = index < 9 ? index + 1 : null;
                 const className = cn(
-                  "group flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left outline-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary/25",
+                  "group flex w-full select-text items-center gap-2 rounded-md px-2.5 py-2 text-left outline-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary/25",
                   isSelected
                     ? "bg-muted/55 text-foreground"
                     : "bg-transparent text-foreground/85 hover:bg-muted/30",
@@ -281,18 +281,35 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                     ) : null}
                   </>
                 );
+                // Chromium cannot start a text selection inside a native <button>, so the
+                // option is a button-role div whose label and description stay copyable.
                 return (
-                  <button
+                  <div
                     key={`${activeQuestion.id}:${optionValue}`}
-                    type="button"
-                    disabled={disabled || isResponding}
-                    onClick={() => {
+                    role="button"
+                    tabIndex={disabled || isResponding ? -1 : 0}
+                    aria-disabled={disabled || isResponding}
+                    onClick={(event) => {
+                      // A drag that selected text in the option ends in a click; it must not answer.
+                      const selection = window.getSelection();
+                      if (
+                        selection &&
+                        !selection.isCollapsed &&
+                        selection.containsNode(event.currentTarget, true)
+                      ) {
+                        return;
+                      }
+                      handleOptionSelection(activeQuestion.id, optionValue);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
                       handleOptionSelection(activeQuestion.id, optionValue);
                     }}
                     className={className}
                   >
                     {content}
-                  </button>
+                  </div>
                 );
               })}
             </div>
