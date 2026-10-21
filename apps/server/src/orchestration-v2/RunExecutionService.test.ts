@@ -2502,9 +2502,13 @@ it.effect("fails the running provider turn with the run when event ingestion fai
               providerThreadId: ids.providerThreadId,
               nodeId: ids.rootNodeId,
               runAttemptId: ids.attemptId,
+              nativeTurnRef: null,
+              ordinal: 1,
               status: "running",
+              startedAt: DateTime.makeUnsafe("2026-07-21T12:00:00.000Z"),
+              completedAt: null,
             },
-          } as ProviderAdapter.ProviderAdapterV2Event),
+          } satisfies ProviderAdapter.ProviderAdapterV2Event),
           Stream.fail(
             new ProviderAdapter.ProviderAdapterEventStreamError({
               driver,
