@@ -243,4 +243,20 @@ describe("usage pricing", () => {
     expect(lookupRate(table, "provider-b/example-model")?.inputCostPerToken).toBe(3);
     expect(lookupRate(table, "example-model")).toBeNull();
   });
+
+  it("prices Codex Daybreak models under their LiteLLM names", () => {
+    const table = parseRateTable({
+      "daybreak-blue-latest": rate(1),
+      "daybreak-red-latest": rate(2),
+    });
+
+    expect(lookupRate(table, "gpt-daybreak-blue-latest")?.inputCostPerToken).toBe(1);
+    expect(lookupRate(table, "gpt-daybreak-red-latest")?.inputCostPerToken).toBe(2);
+    expect(
+      lookupRate(
+        parseRateTable({ "daybreak-blue-latest": rate(1), "gpt-daybreak-blue-latest": rate(3) }),
+        "gpt-daybreak-blue-latest",
+      )?.inputCostPerToken,
+    ).toBe(3);
+  });
 });

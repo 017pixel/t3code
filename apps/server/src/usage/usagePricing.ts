@@ -195,6 +195,12 @@ const UNPRICEABLE_MODELS = new Set([
   "fable",
 ]);
 
+/** Codex records these models with a `gpt-` prefix that LiteLLM's keys omit. */
+const RATE_KEY_ALIASES: ReadonlyMap<string, string> = new Map([
+  ["gpt-daybreak-blue-latest", "daybreak-blue-latest"],
+  ["gpt-daybreak-red-latest", "daybreak-red-latest"],
+]);
+
 /**
  * A scan prices every record twice against a few dozen models, and tables are
  * never mutated once built.
@@ -219,7 +225,8 @@ function resolveRate(table: RateTable, model: string): ModelRate | null {
   const key = stripVariantSuffix(normalizeRateKey(model));
   const bareName = bareModelName(key);
   if (bareName.length === 0 || UNPRICEABLE_MODELS.has(bareName)) return null;
-  return table.get(key) ?? null;
+  const alias = RATE_KEY_ALIASES.get(key);
+  return table.get(key) ?? (alias === undefined ? null : table.get(alias)) ?? null;
 }
 
 export type PricedRecord = Pick<
