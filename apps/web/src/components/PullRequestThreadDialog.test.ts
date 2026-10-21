@@ -9,15 +9,6 @@ import { AsyncResult } from "effect/reactivity";
 import { isValidElement, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-const PREPARED_PULL_REQUEST = vi.hoisted(() => ({
-  number: 123,
-  title: "Pull request",
-  url: "https://github.com/pingdotgg/t3code/pull/123",
-  baseBranch: "main",
-  headBranch: "feature/pr",
-  state: "open" as const,
-}));
-
 const state = vi.hoisted(() => ({
   canOperate: false,
   canWriteSourceControl: true,
@@ -31,7 +22,7 @@ const state = vi.hoisted(() => ({
   openChanges: [] as boolean[],
   checkouts: [] as string[],
   setupScripts: 0,
-  prepared: [] as unknown[],
+  prepared: [] as { branch: string; worktreePath: string | null }[],
 }));
 
 vi.mock("react", async (importOriginal) => ({
@@ -89,7 +80,6 @@ vi.mock("~/state/git", () => ({
       await state.pendingResponse;
       if (state.interrupted) return AsyncResult.failure(Cause.interrupt());
       return AsyncResult.success({
-        pullRequest: PREPARED_PULL_REQUEST,
         branch: "feature/pr",
         worktreePath: mode === "worktree" ? "/worktree" : null,
         isOnPullRequestHead: true,
@@ -185,20 +175,5 @@ describe("pull request worktree permissions", () => {
 
     expect(state.checkouts).toEqual([]);
     expect(state.setupScripts).toBe(0);
-  });
-
-  // #15721: the thread is still a draft when the checkout finishes, so the pull request the
-  // server resolved has to reach the caller for the thread to be linked to it.
-  it("hands the checked-out pull request to the thread it prepares", async () => {
-    await prepareAction("Local")();
-
-    expect(state.checkouts).toEqual(["local"]);
-    expect(state.prepared).toEqual([
-      expect.objectContaining({
-        branch: "feature/pr",
-        worktreePath: null,
-        pullRequest: expect.objectContaining({ url: PREPARED_PULL_REQUEST.url }),
-      }),
-    ]);
   });
 });

@@ -105,6 +105,7 @@ import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { fileAttachmentCapabilityBlockReason } from "./composerAttachmentFiles";
 import { readEnvironmentScope } from "../../state/session";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
+import { usePullRequestLinking } from "../../hooks/usePullRequestLinking";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   threadContextsOutsideEnvironment,
@@ -318,6 +319,7 @@ export function useComposerSend(input: ComposerSendInput) {
     persistThreadSettingsForNextTurn,
   } = input;
   const handleNewThread = useNewThreadHandler();
+  const pullRequestLinking = usePullRequestLinking(environmentId);
   const navigate = useNavigate();
   const clientSettingsHydrated = useClientSettingsHydrated();
   const planModeEnabled = useEnvironmentSettings(environmentId, selectPlanModeEnabled);
@@ -1261,6 +1263,25 @@ export function useComposerSend(input: ComposerSendInput) {
         failure = startResult;
       } else {
         turnStartSucceeded = true;
+        // A pull request checked out into the draft can only be linked now that its thread exists.
+        const checkedOutPullRequestUrl = sentDraftThreadRef ? draftThread?.pullRequestUrl : null;
+        if (
+          sentDraftThreadRef &&
+          checkedOutPullRequestUrl &&
+          pullRequestLinking.canLink(checkedOutPullRequestUrl)
+        ) {
+          void pullRequestLinking
+            .changeLink(sentDraftThreadRef, checkedOutPullRequestUrl, true)
+            .catch((error: unknown) => {
+              toastManager.add(
+                stackedThreadToast({
+                  type: "warning",
+                  title: "Could not link the pull request to this thread",
+                  description: error instanceof Error ? error.message : undefined,
+                }),
+              );
+            });
+        }
         setKeepFullHistory(routeThreadKey, false);
         clearUsageLimitsFor(routeThreadKey);
         if (turnUsesAttachmentUploads) {
