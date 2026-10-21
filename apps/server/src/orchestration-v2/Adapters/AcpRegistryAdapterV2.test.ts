@@ -453,6 +453,7 @@ const openBusyReplaySession = (
   options: {
     readonly rejections?: number;
     readonly errorMessage?: string;
+    readonly errorCode?: number;
     readonly cancel?: boolean;
     readonly cancelInFlight?: boolean;
     readonly oldOutputGate?: ProviderReplayGate;
@@ -512,7 +513,10 @@ const openBusyReplaySession = (
           frame: {
             kind: "response",
             method: "session/prompt",
-            error: { code: -32603, message: options.errorMessage ?? busyPromptError },
+            error: {
+              code: options.errorCode ?? -32603,
+              message: options.errorMessage ?? busyPromptError,
+            },
           },
         },
       ]).flat(),
@@ -766,15 +770,23 @@ describe("AcpRegistryAdapterV2", () => {
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
-  it.effect("does not retry unrelated ACP internal errors", () =>
+  it.effect.each([
+    { name: "unrelated internal error", errorCode: -32603, errorMessage: "Another internal error" },
+    {
+      name: "busy message with a different code",
+      errorCode: -32602,
+      errorMessage: busyPromptError,
+    },
+    { name: "near-match busy message", errorCode: -32603, errorMessage: `${busyPromptError} ` },
+  ])("does not retry $name", ({ errorCode, errorMessage }) =>
     Effect.gen(function* () {
-      const session = yield* openBusyReplaySession({ errorMessage: "Another internal error" });
+      const session = yield* openBusyReplaySession({ errorCode, errorMessage });
       yield* startBusyReplayTurn(session);
       const events = yield* session.until((event) => event.type === "turn.terminal");
       const terminal = events.at(-1)!;
       if (terminal.type !== "turn.terminal") throw new Error("Missing terminal");
       assert.equal(terminal.status, "failed");
-      assert.equal(terminal.failure?.message, "Another internal error");
+      assert.equal(terminal.failure?.message, errorMessage.trim());
       assert.equal(session.promptRequests.length, 2);
       assert.isFalse(
         events.some(
