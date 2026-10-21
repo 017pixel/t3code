@@ -285,6 +285,12 @@ interface TerminalSessionState {
   runtimeEnv: Record<string, string> | null;
 }
 
+interface PersistedHistoryMark {
+  epoch: number;
+  appendedLength: number;
+  fileBytes: number;
+}
+
 interface PersistHistoryRequest {
   history: BoundedTerminalHistory;
   immediate: boolean;
@@ -843,6 +849,9 @@ export class BoundedTerminalHistory {
   // Reading the old string's tail on each append can force chunk concatenation.
   private lastCodeUnit: number | undefined;
   private cachedValue: string | null = "";
+  // Code units appended since the last clear; content only ever grows at the end.
+  appendedLength = 0;
+  epoch = 0;
 
   constructor(maxLines: number, initial: string, maxBytes = DEFAULT_HISTORY_BYTE_LIMIT) {
     this.maxLines = maxLines;
@@ -875,6 +884,7 @@ export class BoundedTerminalHistory {
       previous.data += text[0];
       previous.byteLength += 1;
       this.byteLength += 1;
+      this.appendedLength += 1;
       this.lastCodeUnit = firstCode;
       offset = 1;
       this.trim();
@@ -915,6 +925,7 @@ export class BoundedTerminalHistory {
     }
     this.byteLength += byteLength;
     this.lineBreaks += lineBreaks;
+    this.appendedLength += data.length;
     this.lastCodeUnit = data.charCodeAt(data.length - 1);
     this.cachedValue = null;
   }
@@ -996,6 +1007,20 @@ export class BoundedTerminalHistory {
     this.lineBreaks = 0;
     this.lastCodeUnit = undefined;
     this.cachedValue = "";
+    this.appendedLength = 0;
+    this.epoch += 1;
+  }
+
+  /** The last `codeUnits` of the history, or null when some were already trimmed. */
+  suffix(codeUnits: number): string | null {
+    const parts: Array<string> = [];
+    let remaining = codeUnits;
+    for (let index = this.chunks.length - 1; remaining > 0 && index >= this.start; index -= 1) {
+      const data = this.chunks[index]!.data;
+      parts.push(remaining >= data.length ? data : data.slice(data.length - remaining));
+      remaining -= data.length;
+    }
+    return remaining > 0 ? null : parts.toReversed().join("");
   }
 
   value(): string {
@@ -1783,6 +1808,50 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     yield* registerKillFiber(process, fiber);
   });
 
+  // Rewriting the whole history every debounce turns sustained output into
+  // megabytes of disk writes per second. The file is an append log instead,
+  // compacted once it doubles the cap; restore reads only the capped tail.
+  // Appends assume nothing else writes the file while its session lives:
+  // history is only read, truncated, or deleted around open and close.
+  const persistedHistories = new WeakMap<BoundedTerminalHistory, PersistedHistoryMark>();
+  const encodeHistory = (history: BoundedTerminalHistory, text: string) => {
+    // A lone high surrogate would encode as U+FFFD; write it with its pair next time.
+    const code = text.charCodeAt(text.length - 1);
+    const held = code >= 0xd800 && code <= 0xdbff ? 1 : 0;
+    return {
+      bytes: new TextEncoder().encode(held ? text.slice(0, -1) : text),
+      appendedLength: history.appendedLength - held,
+    };
+  };
+  const writeHistory = Effect.fn("terminal.writeHistory")(function* (
+    filePath: string,
+    history: BoundedTerminalHistory,
+  ) {
+    const mark = persistedHistories.get(history);
+    const pending =
+      mark && mark.epoch === history.epoch
+        ? history.suffix(history.appendedLength - mark.appendedLength)
+        : null;
+    if (mark && pending !== null) {
+      if (pending.length === 0) return;
+      const { bytes, appendedLength } = encodeHistory(history, pending);
+      if (mark.fileBytes + bytes.byteLength <= 2 * historyByteLimit) {
+        yield* fileSystem.writeFile(filePath, bytes, { flag: "a" });
+        mark.appendedLength = appendedLength;
+        mark.fileBytes += bytes.byteLength;
+        return;
+      }
+    }
+    const { bytes, appendedLength } = encodeHistory(history, history.value());
+    persistedHistories.delete(history);
+    yield* fileSystem.writeFile(filePath, bytes);
+    persistedHistories.set(history, {
+      epoch: history.epoch,
+      appendedLength,
+      fileBytes: bytes.byteLength,
+    });
+  });
+
   const persistWorker = yield* makeKeyedCoalescingWorker<
     string,
     PersistHistoryRequest,
@@ -1803,17 +1872,16 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         return;
       }
 
-      yield* fileSystem
-        .writeFileString(historyPath(threadId, terminalId), request.history.value())
-        .pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("failed to persist terminal history", {
-              threadId,
-              terminalId,
-              error,
-            }),
-          ),
-        );
+      yield* writeHistory(historyPath(threadId, terminalId), request.history).pipe(
+        Effect.catch((error) => {
+          persistedHistories.delete(request.history);
+          return Effect.logWarning("failed to persist terminal history", {
+            threadId,
+            terminalId,
+            error,
+          });
+        }),
+      );
     }),
   });
 
