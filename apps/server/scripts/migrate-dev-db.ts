@@ -119,6 +119,8 @@ export interface RunMigrateDevDbInput {
   readonly source?: string | undefined;
   readonly projects: number;
   readonly threadsPerProject: number;
+  /** Settled threads are most of real history, so a seed without them is thin. */
+  readonly includeSettled?: boolean | undefined;
 }
 
 export interface RunMigrateDevDbOptions {
@@ -217,17 +219,21 @@ const CLEARED_TABLES: ReadonlyArray<string> = [
 
 const PROVIDER_SESSIONS_TABLE = "orchestration_v2_projection_provider_sessions";
 
-const rootIsVisible = (sql: SqlClient.SqlClient) => sql`
+const rootIsCopied = (sql: SqlClient.SqlClient, includeSettled: boolean) => sql`
   root.deleted_at IS NULL
   AND json_extract(root.payload_json, '$.deletedAt') IS NULL
   AND json_extract(root.payload_json, '$.archivedAt') IS NULL
-  AND json_extract(root.payload_json, '$.settledAt') IS NULL
-  AND json_extract(root.payload_json, '$.settledOverride') IS NOT 'settled'`;
+  AND (${includeSettled ? 1 : 0} = 1 OR (
+    json_extract(root.payload_json, '$.settledAt') IS NULL
+    AND json_extract(root.payload_json, '$.settledOverride') IS NOT 'settled'))`;
 
 /**
  * One transaction reads the source, so the copy is consistent while the real server writes.
  */
-const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath: string) {
+const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (
+  sourcePath: string,
+  includeSettled: boolean,
+) {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`ATTACH DATABASE ${`${NodeURL.pathToFileURL(sourcePath).href}?mode=ro`} AS src`;
   const schema = yield* sql<{ type: string; name: string; sql: string }>`
@@ -249,7 +255,7 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
           SELECT family.thread_id FROM src.orchestration_v2_projection_threads family
           JOIN src.orchestration_v2_projection_threads root ON root.thread_id =
             COALESCE(json_extract(family.payload_json, '$.lineage.rootThreadId'), family.thread_id)
-          WHERE ${rootIsVisible(sql)}`;
+          WHERE ${rootIsCopied(sql, includeSettled)}`;
       }
       for (const { name } of tables) {
         if (CLEARED_TABLES.includes(name)) continue;
@@ -302,17 +308,20 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
     WHERE json_extract(payload_json, '$.limitRecovery') IS NOT NULL`;
 
   // Forks and subagents read history and results through their lineage, so a
-  // thread family is cloned or dropped as a whole.
+  // thread family is cloned or dropped as a whole. Every thread in it counts
+  // toward the per-project limit: one orchestrator family can hold hundreds of
+  // subagents and most of the database.
   yield* sql`CREATE TEMP TABLE thread_families AS
     SELECT thread_id, updated_at,
       COALESCE(json_extract(payload_json, '$.lineage.rootThreadId'), thread_id) AS root_id
     FROM orchestration_v2_projection_threads`;
 
   yield* sql`CREATE TEMP TABLE stopped_families AS
-    SELECT f.root_id, root.project_id, MAX(f.updated_at) AS updated_at
+    SELECT f.root_id, root.project_id, MAX(f.updated_at) AS updated_at,
+      COUNT(*) AS thread_count
     FROM thread_families f
     JOIN orchestration_v2_projection_threads root ON root.thread_id = f.root_id
-    WHERE ${rootIsVisible(sql)}
+    WHERE ${rootIsCopied(sql, input.includeSettled === true)}
     GROUP BY f.root_id, root.project_id
     HAVING SUM(f.thread_id IN (SELECT thread_id FROM live_threads)) = 0`;
 
@@ -335,14 +344,16 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
       SELECT root_id FROM (
         SELECT
           sf.root_id,
-          ROW_NUMBER() OVER (
+          SUM(sf.thread_count) OVER (
             PARTITION BY sf.project_id
-            ORDER BY sf.updated_at DESC
-          ) AS recency_rank
+            ORDER BY sf.updated_at DESC, sf.root_id
+            ROWS UNBOUNDED PRECEDING
+          ) AS threads_so_far
         FROM stopped_families sf
         JOIN kept_projects kp ON kp.project_id = sf.project_id
+        WHERE sf.thread_count <= ${input.threadsPerProject}
       )
-      WHERE recency_rank <= ${input.threadsPerProject}
+      WHERE threads_so_far <= ${input.threadsPerProject}
     )`;
 
   const threadTables = yield* sql<{ name: string }>`
@@ -475,8 +486,10 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
 
   yield* removeDatabaseFiles(snapshotPath);
   const { executedMigrations, pruned } = yield* Effect.gen(function* () {
-    yield* Console.log(`Copying visible threads from ${sourcePath} (read-only)...`);
-    yield* copySourceSlice(sourcePath).pipe(
+    yield* Console.log(
+      `Copying ${input.includeSettled ? "visible and settled" : "visible"} threads from ${sourcePath} (read-only)...`,
+    );
+    yield* copySourceSlice(sourcePath, input.includeSettled === true).pipe(
       Effect.provide(NodeSqliteClient.layer({ filename: snapshotPath })),
       wrapPhase("snapshot", sourcePath),
     );
@@ -570,7 +583,7 @@ export const migrateDevDbCommand = Command.make(
     threadsPerProject: Flag.Int("threads-per-project").pipe(
       Flag.withDefault(10),
       Flag.withDescription(
-        "How many recent stopped threads, with their forks and subagents, to keep per project.",
+        "How many recent stopped threads to keep per project. Forks and subagents count too, and a family that does not fit is skipped whole.",
       ),
     ),
     baseDir: Flag.String("base-dir").pipe(
@@ -581,12 +594,19 @@ export const migrateDevDbCommand = Command.make(
       Flag.optional,
       Flag.withDescription("Source database. Defaults to ~/.t3/userdata/statev2.sqlite."),
     ),
+    includeSettled: Flag.Boolean("include-settled").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription(
+        "Also keep settled threads. They count toward --threads-per-project. Archived and deleted threads are always dropped.",
+      ),
+    ),
   },
-  ({ projects, threadsPerProject, baseDir, source }) =>
+  ({ projects, threadsPerProject, baseDir, source, includeSettled }) =>
     Effect.gen(function* () {
       const result = yield* runMigrateDevDb({
         projects,
         threadsPerProject,
+        includeSettled,
         baseDir: Option.getOrUndefined(baseDir),
         source: Option.getOrUndefined(source),
       });

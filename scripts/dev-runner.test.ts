@@ -8,6 +8,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, describe, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
@@ -19,6 +20,7 @@ import {
   checkPortAvailabilityOnHosts,
   createDevRunnerEnv,
   findFirstAvailableOffset,
+  planFirstStart,
   resolveModePortOffsets,
   runDevRunnerWithInput,
 } from "./dev-runner.ts";
@@ -162,6 +164,83 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
 
         assert.equal(env.HOST, undefined);
       }),
+    );
+  });
+
+  describe("planFirstStart", () => {
+    const makeLayout = Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-first-start-" });
+      const sharedHome = path.join(root, "shared");
+      const worktreeHome = path.join(root, "worktree", ".t3");
+      const repoRoot = path.join(root, "repo");
+      const source = path.join(sharedHome, "userdata", "statev2.sqlite");
+      yield* fs.makeDirectory(path.dirname(source), { recursive: true });
+      yield* fs.writeFileString(source, "");
+      return { fs, path, sharedHome, worktreeHome, repoRoot, source };
+    });
+
+    it.effect("seeds an empty worktree home once and warms a cold cache once", () =>
+      Effect.gen(function* () {
+        const { fs, path, sharedHome, worktreeHome, repoRoot, source } = yield* makeLayout;
+        const input = { mode: "dev", seed: true, worktreeHome, sharedHome, repoRoot } as const;
+
+        const first = yield* planFirstStart(input);
+        assert.deepStrictEqual(first.seed, { home: worktreeHome, source });
+        assert.equal(first.warmDeps, true);
+
+        yield* fs.makeDirectory(path.join(worktreeHome, "userdata"), { recursive: true });
+        yield* fs.writeFileString(path.join(worktreeHome, "userdata", "statev2.sqlite"), "");
+        const metadata = path.join(repoRoot, "apps/web/node_modules/.vite/deps/_metadata.json");
+        yield* fs.makeDirectory(path.dirname(metadata), { recursive: true });
+        yield* fs.writeFileString(metadata, "{}");
+
+        const second = yield* planFirstStart(input);
+        assert.equal(second.seed, undefined);
+        assert.equal(second.warmDeps, false);
+      }).pipe(Effect.scoped),
+    );
+
+    it.effect(
+      "does not seed when opted out, outside a worktree home, without a server, or without a live install",
+      () =>
+        Effect.gen(function* () {
+          const { sharedHome, worktreeHome, repoRoot } = yield* makeLayout;
+          const base = { mode: "dev", seed: true, worktreeHome, sharedHome, repoRoot } as const;
+
+          const plans = yield* Effect.all([
+            planFirstStart({ ...base, seed: false }),
+            planFirstStart({ ...base, worktreeHome: undefined }),
+            planFirstStart({ ...base, mode: "dev:web" }),
+            planFirstStart({ ...base, sharedHome: worktreeHome }),
+          ]);
+          assert.deepStrictEqual(
+            plans.map((plan) => plan.seed),
+            [undefined, undefined, undefined, undefined],
+          );
+        }).pipe(Effect.scoped),
+    );
+
+    it.effect("reports a worktree database that is a full copy of live data", () =>
+      Effect.gen(function* () {
+        const { fs, path, sharedHome, worktreeHome, repoRoot } = yield* makeLayout;
+        const v1 = path.join(worktreeHome, "userdata", "state.sqlite");
+        yield* fs.makeDirectory(path.dirname(v1), { recursive: true });
+        yield* fs.writeFileString(v1, "");
+        // Sparse, so the test does not write 600 MB.
+        yield* fs.truncate(v1, 600 * 1024 * 1024);
+
+        const plan = yield* planFirstStart({
+          mode: "dev:server",
+          seed: true,
+          worktreeHome,
+          sharedHome,
+          repoRoot,
+        });
+        assert.deepStrictEqual(plan.largeDatabases, [{ file: v1, bytes: 600 * 1024 * 1024 }]);
+        assert.equal(plan.seed, undefined);
+      }).pipe(Effect.scoped),
     );
   });
 
@@ -550,6 +629,8 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
             Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
             Effect.provideService(HostProcess.Platform, "linux"),
             Effect.provideService(HostProcess.WorkingDirectory, input.cwd),
+            // No live install, so a worktree start never seeds from this machine's ~/.t3.
+            Effect.provideService(HostProcess.HomeDirectory, input.cwd),
             Effect.provideService(
               HostProcess.Environment,
               input.ambientHome === undefined ? {} : { T3CODE_HOME: input.ambientHome },

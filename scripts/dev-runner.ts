@@ -10,6 +10,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Hash from "effect/Hash";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
@@ -43,6 +44,9 @@ const FETCH_BAD_PORTS = new Set([
 // Dev servers bind loopback, so loopback is the only interface whose
 // availability decides whether we can use a port.
 const DEV_PORT_PROBE_HOSTS = ["127.0.0.1", "::1"] as const;
+// Some worktrees hold a full copy of the live database (gigabytes). A pruned
+// migrate-dev-db copy is tens of MB.
+const LARGE_DEV_DATABASE_BYTES = 500 * 1024 * 1024;
 
 /**
  * Loopback and the wildcards qualify; a specific interface (e.g. a LAN IP) does
@@ -566,6 +570,98 @@ export const resolveModePortOffsets = Effect.fn("dev-runner.resolveModePortOffse
   return { serverOffset: sharedOffset, webOffset: sharedOffset };
 });
 
+const SERVER_MODES: ReadonlySet<DevMode> = new Set(["dev", "dev:server", "dev:desktop"]);
+const WEB_MODES: ReadonlySet<DevMode> = new Set(["dev", "dev:web", "dev:desktop"]);
+
+interface FirstStartInput {
+  readonly mode: DevMode;
+  readonly seed: boolean;
+  /** The resolved home, when it is the worktree's own `.t3`. */
+  readonly worktreeHome: string | undefined;
+  /** Where a live install keeps its database: `~/.t3`. */
+  readonly sharedHome: string;
+  readonly repoRoot: string;
+}
+
+/**
+ * Work the first dev start in a checkout does once, so dev servers start with
+ * real data and a warm web dependency cache. Each task checks for its own
+ * output, so later starts skip it.
+ */
+export const planFirstStart = Effect.fn("dev-runner.planFirstStart")(function* (
+  input: FirstStartInput,
+): Effect.fn.Return<
+  {
+    readonly seed: { readonly home: string; readonly source: string } | undefined;
+    readonly warmDeps: boolean;
+    readonly largeDatabases: ReadonlyArray<{ readonly file: string; readonly bytes: number }>;
+  },
+  never,
+  FileSystem.FileSystem | Path.Path
+> {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const exists = (file: string) => fs.exists(file).pipe(Effect.orElseSucceed(() => false));
+
+  let seed: { home: string; source: string } | undefined;
+  const largeDatabases: Array<{ file: string; bytes: number }> = [];
+  if (input.worktreeHome !== undefined && SERVER_MODES.has(input.mode)) {
+    const stateDir = path.join(input.worktreeHome, "userdata");
+    const databases = [
+      path.join(stateDir, "statev2.sqlite"),
+      // The server upgrades a V1 state.sqlite when statev2 is missing, so its
+      // presence also means this worktree already has data.
+      path.join(stateDir, "state.sqlite"),
+    ];
+    let hasDatabase = false;
+    for (const file of databases) {
+      const info = yield* fs.stat(file).pipe(Effect.option);
+      if (Option.isNone(info)) continue;
+      hasDatabase = true;
+      const bytes = Number(info.value.size);
+      if (bytes > LARGE_DEV_DATABASE_BYTES) largeDatabases.push({ file, bytes });
+    }
+    const source = path.join(input.sharedHome, "userdata", "statev2.sqlite");
+    if (input.seed && !hasDatabase && (yield* exists(source))) {
+      seed = { home: input.worktreeHome, source };
+    }
+  }
+
+  const warmDeps =
+    WEB_MODES.has(input.mode) &&
+    !(yield* exists(
+      path.join(input.repoRoot, "apps", "web", "node_modules", ".vite", "deps", "_metadata.json"),
+    ));
+
+  return { seed, warmDeps, largeDatabases };
+});
+
+/** First-start tasks are best effort: a failure warns, and dev still starts. */
+const runNodeScript = Effect.fn("dev-runner.runNodeScript")(function* (
+  label: string,
+  script: string,
+  args: ReadonlyArray<string>,
+  env: NodeJS.ProcessEnv,
+) {
+  const path = yield* Path.Path;
+  const repoRoot = path.dirname(import.meta.dirname);
+  const exitCode = yield* ChildProcess.make(
+    yield* HostProcess.ExecutablePath,
+    [path.join(repoRoot, script), ...args],
+    { cwd: repoRoot, stdin: "ignore", stdout: "inherit", stderr: "inherit", env, extendEnv: false },
+  ).pipe(
+    Effect.flatMap((child) => child.exitCode),
+    Effect.scoped,
+    Effect.map(Number),
+    Effect.orElseSucceed(() => -1),
+  );
+  if (exitCode !== 0) {
+    yield* Effect.logWarning(`[dev-runner] ${label} failed (exit ${exitCode}); continuing.`);
+  }
+});
+
+const formatMegabytes = (bytes: number) => `${Math.round(bytes / (1024 * 1024))} MB`;
+
 interface DevRunnerCliInput {
   readonly mode: DevMode;
   readonly t3Home: string | undefined;
@@ -577,6 +673,8 @@ interface DevRunnerCliInput {
   readonly devUrl: URL | undefined;
   readonly dryRun: boolean;
   readonly share: boolean;
+  /** `--no-seed` or `T3CODE_DEV_SEED=0` keeps a new worktree's database empty. */
+  readonly seed?: boolean | undefined;
   readonly runArgs: ReadonlyArray<string>;
 }
 
@@ -648,6 +746,7 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
       ? ` selectedOffset(server=${serverOffset},web=${webOffset})`
       : "";
   const baseDir = env.T3CODE_HOME ?? (yield* DEFAULT_T3_HOME);
+  const path = yield* Path.Path;
 
   yield* Effect.logInfo(
     `[dev-runner] mode=${input.mode} source=${source}${selectionSuffix} serverPort=${String(env.T3CODE_PORT)} webPort=${String(env.PORT)} baseDir=${baseDir}`,
@@ -720,6 +819,46 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
         yield* Effect.logInfo(`[dev-runner] shared on tailnet: ${shared.url}`);
       }
     }
+  }
+
+  // After sharing: warming must resolve the same Vite config, including the
+  // bundled-dev default, that the dev server will.
+  const firstStart = yield* planFirstStart({
+    mode: input.mode,
+    seed: input.seed !== false,
+    worktreeHome:
+      worktreeHome !== undefined && baseDir === path.resolve(worktreeHome)
+        ? worktreeHome
+        : undefined,
+    sharedHome: path.join(yield* HostProcess.HomeDirectory, ".t3"),
+    repoRoot: path.dirname(import.meta.dirname),
+  });
+  for (const { file, bytes } of firstStart.largeDatabases) {
+    yield* Effect.logWarning(
+      file.endsWith("statev2.sqlite")
+        ? `[dev-runner] ${file} is ${formatMegabytes(bytes)}. With the server stopped, \`vp run migrate-dev-db\` replaces it with a small copy of recent data.`
+        : `[dev-runner] ${file} is ${formatMegabytes(bytes)}. The server reads this V1 database only while statev2.sqlite is missing; once \`vp run migrate-dev-db\` has made statev2.sqlite, you can delete it.`,
+    );
+  }
+  const { seed } = firstStart;
+  if (seed !== undefined) {
+    yield* Effect.logInfo(
+      `[dev-runner] seeding ${seed.home} from ${seed.source} (read-only). Pass --no-seed or set T3CODE_DEV_SEED=0 to skip.`,
+    );
+    yield* runNodeScript(
+      "seeding the dev database",
+      "apps/server/scripts/migrate-dev-db.ts",
+      ["--base-dir", seed.home, "--source", seed.source, "--include-settled"],
+      hostEnvironment,
+    );
+  }
+  if (firstStart.warmDeps) {
+    yield* runNodeScript(
+      "warming the web dependency cache",
+      "apps/web/scripts/warm-dep-cache.ts",
+      [],
+      env,
+    );
   }
 
   const args = [...MODE_ARGS[input.mode], ...input.runArgs];
@@ -823,6 +962,12 @@ const devRunnerCli = Command.make("dev-runner", {
       "Publish the web dev server on this machine's tailnet over HTTPS (via `tailscale serve`) and print the pairing URL for it. Removed again on exit.",
     ),
     Flag.withDefault(false),
+  ),
+  seed: Flag.Boolean("seed").pipe(
+    Flag.withDescription(
+      "On the first start in a worktree, copy recent threads from ~/.t3 into its empty database (read-only, via migrate-dev-db). On by default; --no-seed or T3CODE_DEV_SEED=0 skips it.",
+    ),
+    Flag.withFallbackConfig(optionalBooleanConfig("T3CODE_DEV_SEED")),
   ),
   runArgs: Argument.String("run-arg").pipe(
     Argument.withDescription("Additional Vite+ run args (pass after `--`)."),

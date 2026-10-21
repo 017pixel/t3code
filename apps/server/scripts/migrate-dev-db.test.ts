@@ -44,6 +44,13 @@ const createFixtureSource = Effect.fn("createMigrateDevDbFixtureSource")(functio
         ["running-thread", "project-kept", "running", "{}", "2026-08-05"],
         ["settled-thread", "project-kept", "completed", '{"settledAt":"2026-08-01"}', "2026-08-05"],
         [
+          "archived-thread",
+          "project-kept",
+          "completed",
+          '{"archivedAt":"2026-08-01","settledAt":"2026-08-01"}',
+          "2026-08-05",
+        ],
+        [
           "limit-thread",
           "project-kept",
           "completed",
@@ -97,7 +104,7 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
       const source = yield* createFixtureSource(sourceDir);
 
       const result = yield* runMigrateDevDb(
-        { baseDir: destDir, source, projects: 5, threadsPerProject: 1 },
+        { baseDir: destDir, source, projects: 5, threadsPerProject: 2 },
         { sharedHome: sourceDir },
       );
 
@@ -172,6 +179,57 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
       );
       assert.equal(copied.settledRows, 0);
       assert.equal(copied.sequence, sourceSequence?.seq);
+    }),
+  );
+
+  it.effect("skips a thread family with more threads than the per-project limit", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-family-" });
+      const destDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-family-dest-" });
+      const source = yield* createFixtureSource(sourceDir);
+
+      const result = yield* runMigrateDevDb(
+        { baseDir: destDir, source, projects: 5, threadsPerProject: 1 },
+        { sharedHome: sourceDir },
+      );
+
+      assert.deepStrictEqual(
+        result.projects.map((project) => project.threads),
+        [0],
+      );
+    }),
+  );
+
+  it.effect("--include-settled keeps settled threads but still drops archived ones", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-settled-" });
+      const destDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-settled-dest-" });
+      const source = yield* createFixtureSource(sourceDir);
+
+      const result = yield* runMigrateDevDb(
+        { baseDir: destDir, source, projects: 5, threadsPerProject: 100, includeSettled: true },
+        { sharedHome: sourceDir },
+      );
+
+      const kept = yield* withDatabase(
+        result.databasePath,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const threads = yield* sql<{ thread_id: string }>`
+            SELECT thread_id FROM orchestration_v2_projection_threads ORDER BY thread_id`;
+          const [leftovers] = yield* sql<{ auth: number; tasks: number }>`
+            SELECT
+              (SELECT COUNT(*) FROM auth_sessions) AS auth,
+              (SELECT COUNT(*) FROM scheduled_tasks) AS tasks`;
+          return { threads: threads.map((row) => row.thread_id), leftovers };
+        }),
+      );
+      assert.include(kept.threads, "settled-thread");
+      assert.notInclude(kept.threads, "archived-thread");
+      assert.notInclude(kept.threads, "running-thread");
+      assert.deepStrictEqual(kept.leftovers, { auth: 0, tasks: 0 });
     }),
   );
 
