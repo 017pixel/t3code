@@ -59,6 +59,18 @@ export class MigrateDevDbSourceIsDestinationError extends Schema.TaggedError<Mig
   }
 }
 
+export class MigrateDevDbLegacyThreadsError extends Schema.TaggedError<MigrateDevDbLegacyThreadsError>()(
+  "MigrateDevDbLegacyThreadsError",
+  {
+    sourcePath: Schema.String,
+    threadCount: Schema.Number,
+  },
+) {
+  override get message(): string {
+    return `Source database '${this.sourcePath}' holds ${this.threadCount} V1 threads that only server boot imports, so the prune would drop them all. Start a T3 server on a copy of it once, then pass that copy's statev2.sqlite as --source.`;
+  }
+}
+
 export class MigrateDevDbServerRunningError extends Schema.TaggedError<MigrateDevDbServerRunningError>()(
   "MigrateDevDbServerRunningError",
   {
@@ -238,6 +250,11 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
   const threadIdNullable = new Map(threadColumns.map((row) => [row.name, row.notnull === 0]));
   const tables = schema.filter((entry) => entry.type === "table");
   const filtered = tables.some((table) => table.name === "orchestration_v2_projection_threads");
+  // No migration imports V1 threads, and the prune keeps only V2 threads.
+  const [legacyThreads] =
+    !filtered && tables.some((table) => table.name === "projection_threads")
+      ? yield* sql<{ count: number }>`SELECT COUNT(*) AS count FROM src.projection_threads`
+      : [];
 
   yield* sql.withTransaction(
     Effect.gen(function* () {
@@ -274,6 +291,7 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
     }),
   );
   yield* sql`DETACH DATABASE src`;
+  return { legacyThreadCount: legacyThreads?.count ?? 0 };
 });
 
 const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigrateDevDbInput) {
@@ -478,10 +496,16 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
   yield* removeDatabaseFiles(snapshotPath);
   const { executedMigrations, pruned } = yield* Effect.gen(function* () {
     yield* Console.log(`Copying visible threads from ${sourcePath} (read-only)...`);
-    yield* copySourceSlice(sourcePath).pipe(
+    const { legacyThreadCount } = yield* copySourceSlice(sourcePath).pipe(
       Effect.provide(NodeSqliteClient.layer({ filename: snapshotPath })),
       wrapPhase("snapshot", sourcePath),
     );
+    if (legacyThreadCount > 0) {
+      return yield* new MigrateDevDbLegacyThreadsError({
+        sourcePath,
+        threadCount: legacyThreadCount,
+      });
+    }
 
     // Migrate before pruning: a source older than this checkout would
     // otherwise crash the prune queries on columns that don't exist yet.
