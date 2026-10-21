@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "seedId": "issue-22997-composer-v1",
+  "fixedClock": "2026-10-21T12:00:00.000Z",
+  "projectId": "proof-22997-project",
+  "threads": [
+    { "id": "proof-22997-empty", "title": "Empty conversation", "messages": [] },
+    {
+      "id": "proof-22997-history",
+      "title": "Stopped conversation",
+      "messages": [
+        { "role": "user", "text": "Please keep the documentation example concise." },
+        {
+          "role": "assistant",
+          "text": "The example is ready. You can review the documentation next."
+        }
+      ]
+    },
+    { "id": "proof-22997-sibling", "title": "Sibling conversation", "messages": [] }
+  ]
+}
