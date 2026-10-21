@@ -24,7 +24,12 @@ export type OfficeWorkerResult =
     }
   | { readonly type: "notebook"; readonly language: string; readonly cells: NotebookCell[] }
   | { readonly type: "error"; readonly message: string }
-  | { readonly type: "docx"; readonly bytes: ArrayBuffer }
+  | {
+      readonly type: "docx";
+      readonly bytes: ArrayBuffer;
+      readonly documents: string[];
+      readonly truncated: boolean;
+    }
   | {
       readonly type: "xlsx";
       readonly sheets: {

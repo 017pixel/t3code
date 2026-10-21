@@ -237,6 +237,16 @@
       "sourceUrl": "https://github.com/NaturalIntelligence/fast-xml-parser"
     },
     {
+      "name": "saxes",
+      "version": "6.0.0",
+      "license": "ISC",
+      "sourceUrl": "https://github.com/lddubeau/saxes",
+      "generatedNotice": {
+        "licenseId": "ISC",
+        "copyrights": ["Copyright (c) 2018-2021 Louis-Dominique Dubeau"]
+      }
+    },
+    {
       "name": "worker-f",
       "version": "0.1.20",
       "sourceUrl": "https://gitlab.com/catamphetamine/worker-f",

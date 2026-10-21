@@ -106,6 +106,7 @@ const browserTestProject = {
       "heic-to/next",
       "jszip",
       "mermaid",
+      "saxes",
       "read-excel-file/universal",
       "sql.js",
       "tiff",
