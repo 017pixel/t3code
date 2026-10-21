@@ -5,6 +5,7 @@ import {
   filterProjectIconNames,
   firstEmoji,
   normalizeProjectMonogramInput,
+  projectIconSaveErrorMessage,
 } from "./projectIconOptions";
 
 describe("projectIconOptions", () => {
@@ -30,6 +31,26 @@ describe("projectIconOptions", () => {
     expect(normalizeProjectMonogramInput("𐐨bc")).toBe("𐐀B");
     expect(normalizeProjectMonogramInput("  ")).toBe("");
     expect(normalizeProjectMonogramInput("a!")).toBe("A!");
+  });
+
+  it("shows the server validation reason through project mutation wrappers", () => {
+    const message =
+      "Project command invariant failed (project.meta.update): Project monograms must contain at most two characters.";
+    expect(
+      projectIconSaveErrorMessage({
+        name: "ProjectMutationError",
+        message: "Failed to mutate project.",
+        cause: {
+          name: "ProjectOperationError",
+          message: "Project operation failed.",
+          cause: { name: "ProjectCommandInvariantError", message },
+        },
+      }),
+    ).toBe(message);
+    expect(projectIconSaveErrorMessage(new Error("Connection closed."))).toBe("Connection closed.");
+    expect(projectIconSaveErrorMessage({ cause: { message: "Internal server detail" } })).toBe(
+      "Failed to update project icon. Try again.",
+    );
   });
 
   it("extracts one complete emoji grapheme", () => {

@@ -301,12 +301,19 @@ function ProjectDetail({
     faviconPath: string | null;
     projectIcon: ProjectIconOverride | null;
   }) => {
-    if (savingFaviconRef.current) return;
+    if (savingFaviconRef.current) {
+      return AsyncResult.failure<void, Error>(
+        Cause.fail(new Error("A project icon update is already in progress.")),
+      );
+    }
     savingFaviconRef.current = true;
     setIsSavingFavicon(true);
-    await updateAllMembers(input, "Failed to update project icon");
-    savingFaviconRef.current = false;
-    setIsSavingFavicon(false);
+    try {
+      return await updateAllMembers(input, "Failed to update project icon");
+    } finally {
+      savingFaviconRef.current = false;
+      setIsSavingFavicon(false);
+    }
   };
 
   const hasMultipleCheckouts = group.memberProjects.length > 1;
@@ -604,7 +611,10 @@ function ProjectDetail({
             projectName={representative.title}
             open
             onOpenChange={setIconPickerOpen}
-            onSelect={(icon) => void setProjectIcon({ faviconPath: null, projectIcon: icon })}
+            onSelect={async (icon) => {
+              const result = await setProjectIcon({ faviconPath: null, projectIcon: icon });
+              if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+            }}
           />
         </Suspense>
       ) : null}
