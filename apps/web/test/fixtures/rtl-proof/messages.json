@@ -1,0 +1,17 @@
+{
+  "F1": "# כותרת בעברית\n## عنوان بالعربية\n### כותרת שלישית\n#### כותרת רביעית\n##### כותרת חמישית\n###### כותרת שישית\n\nזהו משפט בעברית. שלום עם `const value = 1` בתוך משפט. זהו טקסט ארוך כדי לבדוק גלישת שורות במסך צר, עם סימן שאלה בסוף?\n\nهذه جملة عربية طويلة لاختبار اتجاه النص وعلامات الترقيم في واجهة المحادثة.\n\nEnglish prose stays left to right.\n\nReact מאפשר לבנות ממשק בעברית עם `const value = 1`.\n\n[קישור בטוח](https://example.com) וגם `$test-t3-app` בתוך משפט.\n\n```js\nconst message = \"שלום\";\nconsole.log(message);\n```\n\n| שם | Name |\n| --- | --- |\n| שלום. | Hello. |",
+  "F2": "## רשימות\n\n- שלום עולם. זהו פריט ארוך לבדיקת גלישת שורות ושמירת סמן הרשימה בתוך השוליים במסך צר.\n- Hello world. English control.\n- مهمة عربية طويلة لاختبار التفاف السطر.\n\n### English first unordered\n\n- Hello first.\n- שלום שני.\n\n### RTL first ordered\n\n1. שלום ראשון.\n2. English second.\n\n### English first ordered\n\n1. English first.\n2. שלום שני.\n\n### Wide markers\n\n98. שלום עם סמן רחב.\n99. Hello marker.\n100. עוד פריט ארוך לבדיקת מיקום הסמן בשורה החדשה.\n\n### Loose list\n\n- שלום רופף.\n\n  פסקה נוספת בעברית.\n\n- English loose.\n\n### Nested list\n\n- שלום מקונן\n  - مهمة عربية\n  - English nested\n    1. עוד רמה\n\n### Tasks\n\n- [ ] שלום עולם. זוהי משימה ארוכה מאוד לבדיקת גלישת הטקסט ושמירת תיבת הסימון בתוך המסך.\n- [x] مهمة عربية.\n- [ ] English task.\n\nשלום עם `const value = 1`.\n\n```js\nconst message = \"שלום\";\n```\n\n| שם | Name |\n| --- | --- |\n| שלום. | Hello. |",
+  "F3": "## ציטוטים וטבלאות\n\n> שלום עולם. זהו ציטוט בעברית שנמשך מעבר לשורה אחת במסך צר.\n\n> [!NOTE]\n> שלום עולם.\n\n> [!TIP]\n> هذه نصيحة عربية.\n\n> [!IMPORTANT]\n> חשוב לקרוא את ההערה.\n\n> [!WARNING]\n> אזהרה בעברית.\n\n> [!CAUTION]\n> تحذير باللغة العربية.\n\n> > שלום ציטוט מקונן.\n\n> - שלום\n> - עולם\n\n| שם | Name | قيمة |\n| --- | --- | --- |\n| שלום. | Hello. | عربي |\n\n| Left | Center | Right |\n| :--- | :---: | ---: |\n| שלום | שלום | שלום |\n| English | Middle | End |\n\n| LongHeaderOne | LongHeaderTwo | LongHeaderThree | LongHeaderFour |\n| --- | --- | --- | --- |\n| LongUnbrokenEnglishValueOne | LongUnbrokenEnglishValueTwo | LongUnbrokenEnglishValueThree | LongUnbrokenEnglishValueFour |\n\nשלום עם `const value = 1`.\n\n- שלום.\n- Hello.\n\n```js\nconst message = \"שלום\";\n```",
+  "F5": "שלום עולם. זהו משפט בעברית עם `const value = 1` בתוך המשפט.\n\n- שלום.\n- Hello.\n- [ ] משימה בעברית.\n- [x] مهمة عربية.\n\nEnglish control.",
+  "plan": "## תכנית בעברית\n\nשלום עם `const value = 1`.\n\n- שלב ראשון\n- English second\n\n| שם | Name |\n| --- | --- |\n| שלום | Hello |",
+  "thought": "שלום עולם. מחשבה בעברית עם `const value = 1` וקצת טקסט ארוך כדי לראות את קיצור התצוגה ואת גלישת השורות.\n\n- שלום\n- English",
+  "question": "שלום עולם. איזו אפשרות לבחור?\n\n- אפשרות ראשונה\n- English option",
+  "streamChunks": [
+    "שלום עולם. ",
+    "זהו משפט בעברית.\n\nEnglish with עברית.\n\n```js\nconst message = ",
+    "\"שלום\";\n```\n\n- שלום",
+    "\n- English\n"
+  ],
+  "context": "שלום עולם. הקשר סינתטי עם `const value = 1`.\n\n- שלום\n- English\n\n<b>literal HTML</b>",
+  "workflow": "printf '%s\\n' 'שלום עולם'\n# Synthetic display fixture; never execute"
+}
