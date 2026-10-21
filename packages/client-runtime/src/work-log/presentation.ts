@@ -527,7 +527,14 @@ export function resolveViewedImageAsset(
     resolvedFilePath,
   });
   if (media === null || media.access !== "environment") return null;
-  return { resource: media.resource, alt: media.name, srcFragment: media.srcFragment };
+  return {
+    resource: {
+      ...media.resource,
+      ...(input.entryId !== undefined ? { revision: input.entryId } : {}),
+    },
+    alt: media.name,
+    srcFragment: media.srcFragment,
+  };
 }
 
 function toolGroupActionCount(

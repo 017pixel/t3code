@@ -19,6 +19,8 @@ export const AssetResource = Schema.Union([
   Schema.TaggedStruct("media-file", {
     threadId: ThreadId,
     path: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
+    // Client cache identity only; it does not change the file being requested.
+    revision: Schema.optionalKey(Schema.String),
   }),
   Schema.TaggedStruct("draft-workspace-file", {
     cwd: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),

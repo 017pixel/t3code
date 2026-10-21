@@ -192,6 +192,14 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
       ? HttpServerResponse.empty({ status: 200, headers })
       : HttpServerResponse.uint8Array(body, { headers });
   }
+  // Host images can be overwritten while a signed URL is still valid.
+  if (
+    (headers["Content-Type"] ?? Option.getOrElse(Mime.getType(asset.path), () => "")).startsWith(
+      "image/",
+    )
+  ) {
+    headers["Cache-Control"] = "private, no-store";
+  }
   const mediaFile = asset.file;
   const mediaInfo = mediaFile ? yield* statMediaFile(asset.path, mediaFile) : undefined;
   const isMedia = /^(?:audio|video)\//i.test(headers["Content-Type"] ?? "");

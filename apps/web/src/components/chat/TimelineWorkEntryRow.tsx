@@ -302,6 +302,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
       ? resolveViewedImageAsset(viewedImagePath, {
           threadId: threadRef.threadId,
           workspaceRoot,
+          entryId: workEntry.id,
         })
       : null;
   const canExpand =

@@ -522,6 +522,26 @@ describe("video asset byte ranges", () => {
       }).pipe(Effect.provide(layerFileResponse)),
   );
 
+  it.effect("serves overwritten image bytes without allowing the browser to cache them", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-image-cache-" });
+      const filePath = path.join(directory, "image.png");
+      for (const bytes of ["red", "blue"]) {
+        yield* fs.writeFileString(filePath, bytes);
+        const canonicalPath = yield* fs.realPath(filePath);
+        const file = yield* openMediaFile(canonicalPath);
+        if (!file) throw new Error("Expected an opened image file");
+        for (const asset of [{ path: canonicalPath, file }, { path: canonicalPath }]) {
+          const response = HttpServerResponse.toWeb(yield* assetFileResponse(asset));
+          expect(response.headers.get("cache-control")).toBe("private, no-store");
+          expect(yield* Effect.promise(() => response.text())).toBe(bytes);
+        }
+      }
+    }).pipe(Effect.provide(layerFileResponse)),
+  );
+
   it.effect("keeps attachment media out of the cache once its signed URL expires", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

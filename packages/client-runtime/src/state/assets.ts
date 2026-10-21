@@ -165,7 +165,17 @@ export function createAssetEnvironmentAtoms<R, E>(
   });
   const createUrl = createEnvironmentQueryAtomFamily(runtime, {
     label: "environment-data:assets:create-url",
-    execute,
+    execute: (input: AssetCreateUrlInput) =>
+      execute(input).pipe(
+        Effect.map((result) => {
+          if (input.resource._tag !== "media-file" || input.resource.revision === undefined)
+            return result;
+          return {
+            ...result,
+            relativeUrl: `${result.relativeUrl}${result.relativeUrl.includes("?") ? "&" : "?"}revision=${encodeURIComponent(input.resource.revision)}`,
+          };
+        }),
+      ),
     staleTimeMs: ASSET_URL_STALE_TIME_MS,
     idleTtlMs: ASSET_URL_IDLE_TTL_MS,
     refreshIntervalMs: ASSET_URL_REFRESH_INTERVAL_MS,
