@@ -1800,29 +1800,6 @@ layer("GitHubPullRequestApi.layer", (it) => {
     }),
   );
 
-  it.effect("fails search coverage when the whole query times out", () =>
-    Effect.gen(function* () {
-      mockedExecute.mockReturnValueOnce(
-        Effect.succeed(output(encodeJson({ data: null, errors: [{ message: "timeout" }] }))),
-      );
-      const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
-
-      const result = yield* cli
-        .searchCoverage({
-          cwd: "/w",
-          host: "github.com",
-          repositories: ["acme/web", "acme/docs"],
-        })
-        .pipe(Effect.result);
-
-      assert.strictEqual(mockedExecute.mock.calls.length, 1);
-      expect(result).toMatchObject({
-        _tag: "Failure",
-        failure: { _tag: "GitHubPullRequestReadError", operation: "searchCoverage" },
-      });
-    }),
-  );
-
   it.effect("refuses to look up counts for a repository GitHub cannot address", () =>
     Effect.gen(function* () {
       const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;

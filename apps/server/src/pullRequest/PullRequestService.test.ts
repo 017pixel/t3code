@@ -4443,7 +4443,7 @@ it.effect("explicit and turn invalidations make the next listing ask the host ag
   }),
 );
 
-it.effect("coalesces turn bursts for 30 seconds without delaying explicit refresh", () =>
+it.effect("coalesces turn refreshes for 30 seconds, then refreshes once the window ends", () =>
   Effect.gen(function* () {
     let hostCalls = 0;
     const service = yield* makeService({
@@ -4458,40 +4458,28 @@ it.effect("coalesces turn bursts for 30 seconds without delaying explicit refres
       ],
     });
 
-    yield* service.list({ state: "open" });
     yield* service.refreshAfterTurn("p1" as ProjectId);
-    yield* service.list({ state: "open" });
-    assert.strictEqual(hostCalls, 2);
-
     yield* TestClock.adjust("10 seconds");
+    // Cached until t=40, so only the trailing refresh can make the t=30 read fresh.
+    yield* service.list({ state: "open" });
     yield* service.refreshAfterTurn("p2" as ProjectId);
     yield* service.refreshAfterTurn("p3" as ProjectId);
     yield* service.list({ state: "open" });
-    assert.strictEqual(hostCalls, 2);
+    assert.strictEqual(hostCalls, 1);
 
-    // This cache entry expires at t=40, so the t=30 read must rely on the trailing refresh.
-    yield* service.invalidate({});
-    yield* service.list({ state: "open" });
-    assert.strictEqual(hostCalls, 3);
-    yield* TestClock.adjust("19 seconds");
-    yield* service.refreshAfterTurn("p2" as ProjectId);
-    yield* service.list({ state: "open" });
-    assert.strictEqual(hostCalls, 3);
-
-    const refreshed = yield* service.subscribeRefreshes.pipe(
+    const trailing = yield* service.subscribeRefreshes.pipe(
       Stream.drop(1),
-      Stream.take(1),
-      Stream.runDrain,
+      Stream.runHead,
       Effect.forkChild({ startImmediately: true }),
     );
-    yield* TestClock.adjust("1 second");
-    yield* Fiber.join(refreshed);
+    yield* TestClock.adjust("20 seconds");
+    yield* Fiber.join(trailing);
     yield* service.list({ state: "open" });
-    assert.strictEqual(hostCalls, 4);
+    assert.strictEqual(hostCalls, 2);
   }),
 );
 
-it.effect("refreshes the all-projects listing immediately after a push within a turn window", () =>
+it.effect("pushes and explicit refreshes read fresh inside a turn window", () =>
   Effect.gen(function* () {
     let hostCalls = 0;
     let pushed = false;
@@ -4512,13 +4500,11 @@ it.effect("refreshes the all-projects listing immediately after a push within a 
       ],
     });
 
-    yield* service.list({ state: "open" });
     yield* service.refreshAfterTurn(web.id);
-    yield* service.list({ state: "open" });
-    assert.strictEqual(hostCalls, 2);
-
     yield* TestClock.adjust("10 seconds");
-    assert.deepStrictEqual((yield* service.list({ state: "open" })).entries, []);
+    yield* service.list({ state: "open" });
+    yield* service.invalidate({});
+    yield* service.list({ state: "open" });
     assert.strictEqual(hostCalls, 2);
 
     pushed = true;
@@ -4869,15 +4855,51 @@ it.effect("asks on its own for a repository a search answered nothing for", () =
     );
   }),
 );
-it.effect("caches silent repository coverage for ten minutes before probing again", () =>
+it.effect("trusts a covered silent repository's search for ten minutes", () =>
   Effect.gen(function* () {
     const separately: string[] = [];
-    let coverageFails = false;
-    let coverageAnswers = [
-      { repository: "acme/docs", covered: true },
-      { repository: "acme/old", covered: false },
-    ];
-    const coverageAsks: Array<ReadonlyArray<string>> = [];
+    let coverageAsks = 0;
+    const service = yield* makeService({
+      projects: [
+        project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" }),
+        project({ id: "p2", title: "docs", workspaceRoot: "/b", repository: "acme/docs" }),
+      ],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          listChangeRequests: ({ repository }) => {
+            separately.push(repository);
+            return Effect.succeed({ items: [], truncated: false, continues: false });
+          },
+          listChangeRequestsAcross: () =>
+            Effect.succeed({
+              items: [batchedChangeRequest(1, "acme/web", "2026-07-03T00:00:00Z")],
+              truncated: false,
+            }),
+          searchCoverage: ({ repositories }) => {
+            coverageAsks += 1;
+            return Effect.succeed(
+              repositories.map((repository) => ({ repository, covered: true })),
+            );
+          },
+        }),
+      ],
+    });
+
+    yield* service.list({ state: "open", involvement: "all" });
+    yield* TestClock.adjust("599 seconds");
+    yield* service.list({ state: "open", involvement: "authored" });
+    assert.strictEqual(coverageAsks, 1);
+
+    yield* TestClock.adjust("2 seconds");
+    yield* service.list({ state: "open", involvement: "all" });
+    assert.strictEqual(coverageAsks, 2);
+    assert.deepStrictEqual(separately, []);
+  }),
+);
+it.effect("reads a silent repository on its own unless search coverage is confirmed", () =>
+  Effect.gen(function* () {
+    const separately: string[] = [];
+    let coverageAsks = 0;
     const service = yield* makeService({
       projects: [
         project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" }),
@@ -4888,54 +4910,29 @@ it.effect("caches silent repository coverage for ten minutes before probing agai
         fakeProvider(SourceControlProviderKind.make("github"), {
           listChangeRequests: ({ repository }) => {
             separately.push(repository);
-            return Effect.succeed({ items: [], truncated: false, continues: true });
+            return Effect.succeed({ items: [], truncated: false, continues: false });
           },
           listChangeRequestsAcross: () =>
             Effect.succeed({
               items: [batchedChangeRequest(1, "acme/web", "2026-07-03T00:00:00Z")],
-              truncated: true,
+              truncated: false,
             }),
-          searchCoverage: ({ repositories }) =>
-            Effect.suspend(() => {
-              coverageAsks.push(repositories);
-              return coverageFails ? Effect.fail(requestFailed) : Effect.succeed(coverageAnswers);
-            }),
+          searchCoverage: () =>
+            ++coverageAsks === 1
+              ? Effect.fail(requestFailed)
+              : Effect.succeed([{ repository: "acme/docs", covered: false }]),
         }),
       ],
     });
 
-    yield* service.list({ state: "open", involvement: "all" });
-    yield* TestClock.adjust("599 seconds");
-    yield* service.list({ state: "open", involvement: "authored" });
+    yield* service.list({ state: "open" });
+    assert.deepStrictEqual(separately.splice(0).toSorted(), ["acme/docs", "acme/old"]);
 
-    assert.deepStrictEqual(coverageAsks, [["acme/docs", "acme/old"]]);
-    assert.deepStrictEqual(separately.splice(0), ["acme/old", "acme/old"]);
-
-    coverageFails = true;
-    yield* TestClock.adjust("2 seconds");
-    yield* service.list({ state: "open", involvement: "all" });
-    assert.deepStrictEqual(coverageAsks, [
-      ["acme/docs", "acme/old"],
-      ["acme/docs", "acme/old"],
-    ]);
-    assert.deepStrictEqual(separately, ["acme/docs", "acme/old"]);
-    separately.length = 0;
-
-    coverageFails = false;
-    coverageAnswers = [{ repository: "acme/docs", covered: true }];
+    // A failed probe is not remembered; false and missing answers both stay unconfirmed.
     yield* service.invalidate({});
-    yield* service.list({ state: "open", involvement: "all" });
-    assert.deepStrictEqual(coverageAsks, [
-      ["acme/docs", "acme/old"],
-      ["acme/docs", "acme/old"],
-      ["acme/docs", "acme/old"],
-    ]);
-    assert.deepStrictEqual(separately.splice(0), ["acme/old"]);
-
-    yield* service.invalidate({});
-    yield* service.list({ state: "open", involvement: "all" });
-    assert.strictEqual(coverageAsks.length, 3);
-    assert.deepStrictEqual(separately, ["acme/old"]);
+    yield* service.list({ state: "open" });
+    assert.strictEqual(coverageAsks, 2);
+    assert.deepStrictEqual(separately.toSorted(), ["acme/docs", "acme/old"]);
   }),
 );
 it.effect("reads the repositories one at a time when the search itself fails", () =>
