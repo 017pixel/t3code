@@ -622,6 +622,8 @@ export const layer: Layer.Layer<
         readonly shouldFinalizeRun?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
         readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
         readonly openRunOwnedSubagents?: OpenRunOwnedSubagentProjection;
+        // Only when T3 ends the run itself: the provider never ends this turn.
+        readonly rootProviderTurn?: OrchestrationV2ProviderTurn | null;
         readonly terminal: ProviderTerminalEvent;
         readonly completedAt?: DateTime.Utc;
         readonly failureItemPersisted: boolean;
@@ -757,6 +759,25 @@ export const layer: Layer.Layer<
                     payload: finalizedAttempt,
                   },
                 ]),
+            ...(input.rootProviderTurn != null &&
+            !isTerminalProviderTurnStatus(input.rootProviderTurn.status)
+              ? [
+                  {
+                    id: yield* allocateEventId(),
+                    type: "provider-turn.updated" as const,
+                    threadId: input.run.threadId,
+                    runId: input.run.id,
+                    nodeId: input.rootProviderTurn.nodeId,
+                    providerInstanceId: input.run.providerInstanceId,
+                    occurredAt: completedAt,
+                    payload: {
+                      ...input.rootProviderTurn,
+                      status: input.terminal.status,
+                      completedAt,
+                    },
+                  },
+                ]
+              : []),
             ...(input.terminal.status === "interrupted"
               ? [
                   {
@@ -1003,6 +1024,7 @@ export const layer: Layer.Layer<
         );
         const rootTerminalSeen = yield* Ref.make(false);
         const rootRunFinalized = yield* Ref.make(false);
+        const latestRootProviderTurn = yield* Ref.make<OrchestrationV2ProviderTurn | null>(null);
         const providerThreadOwnerLost = yield* Ref.make(false);
         const activeChildProviderTurns = yield* Ref.make<ReadonlySet<ProviderTurnId>>(new Set());
         const activeChildSubagents = yield* Ref.make<ReadonlyMap<NodeId, ThreadId>>(new Map());
@@ -1387,6 +1409,13 @@ export const layer: Layer.Layer<
                 }
               }
               if (
+                event.type === "provider_turn.updated" &&
+                (event.providerTurn.runAttemptId === input.attempt.id ||
+                  event.providerTurn.id === (yield* Ref.get(eventRouting)).rootProviderTurnId)
+              ) {
+                yield* Ref.set(latestRootProviderTurn, event.providerTurn);
+              }
+              if (
                 event.type === "turn_item.updated" &&
                 event.turnItem.providerTurnId === (yield* Ref.get(eventRouting)).rootProviderTurnId
               ) {
@@ -1438,6 +1467,7 @@ export const layer: Layer.Layer<
                 const providerThread = yield* Ref.get(latestProviderThread);
                 const latestItemOrdinal = yield* Ref.get(latestTurnItemOrdinal);
                 const openSubagents = yield* Ref.get(openRunOwnedSubagents);
+                const rootProviderTurn = yield* Ref.get(latestRootProviderTurn);
                 let nextRetryWarningAt = completedAt;
                 yield* writeFinalRunEvents({
                   run: input.run,
@@ -1450,6 +1480,7 @@ export const layer: Layer.Layer<
                     expectedStatus: "running",
                   },
                   openRunOwnedSubagents: openSubagents,
+                  rootProviderTurn,
                   completedAt,
                   terminal: makeFailedTerminalEvent(
                     makeProviderFailure({ cause: Cause.squash(cause), class: "unknown" }),
