@@ -251,6 +251,26 @@ describe("pull request file keys", () => {
 });
 
 describe("pull request scroll restoration", () => {
+  it.each(["Enter", "F3"])(
+    "keeps navigation from an already-open Find input (%s) while pages arrive",
+    (key) => {
+      const restore = new PullRequestCodeScrollRestoration({ scrollTop: 1800, loadedPageCount: 3 });
+      const surface = Object.assign(new EventTarget(), {
+        scrollTop: 0,
+        scrollHeight: 600,
+        clientHeight: 400,
+      });
+      const stop = observePullRequestCodeScrollIntent(surface, () => restore.cancel());
+      expect(restore.restore(surface, 1, true)).toBe("load-more");
+      surface.dispatchEvent(Object.assign(new Event("keydown"), { key }));
+      surface.scrollTop = 120;
+      surface.scrollHeight = 3000;
+      expect(restore.restore(surface, 3, false)).toBe("waiting");
+      expect(surface.scrollTop).toBe(120);
+      stop();
+    },
+  );
+
   it("keeps a pending target when refresh arrives before its saved pages", () => {
     const initial = new PullRequestCodeScrollRestoration({ scrollTop: 1800, loadedPageCount: 3 });
     const surface = { scrollTop: 0, scrollHeight: 600, clientHeight: 400 };
@@ -277,15 +297,14 @@ describe("pull request scroll restoration", () => {
         clientHeight: 400,
       });
       const keyboardTarget = new EventTarget();
-      const stop = observePullRequestCodeScrollIntent(
-        surface,
-        () => restore.cancel(),
-        keyboardTarget,
-      );
+      const stop = observePullRequestCodeScrollIntent(surface, () => restore.cancel());
       expect(restore.restore(surface, 1, true)).toBe("load-more");
       keyboardTarget.dispatchEvent(
         Object.assign(new Event("keydown"), { key: "f", ctrlKey: true }),
       );
+      expect(restore.pending).toBe(true);
+      surface.dispatchEvent(Object.assign(new Event("keydown"), { key: "f", ctrlKey: true }));
+      expect(restore.pending).toBe(false);
       const toggled = toggleFileDiffFoldForViewed("match", false, foldOverride, new Set());
       expect(isFileDiffCollapsed("match", foldOverride, toggled)).toBe(false);
       surface.scrollTop = 120;

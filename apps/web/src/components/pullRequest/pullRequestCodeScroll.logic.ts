@@ -88,42 +88,19 @@ export function pullRequestCodeScrollSurface(
   };
 }
 
-export function observePullRequestCodeScrollIntent(
-  surface: EventTarget,
-  cancel: () => void,
-  keyboardTarget: EventTarget = surface,
-) {
-  const cancelOnFind = (event: Event) => {
-    const key = event as KeyboardEvent;
-    if ((key.ctrlKey || key.metaKey) && key.key.toLowerCase() === "f") cancel();
-  };
-  const cancelOnKey = (event: Event) => {
-    if (
-      event instanceof KeyboardEvent &&
-      ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key) &&
-      !event
-        .composedPath()
-        .some(
-          (node) =>
-            node instanceof HTMLElement &&
-            (node.isContentEditable || node.matches("input, textarea")),
-        )
-    )
-      cancel();
-  };
+export function observePullRequestCodeScrollIntent(surface: EventTarget, cancel: () => void) {
   surface.addEventListener("wheel", cancel, { passive: true });
   surface.addEventListener("touchmove", cancel, { passive: true });
   surface.addEventListener("pointerdown", cancel, { capture: true });
   // Native scrollbar interactions can emit mouse events without a pointer event.
   surface.addEventListener("mousedown", cancel, { capture: true });
-  surface.addEventListener("keydown", cancelOnKey);
-  keyboardTarget.addEventListener("keydown", cancelOnFind, { capture: true });
+  // Keyboard interaction in the viewer, including Find input, takes priority over restoration.
+  surface.addEventListener("keydown", cancel, { capture: true });
   return () => {
     surface.removeEventListener("wheel", cancel);
     surface.removeEventListener("touchmove", cancel);
     surface.removeEventListener("pointerdown", cancel, { capture: true });
     surface.removeEventListener("mousedown", cancel, { capture: true });
-    surface.removeEventListener("keydown", cancelOnKey);
-    keyboardTarget.removeEventListener("keydown", cancelOnFind, { capture: true });
+    surface.removeEventListener("keydown", cancel, { capture: true });
   };
 }

@@ -1396,11 +1396,7 @@ function PullRequestCodeTab({
         savePullRequestCodeScroll(current, instance.getScrollTop(), loadedSlices.length),
       );
     };
-    const stopObservingIntent = observePullRequestCodeScrollIntent(
-      surface,
-      cancel,
-      surface.ownerDocument,
-    );
+    const stopObservingIntent = observePullRequestCodeScrollIntent(surface, cancel);
     restore();
     return () => {
       stopObserving();
