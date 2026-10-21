@@ -78,6 +78,7 @@
     "remark-gfm": "catalog:",
     "remark-math": "6.0.0",
     "remark-parse": "catalog:",
+    "saxes": "6.0.0",
     "sql.js": "1.15.0",
     "tailwind-merge": "^3.4.0",
     "tiff": "7.1.3",

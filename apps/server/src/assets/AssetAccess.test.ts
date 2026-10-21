@@ -811,6 +811,23 @@ describe("AssetAccess", () => {
         kind: "file",
         path: canonicalCssPath,
       });
+      for (const extension of ["otf", "ttf", "woff", "woff2"]) {
+        const fontName = `preview.${extension}`;
+        const fontPath = path.join(root, fontName);
+        yield* fileSystem.writeFileString(fontPath, "font bytes");
+        const canonicalFontPath = yield* fileSystem.realPath(fontPath);
+        for (const resource of [
+          { _tag: "workspace-file" as const, threadId: ThreadId.make("thread-1"), path: htmlPath },
+          { _tag: "draft-workspace-file" as const, cwd: root, path: "report.html" },
+        ]) {
+          const url = yield* issueAssetUrl({ resource, workspaceRoot: root });
+          const suffix = url.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+          expect(yield* resolveAsset(suffix.slice(0, suffix.indexOf("/")), fontName)).toEqual({
+            kind: "file",
+            path: canonicalFontPath,
+          });
+        }
+      }
       expect(yield* resolveAsset(token, "../secret.txt")).toBeNull();
       expect(yield* resolveAsset(token, ".env")).toBeNull();
       expect(yield* resolveAsset(`${token}tampered`, "report.html")).toBeNull();
@@ -818,10 +835,6 @@ describe("AssetAccess", () => {
         "docx",
         "xlsx",
         "pptx",
-        "ttf",
-        "otf",
-        "woff",
-        "woff2",
         "bmp",
         "heic",
         "tif",
@@ -1040,70 +1053,69 @@ describe("AssetAccess", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
-  it.effect(
-    "issues exact workspace URLs for image, office, font, archive, and SQLite previews",
-    () =>
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const root = yield* fileSystem.makeTempDirectoryScoped({
-          prefix: "t3-asset-image-workspace-",
-        });
-        const assetsDirectory = path.join(root, "assets");
-        yield* fileSystem.makeDirectory(assetsDirectory, { recursive: true });
+  it.effect("issues exact workspace URLs for every non-HTML preview", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-asset-image-workspace-",
+      });
+      const assetsDirectory = path.join(root, "assets");
+      yield* fileSystem.makeDirectory(assetsDirectory, { recursive: true });
+      yield* fileSystem.writeFileString(
+        path.join(assetsDirectory, "private.docx"),
+        "private document",
+      );
+      for (const extension of [
+        "pdf",
+        "png",
+        "bmp",
+        "heic",
+        "tif",
+        "tiff",
+        "docx",
+        "xlsx",
+        "pptx",
+        "ttf",
+        "otf",
+        "woff",
+        "woff2",
+        "zip",
+        "jar",
+        "tar",
+        "gz",
+        "tgz",
+        "sqlite",
+        "sqlite3",
+        "db",
+      ]) {
+        const name = `preview.${extension}`;
+        const filePath = path.join(assetsDirectory, name);
+        const siblingName = `other.${extension}`;
+        yield* fileSystem.writeFileString(filePath, "preview");
         yield* fileSystem.writeFileString(
-          path.join(assetsDirectory, "private.docx"),
-          "private document",
+          path.join(assetsDirectory, siblingName),
+          "private sibling",
         );
-        for (const extension of [
-          "png",
-          "bmp",
-          "heic",
-          "tif",
-          "tiff",
-          "docx",
-          "xlsx",
-          "pptx",
-          "ttf",
-          "otf",
-          "woff",
-          "woff2",
-          "zip",
-          "jar",
-          "tar",
-          "gz",
-          "tgz",
-          "sqlite",
-          "sqlite3",
-          "db",
+        const canonicalPath = yield* fileSystem.realPath(filePath);
+        for (const resource of [
+          {
+            _tag: "workspace-file" as const,
+            threadId: ThreadId.make("thread-1"),
+            path: filePath,
+          },
+          { _tag: "draft-workspace-file" as const, cwd: root, path: `assets/${name}` },
         ]) {
-          const name = `preview.${extension}`;
-          const filePath = path.join(assetsDirectory, name);
-          const siblingName = `other.${extension}`;
-          yield* fileSystem.writeFileString(filePath, "preview");
-          yield* fileSystem.writeFileString(
-            path.join(assetsDirectory, siblingName),
-            "private sibling",
-          );
-          const canonicalPath = yield* fileSystem.realPath(filePath);
-          for (const resource of [
-            {
-              _tag: "workspace-file" as const,
-              threadId: ThreadId.make("thread-1"),
-              path: filePath,
-            },
-            { _tag: "draft-workspace-file" as const, cwd: root, path: `assets/${name}` },
-          ]) {
-            const result = yield* issueAssetUrl({ resource, workspaceRoot: root });
-            const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
-            const token = suffix.slice(0, suffix.indexOf("/"));
-            expect(yield* resolveAsset(token, name)).toEqual({ kind: "file", path: canonicalPath });
-            expect(yield* resolveAsset(token, siblingName)).toBeNull();
-            expect(yield* resolveAsset(token, "private.docx")).toBeNull();
-            expect(yield* resolveAsset(token, `../${name}`)).toBeNull();
-          }
+          const result = yield* issueAssetUrl({ resource, workspaceRoot: root });
+          const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+          const token = suffix.slice(0, suffix.indexOf("/"));
+          expect(yield* resolveAsset(token, name)).toEqual({ kind: "file", path: canonicalPath });
+          expect(yield* resolveAsset(token, siblingName)).toBeNull();
+          expect(yield* resolveAsset(token, "private.docx")).toBeNull();
+          expect(yield* resolveAsset(token, `../${name}`)).toBeNull();
         }
-      }).pipe(Effect.provide(layerTest)),
+      }
+    }).pipe(Effect.provide(layerTest)),
   );
 
   it.effect("previews workspace files with literal fragment characters in their paths", () =>
