@@ -13,6 +13,16 @@ const server = http.createServer((req, res) => {
     path: req.url.startsWith("/api/assets/") ? "/api/assets/[redacted]" : req.url.split("?")[0],
     mode,
   });
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "authorization, content-type",
+      "Access-Control-Allow-Private-Network": "true",
+    });
+    res.end();
+    return;
+  }
   if (mode === "hold") return;
   if (mode === "fail") {
     res.writeHead(503, { "Access-Control-Allow-Origin": "*" });

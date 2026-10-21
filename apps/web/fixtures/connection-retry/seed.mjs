@@ -158,17 +158,12 @@ export async function trace(environmentId) {
 export async function reset(environmentId) {
   const { appAtomRegistry } = await import("../../src/rpc/atomRegistry.ts");
   const { environmentCatalog } = await import("../../src/connection/catalog.ts");
-  await environmentCatalog.setEnabled.run(appAtomRegistry, { environmentId, enabled: false });
-  await waitState(environmentId, "available");
-  await environmentCatalog.setEnabled.run(appAtomRegistry, { environmentId, enabled: true });
-  const deadline = performance.now() + 45000;
-  while (performance.now() < deadline) {
-    const s = await state(environmentId);
-    if (s._tag === "Success" && s.value.phase === "connected" && s.value.attempt === 1)
-      return s.value;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error("Synthetic supervisor did not reset to connected attempt 1");
+  const result = await environmentCatalog.setEnabled.run(appAtomRegistry, {
+    environmentId,
+    enabled: true,
+  });
+  if (result._tag !== "Success") throw new Error("Could not enable synthetic environment");
+  location.reload();
 }
 
 export const scenarios = {
