@@ -5,7 +5,11 @@ import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
 
+import { DESKTOP_UPDATE_IN_PROGRESS_TTL_MS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
+import * as FileSystem from "effect/FileSystem";
+import * as Schema from "effect/Schema";
 import { Argument, Command } from "effect/cli";
 
 const canBind = (port: number) =>
@@ -125,7 +129,50 @@ const runtimePort = Command.make("runtime-port", {
   ),
 );
 
+const UpdateMarker = Schema.fromJsonString(
+  Schema.Struct({ startedAt: Schema.Number, expiresAt: Schema.Number }),
+);
+
+export const updateRemaining = Effect.fn("sshHelper.updateRemaining")(function* (
+  markerFile: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const now = yield* Clock.currentTimeMillis;
+  const marker = yield* fs
+    .readFileString(markerFile)
+    .pipe(Effect.flatMap(Schema.decodeUnknownEffect(UpdateMarker)), Effect.option);
+  if (marker._tag === "Some") {
+    const { startedAt, expiresAt } = marker.value;
+    if (
+      Number.isSafeInteger(startedAt) &&
+      Number.isSafeInteger(expiresAt) &&
+      startedAt <= now &&
+      expiresAt > now &&
+      expiresAt > startedAt &&
+      expiresAt - startedAt <= DESKTOP_UPDATE_IN_PROGRESS_TTL_MS
+    ) {
+      return String(expiresAt - now);
+    }
+  }
+  yield* fs.remove(markerFile, { force: true }).pipe(Effect.ignore);
+  return "";
+});
+
+const updateRemainingCommand = Command.make("update-remaining", {
+  markerFile: Argument.String("marker-file"),
+}).pipe(
+  Command.withHandler(({ markerFile }) =>
+    updateRemaining(markerFile).pipe(
+      Effect.flatMap((remaining) =>
+        Effect.sync(() => {
+          process.stdout.write(remaining);
+        }),
+      ),
+    ),
+  ),
+);
+
 export const sshHelperCommand = Command.make("__ssh-helper").pipe(
   Command.unlisted,
-  Command.withSubcommands([pickPort, waitReady, runtimePort]),
+  Command.withSubcommands([pickPort, waitReady, runtimePort, updateRemainingCommand]),
 );
