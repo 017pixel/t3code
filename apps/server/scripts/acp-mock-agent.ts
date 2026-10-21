@@ -16,6 +16,7 @@ import type * as AcpSchema from "effect-acp/schema";
 import type * as AcpCompat from "effect-acp/compat";
 
 import { beginAcpMockPrompt } from "./acpMockCancellationState.ts";
+import { timelineFollowFixture, waitForTimelineFixtureRelease } from "./timeline-follow-fixture.ts";
 
 const requestLogPath = process.env.T3_ACP_REQUEST_LOG_PATH;
 const exitLogPath = process.env.T3_ACP_EXIT_LOG_PATH;
@@ -962,6 +963,38 @@ const program = Effect.gen(function* () {
       const requestedSessionId = String(request.sessionId ?? sessionId);
       beginAcpMockPrompt(cancelledSessions, requestedSessionId);
       promptCount += 1;
+      const timelineFixtureRoot = process.env.T3_ACP_TIMELINE_FIXTURE_DIRECTORY;
+      if (timelineFixtureRoot !== undefined) {
+        const timelineFixtureDirectory = `${timelineFixtureRoot}/${process.pid}-${promptCount}`;
+        const kind = request.prompt.some(
+          (part) =>
+            part.type === "text" &&
+            typeof part.text === "string" &&
+            part.text.includes("timeline-fixture:short"),
+        )
+          ? "short"
+          : "long";
+        for (const { phase, updates } of timelineFollowFixture(kind)) {
+          yield* Effect.sync(() => NodeFS.mkdirSync(timelineFixtureDirectory, { recursive: true }));
+          yield* Effect.sync(() =>
+            NodeFS.writeFileSync(
+              `${timelineFixtureDirectory}/waiting.json`,
+              encodeJson({ kind, phase, sessionId: requestedSessionId }),
+            ),
+          );
+          yield* Effect.promise(() =>
+            waitForTimelineFixtureRelease(timelineFixtureDirectory, phase),
+          );
+          for (const update of updates) {
+            yield* agent.client.sessionUpdate({ sessionId: requestedSessionId, update });
+            yield* Effect.sleep("40 millis");
+          }
+          yield* Effect.sync(() =>
+            NodeFS.writeFileSync(`${timelineFixtureDirectory}/${phase}.done`, "done\n"),
+          );
+        }
+        return yield* finishPrompt(requestedSessionId, "end_turn");
+      }
       if (
         process.env.T3_ACP_CRASH_PROMPT === "1" &&
         request.prompt.some((part) => part.type === "text" && part.text === "crash now")
