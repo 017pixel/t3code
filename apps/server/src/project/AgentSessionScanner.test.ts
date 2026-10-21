@@ -1259,6 +1259,55 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
+    it.effect("imports every transcript that fits the per-file record limit", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-shared-records-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-shared-records-codex-");
+        const workspace = yield* makeTempDir("t3code-shared-records-workspace-");
+        // Together these exceed 100,000 records, but each one is individually valid.
+        const recordCounts = [20_000, 20_000, 20_000, 58_000];
+        for (const [index, recordCount] of recordCounts.entries()) {
+          yield* writeTranscript({
+            filePath: path.join(
+              codexHomePath,
+              "sessions",
+              "2026",
+              "08",
+              "24",
+              `rollout-${index}.jsonl`,
+            ),
+            contents:
+              [
+                encodeTranscriptRecord({
+                  type: "session_meta",
+                  payload: { id: `session-${index}`, cwd: workspace },
+                }),
+                encodeTranscriptRecord({
+                  type: "event_msg",
+                  payload: { type: "user_message", message: "Imported prompt" },
+                }),
+              ].join("\n") +
+              "\n" +
+              "{}\n".repeat(recordCount - 2),
+            mtimeMs: nowMs - index * 1_000,
+          });
+        }
+        const outcomes = yield* runRecentThreadOutcomes({
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+        });
+        expect(
+          outcomes.map((outcome) =>
+            outcome._tag === "Importable" ? outcome.thread.providerSessionId : outcome._tag,
+          ),
+        ).toEqual(["session-0", "session-1", "session-2", "session-3"]);
+      }),
+    );
+
     for (const source of ["claudeAgent", "codex"] as const) {
       for (const replacement of [
         "same root",
