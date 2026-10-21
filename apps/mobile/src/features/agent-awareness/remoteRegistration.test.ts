@@ -950,6 +950,68 @@ describe("makeRelayDeviceRegistrationRequest", () => {
       expect(publishWidgetMock).toHaveBeenLastCalledWith({ kind: "loading" });
     });
 
+    it.effect("shows loading when another account signs in after a provider release", () => {
+      const relay = fakeRelay(() => Effect.succeed({ aggregate }));
+      setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token-a"), "user-a");
+
+      return Effect.gen(function* () {
+        yield* refreshActiveLiveActivityRemoteRegistration();
+
+        // A remount for the same account keeps its rows.
+        releaseAgentAwarenessRelayTokenProvider();
+        setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token-a"), "user-a");
+        expect(publishWidgetMock).toHaveBeenLastCalledWith({ kind: "snapshot", aggregate });
+
+        releaseAgentAwarenessRelayTokenProvider();
+        setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token-b"), "user-b");
+        expect(publishWidgetMock).toHaveBeenLastCalledWith({ kind: "loading" });
+      }).pipe(Effect.provide(relay));
+    });
+
+    it.effect("an obsolete refresh does not discard the next account's read", () =>
+      Effect.gen(function* () {
+        let markTokenRequested = () => {};
+        const tokenRequested = new Promise<void>((resolve) => {
+          markTokenRequested = resolve;
+        });
+        let releaseToken = () => {};
+        widgetMocks.getInstances.mockReturnValueOnce([
+          {
+            getId: () => "activity-a",
+            getPushToken: () => {
+              markTokenRequested();
+              return new Promise<null>((resolve) => {
+                releaseToken = () => resolve(null);
+              });
+            },
+            addPushTokenListener: vi.fn(),
+          },
+        ] as never);
+        const requested = yield* Deferred.make<void>();
+        const response = yield* Deferred.make<{ readonly aggregate: typeof aggregate }>();
+        const relay = fakeRelay(() =>
+          Deferred.succeed(requested, undefined).pipe(Effect.andThen(Deferred.await(response))),
+        );
+        setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token-a"), "user-a");
+
+        const refreshA = yield* Effect.forkChild(
+          refreshActiveLiveActivityRemoteRegistration().pipe(Effect.provide(relay)),
+        );
+        yield* Effect.promise(() => tokenRequested);
+        setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token-b"), "user-b");
+        const refreshB = yield* Effect.forkChild(
+          refreshActiveLiveActivityRemoteRegistration().pipe(Effect.provide(relay)),
+        );
+        yield* Deferred.await(requested);
+        releaseToken();
+        yield* Fiber.join(refreshA);
+        yield* Deferred.succeed(response, { aggregate });
+        yield* Fiber.join(refreshB);
+
+        expect(publishWidgetMock).toHaveBeenLastCalledWith({ kind: "snapshot", aggregate });
+      }),
+    );
+
     it("shows the signed-out state after cloud sign-out", () => {
       setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
 
