@@ -456,25 +456,12 @@ function listNormalizationPlugin(isComposing: () => boolean) {
   const key = new PluginKey("composerListNormalization");
   return new Plugin({
     key,
-    props: {
-      handleDOMEvents: {
-        compositionend(view) {
-          // ProseMirror queues its final DOM flush later in this event's compositionend handler.
-          queueMicrotask(() =>
-            queueMicrotask(() => {
-              if (!view.isDestroyed && pending.size > 0)
-                view.dispatch(view.state.tr.setMeta(key, true));
-            }),
-          );
-          return false;
-        },
-      },
-    },
     appendTransaction(transactions, oldState, state) {
       if (transactions.some(isHistoryTransaction)) {
         pending.clear();
         return null;
       }
+      if (pending.size === 0 && !transactions.some((tr) => tr.docChanged)) return null;
       const changes = combineTransactionSteps(oldState.doc, [...transactions]);
       pending = new Set(
         [...pending].flatMap((pos) => {
@@ -488,6 +475,7 @@ function listNormalizationPlugin(isComposing: () => boolean) {
           return false;
         });
       }
+      // The next non-composition transaction can normalize after the browser finishes its DOM edits.
       if (isComposing() || transactions.some((tr) => tr.getMeta("composition") != null))
         return null;
 
@@ -499,10 +487,13 @@ function listNormalizationPlugin(isComposing: () => boolean) {
         if (node?.type.name !== "paragraph") continue;
         const text = node.textBetween(0, node.content.size, undefined, "\ufffc");
         const parsed = parseListPrefix(text);
+        // Input rules only introduce unindented top-level lists; keep the same boundary here.
         if (!parsed || parsed.prefix.indent) continue;
         const { prefix, markerLength } = parsed;
-        const code = state.schema.marks.code;
-        if (code && node.rangeHasMark(0, markerLength, code)) continue;
+        if (
+          Object.values(state.schema.marks).some((mark) => node.rangeHasMark(0, markerLength, mark))
+        )
+          continue;
         const active = state.selection.$from.depth === 1 && state.selection.$from.before(1) === pos;
         const content = text.slice(markerLength);
         // Keep `- ` and unfinished task markers literal while the user is entering the gesture.

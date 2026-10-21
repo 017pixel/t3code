@@ -55,6 +55,7 @@ function createEditor(value: string) {
     ],
     content: buildDocJson(value, (name) => ({ label: name, description: null })),
   });
+  // Headless editors need the plugins installed explicitly because there is no mounted view.
   editor.view.updateState(editor.state.reconfigure({ plugins: editor.extensionManager.plugins }));
   editor.view.dispatch(editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc)));
   onTestFinished(() => editor.destroy());
@@ -219,27 +220,15 @@ describe("composer list normalization", () => {
     },
   );
 
-  it("waits until composition ends before changing paragraph structure", async () => {
+  it("waits for a non-composition transaction before changing paragraph structure", () => {
     const editor = createEditor("");
     editor.view.dispatch(editor.state.tr.insertText("- text").setMeta("composition", 1));
     expect(editor.state.doc.firstChild?.type.name).toBe("paragraph");
     editor.view.dispatch(editor.state.tr.insertText("日本語", 3, 7).setMeta("composition", 1));
     expect(editor.state.doc.firstChild?.type.name).toBe("paragraph");
-    const normalization = editor.state.plugins.find(
-      (plugin) => plugin.props.handleDOMEvents?.compositionend && plugin.spec.appendTransaction,
-    )!;
-    normalization.props.handleDOMEvents!.compositionend!.call(
-      normalization,
-      editor.view,
-      new Event("compositionend") as CompositionEvent,
-    );
-    // ProseMirror flushes the final composition text in a microtask after this event.
-    queueMicrotask(() => {
-      editor.view.dispatch(editor.state.tr.insertText("確定", 3, 6).setMeta("composition", 1));
-    });
-    await Promise.resolve();
+    editor.view.dispatch(editor.state.tr.insertText("確定", 3, 6).setMeta("composition", 1));
     expect(editor.state.doc.firstChild?.type.name).toBe("paragraph");
-    await Promise.resolve();
+    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc)));
     expect(editor.state.doc.firstChild?.type.name).toBe("bulletList");
     expect(serializeEditorDoc(editor.state.doc).value).toBe("- 確定");
     expect(undo(editor.state, editor.view.dispatch)).toBe(true);
@@ -263,7 +252,7 @@ describe("composer list normalization", () => {
 
   it("preserves formatting and the caret when removing the literal prefix", () => {
     const editor = createEditor("**text**");
-    editor.view.dispatch(editor.state.tr.insertText("- ", 1));
+    editor.view.dispatch(editor.state.tr.insert(1, editor.schema.text("- ")));
     expect(editor.state.selection.$from.parent.type.name).toBe("paragraph");
     expect(editor.state.selection.$from.parentOffset).toBe(4);
     expect(serializeEditorDoc(editor.state.doc).value).toBe("- **text**");
@@ -275,6 +264,21 @@ describe("composer list normalization", () => {
     expect(editor.state.doc.firstChild?.type.name).toBe("paragraph");
     expect(serializeEditorDoc(editor.state.doc).value).toBe("`- text`");
   });
+
+  it.each(["**- x**", "*-* x", "~~- x~~", "a\n**1.** b"])(
+    "preserves styled markers when restoring %j",
+    (value) => {
+      const editor = createEditor("");
+      editor.commands.setContent(
+        buildDocJson(value, (name) => ({ label: name, description: null })),
+        { emitUpdate: false },
+      );
+      expect(serializeEditorDoc(editor.state.doc).value).toBe(value);
+      expect(editor.state.doc.lastChild?.type.name).toBe("paragraph");
+      editor.view.dispatch(editor.state.tr.insertText("x", editor.state.doc.content.size - 1));
+      expect(editor.state.doc.lastChild?.type.name).toBe("paragraph");
+    },
+  );
 
   it("only normalizes changed blocks", () => {
     const editor = createEditor("");
