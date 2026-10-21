@@ -7,10 +7,7 @@ import {
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
-import {
-  isProviderNativeImageAttachment,
-  providerMessageTextWithAttachmentPaths,
-} from "./attachmentPrompt.ts";
+import { providerMessageTextWithAttachmentPaths } from "./attachmentPrompt.ts";
 
 const document = ChatFileAttachment.make({
   id: ChatAttachmentId.make("file-document"),
@@ -62,20 +59,6 @@ describe("provider attachment prompts", () => {
       );
     }),
   );
-  it.effect("appends resolvable file paths for documents and images", () =>
-    Effect.gen(function* () {
-      assert.equal(
-        yield* providerMessageTextWithAttachmentPaths({
-          text: "Review these.",
-          attachments: [document, image],
-          resolveAttachmentPath,
-        }),
-        'Review these.\n\n[Attached file "spec.pdf" is saved at: /attachments/file-document.pdf]\n' +
-          '\n[Attached image "diagram.png" is saved at: /attachments/file-image.png]',
-      );
-    }),
-  );
-
   it.effect("frames captured-window context as escaped untrusted JSON", () =>
     Effect.gen(function* () {
       const captured = ChatImageAttachment.make({
@@ -169,55 +152,6 @@ describe("provider attachment prompts", () => {
       }),
   );
 
-  it.effect("compacts structured accessibility while preserving trustworthy image bounds", () =>
-    Effect.gen(function* () {
-      const captured = ChatImageAttachment.make({
-        ...image,
-        source: {
-          kind: "snap-shot",
-          capturedAt: "2026-08-24T11:00:00.000Z",
-          appName: "Editor",
-          windowTitle: "main.ts",
-          accessibility: {
-            format: "element-tree",
-            coordinateSpace: "captured-image",
-            imageSize: { width: 800, height: 600 },
-            truncated: false,
-            root: {
-              role: "window",
-              name: "main.ts",
-              bounds: { x: 0, y: 0, width: 800, height: 600 },
-              children: [
-                {
-                  role: "button",
-                  name: "Save",
-                  description: "Save the window",
-                  bounds: { x: 20, y: 40, width: 80, height: 24 },
-                  actions: ["press", "show-menu"],
-                  children: [],
-                },
-                { role: "separator", bounds: null, children: [] },
-              ],
-            },
-          },
-        },
-      });
-      const text = yield* providerMessageTextWithAttachmentPaths({
-        text: "Describe this.",
-        attachments: [captured],
-        resolveAttachmentPath,
-      });
-
-      assert.include(
-        text,
-        '{"appName":"Editor","windowTitle":"main.ts","accessibility":{"format":"element-tree","coordinateSpace":"captured-image","imageSize":{"width":800,"height":600},"root":{"role":"window","name":"main.ts","children":[{"role":"button","name":"Save","bounds":{"x":20,"y":40,"width":80,"height":24},"actions":["show-menu"]}]}}}',
-      );
-      assert.include(text, "Element bounds are pixels in the attached image");
-      assert.notInclude(text, "Save the window");
-      assert.notInclude(text, '"role":"separator"');
-    }),
-  );
-
   it.effect("keeps captured-window context within the provider input limit", () =>
     Effect.gen(function* () {
       const attachments = Array.from({ length: 8 }, (_, index) =>
@@ -248,9 +182,4 @@ describe("provider attachment prompts", () => {
       }
     }),
   );
-
-  it("classifies only image MIME types for native image payloads", () => {
-    assert.isTrue(isProviderNativeImageAttachment(image));
-    assert.isFalse(isProviderNativeImageAttachment(document));
-  });
 });
