@@ -13,6 +13,7 @@ import {
   type PreviewAutomationSnapshot,
   type PreviewAutomationStatus,
 } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -22,6 +23,7 @@ import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import type { BrowserContext, Page } from "playwright-core";
 import { beforeEach, expect, vi } from "vite-plus/test";
 
@@ -221,6 +223,9 @@ let focusedFrame: ReturnType<typeof makeFrame> | null = null;
 let contextFailure: Error | null = null;
 let initialNavigation: (() => Promise<void>) | null = null;
 let desktopRendersNext = false;
+let desktopAttachWait: DesktopChannel.DesktopBrowserChannel["Service"]["awaitAttached"] | null =
+  null;
+let desktopAttachHandled: PromiseWithResolvers<void> | null = null;
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
@@ -262,7 +267,8 @@ const dependencies = Layer.mergeAll(
   }),
   Layer.succeed(DesktopChannel.DesktopBrowserChannel, {
     available: true,
-    awaitAttached: (key) => Effect.sync(() => desktopRenders(key.tabId)),
+    awaitAttached: (key, timeout) =>
+      desktopAttachWait?.(key, timeout) ?? Effect.sync(() => desktopRenders(key.tabId)),
     detached: Stream.callback<{ threadId: string; tabId: string }>((queue) =>
       Effect.acquireRelease(
         Effect.sync(() => {
@@ -283,6 +289,14 @@ const dependencies = Layer.mergeAll(
           return onAttach;
         }),
         (onAttach) => Effect.sync(() => desktopDetaches.off("attach", onAttach)),
+      ),
+    ).pipe(
+      Stream.flatMap((key) =>
+        Stream.concat(
+          Stream.succeed(key),
+          // The next pull acknowledges that ServerBrowser finished handling this attach.
+          Stream.fromEffect(Effect.sync(() => desktopAttachHandled?.resolve())).pipe(Stream.drain),
+        ),
       ),
     ),
     isAttached: (key) => Effect.sync(() => desktopRenders(key.tabId)),
@@ -329,9 +343,104 @@ beforeEach(() => {
   focusedFrame = null;
   desktopTabs.clear();
   desktopRendersNext = false;
+  desktopAttachWait = null;
+  desktopAttachHandled = null;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
+
+const openAfterDesktopAttachTimeout = Effect.gen(function* () {
+  const broker = yield* Broker.PreviewAutomationBroker;
+  const waiting = yield* Deferred.make<{
+    key: DesktopChannel.DesktopTabKey;
+    timeout: Parameters<DesktopChannel.DesktopBrowserChannel["Service"]["awaitAttached"]>[1];
+  }>();
+  // ServerBrowser runs this channel effect through runPromise, outside the test fiber.
+  const testContext = yield* Effect.context();
+  desktopAttachWait = (key, timeout) =>
+    Effect.gen(function* () {
+      yield* Deferred.succeed(waiting, { key, timeout });
+      yield* Effect.sleep(timeout);
+      return false;
+    }).pipe(Effect.provideContext(testContext));
+  const opening = yield* broker
+    .invoke<PreviewAutomationStatus>({
+      scope,
+      operation: "open",
+      input: { reuseExistingTab: false, show: true, url: "https://example.com/fallback" },
+    })
+    .pipe(Effect.forkScoped);
+  const { key, timeout } = yield* Deferred.await(waiting);
+  yield* TestClock.adjust(timeout);
+  const opened = yield* Fiber.join(opening);
+  expect(opened.tabId).toBe(key.tabId);
+  expect(contexts).toHaveLength(1);
+  expect(desktopConnections).toHaveLength(0);
+  return { broker, key, opened, tabId: PreviewTabId.make(key.tabId) };
+});
+
+it.effect("marks a desktop attach timeout as headless fallback in open, status, and snapshot", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const { broker, tabId, opened } = yield* openAfterDesktopAttachTimeout;
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      const snapshot = yield* broker.invoke<PreviewAutomationSnapshot>({
+        scope,
+        tabId,
+        operation: "snapshot",
+        input: {},
+      });
+      for (const payload of [opened, status, snapshot]) {
+        expect.soft(payload).toMatchObject({ desktopFallback: "attach-timeout" });
+      }
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect("surfaces a late desktop attach without swapping the headless page", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const { broker, key, tabId } = yield* openAfterDesktopAttachTimeout;
+      const page = contexts[0]!.page;
+      desktopAttachHandled = Promise.withResolvers<void>();
+      desktopTabs.add(key.tabId);
+      desktopDetaches.emit("attach", key);
+      yield* Effect.promise(() => desktopAttachHandled!.promise);
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      const snapshot = yield* broker.invoke<PreviewAutomationSnapshot>({
+        scope,
+        tabId,
+        operation: "snapshot",
+        input: {},
+      });
+      const reopened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "open",
+        input: { open: false },
+      });
+      expect(contexts).toHaveLength(1);
+      expect(desktopConnections).toHaveLength(0);
+      expect(page.close).not.toHaveBeenCalled();
+      expect(page.evaluate).toHaveBeenCalled();
+      for (const payload of [status, snapshot, reopened]) {
+        expect.soft(payload).toMatchObject({ desktopFallback: "late-attach" });
+      }
+    }),
+  ).pipe(Effect.provide(layer)),
+);
 
 it.live.each(["desktop" as const, undefined])(
   "explicit desktop targets ($0 runtime) fail without creating a server tab",
