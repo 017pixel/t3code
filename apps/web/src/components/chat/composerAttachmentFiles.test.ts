@@ -4,6 +4,8 @@ import { describe, expect, it } from "vite-plus/test";
 import type { ComposerFileAttachment, ComposerImageAttachment } from "../../composerDraftStore";
 import {
   attachmentsToReleaseOnUploadCapabilityLoss,
+  classifyComposerAttachmentFile,
+  localComposerFilePath,
   fileAttachmentCapabilityBlockReason,
   fileAttachmentStagingLimit,
   shouldHandleComposerAttachmentPaste,
@@ -15,10 +17,37 @@ describe("composer attachment files", () => {
       type: "image/svg+xml",
     });
 
+    expect(classifyComposerAttachmentFile(file)).toBe("file");
     expect(shouldHandleComposerAttachmentPaste({ files: [file], plainText: "" })).toBe(true);
     expect(shouldHandleComposerAttachmentPaste({ files: [file], plainText: "Copied text" })).toBe(
       false,
     );
+  });
+
+  it("resolves native file references only for the local desktop environment", () => {
+    const environmentId = EnvironmentId.make("local");
+    const file = new File(["video"], "clip.mov", { type: "video/quicktime" });
+    let pathReads = 0;
+    const local = {
+      file,
+      environmentId,
+      primaryEnvironmentId: environmentId,
+      localEnvironmentDisabled: false,
+      getPathForFile: (selected: File) => {
+        expect(selected).toBe(file);
+        pathReads += 1;
+        return "/local/clip.mov";
+      },
+    };
+    expect(localComposerFilePath(local)).toBe("/local/clip.mov");
+    expect(localComposerFilePath({ ...local, getPathForFile: undefined })).toBeNull();
+    expect(localComposerFilePath({ ...local, localEnvironmentDisabled: true })).toBeNull();
+    expect(localComposerFilePath({ ...local, primaryEnvironmentId: null })).toBeNull();
+    expect(
+      localComposerFilePath({ ...local, environmentId: EnvironmentId.make("remote") }),
+    ).toBeNull();
+    expect(pathReads).toBe(1);
+    expect(localComposerFilePath({ ...local, getPathForFile: () => "" })).toBeNull();
   });
 
   it("keeps the hard upload limit even when the server advertises a larger limit", () => {

@@ -152,14 +152,13 @@ import {
   type ComposerBannerStackItem,
 } from "./ComposerBannerStack";
 import { compressImageForStash, prepareImageForAttachment } from "../../lib/imageCompression";
-import {
-  fileAttachmentTooLargeMessage,
-  formatAttachmentSize,
-} from "@t3tools/client-runtime/state/attachments";
+import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import {
   attachmentsToReleaseOnUploadCapabilityLoss,
   composerOtherFilesForPresentation,
   classifyComposerAttachmentFile,
+  composerFileTooLargeMessage,
+  localComposerFilePath,
   fileAttachmentCapabilityBlockReason,
   fileAttachmentStagingLimit,
   isPreviewableComposerVideo,
@@ -4782,8 +4781,30 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     const acceptedImages: File[] = [];
     const acceptedFiles: ComposerFileAttachment[] = [];
     let error: string | null = null;
+    let insertedAny = false;
     for (const file of files) {
       const attachmentKind = classifyComposerAttachmentFile(file);
+      if (attachmentKind === "file" && fileStagingLimit !== null && file.size > fileStagingLimit) {
+        const path = questionAttachmentTarget
+          ? null
+          : localComposerFilePath({
+              file,
+              environmentId,
+              primaryEnvironmentId,
+              localEnvironmentDisabled: isLocalEnvironmentDisabled(),
+              getPathForFile: window.desktopBridge?.getPathForFile,
+            });
+        if (path !== null) {
+          const inserted = insertComposerTextAtEndStable(`${serializeComposerFileLink(path)} `, {
+            ensureLeadingBoundary: true,
+          });
+          insertedAny = inserted || insertedAny;
+          if (!inserted) error = "The composer is busy; try again once it is ready.";
+        } else {
+          error = composerFileTooLargeMessage(file.name, fileStagingLimit);
+        }
+        continue;
+      }
       const fileMimeType =
         attachmentKind === "file"
           ? (videoMimeType({ name: file.name, mimeType: file.type }) ??
@@ -4808,10 +4829,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`;
         continue;
       }
-      if (attachmentKind === "unsupported-image") {
-        error = `'${file.name}' is not a supported image type. Attach GIF, HEIC, HEIF, JPEG, PNG, or WebP images.`;
-        continue;
-      }
       if (attachmentKind === "image") {
         acceptedImages.push(normalizeComposerImageFileMimeType(file));
       } else {
@@ -4821,10 +4838,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         }
         if (file.size <= 0) {
           error = `'${file.name}' is empty or could not be read.`;
-          continue;
-        }
-        if (file.size > fileStagingLimit) {
-          error = fileAttachmentTooLargeMessage(file.name, fileStagingLimit);
           continue;
         }
         const attachmentFile =
@@ -4846,15 +4859,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
     }
     setThreadError(threadId, error);
-    let insertedAny = false;
     if (acceptedFiles.length > 0) {
       const storedIds = new Set(addComposerFilesToDraft(acceptedFiles));
       const storedFiles = acceptedFiles.filter((file) => storedIds.has(file.id));
       if (storedFiles.length > 0) {
-        insertedAny = insertAttachmentReferences(
-          storedFiles.map(fileContextReference),
-          options?.selection,
-        );
+        insertedAny =
+          insertAttachmentReferences(storedFiles.map(fileContextReference), options?.selection) ||
+          insertedAny;
       }
       if (options?.source?._tag === "pasted-text" && storedFiles.length > 0) {
         const attached = storedFiles[0]!;

@@ -11,8 +11,9 @@ import {
 import type { ComposerFileAttachment, ComposerImageAttachment } from "../../composerDraftStore";
 import { isHeicImageFile } from "../../lib/imageCompression";
 import { isVideoAttachment } from "../../types";
+import { folderDropTarget, resolveDroppedFolderPath } from "./folderDrop";
 
-type ComposerAttachmentFileKind = "image" | "file" | "unsupported-image";
+type ComposerAttachmentFileKind = "image" | "file";
 
 interface FileAttachmentCapabilityState {
   readonly attachmentUploadsCapabilityKnown: boolean;
@@ -71,7 +72,22 @@ export function classifyComposerAttachmentFile(
   if (!file.type.toLowerCase().startsWith("image/")) {
     return "file";
   }
-  return isProviderSendTurnSupportedImageMimeType(file.type) ? "image" : "unsupported-image";
+  return isProviderSendTurnSupportedImageMimeType(file.type) ? "image" : "file";
+}
+
+export function localComposerFilePath(input: {
+  readonly file: File;
+  readonly environmentId: EnvironmentId;
+  readonly primaryEnvironmentId: EnvironmentId | null;
+  readonly localEnvironmentDisabled: boolean;
+  readonly getPathForFile: ((file: File) => string) | undefined;
+}): string | null {
+  if (folderDropTarget(input) !== "local") return null;
+  return resolveDroppedFolderPath(input.file, input.getPathForFile);
+}
+
+export function composerFileTooLargeMessage(name: string, maxUploadBytes: number): string {
+  return `${fileAttachmentTooLargeMessage(name, maxUploadBytes)} Reference a path on the destination environment with @ instead.`;
 }
 
 export function isPreviewableComposerVideo(
@@ -122,7 +138,7 @@ export function fileAttachmentCapabilityBlockReason(
   }
   const oversizedFile = input.files.find((file) => file.sizeBytes > maxFileAttachmentBytes);
   if (oversizedFile) {
-    return fileAttachmentTooLargeMessage(oversizedFile.name, maxFileAttachmentBytes);
+    return composerFileTooLargeMessage(oversizedFile.name, maxFileAttachmentBytes);
   }
   return null;
 }
@@ -145,12 +161,7 @@ export function shouldHandleComposerAttachmentPaste(input: {
   readonly files: ReadonlyArray<File>;
   readonly plainText: string;
 }): boolean {
-  if (
-    input.files.some((file) => {
-      const classification = classifyComposerAttachmentFile(file);
-      return classification === "image" || classification === "unsupported-image";
-    })
-  ) {
+  if (input.files.some((file) => classifyComposerAttachmentFile(file) === "image")) {
     return true;
   }
 
