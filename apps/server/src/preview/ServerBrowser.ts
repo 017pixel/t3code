@@ -291,7 +291,12 @@ interface ServerTab {
 
   readonly isolatedContext: boolean;
 
-  readonly desktop: { readonly close: () => Promise<void> } | null;
+  /**
+   * A desktop-rendered page. `background` pages live in a never-shown window,
+   * so the server sizes them like headless pages; the others follow the
+   * panel's `<webview>`.
+   */
+  readonly desktop: { readonly close: () => Promise<void>; readonly background: boolean } | null;
   readonly profileId: string | undefined;
   readonly openerTabId: string | undefined;
 
@@ -505,10 +510,12 @@ const make = Effect.gen(function* () {
         }
       : null;
 
+  const inPanel = (tab: ServerTab) => tab.desktop !== null && !tab.desktop.background;
+
   const updateFileChooserInterception = (tab: ServerTab) => {
     // Native desktop views use the OS picker. Only agents and streamed controllers
     // have an uploader that can answer an intercepted request.
-    const intercept = !tab.desktop || tab.agentOperating || tab.control.controller !== null;
+    const intercept = !inPanel(tab) || tab.agentOperating || tab.control.controller !== null;
     if (intercept === tab.fileChooserIntercepted) return;
     tab.fileChooserIntercepted = intercept;
     if (intercept) tab.page.on("filechooser", tab.onFileChooser);
@@ -599,7 +606,7 @@ const make = Effect.gen(function* () {
 
   const layoutSize = (tab: ServerTab) => {
     const size = tab.page.viewportSize();
-    if (!size || tab.desktop) return size;
+    if (!size || inPanel(tab)) return size;
     return {
       width: Math.max(1, Math.round(size.width / tab.zoomFactor)),
       height: Math.max(1, Math.round(size.height / tab.zoomFactor)),
@@ -607,7 +614,7 @@ const make = Effect.gen(function* () {
   };
 
   const applyZoom = async (tab: ServerTab) => {
-    if (tab.desktop) return;
+    if (inPanel(tab)) return;
     const size = tab.page.viewportSize();
     if (!size) return;
     if (tab.zoomFactor === 1) {
@@ -632,7 +639,7 @@ const make = Effect.gen(function* () {
   const applySetting = async (tab: ServerTab, setting: PreviewViewportSetting) => {
     tab.setting = setting;
 
-    if (tab.desktop) return;
+    if (inPanel(tab)) return;
     const size =
       fixedViewportSize(setting) ??
       [...tab.viewers]
@@ -652,7 +659,7 @@ const make = Effect.gen(function* () {
       await tab.page.emulateMedia({ colorScheme: colorScheme === "system" ? null : colorScheme });
     }
     const zoomFactor = snapshot.zoomFactor ?? 1;
-    if (zoomFactor !== tab.zoomFactor && !tab.desktop) {
+    if (zoomFactor !== tab.zoomFactor && !inPanel(tab)) {
       tab.zoomFactor = zoomFactor;
       await applyZoom(tab);
       broadcastViewport(tab);
@@ -701,8 +708,12 @@ const make = Effect.gen(function* () {
           .pipe(Scope.provide(scope)),
       );
       const connected = await contexts.connectDesktopPage(endpoint);
+      const background = await Effect.runPromise(
+        desktopChannel.isBackground({ threadId: snapshot.threadId, tabId: snapshot.tabId }),
+      );
       return {
         page: connected.page,
+        background,
         close: async () => {
           await connected.browser.close().catch(constVoid);
           await Effect.runPromise(Scope.close(scope, Exit.void));
@@ -764,7 +775,7 @@ const make = Effect.gen(function* () {
       fileChooserIntercepted: false,
       onFileChooser: (chooser) => void offerFileChooser(tab, chooser),
       isolatedContext,
-      desktop: desktop === null ? null : { close: desktop.close },
+      desktop: desktop === null ? null : { close: desktop.close, background: desktop.background },
       profileId: snapshot.profileId,
       openerTabId: adopted?.openerTabId,
       downloads: [],
@@ -783,7 +794,7 @@ const make = Effect.gen(function* () {
       captureLock: Promise.resolve(),
       capturing: 0,
     };
-    if (!desktop) {
+    if (!inPanel(tab)) {
       await page.setViewportSize(fixedViewportSize(tab.setting) ?? UNATTACHED_FILL_VIEWPORT);
     }
     await applyRendering(tab, snapshot);
@@ -1273,14 +1284,14 @@ const make = Effect.gen(function* () {
       );
   };
 
-  // Desktop browsing bypasses streamed viewers and server input tracking,
-  // so these idle signals only apply to headless tabs.
+  // Panel browsing bypasses streamed viewers and server input tracking,
+  // so these idle signals only apply to tabs the panel does not render.
   const closeIdleAgentTabs = () => {
     const cutoff = Date.now() - AGENT_TAB_IDLE_MS;
     for (const tab of tabs.values()) {
       if (
         tab.control.agentId !== null &&
-        tab.desktop === null &&
+        !inPanel(tab) &&
         tab.viewers.size === 0 &&
         tab.usedAt < cutoff
       )
@@ -2198,7 +2209,7 @@ const make = Effect.gen(function* () {
         const height = Math.min(Math.round(num(message.height)), 2160);
         if (width < 100 || height < 100) return;
         viewer.requestedSize = { width, height, order: ++viewerResizeOrder };
-        if (tab.setting._tag !== "fill" || tab.desktop) return;
+        if (tab.setting._tag !== "fill" || inPanel(tab)) return;
         const current = tab.page.viewportSize();
         if (current?.width === width && current.height === height) return;
         await tab.page.setViewportSize({ width, height });

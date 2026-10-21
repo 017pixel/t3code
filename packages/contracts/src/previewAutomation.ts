@@ -949,8 +949,10 @@ export class PreviewAutomationTimeoutError extends Schema.TaggedError<PreviewAut
   },
 ) {
   override get message(): string {
-    const summary = `Preview automation ${this.operation} timed out after ${this.timeoutMs}ms.`;
-    return summary;
+    // A host's own deadline is not the broker's timeoutMs, so do not claim it.
+    return this.remoteTag === undefined
+      ? `Preview automation ${this.operation} timed out after ${this.timeoutMs}ms.`
+      : `Preview automation ${this.operation} timed out in the browser before it could finish.`;
   }
 }
 

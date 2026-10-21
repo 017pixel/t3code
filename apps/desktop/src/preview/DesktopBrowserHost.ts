@@ -42,6 +42,7 @@ const keyOf = ({ threadId, tabId }: DesktopBrowserTabKey) => `${threadId}\u0000$
 interface AttachedTab {
   readonly key: DesktopBrowserTabKey;
   readonly debuggee: DesktopBrowserTabDebugger;
+  readonly background: boolean;
   relay: CdpRelayConnection | null;
   downloadDirectory: string | null;
   pendingDownloadGuid: string | null;
@@ -59,7 +60,12 @@ export class DesktopBrowserHost extends Context.Service<
   {
     readonly events: Stream.Stream<Uint8Array>;
     readonly handleCommandLine: (line: string) => Effect.Effect<void>;
-    readonly attach: (key: DesktopBrowserTabKey, debuggee: DesktopBrowserTabDebugger) => void;
+    /** `background` tabs live in a never-shown window that no panel sizes. */
+    readonly attach: (
+      key: DesktopBrowserTabKey,
+      debuggee: DesktopBrowserTabDebugger,
+      background: boolean,
+    ) => void;
     readonly detach: (key: DesktopBrowserTabKey) => void;
     readonly humanStartedDownload: (source: Electron.WebContents) => boolean;
     readonly placeDownload: (source: Electron.WebContents, item: Electron.DownloadItem) => boolean;
@@ -137,13 +143,18 @@ export const make = Effect.gen(function* () {
     emit({ type: "detached", ...key });
   };
 
-  const attach = (key: DesktopBrowserTabKey, debuggee: DesktopBrowserTabDebugger) => {
+  const attach = (
+    key: DesktopBrowserTabKey,
+    debuggee: DesktopBrowserTabDebugger,
+    background: boolean,
+  ) => {
     const id = keyOf(key);
     if (tabs.get(id)?.debuggee.webContents === debuggee.webContents) return;
     detach(key);
     const tab: AttachedTab = {
       key,
       debuggee,
+      background,
       relay: null,
       downloadDirectory: null,
       pendingDownloadGuid: null,
@@ -158,7 +169,7 @@ export const make = Effect.gen(function* () {
     };
     tabs.set(id, tab);
     debuggee.debugger.on("message", tab.onMessage);
-    emit({ type: "attached", ...key });
+    emit({ type: "attached", ...key, background });
   };
 
   const handleCommandLine = (line: string) =>
@@ -190,7 +201,7 @@ export const make = Effect.gen(function* () {
       [...tabs.values()],
       (tab) => {
         tab.relay = null;
-        return PubSub.publish(outbox, { type: "attached", ...tab.key });
+        return PubSub.publish(outbox, { type: "attached", ...tab.key, background: tab.background });
       },
       { discard: true },
     ),

@@ -52,6 +52,8 @@ export class DesktopBrowserChannel extends Context.Service<
     readonly detached: Stream.Stream<DesktopTabKey>;
     readonly attached: Stream.Stream<DesktopTabKey>;
     readonly isAttached: (key: DesktopTabKey) => Effect.Effect<boolean>;
+    /** The tab lives in a never-shown desktop window, so no panel sizes it. */
+    readonly isBackground: (key: DesktopTabKey) => Effect.Effect<boolean>;
     readonly endpoint: (key: DesktopTabKey) => Effect.Effect<string, never, Scope.Scope>;
     readonly pointer: (
       key: DesktopTabKey,
@@ -65,7 +67,8 @@ const make = Effect.gen(function* () {
   const inputFd = config.desktopBrowserFd;
   const controlFd = config.desktopBrowserControlFd;
   const changes = yield* PubSub.unbounded<{ key: DesktopTabKey; attached: boolean }>();
-  const attachedTabs = new Set<string>();
+  /** Attached tab ids, mapped to whether each is hosted in the background. */
+  const attachedTabs = new Map<string, boolean>();
   const inbound = new Map<string, Queue.Queue<string>>();
   const writeLock = yield* Semaphore.make(1);
 
@@ -76,6 +79,7 @@ const make = Effect.gen(function* () {
       detached: Stream.empty,
       attached: Stream.empty,
       isAttached: () => Effect.succeed(false),
+      isBackground: () => Effect.succeed(false),
       endpoint: () => Effect.die("No desktop app is attached to this server."),
       pointer: () => Effect.void,
     });
@@ -115,7 +119,7 @@ const make = Effect.gen(function* () {
           return queue ? Queue.offer(queue, event.message).pipe(Effect.asVoid) : Effect.void;
         }
         case "attached":
-          attachedTabs.add(id);
+          attachedTabs.set(id, event.background === true);
           return PubSub.publish(changes, { key, attached: true });
         case "detached": {
           attachedTabs.delete(id);
@@ -214,6 +218,7 @@ const make = Effect.gen(function* () {
       Stream.map((change) => change.key),
     ),
     isAttached: (key) => Effect.sync(() => attachedTabs.has(keyOf(key))),
+    isBackground: (key) => Effect.sync(() => attachedTabs.get(keyOf(key)) === true),
     endpoint,
     pointer: (key, pointer) => command({ type: "pointer", ...key, ...pointer }),
   });

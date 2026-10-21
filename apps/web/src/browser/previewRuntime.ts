@@ -41,10 +41,13 @@ export function usePreviewAvailable(environmentId: EnvironmentId | null): boolea
   return isPreviewSupportedInRuntime() || serverBrowser;
 }
 
-export function rendersServerTabNatively(
+type RuntimeSnapshot = Pick<PreviewSessionSnapshot, "runtime" | "automationOwner">;
+
+/** The desktop app hosts this server tab, in a panel `<webview>` or a background window. */
+function desktopHostsServerTab(
   environmentId: EnvironmentId,
   primaryEnvironmentId: EnvironmentId | null,
-  snapshot: Pick<PreviewSessionSnapshot, "runtime"> | null | undefined,
+  snapshot: RuntimeSnapshot | null | undefined,
 ): boolean {
   return (
     isElectron &&
@@ -54,9 +57,36 @@ export function rendersServerTabNatively(
   );
 }
 
+export function rendersServerTabNatively(
+  environmentId: EnvironmentId,
+  primaryEnvironmentId: EnvironmentId | null,
+  snapshot: RuntimeSnapshot | null | undefined,
+): boolean {
+  return (
+    desktopHostsServerTab(environmentId, primaryEnvironmentId, snapshot) &&
+    snapshot?.automationOwner === undefined
+  );
+}
+
+/**
+ * Agent tabs run in a never-shown desktop window, because a panel `<webview>`
+ * created while the app is hidden never paints and agents open tabs whenever
+ * they like. The panel streams them like any other server tab.
+ */
+export function hostsServerTabInBackground(
+  environmentId: EnvironmentId,
+  primaryEnvironmentId: EnvironmentId | null,
+  snapshot: RuntimeSnapshot | null | undefined,
+): boolean {
+  return (
+    desktopHostsServerTab(environmentId, primaryEnvironmentId, snapshot) &&
+    snapshot?.automationOwner !== undefined
+  );
+}
+
 export function useRendersServerTabNatively(
   environmentId: EnvironmentId,
-  snapshot: Pick<PreviewSessionSnapshot, "runtime"> | null | undefined,
+  snapshot: RuntimeSnapshot | null | undefined,
 ): boolean {
   return rendersServerTabNatively(environmentId, useAtomValue(primaryEnvironmentIdAtom), snapshot);
 }

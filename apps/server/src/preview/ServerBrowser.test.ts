@@ -221,6 +221,7 @@ let focusedFrame: ReturnType<typeof makeFrame> | null = null;
 let contextFailure: Error | null = null;
 let initialNavigation: (() => Promise<void>) | null = null;
 let desktopRendersNext = false;
+let desktopBackground = false;
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
@@ -286,6 +287,7 @@ const dependencies = Layer.mergeAll(
       ),
     ),
     isAttached: (key) => Effect.sync(() => desktopRenders(key.tabId)),
+    isBackground: () => Effect.sync(() => desktopBackground),
     endpoint: (key) =>
       Effect.acquireRelease(Effect.succeed(`ws://desktop/${key.tabId}`), () =>
         Effect.sync(() => releasedDesktopTabs.push(key.tabId)),
@@ -329,6 +331,7 @@ beforeEach(() => {
   focusedFrame = null;
   desktopTabs.clear();
   desktopRendersNext = false;
+  desktopBackground = false;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
@@ -492,6 +495,28 @@ it.live("enforces provider ownership and explicit targets when a session has mul
       expect(contexts).toHaveLength(2);
     }),
   ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([
+  { background: true, sized: true },
+  { background: false, sized: false },
+])(
+  "a desktop tab is sized by the server only when no panel webview sizes it (background $background)",
+  ({ background, sized }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = true;
+        desktopBackground = background;
+        const { browser, tabId } = yield* ready;
+        const page = desktopConnections[0]!.context.page;
+        page.setViewportSize.mockClear();
+        const operator = yield* browser.attachViewer(viewerInput(tabId, true));
+        yield* operator.input({ type: "takeControl" });
+        yield* operator.input({ type: "resize", width: 390, height: 844 });
+        if (sized) expect(page.setViewportSize).toHaveBeenCalledWith({ width: 390, height: 844 });
+        else expect(page.setViewportSize).not.toHaveBeenCalled();
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live("streams to a read-only viewer without allowing takeover, input, or viewport changes", () =>

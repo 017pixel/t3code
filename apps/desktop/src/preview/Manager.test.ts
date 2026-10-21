@@ -600,6 +600,58 @@ describe("PreviewManager", () => {
       ),
   );
 
+  effectIt.effect(
+    "hosts an agent tab in a never-shown window that paints and closes with the tab",
+    () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          const tab = makeTestPreviewWebContents(
+            async () => ({
+              toJPEG: () => Buffer.from(""),
+              getSize: () => ({ width: 1, height: 1 }),
+            }),
+            55,
+            null as unknown as TestHostWebContents,
+          );
+          const loadURL = vi.fn(async () => undefined);
+          Object.assign(tab, { getType: () => "window", once: vi.fn(), loadURL, reload: vi.fn() });
+          const window = {
+            webContents: tab,
+            once: vi.fn(),
+            isDestroyed: () => false,
+            destroy: vi.fn(),
+          };
+          let options: Electron.BrowserWindowConstructorOptions | undefined;
+          browserWindowConstructor.mockImplementation(function (
+            next: Electron.BrowserWindowConstructorOptions,
+          ) {
+            options = next;
+            return window;
+          });
+          fromId.mockReturnValue(tab);
+
+          const state = yield* manager.createTab(
+            "tab_agent",
+            { serverTab: { threadId: "thread", tabId: "agent" } },
+            { partition: "persist:t3code-preview-test", url: "https://example.com/agent" },
+          );
+
+          expect(options).toMatchObject({
+            show: false,
+            paintWhenInitiallyHidden: true,
+            webPreferences: {
+              partition: "persist:t3code-preview-test",
+              backgroundThrottling: false,
+            },
+          });
+          expect(state.webContentsId).toBe(55);
+          expect(loadURL).toHaveBeenCalledWith("https://example.com/agent");
+          yield* manager.closeTab("tab_agent");
+          expect(window.destroy).toHaveBeenCalledOnce();
+        }),
+      ),
+  );
+
   effectIt.effect("keeps editing and forwarded shortcuts in whichever tab holds focus", () =>
     withManager((manager) =>
       Effect.gen(function* () {

@@ -1,3 +1,5 @@
+import type { DesktopPreviewTabDefaults } from "@t3tools/contracts";
+
 import { previewBridge } from "~/components/preview/previewBridge";
 
 import { browserDefaultTabState, resolveBrowserDefaults } from "./browserDefaults";
@@ -47,6 +49,7 @@ export interface AcquiredDesktopTab {
 export function acquireDesktopTab(
   tabId: string,
   serverTab?: { readonly threadId: string; readonly tabId: string },
+  background?: DesktopPreviewTabDefaults["background"],
 ): AcquiredDesktopTab {
   const current =
     leases.get(tabId) ??
@@ -59,6 +62,7 @@ export function acquireDesktopTab(
         previewBridge?.createTab(tabId, {
           ...browserDefaultTabState(await resolveBrowserDefaults()),
           ...(serverTab === undefined ? {} : { serverTab }),
+          ...(background === undefined ? {} : { background }),
         }),
       ),
     } satisfies DesktopTabLease);

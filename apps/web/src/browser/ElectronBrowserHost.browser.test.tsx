@@ -22,6 +22,12 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock(import("~/env"), async (original) => ({ ...(await original()), isElectron: true }));
 
+// Server tabs render on the desktop only for its own environment.
+vi.mock(import("~/state/primaryEnvironment"), async () => {
+  const { Atom } = await import("effect/reactivity");
+  return { primaryEnvironmentIdAtom: Atom.make(EnvironmentId.make("host-webview-order")) };
+});
+
 vi.mock(import("~/state/session"), async (original) => ({
   ...(await original()),
   useEnvironmentScope: () => true,
@@ -159,5 +165,35 @@ describe("ElectronBrowserHost", () => {
     const after = webviews();
     expect(after).toHaveLength(2);
     expect(after.every((node, index) => node.isSameNode(before[index]!))).toBe(true);
+  });
+
+  it("hosts an agent's tab in a background window instead of a panel webview", async () => {
+    using _state = setup();
+    reconcilePreviewServerSessions(threadRef, {
+      sessions: [
+        {
+          ...snapshot("tab_agent", "2026-01-01T00:00:01.000Z"),
+          runtime: "server",
+          automationOwner: "agent-session",
+        },
+      ],
+      serverEpoch: "server-a",
+      revision: 1,
+    });
+    await using screen = await renderHost();
+
+    await vi.waitFor(() =>
+      expect(mocks.createTab).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          serverTab: { threadId: threadRef.threadId, tabId: "tab_agent" },
+          background: expect.objectContaining({
+            environmentId: threadRef.environmentId,
+            url: "https://example.com/tab_agent",
+          }),
+        }),
+      ),
+    );
+    expect(screen.container.querySelectorAll("webview")).toHaveLength(0);
   });
 });
