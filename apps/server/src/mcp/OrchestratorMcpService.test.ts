@@ -45,6 +45,7 @@ import {
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { buildUnavailableProviderSnapshot } from "../provider/unavailableProviderSnapshot.ts";
@@ -62,6 +63,12 @@ const decodeTarget = Schema.decodeUnknownEffect(OrchestratorMcpTarget);
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+  Layer.provide(
+    Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+      namedProjectsRoot: "/projects",
+      isScratchProject: () => Effect.succeed(false),
+    }),
+  ),
 );
 
 describe("OrchestratorMcpService", () => {
@@ -1931,6 +1938,93 @@ describe("OrchestratorMcpService provider resolution", () => {
       );
 
     describe("scheduled task workspace strategies", () => {
+      it.effect.each(["create", "unbind"] as const)(
+        "%s saves an unbound Scratch task at root without invoking Git",
+        (operation) =>
+          Effect.gen(function* () {
+            const shell = {
+              ...liveThreadShell(boundThreadId, { runtimeMode: "approval-required" }),
+              projectId,
+            };
+            const existing = task({ threadId: boundThreadId, workspaceStrategy: { type: "root" } });
+            const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+            const gitCalls = yield* Ref.make(0);
+            const scope: McpInvocationScope = {
+              ...supervisedClient,
+              client: undefined,
+              thread: {
+                threadId: boundThreadId,
+                providerSessionId: "provider:scratch-scheduled",
+                providerInstanceId: shell.providerInstanceId,
+              },
+            };
+            const dependencies = Layer.mergeAll(
+              NodeServices.layer,
+              Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+              Layer.mock(GitVcsDriver.GitVcsDriver)({
+                resolveDefaultWorktreeBaseRef: () =>
+                  Ref.update(gitCalls, (count) => count + 1).pipe(
+                    Effect.andThen(Effect.die("Scratch is deliberately not a Git repository")),
+                  ),
+              }),
+              Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+                namedProjectsRoot: "/projects",
+                isScratchProject: (id) => Effect.succeed(id === projectId),
+              }),
+              Layer.mock(ThreadManagementService.ThreadManagementService)({
+                getThreadShell: () => Effect.succeed(shell),
+                getThreadRecords: () => Effect.succeed(idleThreadProjection(shell)),
+              }),
+              ServerSettings.layerTest(),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+              Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+                list: () => Effect.succeed([]),
+              }),
+              Layer.mock(ProjectService.ProjectService)({
+                getById: () =>
+                  Effect.succeedSome({
+                    id: projectId,
+                    title: "Scratch",
+                    workspaceRoot: "/scratch",
+                    defaultModelSelection: existing.modelSelection,
+                    scripts: [],
+                    createdAt: existing.createdAt,
+                    updatedAt: existing.updatedAt,
+                    deletedAt: null,
+                  }),
+              }),
+              Layer.mock(SecretRequests.SecretRequests)({}),
+              Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+                list: () => Effect.succeed({ tasks: [existing] }),
+                upsert: (input) =>
+                  Ref.update(saved, (inputs) => [...inputs, input]).pipe(
+                    Effect.as({ task: existing }),
+                  ),
+              }),
+            );
+            const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+              Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))),
+            );
+            if (operation === "create") {
+              yield* mcp.scheduleTask(scope, {
+                prompt: "Check Scratch",
+                schedule: { type: "interval", everyMs: 60_000 },
+                bindToCurrentThread: false,
+              });
+            } else {
+              yield* mcp.updateScheduledTask(scope, {
+                scheduledTaskId: existing.id,
+                bindToCurrentThread: false,
+              });
+            }
+            const inputs = yield* Ref.get(saved);
+            assert.equal(inputs.length, 1);
+            assert.equal(inputs[0]!.threadId, null);
+            assert.deepEqual(inputs[0]!.workspaceStrategy, { type: "root" });
+            assert.equal(yield* Ref.get(gitCalls), 0);
+          }),
+      );
+
       it.live.each([
         { operation: "create", defaultBranch: "master", bound: false },
         { operation: "create", defaultBranch: "main", bound: false },
@@ -2128,6 +2222,10 @@ describe("OrchestratorMcpService provider resolution", () => {
             NodeServices.layer,
             Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
             Layer.succeed(GitVcsDriver.GitVcsDriver, git),
+            Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+              namedProjectsRoot: "/projects",
+              isScratchProject: () => Effect.succeed(false),
+            }),
             Layer.mock(ThreadManagementService.ThreadManagementService)({
               getThreadShell: () => Effect.succeed(shell),
               getThreadRecords: () => Effect.succeed(idleThreadProjection(shell)),
