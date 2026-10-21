@@ -7,15 +7,18 @@ import { resolveDiffThemeName } from "~/lib/diffRendering";
 import { PREFERRED_HIGHLIGHTER } from "~/lib/syntaxHighlighting";
 
 import { FILE_LINK_REVEAL_UNSAFE_CSS } from "./fileSurfaceChrome";
+import { useSourceTextSelection } from "./useSourceTextSelection";
 
 export default function ReadOnlySourcePreview(props: {
   readonly name: string;
   readonly text: string;
   readonly cacheKey?: string;
-  readonly onPostRender?: FileOptions<unknown, undefined>["onPostRender"];
+  readonly onPostRender?: FileOptions<undefined, undefined>["onPostRender"];
 }) {
   const resolvedTheme = useRenderedAppearance();
   const wordWrap = useClientSettings((settings) => settings.wordWrap);
+  const onSelectionPostRender = useSourceTextSelection(props.text);
+  const { onPostRender } = props;
   return (
     <DiffWorkerPoolProvider>
       <Virtualizer
@@ -36,7 +39,10 @@ export default function ReadOnlySourcePreview(props: {
             preferredHighlighter: PREFERRED_HIGHLIGHTER,
             themeType: resolvedTheme,
             unsafeCSS: FILE_LINK_REVEAL_UNSAFE_CSS,
-            ...(props.onPostRender ? { onPostRender: props.onPostRender } : {}),
+            onPostRender: (fileContainer, instance, phase) => {
+              onPostRender?.(fileContainer, instance, phase);
+              onSelectionPostRender(fileContainer, phase);
+            },
           }}
           className="min-h-full"
         />
