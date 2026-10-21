@@ -74,6 +74,8 @@ describe("handoff endpoints shared by web and mobile", () => {
 });
 
 const projection = {
+  thread: { id: "source-thread" },
+  contextTransfers: [],
   runs: [{ ...run("source", 1, from, "source"), startedAt: "2026-10-11T00:00:00Z" }],
   visibleTurnItems: [{ item: { type: "user_message" } }],
 } as unknown as OrchestrationV2ThreadProjection;
@@ -125,6 +127,14 @@ describe("pending context handoff", () => {
     } as unknown as OrchestrationV2ThreadProjection;
     const selection = { instanceId: from, model: "source" };
     expect(resolvePendingHandoff(merged, selection, [])?.to).toEqual(selection);
+    const consumed = {
+      ...merged,
+      contextTransfers: merged.contextTransfers.map((transfer) => ({
+        ...transfer,
+        status: "consumed",
+      })),
+    } as unknown as OrchestrationV2ThreadProjection;
+    expect(resolvePendingHandoff(consumed, selection, [])).toBeNull();
   });
   it("resumes compatible account overlays without showing a handoff", () => {
     const providers = [from, to].map((instanceId) => ({
