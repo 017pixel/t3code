@@ -1112,6 +1112,16 @@ describe("planComposerTurn", () => {
     ).toMatchObject({ compactBeforeSend: false, turnDispatchMode: "auto" });
   });
 
+  it.each([
+    "/compact Keep the interface decisions, drop the debugging output",
+    "/Compact  keep the interface decisions",
+    "/compact\nkeep the interface decisions",
+  ])("does not compact a stale session before /compact with instructions: %j", (messageText) => {
+    expect(
+      planComposerTurn({ ...base, resumeCompactionTokens: 250_000, messageText }),
+    ).toMatchObject({ compactBeforeSend: false, turnDispatchMode: "auto" });
+  });
+
   it("queues behind a running turn only when asked to", () => {
     const running = {
       ...base,
