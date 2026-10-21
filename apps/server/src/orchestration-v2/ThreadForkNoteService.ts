@@ -11,6 +11,7 @@ import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
+import { isForkableSourceRunStatus } from "./ThreadForkService.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
 const NOTE_TIMEOUT_MS = 5 * 60_000;
@@ -69,6 +70,22 @@ export const layer = Layer.effect(
           message: "The thread was not found.",
         });
       }
+      // The latest turn, even a stopped or failed one, so the note covers it.
+      const { runs } = yield* threads
+        .getThreadRecords(source.id, ["runs"])
+        .pipe(Effect.mapError(fail("Could not read the thread.")));
+      const latestRun = runs
+        .filter((run) => run.status !== "rolled_back")
+        .toSorted((left, right) => right.ordinal - left.ordinal)[0];
+      if (latestRun === undefined || !isForkableSourceRunStatus(latestRun.status)) {
+        return yield* new OrchestrationV2WriteForkNoteError({
+          threadId: input.threadId,
+          message:
+            latestRun === undefined
+              ? "This thread has no turn to fork yet."
+              : "Wait for the current turn to finish.",
+        });
+      }
       const id = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
       const scratchThreadId = ThreadId.make(`fork-note:${id}`);
 
@@ -78,7 +95,7 @@ export const layer = Layer.effect(
           commandId: CommandId.make(`fork-note:${id}:fork`),
           sourceThreadId: source.id,
           targetThreadId: scratchThreadId,
-          sourcePoint: { type: "latest_stable" },
+          sourcePoint: { type: "run", runId: latestRun.id },
           title: `Fork note: ${source.title}`,
           createdBy: "user",
           creationSource: "server",

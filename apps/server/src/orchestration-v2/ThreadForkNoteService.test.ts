@@ -53,13 +53,22 @@ function harness(input: {
         run: { id: runId, status: input.runStatus } as OrchestrationV2Run,
         timedOut: false,
       }),
-    getThreadRecords: () =>
-      Effect.succeed({
-        messages: input.messages.map((message, index) => ({
-          ...message,
-          id: MessageId.make(`message-${index}`),
-        })),
-      } as never),
+    getThreadRecords: (threadId) =>
+      Effect.succeed(
+        (threadId === sourceThreadId
+          ? {
+              runs: [
+                { id: RunId.make("stopped-run"), ordinal: 2, status: "interrupted" },
+                { id: RunId.make("older-run"), ordinal: 1, status: "completed" },
+              ],
+            }
+          : {
+              messages: input.messages.map((message, index) => ({
+                ...message,
+                id: MessageId.make(`message-${index}`),
+              })),
+            }) as never,
+      ),
   });
   const layer = ThreadForkNote.layer.pipe(Layer.provide(Layer.merge(threads, NodeCrypto.layer)));
   return { commands, sent, layer };
@@ -87,6 +96,8 @@ describe("ThreadForkNoteService", () => {
       assert.strictEqual(fork?.type, "thread.fork");
       if (fork?.type !== "thread.fork") return;
       assert.strictEqual(fork.sourceThreadId, sourceThreadId);
+      // A stopped last turn is still part of the conversation the note covers.
+      assert.deepStrictEqual(fork.sourcePoint, { type: "run", runId: RunId.make("stopped-run") });
       assert.deepStrictEqual(
         sent.map((entry) => entry.threadId),
         [fork.targetThreadId],

@@ -109,6 +109,8 @@ function ForkToMachineDialog({ threadRef }: { threadRef: ScopedThreadRef }) {
   const writeForkNote = useAtomCommand(threadEnvironment.writeForkNote, { reportFailure: false });
   const launch = useAtomCommand(threadEnvironment.launch, { reportFailure: false });
   const [message, setMessage] = useState<string | null>(null);
+  // The note describes this ref; the fork starts there even if the checkout moves on.
+  const [noteBaseRef, setNoteBaseRef] = useState<string | null>(null);
   const [busy, setBusy] = useState<"note" | "fork" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -130,13 +132,14 @@ function ForkToMachineDialog({ threadRef }: { threadRef: ScopedThreadRef }) {
       setError(failureMessage(result));
       return;
     }
+    setNoteBaseRef(branchState.baseRef);
     setMessage(
       forkFirstMessage({ note: result.value.note, sourceLabel, baseRef: branchState.baseRef }),
     );
   };
 
   const fork = async () => {
-    if (!ready || busy || message === null || message.trim().length === 0) return;
+    if (!ready || busy || message === null || noteBaseRef === null || !message.trim()) return;
     const modelSelection = forkModelSelection({
       selection: thread.modelSelection,
       sourceProviders: providersByEnvironment.get(threadRef.environmentId) ?? [],
@@ -162,7 +165,7 @@ function ForkToMachineDialog({ threadRef }: { threadRef: ScopedThreadRef }) {
         interactionMode: thread.interactionMode,
         workspaceStrategy: {
           type: "worktree",
-          baseRef: branchState.baseRef,
+          baseRef: noteBaseRef,
           startFromOrigin: true,
         },
         initialMessage: { messageId: newMessageId(), text: message, attachments: [] },
