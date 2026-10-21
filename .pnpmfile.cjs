@@ -32,17 +32,18 @@ module.exports = {
     },
     updateConfig(config) {
       const next = { ...config };
-      // Dev machines link packages from one shared copy in <storeDir>/links,
-      // so a worktree install takes seconds and a worktree delete is instant.
-      // CI keeps per-project stores: pnpm 12 honors an explicit setting there
-      // too, and a fresh runner has nothing to share. Windows is left out:
-      // WSL dev runs the server from the same node_modules, and store links
-      // across that boundary are untested.
-      // T3CODE_PNPM_GLOBAL_VIRTUAL_STORE=0 opts a dev machine out.
+      // T3CODE_PNPM_GLOBAL_VIRTUAL_STORE=1 links packages from one shared copy
+      // in <storeDir>/links, so a worktree install takes seconds and a
+      // worktree delete is instant. It is opt-in: types that import packages
+      // they never declare only resolve through pnpm's hoisted copies, which
+      // TypeScript cannot reach from the shared store. CI never uses it, since
+      // pnpm 12 honors an explicit setting there too. Windows is left out: WSL
+      // dev runs the server from the same node_modules, and store links across
+      // that boundary are untested.
       if (
+        process.env.T3CODE_PNPM_GLOBAL_VIRTUAL_STORE === "1" &&
         !process.env.CI &&
-        process.platform !== "win32" &&
-        process.env.T3CODE_PNPM_GLOBAL_VIRTUAL_STORE !== "0"
+        process.platform !== "win32"
       ) {
         next.virtualStoreType = "global";
       }
