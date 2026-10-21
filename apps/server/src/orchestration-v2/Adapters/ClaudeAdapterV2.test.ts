@@ -2797,6 +2797,114 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     );
   });
 
+  describe("forwarded Claude approval reasons", () => {
+    const callbackPayload = {
+      toolName: "Edit",
+      input: {
+        file_path: "/workspace/.claude/settings.json",
+        old_string: "false",
+        new_string: "true",
+      },
+      options: {
+        toolUseID: "tool-settings-edit",
+        requestId: "request-settings-edit",
+        description: "Edit /workspace/.claude/settings.json",
+        decisionReason: "Claude Code settings files require explicit approval.",
+        blockedPath: "/workspace/.claude/settings.json",
+      },
+    };
+
+    it.effect.each([
+      { runtimeMode: "full-access", withReason: true },
+      { runtimeMode: "approval-required", withReason: true },
+      { runtimeMode: "full-access", withReason: false },
+    ] as const)(
+      "renders callback reason=$withReason in $runtimeMode without replacing the tool title",
+      ({ runtimeMode, withReason }) =>
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("attempt-approval-reason"),
+              text: "Update project settings.",
+              attachments: [],
+              runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+                runtimeMode,
+                interactionMode: "default",
+                cwd: "/workspace",
+              }),
+            }),
+          );
+          assert.equal(
+            harness.getOpenedOptions()?.permissionMode,
+            runtimeMode === "full-access" ? "bypassPermissions" : "default",
+          );
+          const { decisionReason, ...options } = callbackPayload.options;
+          const decision = yield* Effect.promise((signal) =>
+            harness.getOpenedOptions()!.canUseTool!(
+              callbackPayload.toolName,
+              callbackPayload.input,
+              {
+                ...options,
+                ...(withReason ? { decisionReason } : {}),
+                signal,
+              },
+            ),
+          ).pipe(Effect.forkScoped);
+          const event = yield* Queue.take(harness.runtimeRequestReceipts);
+          yield* harness.until(() =>
+            harness.events.some(
+              (candidate) =>
+                candidate.type === "turn_item.updated" &&
+                candidate.turnItem.type === "approval_request" &&
+                candidate.turnItem.requestId === event.runtimeRequest.id,
+            ),
+          );
+          const itemEvent = harness.events.findLast(
+            (candidate) =>
+              candidate.type === "turn_item.updated" &&
+              candidate.turnItem.type === "approval_request" &&
+              candidate.turnItem.requestId === event.runtimeRequest.id,
+          );
+          assert.isDefined(itemEvent);
+          if (
+            itemEvent?.type !== "turn_item.updated" ||
+            itemEvent.turnItem.type !== "approval_request"
+          )
+            return;
+          const item = itemEvent.turnItem;
+          if (withReason) {
+            assert.include(item.prompt ?? "", decisionReason);
+            assert.equal(item.title, callbackPayload.options.description);
+            if (runtimeMode === "full-access") {
+              assert.include(
+                item.prompt ?? "",
+                "Full access is on, but Claude still requires approval",
+              );
+            } else {
+              assert.notInclude(item.prompt ?? "", "Full access is on");
+            }
+          } else {
+            assert.isNull(item.title);
+            assert.equal(item.prompt, callbackPayload.options.description);
+          }
+          yield* harness.runtime.respondToRuntimeRequest({
+            requestId: event.runtimeRequest.id,
+            decision: "decline",
+          });
+          assert.equal((yield* Fiber.join(decision))?.behavior, "deny");
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+    );
+  });
+
   describe("Plan-mode tool approval", () => {
     const openPlanTurn = Effect.fn("openPlanTurn")(function* (
       runtimeMode: "auto" | "full-access",

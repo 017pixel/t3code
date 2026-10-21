@@ -6347,6 +6347,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly nativeRequestId: string;
           readonly requestKind: OrchestrationV2RuntimeRequest["kind"];
           readonly prompt?: string;
+          readonly title?: string;
           readonly questions?: ReadonlyArray<OrchestrationV2UserInputQuestion>;
         }) {
           const createdAt = yield* DateTime.now;
@@ -6421,7 +6422,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             parentItemId: null,
             ordinal,
             status: "waiting",
-            title: null,
+            title: input.title ?? null,
             startedAt: createdAt,
             completedAt: null,
             updatedAt: createdAt,
@@ -8912,12 +8913,21 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             callbackOptions.description ??
             callbackOptions.decisionReason ??
             summarizeClaudeToolRequest(toolName, nativeToolInput);
+          const reason = callbackOptions.decisionReason?.trim();
+          const detail = reason
+            ? `${prompt}\n\n${
+                context.queryPolicy.permissionMode === "bypassPermissions"
+                  ? "Full access is on, but Claude still requires approval: "
+                  : ""
+              }${reason}`
+            : prompt;
           const artifacts = yield* buildApprovalRequestArtifacts({
             context,
             nativeItemId: nativeRequestId,
             nativeRequestId,
             requestKind,
-            prompt,
+            prompt: detail,
+            ...(reason ? { title: prompt } : {}),
           });
           const decision = yield* Deferred.make<ProviderApprovalDecision, never>();
           yield* Ref.update(pendingRuntimeRequests, (current) => {
