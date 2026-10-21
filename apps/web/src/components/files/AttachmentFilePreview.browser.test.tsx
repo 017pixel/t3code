@@ -2,7 +2,7 @@ import DocumentPages, { sanitizeDocumentHtml } from "./DocumentPages";
 import { act, render, stubGlobal, type Screen } from "../../../test/render";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import "~/index.css";
 
 const { refresh } = vi.hoisted(() => ({ refresh: vi.fn<() => Promise<string | null>>() }));
@@ -208,51 +208,65 @@ describe("bounded binary previews", () => {
     }
   });
 
-  it("shows stored and virtual generated SQLite columns", async () => {
-    const [{ default: initSqlJs }, { default: wasmUrl }] = await Promise.all([
-      import("sql.js"),
-      import("sql.js/dist/sql-wasm.wasm?url"),
-    ]);
-    const SQL = await initSqlJs({ locateFile: () => wasmUrl });
-    const database = new SQL.Database();
-    database.run(
-      "CREATE TABLE sqliteData (price INTEGER, quantity INTEGER, total INTEGER GENERATED ALWAYS AS (price * quantity) STORED, doubled INTEGER GENERATED ALWAYS AS (price * 2) VIRTUAL); INSERT INTO sqliteData(price, quantity) VALUES (7, 3); CREATE TABLE zzInventory (stock INTEGER); INSERT INTO zzInventory VALUES(42)",
-    );
-    const src = URL.createObjectURL(new Blob([new Uint8Array(database.export())]));
-    database.close();
-    try {
-      await using screen = await render(
-        <BinaryViewer src={src} name="orders.sqlite" kind="sqlite" />,
-      );
-      await vi.waitFor(
-        () =>
-          expect([...screen.container.querySelectorAll("th")].map((x) => x.textContent)).toEqual([
-            "price",
-            "quantity",
-            "total",
-            "doubled",
-          ]),
-        10_000,
-      );
-      expect([...screen.container.querySelectorAll("td")].map((x) => x.textContent)).toEqual([
-        "7",
-        "3",
-        "21",
-        "14",
+  it.each([320, 1280])(
+    "shows generated SQLite columns and retains picker focus at %i px",
+    async (width) => {
+      await page.viewport(width, 800);
+      const [{ default: initSqlJs }, { default: wasmUrl }] = await Promise.all([
+        import("sql.js"),
+        import("sql.js/dist/sql-wasm.wasm?url"),
       ]);
-      await act(() =>
-        screen.container.querySelector<HTMLButtonElement>('[aria-label="Table"]')!.click(),
+      const SQL = await initSqlJs({ locateFile: () => wasmUrl });
+      const database = new SQL.Database();
+      database.run(
+        "CREATE TABLE sqliteData (price INTEGER, quantity INTEGER, total INTEGER GENERATED ALWAYS AS (price * quantity) STORED, doubled INTEGER GENERATED ALWAYS AS (price * 2) VIRTUAL); INSERT INTO sqliteData(price, quantity) VALUES (7, 3); CREATE TABLE zzInventory (stock INTEGER); INSERT INTO zzInventory VALUES(42)",
       );
-      await page.getByRole("option", { name: "zzInventory (1 rows)" }).click();
-      await vi.waitFor(() =>
+      const src = URL.createObjectURL(new Blob([new Uint8Array(database.export())]));
+      database.close();
+      try {
+        await using screen = await render(
+          <BinaryViewer src={src} name="orders.sqlite" kind="sqlite" />,
+        );
+        await vi.waitFor(
+          () =>
+            expect([...screen.container.querySelectorAll("th")].map((x) => x.textContent)).toEqual([
+              "price",
+              "quantity",
+              "total",
+              "doubled",
+            ]),
+          10_000,
+        );
         expect([...screen.container.querySelectorAll("td")].map((x) => x.textContent)).toEqual([
-          "42",
-        ]),
-      );
-    } finally {
-      URL.revokeObjectURL(src);
-    }
-  });
+          "7",
+          "3",
+          "21",
+          "14",
+        ]);
+        const trigger = screen.container.querySelector<HTMLButtonElement>('[aria-label="Table"]')!;
+        await act(() => trigger.focus());
+        await userEvent.keyboard("{Enter}");
+        await expect
+          .element(page.getByRole("option", { name: "zzInventory (1 rows)" }))
+          .toBeVisible();
+        await userEvent.keyboard("{ArrowDown}{Enter}");
+        await vi.waitFor(() =>
+          expect([...screen.container.querySelectorAll("td")].map((x) => x.textContent)).toEqual([
+            "42",
+          ]),
+        );
+        await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
+        await userEvent.keyboard("{Enter}");
+        await expect
+          .element(page.getByRole("option", { name: "zzInventory (1 rows)" }))
+          .toBeVisible();
+        await userEvent.keyboard("{Escape}");
+      } finally {
+        URL.revokeObjectURL(src);
+        await page.viewport(1280, 800);
+      }
+    },
+  );
 
   it("reauthorizes a failed image when retry is clicked", async () => {
     const image =
