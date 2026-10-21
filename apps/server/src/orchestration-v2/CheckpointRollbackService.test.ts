@@ -22,6 +22,7 @@ import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Deferred from "effect/Deferred";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -559,6 +560,7 @@ const seedRollbackHistory = Effect.gen(function* () {
   }
 
   const rollbackCounts: number[] = [];
+  const interrupted: ProviderTurnId[] = [];
   const restored: CheckpointId[] = [];
   const deletedRefs: CheckpointId[] = [];
   const committed: OrchestrationV2DomainEvent[] = [];
@@ -601,6 +603,10 @@ const seedRollbackHistory = Effect.gen(function* () {
                   rollbackCounts.push(yield* resolveCodexRollbackTurnCount(input));
                   return { providerThread: input.providerThread };
                 }),
+              interruptTurn: (input: ProviderAdapter.ProviderAdapterV2InterruptInput) =>
+                Effect.sync(() => {
+                  interrupted.push(input.providerTurnId);
+                }),
             } as never),
         }),
         Layer.mock(RuntimePolicy.RuntimePolicyV2)({ resolve: () => Effect.succeed({} as never) }),
@@ -621,12 +627,21 @@ const seedRollbackHistory = Effect.gen(function* () {
   return {
     store,
     now,
+    apply,
     threadId,
+    providerThreadId,
+    providerInstanceId,
+    driver,
+    modelSelection,
+    scopeId,
     runId,
     nodeId,
+    attemptId,
+    turnId,
     checkpointId,
     rollback,
     rollbackCounts,
+    interrupted,
     restored,
     deletedRefs,
     committed,
@@ -729,6 +744,75 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
             [history.checkpointId(0), history.checkpointId(8)],
           );
         }),
+    );
+
+    it.effect("does not leave a run that is still streaming alive in the provider", () =>
+      Effect.gen(function* () {
+        const history = yield* seedRollbackHistory;
+        const { now, runId, nodeId, attemptId, turnId } = history;
+        yield* history.apply({
+          type: "run.created",
+          payload: {
+            id: runId(8),
+            threadId: history.threadId,
+            ordinal: 8,
+            providerInstanceId: history.providerInstanceId,
+            modelSelection: history.modelSelection,
+            providerThreadId: history.providerThreadId,
+            userMessageId: MessageId.make("rollback-history-message-8"),
+            rootNodeId: nodeId(8),
+            activeAttemptId: attemptId(8),
+            status: "running",
+            requestedAt: now,
+            startedAt: now,
+            completedAt: null,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+        });
+        yield* history.apply({
+          type: "run-attempt.created",
+          runId: runId(8),
+          payload: {
+            id: attemptId(8),
+            runId: runId(8),
+            attemptOrdinal: 1,
+            rootNodeId: nodeId(8),
+            providerInstanceId: history.providerInstanceId,
+            providerThreadId: history.providerThreadId,
+            providerTurnId: turnId(8),
+            reason: "initial",
+            status: "running",
+            startedAt: now,
+            completedAt: null,
+          },
+        });
+        yield* history.apply({
+          type: "provider-turn.updated",
+          payload: {
+            id: turnId(8),
+            providerThreadId: history.providerThreadId,
+            nodeId: nodeId(8),
+            runAttemptId: attemptId(8),
+            nativeTurnRef: {
+              driver: history.driver,
+              nativeId: "native-turn-8",
+              strength: "strong",
+            },
+            ordinal: 16,
+            status: "running",
+            startedAt: now,
+            completedAt: null,
+          },
+        });
+
+        const exit = yield* Effect.exit(history.rollback(6));
+
+        assert.isTrue(
+          Exit.isFailure(exit) || history.interrupted.includes(turnId(8)),
+          "rolling back past a running run succeeded without interrupting its provider turn, so the native turn keeps streaming",
+        );
+      }),
     );
   },
 );
