@@ -211,6 +211,49 @@ describe("server ownership", () => {
     }).pipe(Effect.provide(layerOwnership)),
   );
 
+  it.effect("warns against deleting the lock when refusing a second owner", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-owner-message-" });
+      const statePath = path.join(root, "server-runtime.json");
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ServerOwnership.acquireServerOwnership(statePath);
+          const refused = yield* ServerOwnership.acquireServerOwnership(statePath).pipe(
+            Effect.flip,
+          );
+          assert.equal(refused._tag, "ServerAlreadyRunningError");
+          assert.match(refused.message, /server-owner\.sqlite/);
+          assert.match(refused.message, /never delete|do not delete|don't delete/i);
+        }),
+      );
+    }).pipe(Effect.provide(layerOwnership)),
+  );
+
+  it.effect("stops publishing as owner once its lock file is removed or replaced", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-owner-unlinked-" });
+      const statePath = path.join(root, "server-runtime.json");
+      const lockPath = path.join(root, "server-owner.sqlite");
+      const state = yield* makeState;
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const owner = yield* ServerOwnership.acquireServerOwnership(statePath);
+          yield* owner.publish(state);
+          // The lock now protects a deleted inode, as after `rm -f server-owner.sqlite*`.
+          yield* fs.remove(lockPath);
+          assert.equal((yield* owner.publish(state).pipe(Effect.result))._tag, "Failure");
+          // A second server can now lock a fresh file in the same home.
+          yield* ServerOwnership.acquireServerOwnership(statePath);
+          assert.equal((yield* owner.publish(state).pipe(Effect.result))._tag, "Failure");
+        }),
+      );
+    }).pipe(Effect.provide(layerOwnership)),
+  );
+
   it.effect("never removes a runtime record another server published", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
