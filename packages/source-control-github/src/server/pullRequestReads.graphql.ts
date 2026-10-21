@@ -1605,6 +1605,10 @@ export const NodesCheckRun = Schema.Struct({
   status: GraphQL.enumLiterals(Shared.CheckStatusState.literals),
   /** The conclusion of the check run. */
   conclusion: Schema.NullOr(GraphQL.enumLiterals(Shared.CheckConclusionState.literals)),
+  /** Identifies the date and time when the check run was started. */
+  startedAt: Schema.NullOr(Shared.DateTime),
+  /** Identifies the date and time when the check run was completed. */
+  completedAt: Schema.NullOr(Shared.DateTime),
   /** The check suite that this run is a part of. */
   checkSuite: CheckSuite
 })
@@ -1682,7 +1686,7 @@ export const BranchCheckHistory = GraphQL.query("BranchCheckHistory", {
       { name: "ref", body: "String!" }
     ],
     selections: [
-      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){ref(qualifiedName:$", "ref", "){target{__typename...on Commit{history(first:20){nodes{statusCheckRollup{contexts(first:100){nodes{__typename...on StatusContext{context state}...on CheckRun{name status conclusion checkSuite{workflowRun{workflow{name}}}}}}}}}}}}}"] }
+      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){ref(qualifiedName:$", "ref", "){target{__typename...on Commit{history(first:20){nodes{statusCheckRollup{contexts(first:100){nodes{__typename...on StatusContext{context state}...on CheckRun{name status conclusion startedAt completedAt checkSuite{workflowRun{workflow{name}}}}}}}}}}}}}"] }
     ],
     fragments: []
   },

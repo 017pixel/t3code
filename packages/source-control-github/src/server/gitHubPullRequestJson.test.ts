@@ -1675,11 +1675,19 @@ describe("pull request watch fingerprints", () => {
 
 describe("branch check history", () => {
   it("takes each check's newest finished run, past reruns and commits CI did not run on", () => {
-    const run = (name: string, status: string, conclusion: string | null, workflow = "CI") => ({
+    const run = (
+      name: string,
+      status: string,
+      conclusion: string | null,
+      workflow = "CI",
+      completedAt: string | null = null,
+    ) => ({
       __typename: "CheckRun",
       name,
       status,
       conclusion,
+      startedAt: null,
+      completedAt,
       checkSuite: { workflowRun: { workflow: { name: workflow } } },
     });
     const commit = (contexts: ReadonlyArray<unknown> | null) => ({
@@ -1696,6 +1704,11 @@ describe("branch check history", () => {
                 commit(null),
                 // A rerun still going must not hide the run that finished on the same commit.
                 commit([run("build", "IN_PROGRESS", null), run("build", "COMPLETED", "SUCCESS")]),
+                // Of two finished runs on one commit, the later one answers, whatever the order.
+                commit([
+                  run("e2e", "COMPLETED", "SUCCESS", "CI", "2026-10-21T02:00:00Z"),
+                  run("e2e", "COMPLETED", "FAILURE", "CI", "2026-10-21T01:00:00Z"),
+                ]),
                 commit([
                   run("lint", "COMPLETED", "FAILURE"),
                   run("test", "COMPLETED", "FAILURE"),
@@ -1713,7 +1726,7 @@ describe("branch check history", () => {
     });
     expect(toBranchChecks(result)).toEqual({
       failing: ["lint", "CI / pack"],
-      passing: ["test", "build", "Release / pack"],
+      passing: ["test", "build", "e2e", "Release / pack"],
     });
     expect(
       toBranchChecks(Schema.decodeUnknownSync(BranchCheckHistory.result)({ repository: null })),

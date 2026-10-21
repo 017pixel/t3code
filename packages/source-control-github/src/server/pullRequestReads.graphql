@@ -582,6 +582,8 @@ query BranchCheckHistory($owner: String!, $name: String!, $ref: String!) {
                       name
                       status
                       conclusion
+                      startedAt
+                      completedAt
                       checkSuite {
                         workflowRun {
                           workflow {
