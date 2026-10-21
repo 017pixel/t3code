@@ -67,7 +67,7 @@ export class MigrateDevDbLegacySourceError extends Schema.TaggedError<MigrateDev
   },
 ) {
   override get message(): string {
-    return `Source database '${this.sourcePath}' predates the V2 thread tables and holds ${this.legacyThreads} legacy threads, which this command cannot carry over. Start a server on a copy of it once so it imports them, then use that copy as --source.`;
+    return `Source database '${this.sourcePath}' holds ${this.legacyThreads} legacy threads the server has not imported into V2 yet, which this command cannot carry over. Start a server once on a T3 home holding a copy of it so it imports them, then pass the userdata/statev2.sqlite that server leaves behind as --source.`;
   }
 }
 
@@ -237,20 +237,33 @@ const rootIsVisible = (sql: SqlClient.SqlClient) => sql`
 
 /**
  * The server imports V1 threads into the V2 tables at runtime, not in a
- * migration, so a pre-V2 source would migrate cleanly into a database with
- * no threads at all.
+ * migration, and the copy keeps only threads that already have V2 rows, so a
+ * source with unimported threads would migrate cleanly and silently lose them.
+ * Mirrors the first half of LegacyV1ThreadImporter's pendingThreadCount; the
+ * other half (lazy transcript imports) survives the copy.
  */
-const ensureSourceIsV2 = Effect.fn("ensureDevDbSourceIsV2")(function* (sourcePath: string) {
+const ensureNoPendingLegacyThreads = Effect.fn("ensureDevDbNoPendingLegacyThreads")(function* (
+  sourcePath: string,
+) {
   const sql = yield* SqlClient.SqlClient;
   const tables = yield* sql<{ name: string }>`
     SELECT name FROM sqlite_master WHERE type = 'table'
       AND name IN ('projection_threads', 'orchestration_v2_projection_threads')`;
   const names = new Set(tables.map((table) => table.name));
-  if (names.has("orchestration_v2_projection_threads") || !names.has("projection_threads")) {
-    return;
-  }
-  const [legacy] = yield* sql<{ count: number }>`SELECT COUNT(*) AS count FROM projection_threads`;
-  const legacyThreads = Number(legacy?.count ?? 0);
+  if (!names.has("projection_threads")) return;
+  // The V2 tables and application_event_version arrive in the same migration.
+  const [pending] = names.has("orchestration_v2_projection_threads")
+    ? yield* sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM projection_threads AS thread
+        WHERE NOT EXISTS (
+          SELECT 1 FROM orchestration_events AS event
+          WHERE event.application_event_version = 2
+            AND event.aggregate_kind = 'thread'
+            AND event.stream_id = thread.thread_id
+            AND event.event_type = 'thread.created'
+        )`
+    : yield* sql<{ count: number }>`SELECT COUNT(*) AS count FROM projection_threads`;
+  const legacyThreads = Number(pending?.count ?? 0);
   if (legacyThreads > 0) {
     return yield* new MigrateDevDbLegacySourceError({ sourcePath, legacyThreads });
   }
@@ -497,7 +510,7 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
   }
 
   // Before ensureNotInUse, whose checkpoint already rewrites the destination.
-  yield* ensureSourceIsV2(sourcePath).pipe(
+  yield* ensureNoPendingLegacyThreads(sourcePath).pipe(
     Effect.provide(NodeSqliteClient.layer({ filename: sourcePath, readonly: true })),
     Effect.catchTags({
       SqlError: (cause) =>

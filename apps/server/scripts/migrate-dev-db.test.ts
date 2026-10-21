@@ -9,9 +9,9 @@ import { runMigrations } from "../src/persistence/Migrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { runMigrateDevDb } from "./migrate-dev-db.ts";
 
-const withDatabase = <A, E>(
+const withDatabase = <A, E, R>(
   databasePath: string,
-  effect: Effect.Effect<A, E, SqlClient.SqlClient>,
+  effect: Effect.Effect<A, E, R | SqlClient.SqlClient>,
 ) => effect.pipe(Effect.provide(NodeSqliteClient.layer({ filename: databasePath })));
 
 const createFixtureSource = Effect.fn("createMigrateDevDbFixtureSource")(function* (
@@ -69,9 +69,14 @@ const createFixtureSource = Effect.fn("createMigrateDevDbFixtureSource")(functio
           (run_id, thread_id, ordinal, provider, status, requested_at, payload_json)
           VALUES (${`run-${threadId}`}, ${threadId}, 1, 'codex', ${runStatus}, '2026-08-01', '{}')`;
         yield* sql`INSERT INTO orchestration_events
-          (event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at, actor_kind, payload_json, metadata_json)
-          VALUES (${`event-${threadId}`}, 'thread', ${threadId}, 0, 'thread.created', '2026-08-01', 'user', '{}', '{}')`;
+          (event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at, actor_kind, payload_json, metadata_json, application_event_version)
+          VALUES (${`event-${threadId}`}, 'thread', ${threadId}, 0, 'thread.created', '2026-08-01', 'user', '{}', '{}', 2)`;
       }
+      // A V1 thread the server already imported must not trip the legacy guard.
+      yield* sql`INSERT INTO projection_threads
+        (thread_id, project_id, title, model_selection_json, runtime_mode, created_at, updated_at)
+        VALUES ('stopped-thread', 'project-kept', 'stopped-thread',
+          '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', '2026-08-01', '2026-08-01')`;
       yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions
         (provider_session_id, thread_id, provider, status, updated_at, payload_json)
         VALUES ('session-shared', 'running-thread', 'codex', 'stopped', '2026-08-01', '{}')`;
@@ -228,12 +233,19 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
     }),
   );
 
-  it.effect("refuses a pre-V2 source that still holds legacy threads", () =>
+  // The server imports V1 threads at boot, not in a migration, so a source can
+  // reach the V2 schema with its legacy threads still unimported.
+  it.effect.each([
+    { name: "a pre-V2 source", migrateToLatest: false },
+    { name: "a V2 source whose legacy threads were never imported", migrateToLatest: true },
+  ])("refuses $name", ({ migrateToLatest }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-v1-data-" });
-      const destDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-v1-data-dest-" });
+      const destDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "migrate-dev-db-v1-data-dest-",
+      });
       const stateDir = path.join(sourceDir, "userdata");
       const source = path.join(stateDir, "statev2.sqlite");
       yield* fs.makeDirectory(stateDir, { recursive: true });
@@ -249,6 +261,7 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
             (thread_id, project_id, title, model_selection_json, runtime_mode, created_at, updated_at)
             VALUES ('thread-legacy', 'project-legacy', 'Legacy thread',
               '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', '2026-08-01', '2026-08-01')`;
+          if (migrateToLatest) yield* runMigrations();
         }),
       );
 
