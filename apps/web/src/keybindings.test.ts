@@ -699,18 +699,17 @@ describe("resolveShortcutCommand", () => {
     },
   );
 
-  it("matches punctuation shortcuts by physical key across keyboard layouts", () => {
+  it("matches punctuation shortcuts by layout while preserving US shifted glyphs", () => {
     const keybindings = compile([
       { shortcut: modShortcut("'", { shiftKey: true }), command: "diff.toggle" },
     ]);
 
-    assert.strictEqual(
+    assert.isNull(
       resolveShortcutCommand(
         event({ key: "@", code: "Quote", metaKey: true, shiftKey: true }),
         keybindings,
         { platform: "MacIntel" },
       ),
-      "diff.toggle",
     );
     assert.isNull(
       resolveShortcutCommand(
@@ -718,6 +717,37 @@ describe("resolveShortcutCommand", () => {
         keybindings,
         { platform: "MacIntel" },
       ),
+    );
+    assert.strictEqual(
+      resolveShortcutCommand(
+        event({ key: '"', code: "Quote", metaKey: true, shiftKey: true }),
+        keybindings,
+        { platform: "MacIntel" },
+      ),
+      "diff.toggle",
+    );
+  });
+
+  it("matches custom layout punctuation independently of its physical position", () => {
+    const keybindings = compile([{ shortcut: modShortcut("+"), command: "diff.toggle" }]);
+    assert.strictEqual(
+      resolveShortcutCommand(
+        event({ key: "+", code: "BracketRight", ctrlKey: true }),
+        keybindings,
+        { platform: "Linux" },
+      ),
+      "diff.toggle",
+    );
+  });
+
+  it("retains physical punctuation fallback for non-printable key values", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(
+        event({ key: "Unidentified", code: "BracketRight", ctrlKey: true }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "Linux" },
+      ),
+      "navigation.forward",
     );
   });
 

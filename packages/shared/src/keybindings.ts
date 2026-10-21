@@ -101,7 +101,16 @@ export function resolveEventKeys(event: ShortcutEventLike): Set<string> {
   if (letterCode && !/^[a-z]$/.test(layoutKey)) {
     keys.add(letterCode.toLowerCase());
   }
-  keys.add(shortcutKeyFromEvent(event));
+  const physicalKey = shortcutKeyFromEvent(event);
+  // Printable punctuation follows the layout, except for modifier-produced
+  // glyphs and US shifted keys such as Shift+] producing }.
+  if (
+    layoutKey.length !== 1 ||
+    event.altKey ||
+    (event.shiftKey && US_SHIFTED_TO_UNSHIFTED_KEYS.get(layoutKey) === physicalKey)
+  ) {
+    keys.add(physicalKey);
+  }
   return keys;
 }
 
