@@ -3793,7 +3793,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           LEFT JOIN orchestration_v2_projection_turn_items latest_failure_error
             ON latest_failure_error.turn_item_id = (
               SELECT error.turn_item_id FROM orchestration_v2_projection_turn_items error
-              WHERE error.run_id = latest_failure.run_id
+              WHERE error.thread_id = t.thread_id
+                AND error.run_id = latest_failure.run_id
                 AND error.node_id IS json_extract(latest_failure.payload_json, '$.rootNodeId')
                 AND error.type = 'error' AND error.status = 'failed'
               ORDER BY error.updated_at DESC, error.ordinal DESC, error.turn_item_id DESC
@@ -5846,7 +5847,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             LEFT JOIN orchestration_v2_projection_turn_items latest_failure_error
               ON latest_failure_error.turn_item_id = (
                 SELECT error.turn_item_id FROM orchestration_v2_projection_turn_items error
-                WHERE error.run_id = latest_failure.run_id
+                WHERE error.thread_id = t.thread_id
+                  AND error.run_id = latest_failure.run_id
                   AND error.node_id IS json_extract(latest_failure.payload_json, '$.rootNodeId')
                   AND error.type = 'error' AND error.status = 'failed'
                 ORDER BY error.updated_at DESC, error.ordinal DESC, error.turn_item_id DESC
