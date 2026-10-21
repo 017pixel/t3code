@@ -1670,22 +1670,34 @@ export function presentThreadShellFromProjection(
   };
 }
 
-/** Background work the provider still runs after the latest run ended. */
+const LIVE_RUN_STATUSES = new Set(["queued", "preparing", "starting", "running"]);
+
+/**
+ * Background work the provider still runs after an earlier run ended. It
+ * stays listed while a later run is live; that live run's own items are its
+ * foreground work, so they never count as background.
+ */
 export function deriveThreadPendingBackgroundTasks(projection: ThreadProjection | null) {
   if (projection === null) return [];
   const sessionError =
     projection.providerSessions.findLast(
       (session) => session.providerInstanceId === projection.thread.providerInstanceId,
     )?.lastError ?? null;
+  const liveRunIds = new Set(
+    projection.runs.filter((run) => LIVE_RUN_STATUSES.has(run.status)).map((run) => run.id),
+  );
   const latestRun =
     usageLimitRunPresentedAsLatest(projection.runs, projection.turnItems, sessionError) ??
-    latestUnheldRun(projection.runs);
+    latestUnheldRun(projection.runs.filter((run) => !liveRunIds.has(run.id)));
   return [
     ...derivePendingBackgroundWork({
       latestRun,
       providerThreads: projection.providerThreads,
-      turnItems: projection.turnItems,
+      turnItems: projection.turnItems.filter(
+        (item) => item.runId === null || !liveRunIds.has(item.runId),
+      ),
       activeProviderThreadId: projection.thread.activeProviderThreadId,
+      hasActiveRun: false,
       runs: projection.runs,
       pullRequests: projection.thread.pullRequests,
     }),
