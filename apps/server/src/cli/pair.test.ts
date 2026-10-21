@@ -303,15 +303,39 @@ describe("t3 pair", () => {
     ).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it("does not suggest a command built from an unsafe server version", () => {
-    const message = new IncompatibleServerError({
-      serverVersion: "0.0.45; rm -rf ~",
-      protocolVersion: 1,
-    }).message;
+  it.effect("does not print or suggest a command built from an unsafe server version", () =>
+    withDescriptorServer(
+      (origin) =>
+        Effect.gen(function* () {
+          const baseDir = NodeFS.mkdtempSync(
+            NodePath.join(NodeOS.tmpdir(), "t3-pair-protocol-test-"),
+          );
+          yield* persistServerRuntimeState({
+            path: NodePath.join(baseDir, "userdata", "server-runtime.json"),
+            state: yield* makePersistedServerRuntimeState({
+              config: { host: "127.0.0.1", devUrl: undefined },
+              port: Number(new URL(origin).port),
+            }),
+          });
 
-    expect(message).toContain("Pair with the server's own CLI.");
-    expect(message).not.toContain("npx t3@");
-  });
+          const error = yield* provideCliTestLayers(
+            runCli(["pair", "--base-dir", baseDir]).pipe(Effect.flip),
+          );
+
+          assert.instanceOf(error, IncompatibleServerError);
+          assert.isUndefined(error.serverVersion);
+          assert.include(error.message, "Pair with the server's own CLI.");
+          assert.notInclude(error.message, "npx t3@");
+          assert.notInclude(error.message, "\u001b");
+        }),
+      "127.0.0.1",
+      {
+        ...testDescriptor,
+        serverVersion: "0.0.45\u001b[2J; rm -rf ~",
+        orchestrationProtocolVersion: 1,
+      },
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   it.effect("ignores runtime state whose recorded pid is no longer alive", () =>
     withDescriptorServer((origin) =>

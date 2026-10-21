@@ -132,16 +132,22 @@ export class ServePortOccupiedError extends Schema.TaggedError<ServePortOccupied
   }
 }
 
+// The server version comes from the network. Only a plain version is safe to print and to put
+// into a command the user copies.
+const PLAIN_VERSION = /^[\w.+-]{1,64}$/;
+
 export class IncompatibleServerError extends Schema.TaggedError<IncompatibleServerError>()(
   "IncompatibleServerError",
-  { serverVersion: Schema.String, protocolVersion: Schema.Number },
+  { serverVersion: Schema.UndefinedOr(Schema.String), protocolVersion: Schema.Number },
 ) {
   override get message(): string {
-    // serverVersion comes from the network, so only put a plain version into a copyable command.
-    const command = /^[\w.+-]+$/.test(this.serverVersion)
-      ? `: \`npx t3@${this.serverVersion} pair\``
-      : "";
-    return `The running T3 Code server (${this.serverVersion}) uses orchestration protocol ${String(this.protocolVersion)}, but this CLI uses protocol ${String(ORCHESTRATION_PROTOCOL_VERSION)}, so its pairing token would not work. Pair with the server's own CLI${command}.`;
+    const server =
+      this.serverVersion === undefined
+        ? "The running T3 Code server"
+        : `The running T3 Code server (${this.serverVersion})`;
+    const command =
+      this.serverVersion === undefined ? "" : `: \`npx t3@${this.serverVersion} pair\``;
+    return `${server} uses orchestration protocol ${String(this.protocolVersion)}, but this CLI uses protocol ${String(ORCHESTRATION_PROTOCOL_VERSION)}, so its pairing token would not work. Pair with the server's own CLI${command}.`;
   }
 }
 
@@ -512,7 +518,9 @@ export const pairCommand = Command.make("pair", {
       const protocolVersion = target.descriptor.orchestrationProtocolVersion ?? 1;
       if (protocolVersion !== ORCHESTRATION_PROTOCOL_VERSION) {
         return yield* new IncompatibleServerError({
-          serverVersion: target.descriptor.serverVersion,
+          serverVersion: PLAIN_VERSION.test(target.descriptor.serverVersion)
+            ? target.descriptor.serverVersion
+            : undefined,
           protocolVersion,
         });
       }
