@@ -1953,12 +1953,46 @@ describe("OrchestratorMcpService provider resolution", () => {
 
       it.live.each(["create", "update"] as const)(
         "%s resolves the advertised master default without cached remote HEAD",
-        (operation) => checkWorkspaceStrategy(operation, "master", false, true, false),
+        (operation) =>
+          checkWorkspaceStrategy(operation, "master", false, { cacheRemoteHead: false }),
       );
 
       it.live.each(["create", "update"] as const)(
         "%s uses local main without a remote",
-        (operation) => checkWorkspaceStrategy(operation, "main", false, false),
+        (operation) => checkWorkspaceStrategy(operation, "main", false, { hasRemote: false }),
+      );
+
+      it.live.each([
+        { operation: "create", cacheRemoteHead: true },
+        { operation: "update", cacheRemoteHead: true },
+        { operation: "create", cacheRemoteHead: false },
+        { operation: "update", cacheRemoteHead: false },
+      ] as const)(
+        "$operation fetches upstream master without a local default (cached HEAD: $cacheRemoteHead)",
+        ({ operation, cacheRemoteHead }) =>
+          checkWorkspaceStrategy(operation, "master", false, {
+            remoteName: "upstream",
+            removeLocalDefault: true,
+            cacheRemoteHead,
+          }),
+      );
+
+      it.live.each(["create", "update"] as const)(
+        "%s saves using local main when the remote is unreachable and HEAD is uncached",
+        (operation) =>
+          checkWorkspaceStrategy(operation, "main", false, {
+            cacheRemoteHead: false,
+            unreachableRemote: true,
+          }),
+      );
+
+      it.live.each(["create", "update"] as const)(
+        "%s uses local main when the reachable remote advertises no HEAD symref",
+        (operation) =>
+          checkWorkspaceStrategy(operation, "main", false, {
+            cacheRemoteHead: false,
+            missingRemoteHead: true,
+          }),
       );
 
       const checkWorkspaceStrategy = Effect.fn("test.checkScheduledTaskWorkspace")(
@@ -1966,9 +2000,23 @@ describe("OrchestratorMcpService provider resolution", () => {
           operation: "create" | "update",
           defaultBranch: string,
           bindToCurrentThread: boolean | undefined,
-          hasRemote = true,
-          cacheRemoteHead = true,
+          options: {
+            hasRemote?: boolean;
+            cacheRemoteHead?: boolean;
+            remoteName?: string;
+            removeLocalDefault?: boolean;
+            unreachableRemote?: boolean;
+            missingRemoteHead?: boolean;
+          } = {},
         ) {
+          const {
+            hasRemote = true,
+            cacheRemoteHead = true,
+            remoteName = "origin",
+            removeLocalDefault = false,
+            unreachableRemote = false,
+            missingRemoteHead = false,
+          } = options;
           const fs = yield* FileSystem.FileSystem;
           const directory = yield* fs.makeTempDirectoryScoped({ prefix: "scheduled-workspace-" });
           const workspaceRoot = `${directory}/project`;
@@ -1982,7 +2030,7 @@ describe("OrchestratorMcpService provider resolution", () => {
               `--initial-branch=${defaultBranch}`,
               "origin.git",
             ]);
-            yield* runGit(directory, ["clone", "origin.git", "project"]);
+            yield* runGit(directory, ["clone", "--origin", remoteName, "origin.git", "project"]);
           } else {
             yield* runGit(directory, ["init", `--initial-branch=${defaultBranch}`, "project"]);
           }
@@ -1997,19 +2045,19 @@ describe("OrchestratorMcpService provider resolution", () => {
             "initial",
           ]);
           if (hasRemote) {
-            yield* runGit(workspaceRoot, ["push", "-u", "origin", defaultBranch]);
+            yield* runGit(workspaceRoot, ["push", "-u", remoteName, defaultBranch]);
             const head = yield* git.execute({
               operation: "test.remoteHead",
               cwd: workspaceRoot,
-              args: ["symbolic-ref", "refs/remotes/origin/HEAD"],
+              args: ["symbolic-ref", `refs/remotes/${remoteName}/HEAD`],
               allowNonZeroExit: true,
             });
             assert.notEqual(head.exitCode, 0);
             if (cacheRemoteHead) {
               yield* runGit(workspaceRoot, [
                 "symbolic-ref",
-                "refs/remotes/origin/HEAD",
-                `refs/remotes/origin/${defaultBranch}`,
+                `refs/remotes/${remoteName}/HEAD`,
+                `refs/remotes/${remoteName}/${defaultBranch}`,
               ]);
             }
           }
@@ -2024,6 +2072,34 @@ describe("OrchestratorMcpService provider resolution", () => {
             "-m",
             "feature only",
           ]);
+          const defaultHead = yield* git.resolveCommit({
+            cwd: workspaceRoot,
+            revision: defaultBranch,
+          });
+          if (removeLocalDefault) {
+            yield* runGit(workspaceRoot, ["branch", "-D", defaultBranch]);
+            yield* runGit(workspaceRoot, [
+              "update-ref",
+              "-d",
+              `refs/remotes/${remoteName}/${defaultBranch}`,
+            ]);
+          }
+          if (missingRemoteHead) {
+            yield* runGit(directory, [
+              "--git-dir=origin.git",
+              "symbolic-ref",
+              "HEAD",
+              "refs/heads/missing",
+            ]);
+          }
+          if (unreachableRemote) {
+            yield* runGit(workspaceRoot, [
+              "remote",
+              "set-url",
+              remoteName,
+              `${directory}/missing.git`,
+            ]);
+          }
           const shell = {
             ...liveThreadShell(boundThreadId, { runtimeMode: "approval-required" }),
             projectId,
@@ -2108,30 +2184,55 @@ describe("OrchestratorMcpService provider resolution", () => {
               ? explicitWorkspace
               : bindToCurrentThread
                 ? { type: "root" }
-                : { type: "worktree", baseRef: defaultBranch, startFromOrigin: true },
+                : {
+                    type: "worktree",
+                    baseRef:
+                      hasRemote && !unreachableRemote && !missingRemoteHead
+                        ? `refs/remotes/${remoteName}/${defaultBranch}`
+                        : defaultBranch,
+                    startFromOrigin: true,
+                  },
           );
           if (bindToCurrentThread === false) {
             const strategy = inputs[0]!.workspaceStrategy;
             assert.equal(strategy.type, "worktree");
             if (strategy.type === "worktree") {
-              const fetched = yield* git.fetchWorktreeBaseCommit({
+              // Saving offline must still permit a launch after connectivity returns.
+              if (unreachableRemote) {
+                yield* runGit(workspaceRoot, [
+                  "remote",
+                  "set-url",
+                  remoteName,
+                  `${directory}/origin.git`,
+                ]);
+              }
+              const target = yield* git.resolveWorktreeBaseRemote({
                 cwd: workspaceRoot,
                 refName: strategy.baseRef,
               });
-              yield* runGit(workspaceRoot, [
-                "worktree",
-                "add",
-                "--detach",
-                `${directory}/fresh`,
-                fetched?.commitSha ?? strategy.baseRef,
-              ]);
+              assert.deepEqual(
+                target,
+                hasRemote ? { remoteName, branchName: defaultBranch } : null,
+              );
+              const fetched =
+                target === null
+                  ? null
+                  : yield* git.fetchWorktreeBaseCommit({
+                      cwd: workspaceRoot,
+                      refName: strategy.baseRef,
+                    });
+              if (hasRemote) assert.isNotNull(fetched);
+              yield* git.createWorktree({
+                cwd: workspaceRoot,
+                path: `${directory}/fresh`,
+                newRefName: "feature/scheduled",
+                refName: fetched?.commitSha ?? strategy.baseRef,
+                baseRefName:
+                  fetched === null ? strategy.baseRef : `refs/remotes/${fetched.remoteRefName}`,
+              });
               const freshHead = yield* git.resolveCommit({
                 cwd: `${directory}/fresh`,
                 revision: "HEAD",
-              });
-              const defaultHead = yield* git.resolveCommit({
-                cwd: workspaceRoot,
-                revision: defaultBranch,
               });
               assert.equal(freshHead.commitSha, defaultHead.commitSha);
             }
