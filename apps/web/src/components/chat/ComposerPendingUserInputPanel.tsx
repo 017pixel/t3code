@@ -85,6 +85,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   const canRespond = prompt.responseCapability !== "not_resumable";
   const responseDisabled = disabled || isResponding || !canRespond;
   const autoAdvanceTimerRef = useRef<number | null>(null);
+  const spacePressedOptionRef = useRef<HTMLElement | null>(null);
   // The auto-advance timer fires after the render that armed it.
   const advance = useStableCallback(onAdvance);
   const [optimisticSingleSelect, setOptimisticSingleSelect] = useState<{
@@ -301,10 +302,25 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                       }
                       handleOptionSelection(activeQuestion.id, optionValue);
                     }}
+                    // Native button keys: Enter answers on keydown, Space on keyup, and
+                    // blurring while Space is held cancels it.
                     onKeyDown={(event) => {
-                      if (event.key !== "Enter" && event.key !== " ") return;
-                      event.preventDefault();
-                      handleOptionSelection(activeQuestion.id, optionValue);
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        handleOptionSelection(activeQuestion.id, optionValue);
+                      } else if (event.key === " ") {
+                        event.preventDefault();
+                        if (!event.repeat) spacePressedOptionRef.current = event.currentTarget;
+                      }
+                    }}
+                    onKeyUp={(event) => {
+                      if (event.key !== " ") return;
+                      const pressed = spacePressedOptionRef.current === event.currentTarget;
+                      spacePressedOptionRef.current = null;
+                      if (pressed) handleOptionSelection(activeQuestion.id, optionValue);
+                    }}
+                    onBlur={() => {
+                      spacePressedOptionRef.current = null;
                     }}
                     className={className}
                   >
