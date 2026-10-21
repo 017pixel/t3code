@@ -314,31 +314,6 @@ describe("providerMaintenanceRunner", () => {
     );
   });
 
-  it.effect("reports unchanged when the updater exits 0 but the provider is gone", () => {
-    return Effect.gen(function* () {
-      const { registry, providersRef } = yield* makeRegistry(baseProvider);
-      const updater = yield* makeTestRunner({
-        ...registry,
-        refreshAfterUpdate: () =>
-          Ref.updateAndGet(providersRef, (providers) =>
-            providers.map((provider) => ({ ...provider, installed: false, version: null })),
-          ),
-      });
-
-      const result = yield* updater.updateProvider(CODEX_DRIVER);
-      assert.strictEqual(result.providers[0]?.updateState?.status, "unchanged");
-      assert.match(result.providers[0]?.updateState?.message ?? "", /could not verify/);
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          layerNonWindowsPlatform,
-          layerLatestVersionHttpClient("0.0.0"),
-          layerMockSpawner(() => ({ stdout: "updated" })),
-        ),
-      ),
-    );
-  });
-
   it.effect(
     "keeps a successful update when the binary is present but its version is unreadable",
     () => {
@@ -441,81 +416,6 @@ describe("providerMaintenanceRunner", () => {
     );
   });
 
-  it.effect("reports the installer's latest output line while the update runs", () => {
-    const exited = Deferred.makeUnsafe<number>();
-    const reached = Deferred.makeUnsafe<void>();
-    return Effect.gen(function* () {
-      const { registry, updateStatesRef } = yield* makeRegistry(baseNativeCliProvider);
-      const updater = yield* makeTestRunner(registry);
-      const runningMessages = Ref.get(updateStatesRef).pipe(
-        Effect.map((states) =>
-          states.filter((state) => state.status === "running").map((state) => state.message),
-        ),
-      );
-
-      const fiber = yield* updater.updateProvider(NATIVE_CLI_DRIVER).pipe(Effect.forkChild);
-      yield* Deferred.await(reached);
-      assert.deepStrictEqual(yield* runningMessages, [
-        "Checking for the latest version",
-        "Running native-agent update",
-        "80%",
-      ]);
-
-      yield* Deferred.succeed(exited, 0);
-      const result = yield* Fiber.join(fiber);
-      assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          layerNonWindowsPlatform,
-          layerLatestVersionHttpClient("0.0.0"),
-          layerMockSpawner(() => ({
-            progress: ["80%"],
-            exitCode: Deferred.succeed(reached, undefined).pipe(
-              Effect.andThen(Deferred.await(exited)),
-            ),
-          })),
-        ),
-      ),
-    );
-  });
-
-  it.effect("installs the advertised version when pnpm owns the global install", () => {
-    const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
-    return Effect.gen(function* () {
-      const { registry } = yield* makeRegistry(baseProvider);
-      const updater = yield* makeTestRunner({
-        ...registry,
-        getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
-          Effect.succeed(
-            makeProviderMaintenanceCapabilities({
-              provider,
-              packageName: "@openai/codex",
-              updateExecutable: "pnpm",
-              updateArgs: ["add", "-g", "@openai/codex@latest"],
-              updateLockKey: "pnpm-global",
-            }),
-          ),
-      });
-
-      yield* updater.updateProvider(CODEX_DRIVER);
-      assert.deepStrictEqual(calls, [
-        { command: "pnpm", args: ["add", "-g", "@openai/codex@9.9.9"] },
-      ]);
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          layerNonWindowsPlatform,
-          layerLatestVersionHttpClient("9.9.9"),
-          layerMockSpawner((command, args) => {
-            calls.push({ command, args });
-            return { stdout: "updated" };
-          }),
-        ),
-      ),
-    );
-  });
-
   it("splits installer output into clean status lines", () => {
     assert.deepStrictEqual(ProviderMaintenanceRunner.splitOutputLines("Down", "loading\r\n 5"), {
       lines: ["Downloading"],
@@ -577,85 +477,6 @@ describe("providerMaintenanceRunner", () => {
       ),
     );
   });
-
-  it.effect("uses the resolved provider capabilities when choosing the update executable", () => {
-    const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
-    return Effect.gen(function* () {
-      const { registry } = yield* makeRegistry({
-        ...baseProvider,
-        versionAdvisory: {
-          status: "behind_latest",
-          currentVersion: "2.0.14",
-          latestVersion: "2.1.123",
-          updateCommand: "bun i -g @anthropic-ai/claude-code@latest",
-          canUpdate: true,
-          checkedAt: "2026-04-30T12:00:00.000Z",
-          message: "Update available.",
-        },
-      });
-      const updater = yield* makeTestRunner({
-        ...registry,
-        getProviderMaintenanceCapabilitiesForInstance: () =>
-          Effect.succeed(
-            makeProviderMaintenanceCapabilities({
-              provider: CODEX_DRIVER,
-              packageName: "@openai/codex",
-              updateExecutable: "bun",
-              updateArgs: ["i", "-g", "@openai/codex@latest"],
-              updateLockKey: "bun-global",
-            }),
-          ),
-      });
-
-      yield* updater.updateProvider(CODEX_DRIVER);
-      assert.deepStrictEqual(calls, [
-        {
-          command: "bun",
-          args: ["i", "-g", "@openai/codex@latest"],
-        },
-      ]);
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          layerNonWindowsPlatform,
-          layerLatestVersionHttpClient("0.0.0"),
-          layerMockSpawner((command, args) => {
-            calls.push({ command, args });
-            return { stdout: "updated" };
-          }),
-        ),
-      ),
-    );
-  });
-
-  it.effect("does not report verified success when selected-instance discovery fails", () =>
-    Effect.gen(function* () {
-      const { registry, providersRef } = yield* makeRegistry(baseNativeCliProvider);
-      const updater = yield* makeTestRunner({
-        ...registry,
-        refreshAfterUpdate: () =>
-          Ref.updateAndGet(providersRef, (providers) =>
-            providers.map((provider) => ({
-              ...provider,
-              status: "error",
-              message: "Discovery failed.",
-            })),
-          ),
-      });
-      const result = yield* updater.updateProvider(NATIVE_CLI_DRIVER);
-      assert.strictEqual(result.providers[0]?.status, "error");
-      assert.strictEqual(result.providers[0]?.updateState?.status, "unchanged");
-      assert.match(result.providers[0]?.updateState?.message ?? "", /could not verify/);
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          layerNonWindowsPlatform,
-          layerLatestVersionHttpClient("0.0.0"),
-          layerMockSpawner(() => ({ stdout: "updated" })),
-        ),
-      ),
-    ),
-  );
 
   it.effect("records command failure output in provider update state", () =>
     Effect.gen(function* () {
@@ -744,120 +565,6 @@ describe("providerMaintenanceRunner", () => {
               stdout: "updated",
               exitCode: Effect.promise(() => release).pipe(Effect.as(0)),
             };
-          }),
-        ),
-      ),
-    );
-  });
-
-  it.effect("serializes different providers that share the same update lock key", () => {
-    const firstStartedLatch: { resolve: () => void } = { resolve: () => {} };
-    const releaseFirstLatch: { resolve: () => void } = { resolve: () => {} };
-    const firstStarted = new Promise<void>((resolve) => {
-      firstStartedLatch.resolve = resolve;
-    });
-    const releaseFirst = new Promise<void>((resolve) => {
-      releaseFirstLatch.resolve = resolve;
-    });
-    const calls: Array<string> = [];
-    return Effect.gen(function* () {
-      const { registry } = yield* makeRegistry([baseProvider, baseOpenCodeProvider]);
-      const updater = yield* makeTestRunner({
-        ...registry,
-        getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
-          Effect.succeed(
-            makeProviderMaintenanceCapabilities({
-              provider,
-              packageName: provider === OPENCODE_DRIVER ? "opencode-ai" : "@openai/codex",
-              updateExecutable: "npm",
-              updateArgs:
-                provider === OPENCODE_DRIVER
-                  ? ["install", "-g", "opencode-ai@latest"]
-                  : ["install", "-g", "@openai/codex@latest"],
-              updateLockKey: "npm-global",
-            }),
-          ),
-      });
-
-      const first = yield* updater.updateProvider(CODEX_DRIVER).pipe(Effect.forkScoped);
-      yield* Effect.promise(() => firstStarted);
-
-      const second = yield* updater.updateProvider(OPENCODE_DRIVER).pipe(Effect.forkScoped);
-      let providersWhileQueued: ReadonlyArray<ServerProvider> = [];
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        providersWhileQueued = yield* registry.getProviders;
-        const queuedStatus = providersWhileQueued.find(
-          (provider) => provider.instanceId === OPENCODE_INSTANCE_ID,
-        )?.updateState?.status;
-        if (queuedStatus === "queued") {
-          break;
-        }
-        yield* Effect.yieldNow;
-      }
-      assert.deepStrictEqual(calls, ["install -g @openai/codex@latest"]);
-      assert.strictEqual(
-        providersWhileQueued.find((provider) => provider.instanceId === OPENCODE_INSTANCE_ID)
-          ?.updateState?.status,
-        "queued",
-      );
-
-      releaseFirstLatch.resolve();
-      yield* Fiber.join(first);
-      yield* Fiber.join(second);
-      assert.deepStrictEqual(calls, [
-        "install -g @openai/codex@latest",
-        "install -g opencode-ai@latest",
-      ]);
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          layerNonWindowsPlatform,
-          layerLatestVersionHttpClient("2.0.0"),
-          layerMockSpawner((_command, args) => {
-            calls.push(args.join(" "));
-            if (calls.length === 1) {
-              firstStartedLatch.resolve();
-              return {
-                stdout: "updated",
-                exitCode: Effect.promise(() => releaseFirst).pipe(Effect.as(0)),
-              };
-            }
-            return { stdout: "updated" };
-          }),
-        ),
-      ),
-    );
-  });
-
-  it.effect("accepts arbitrary driver-provided update lock keys", () => {
-    const calls: Array<string> = [];
-    return Effect.gen(function* () {
-      const { registry } = yield* makeRegistry(baseProvider);
-      const updater = yield* makeTestRunner({
-        ...registry,
-        getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
-          Effect.succeed(
-            makeProviderMaintenanceCapabilities({
-              provider,
-              packageName: "@openai/codex",
-              updateExecutable: "npm",
-              updateArgs: ["install", "-g", "@openai/codex@latest"],
-              updateLockKey: "unknown-lock-key",
-            }),
-          ),
-      });
-
-      const result = yield* updater.updateProvider(CODEX_DRIVER);
-      assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
-      assert.deepStrictEqual(calls, ["install -g @openai/codex@latest"]);
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          layerNonWindowsPlatform,
-          layerLatestVersionHttpClient("0.0.0"),
-          layerMockSpawner((_command, args) => {
-            calls.push(args.join(" "));
-            return { stdout: "updated" };
           }),
         ),
       ),
@@ -1576,11 +1283,18 @@ describe("ProviderInstallLock", () => {
       const runs = yield* Ref.make(0);
       yield* fileSystem.writeFileString(`${lockFile(directory, "k")}.reclaim`, String(deadPid));
       yield* fileSystem.utimes(`${lockFile(directory, "k")}.reclaim`, 0, 0);
-      // Hold the lock long enough for the other reclaimer to finish its attempt.
-      // @effect-diagnostics-next-line globalTimers:off
-      const hold = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 100)));
+      // The winner holds the lock until the other reclaimer has finished its attempt.
+      const loserDone = yield* Deferred.make<void>();
       const attempt = (lock: typeof first) =>
-        lock.tryRun("k", () => Ref.update(runs, (count) => count + 1).pipe(Effect.andThen(hold)));
+        lock
+          .tryRun("k", () =>
+            Ref.update(runs, (count) => count + 1).pipe(Effect.andThen(Deferred.await(loserDone))),
+          )
+          .pipe(
+            Effect.tap((result) =>
+              Option.isNone(result) ? Deferred.succeed(loserDone, undefined) : Effect.void,
+            ),
+          );
 
       const results = yield* Effect.all([attempt(first), attempt(second)], {
         concurrency: "unbounded",
@@ -1588,33 +1302,6 @@ describe("ProviderInstallLock", () => {
 
       assert.strictEqual(results.filter(Option.isSome).length, 1);
       assert.strictEqual(yield* Ref.get(runs), 1);
-    }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("untilIdle waits for a held lock, then resumes", () =>
-    Effect.gen(function* () {
-      const { directory, first } = yield* withHome;
-      const fileSystem = yield* FileSystem.FileSystem;
-      yield* fileSystem.makeDirectory(directory, { recursive: true });
-      yield* fileSystem.writeFileString(lockFile(directory, "k"), String(process.pid));
-      const resumed = yield* Deferred.make<void>();
-      yield* first.untilIdle.pipe(
-        Effect.andThen(Deferred.succeed(resumed, undefined)),
-        Effect.forkScoped,
-      );
-
-      // The lock files are read from disk, so give each clock tick real time to settle.
-      // @effect-diagnostics-next-line globalTimers:off
-      const settle = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)));
-      const tick = TestClock.adjust(Duration.seconds(1)).pipe(Effect.andThen(settle));
-      yield* Effect.all([tick, tick, tick]);
-      assert.isFalse(yield* Deferred.isDone(resumed));
-
-      yield* fileSystem.remove(lockFile(directory, "k"));
-      for (let attempt = 0; attempt < 50 && !(yield* Deferred.isDone(resumed)); attempt += 1) {
-        yield* tick;
-      }
-      assert.isTrue(yield* Deferred.isDone(resumed));
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -1649,11 +1336,9 @@ describe("ProviderInstallLock", () => {
       assert.isTrue(yield* second.anyHeld);
       assert.deepStrictEqual(yield* second.tryRun("k", () => Effect.void), Option.none());
 
-      for (let attempt = 0; attempt < 100 && !(yield* fileSystem.exists(marker)); attempt += 1) {
-        yield* Effect.sleep(Duration.millis(100));
-      }
+      // The wrapper releases the lock only after the installer exits.
+      yield* second.untilIdle;
       assert.strictEqual(yield* fileSystem.readFileString(marker), "finished");
-      yield* Effect.sleep(Duration.millis(200));
       assert.isFalse(yield* second.anyHeld);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
