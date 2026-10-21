@@ -39,8 +39,7 @@ import { useRenderedAppearance } from "../hooks/useTheme";
 import { useStableCallback } from "../hooks/useStableCallback";
 import {
   buildFileDiffContentVersion,
-  buildFileDiffIdentityKey,
-  buildLazyFileDiffIdentityKey,
+  buildFileDiffIdentityKeys,
   getDiffCollapseIconClassName,
   getDiffLineStat,
   getRenderablePatch,
@@ -99,21 +98,14 @@ import { useThreadRouteRef } from "../hooks/useThreadRouteTarget";
 type DiffThemeType = "light" | "dark";
 const AUTOMATIC_BASE_REF = "__automatic_base_ref__";
 const DIFF_FILE_TREE_STORAGE_KEY = "t3code.diffFileTreeOpen";
-const fileEntryCache = new WeakMap<
-  FileDiffMetadata,
-  { fileDiff: FileDiffMetadata; fileKey: string; fileVersion: number }
->();
+const fileVersionCache = new WeakMap<FileDiffMetadata, number>();
 
-function getCachedFileEntry(fileDiff: FileDiffMetadata) {
-  const cached = fileEntryCache.get(fileDiff);
-  if (cached) return cached;
-  const entry = {
-    fileDiff,
-    fileKey: buildFileDiffIdentityKey(fileDiff),
-    fileVersion: buildFileDiffContentVersion(fileDiff),
-  };
-  fileEntryCache.set(fileDiff, entry);
-  return entry;
+function getCachedFileVersion(fileDiff: FileDiffMetadata) {
+  const cached = fileVersionCache.get(fileDiff);
+  if (cached !== undefined) return cached;
+  const version = buildFileDiffContentVersion(fileDiff);
+  fileVersionCache.set(fileDiff, version);
+  return version;
 }
 
 const EMPTY_COLLAPSED_DIFF_FILE_KEYS: ReadonlySet<string> = new Set();
@@ -505,11 +497,12 @@ export default function DiffPanel({
   }, [canRefreshGitDiff, refreshBranchDiffPreview]);
 
   const isRefreshingDiff = branchDiffPreview.isPending || areFilePatchesPending;
-  const renderableFileEntries = renderableFiles.map((fileDiff) => {
-    const entry = getCachedFileEntry(fileDiff);
-    return lazySource ? { ...entry, fileKey: buildLazyFileDiffIdentityKey(fileDiff) } : entry;
-  });
-  const diffFileKeys = renderableFileEntries.map((file) => file.fileKey);
+  const diffFileKeys = buildFileDiffIdentityKeys(renderableFiles);
+  const renderableFileEntries = renderableFiles.map((fileDiff, index) => ({
+    fileDiff,
+    fileKey: diffFileKeys[index] ?? "",
+    fileVersion: getCachedFileVersion(fileDiff),
+  }));
   const defaultCollapsedDiffFileKeys = settings.diffFilesCollapsed
     ? new Set(diffFileKeys)
     : EMPTY_COLLAPSED_DIFF_FILE_KEYS;

@@ -211,20 +211,24 @@ export function resolveFileDiffPreviousPath(fileDiff: FileDiffMetadata): string 
   return fileDiff.prevName ?? fileDiff.name ?? "";
 }
 
-/**
- * A type change (regular file to symlink) arrives as a deletion and an addition
- * of the same path, so the change type is part of the identity.
- */
 export function buildFileDiffIdentityKey(fileDiff: FileDiffMetadata): string {
-  return `${resolveFileDiffPreviousPath(fileDiff)}\u0000${resolveFileDiffPath(fileDiff)}\u0000${fileDiff.type}`;
+  return `${resolveFileDiffPreviousPath(fileDiff)}\u0000${resolveFileDiffPath(fileDiff)}`;
 }
 
 /**
- * A lazily loaded review file shows a placeholder with a provisional change type until its
- * patch arrives, and each source path renders one file, so the path pair alone identifies it.
+ * The change type cannot be part of the identity: a lazily loaded review file shows a
+ * placeholder until its patch arrives, and the same file can render lazily or fully parsed
+ * across refreshes. A type change (regular file to symlink) still arrives as a deletion and
+ * an addition of the same path, so a repeated path pair is told apart by its occurrence.
  */
-export function buildLazyFileDiffIdentityKey(fileDiff: FileDiffMetadata): string {
-  return `${resolveFileDiffPreviousPath(fileDiff)}\u0000${resolveFileDiffPath(fileDiff)}`;
+export function buildFileDiffIdentityKeys(files: ReadonlyArray<FileDiffMetadata>): string[] {
+  const seen = new Map<string, number>();
+  return files.map((fileDiff) => {
+    const key = buildFileDiffIdentityKey(fileDiff);
+    const occurrence = seen.get(key) ?? 0;
+    seen.set(key, occurrence + 1);
+    return occurrence === 0 ? key : `${key}\u0000${occurrence}`;
+  });
 }
 
 export function buildFileDiffRenderKey(fileDiff: FileDiffMetadata): string {
