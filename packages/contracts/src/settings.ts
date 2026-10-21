@@ -652,17 +652,11 @@ export const IDLE_COMPACTION_MODES = [
 export const IdleCompactionMode = Schema.Literals(IDLE_COMPACTION_MODES.map((mode) => mode.value));
 export type IdleCompactionMode = typeof IdleCompactionMode.Type;
 
-// `compactIdleThreads` was a beta on/off switch for compacting before the cache expires.
-const LegacyCompactIdleThreads = Schema.Boolean.pipe(
-  Schema.decodeTo(
-    IdleCompactionMode,
-    SchemaTransformation.transform({
-      decode: (enabled): IdleCompactionMode => (enabled ? "beforeCacheExpires" : "onReturn"),
-      encode: (mode) => mode === "beforeCacheExpires",
-    }),
-  ),
-);
-const IdleCompactionModeSetting = Schema.Union([IdleCompactionMode, LegacyCompactIdleThreads]);
+// The mode replaced `compactIdleThreads`, a beta on/off switch for compacting before the
+// cache expires. Clients that predate the mode decode that key as a boolean, so the mode
+// lives under its own key and the old one stays off the wire.
+export const legacyCompactIdleThreadsMode = (enabled: boolean): IdleCompactionMode =>
+  enabled ? "beforeCacheExpires" : "onReturn";
 
 const INSTANCE_IDLE_COMPACTION_MODES = [
   { value: "default", label: "Use default" },
@@ -1202,7 +1196,7 @@ export const ServerSettings = Schema.Struct({
   sidebarAutoSettleAfterDays: Schema.NullOr(SidebarAutoSettleAfterDays).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS)),
   ),
-  compactIdleThreads: IdleCompactionModeSetting.pipe(
+  idleCompaction: IdleCompactionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("onReturn" as const)),
   ),
   snoozeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -1381,7 +1375,7 @@ export const resolveProjectProviderInstanceEnabled = (
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 
 export const resolveIdleCompaction = (
-  settings: Pick<ServerSettings, "providerInstances" | "compactIdleThreads">,
+  settings: Pick<ServerSettings, "providerInstances" | "idleCompaction">,
   instanceId: ProviderInstanceId,
 ): IdleCompactionMode => {
   const instance = Object.hasOwn(settings.providerInstances, instanceId)
@@ -1391,7 +1385,7 @@ export const resolveIdleCompaction = (
     Option.map((config) => config.idleCompaction),
     Option.getOrElse(() => "default" as const),
   );
-  return override === "default" ? settings.compactIdleThreads : override;
+  return override === "default" ? settings.idleCompaction : override;
 };
 
 export const ServerSettingsOperation = Schema.Literals([
@@ -1535,7 +1529,9 @@ export const ServerSettingsPatch = Schema.Struct({
   deviceHosts: Schema.optionalKey(SshDeviceHostConfigs),
   easDeviceHosts: Schema.optionalKey(EasDeviceHostConfigs),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
-  compactIdleThreads: Schema.optionalKey(IdleCompactionMode),
+  idleCompaction: Schema.optionalKey(IdleCompactionMode),
+  // Sent by clients that predate `idleCompaction`.
+  compactIdleThreads: Schema.optionalKey(Schema.Boolean),
   sidebarAutoSettleKeepPullRequests: Schema.optionalKey(Schema.Boolean),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),

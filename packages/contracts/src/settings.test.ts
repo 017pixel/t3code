@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { type CommandId, ProjectId } from "./baseSchemas.ts";
@@ -8,6 +9,7 @@ import {
   ClientSettingsPatch,
   ClaudeSettings,
   DEFAULT_SERVER_SETTINGS,
+  IDLE_COMPACTION_MODES,
   requiredScopesForProjectMutation,
   resolveIdleCompaction,
   resolveProjectProviderInstanceEnabled,
@@ -23,6 +25,12 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+// How clients built before idle compaction modes read the setting.
+const decodeOlderClientServerSettings = Schema.decodeUnknownSync(
+  Schema.Struct({
+    compactIdleThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  }),
+);
 
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
@@ -138,7 +146,7 @@ describe("custom model settings", () => {
 describe("resolveIdleCompaction", () => {
   it("lets a Claude instance override the global default", () => {
     const settings = decodeServerSettings({
-      compactIdleThreads: "off",
+      idleCompaction: "off",
       providerInstances: {
         claude_work: { driver: "claudeAgent", config: { idleCompaction: "onReturn" } },
         claude_personal: { driver: "claudeAgent" },
@@ -151,12 +159,13 @@ describe("resolveIdleCompaction", () => {
     expect(resolveIdleCompaction(settings, ProviderInstanceId.make("claudeAgent"))).toBe("off");
   });
 
-  it("keeps the legacy beta switch's behavior", () => {
-    expect(decodeServerSettings({ compactIdleThreads: true }).compactIdleThreads).toBe(
-      "beforeCacheExpires",
-    );
-    expect(decodeServerSettings({}).compactIdleThreads).toBe("onReturn");
-  });
+  it.each(IDLE_COMPACTION_MODES)(
+    "keeps $value readable by clients that predate the mode",
+    ({ value }) => {
+      const wire = encodeServerSettings(decodeServerSettings({ idleCompaction: value }));
+      expect(() => decodeOlderClientServerSettings(wire)).not.toThrow();
+    },
+  );
 });
 
 describe("ClientSettings notifications", () => {

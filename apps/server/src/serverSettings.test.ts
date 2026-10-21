@@ -212,6 +212,26 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(layerServerSettings())),
   );
 
+  it.effect.each([
+    { saved: true, mode: "beforeCacheExpires" },
+    { saved: false, mode: "onReturn" },
+    { saved: "off", mode: "off" },
+  ] as const)("reads idle compaction saved as compactIdleThreads: $saved", ({ saved, mode }) =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      yield* fs.writeFileString(
+        config.settingsPath,
+        JSON.stringify({ compactIdleThreads: saved, enableAgentBrowserAccess: false }),
+      );
+
+      const settings = yield* service.getSettings;
+      assert.equal(settings.idleCompaction, mode);
+      assert.isFalse(settings.enableAgentBrowserAccess);
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("saves through a symlinked settings file without replacing the link", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;

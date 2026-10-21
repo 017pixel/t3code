@@ -1,5 +1,7 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  IdleCompactionMode,
+  legacyCompactIdleThreadsMode,
   ModelSelection,
   ProjectId,
   ProjectScript,
@@ -274,9 +276,25 @@ const PersistedResponseStreamingMode = Schema.Union([
     }),
   ),
 );
+// Files written before `idleCompaction` keep the mode under `compactIdleThreads`: the beta
+// switch, or for a short while the mode itself.
+const PersistedCompactIdleThreads = Schema.Union([
+  IdleCompactionMode,
+  Schema.Boolean.pipe(
+    Schema.decodeTo(
+      IdleCompactionMode,
+      SchemaTransformation.transform({
+        decode: legacyCompactIdleThreadsMode,
+        encode: (mode) => mode === "beforeCacheExpires",
+      }),
+    ),
+  ),
+]);
 const ServerSettingsJson = fromLenientJson(
   Schema.Struct({
     ...ServerSettings.fields,
+    idleCompaction: Schema.optionalKey(IdleCompactionMode),
+    compactIdleThreads: Schema.optionalKey(PersistedCompactIdleThreads),
     responseStreamingMode: PersistedResponseStreamingMode.pipe(
       Schema.withDecodingDefault(Effect.succeed("paragraph" as const)),
     ),
@@ -682,7 +700,12 @@ const make = Effect.gen(function* () {
           });
         }
       } else {
-        settings = decoded.value;
+        const { idleCompaction, compactIdleThreads, ...decodedSettings } = decoded.value;
+        settings = {
+          ...decodedSettings,
+          idleCompaction:
+            idleCompaction ?? compactIdleThreads ?? DEFAULT_SERVER_SETTINGS.idleCompaction,
+        };
       }
     }
 

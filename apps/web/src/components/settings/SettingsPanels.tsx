@@ -996,16 +996,16 @@ export function GeneralSettingsPanel() {
 
         <SettingsRow
           serverScoped
-          settingKeys={["compactIdleThreads"]}
+          settingKeys={["idleCompaction"]}
           {...searchableSetting("compact-idle-threads")}
           description="When to compact an idle Claude thread over 200,000 tokens: after you return, just before its prompt cache expires, or never. Each Claude provider can override this."
           resetAction={
-            settings.compactIdleThreads !== DEFAULT_UNIFIED_SETTINGS.compactIdleThreads ? (
+            settings.idleCompaction !== DEFAULT_UNIFIED_SETTINGS.idleCompaction ? (
               <SettingResetButton
                 label="compact idle threads"
                 onClick={() =>
                   updateSettings({
-                    compactIdleThreads: DEFAULT_UNIFIED_SETTINGS.compactIdleThreads,
+                    idleCompaction: DEFAULT_UNIFIED_SETTINGS.idleCompaction,
                   })
                 }
               />
@@ -1013,16 +1013,16 @@ export function GeneralSettingsPanel() {
           }
           control={
             <Select
-              value={settings.compactIdleThreads}
+              value={settings.idleCompaction}
               onValueChange={(value) => {
                 const mode = IDLE_COMPACTION_MODES.find((candidate) => candidate.value === value);
-                if (mode) updateSettings({ compactIdleThreads: mode.value });
+                if (mode) updateSettings({ idleCompaction: mode.value });
               }}
             >
               <SelectTrigger size="sm" className="w-full sm:w-56" aria-label="Compact idle threads">
                 <SelectValue>
                   {
-                    IDLE_COMPACTION_MODES.find((mode) => mode.value === settings.compactIdleThreads)
+                    IDLE_COMPACTION_MODES.find((mode) => mode.value === settings.idleCompaction)
                       ?.label
                   }
                 </SelectValue>

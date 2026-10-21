@@ -71,6 +71,17 @@ describe("serverSettings helpers", () => {
       logsAfterDays: 30,
     });
   });
+  it("maps the beta switch from clients that predate idle compaction modes", () => {
+    const enabled = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      compactIdleThreads: true,
+    });
+    expect(enabled.idleCompaction).toBe("beforeCacheExpires");
+    expect("compactIdleThreads" in enabled).toBe(false);
+    expect(applyServerSettingsPatch(enabled, { compactIdleThreads: false }).idleCompaction).toBe(
+      "onReturn",
+    );
+  });
+
   it("replaces a source control host's patched field so a cleared account pin does not survive", () => {
     const pinned = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       sourceControlHosts: {

@@ -9,6 +9,7 @@ import {
   resolveProjectProviderInstanceEnabled,
   resolveProviderInstanceEnabled,
   isProviderTextGenerationCapable,
+  legacyCompactIdleThreadsMode,
   type ModelSelection,
   type ProjectId,
   type ProjectScopedServerSettingKey,
@@ -386,6 +387,7 @@ export function applyServerSettingsPatch(
     projectAgentBrowserAccessOverrides: _legacyBrowserAccess,
     projectAutoPullOverrides: _legacyAutoPull,
     projectScriptOverrides: _legacyScripts,
+    compactIdleThreads: legacyCompactIdleThreads,
     ...patchForMerge
   } = patch;
   const currentBackgroundActivity = normalizeServerBackgroundActivitySettings(current);
@@ -469,7 +471,12 @@ export function applyServerSettingsPatch(
       },
     };
   }
-  const next = deepMerge(current, patchForMerge);
+  const next = deepMerge(current, {
+    ...(legacyCompactIdleThreads === undefined
+      ? {}
+      : { idleCompaction: legacyCompactIdleThreadsMode(legacyCompactIdleThreads) }),
+    ...patchForMerge,
+  });
   const nextWithReplacementsBase = {
     ...next,
     favorites,
