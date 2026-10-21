@@ -1675,11 +1675,12 @@ describe("pull request watch fingerprints", () => {
 
 describe("branch check history", () => {
   it("takes each check's newest finished run, past reruns and commits CI did not run on", () => {
-    const run = (name: string, status: string, conclusion: string | null) => ({
+    const run = (name: string, status: string, conclusion: string | null, workflow = "CI") => ({
       __typename: "CheckRun",
       name,
       status,
       conclusion,
+      checkSuite: { workflowRun: { workflow: { name: workflow } } },
     });
     const commit = (contexts: ReadonlyArray<unknown> | null) => ({
       statusCheckRollup: contexts === null ? null : { contexts: { nodes: contexts } },
@@ -1700,6 +1701,9 @@ describe("branch check history", () => {
                   run("test", "COMPLETED", "FAILURE"),
                   run("build", "COMPLETED", "FAILURE"),
                   run("deploy", "COMPLETED", "CANCELLED"),
+                  // Two workflows' "pack" jobs keep the names a pull request's checks give them.
+                  run("pack", "COMPLETED", "FAILURE"),
+                  run("pack", "COMPLETED", "SUCCESS", "Release"),
                 ]),
               ],
             },
@@ -1707,7 +1711,10 @@ describe("branch check history", () => {
         },
       },
     });
-    expect(toBranchChecks(result)).toEqual({ failing: ["lint"], passing: ["test", "build"] });
+    expect(toBranchChecks(result)).toEqual({
+      failing: ["lint", "CI / pack"],
+      passing: ["test", "build", "Release / pack"],
+    });
     expect(
       toBranchChecks(Schema.decodeUnknownSync(BranchCheckHistory.result)({ repository: null })),
     ).toBeNull();

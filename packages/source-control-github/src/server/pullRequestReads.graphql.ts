@@ -1604,7 +1604,9 @@ export const NodesCheckRun = Schema.Struct({
   /** The current status of the check run. */
   status: GraphQL.enumLiterals(Shared.CheckStatusState.literals),
   /** The conclusion of the check run. */
-  conclusion: Schema.NullOr(GraphQL.enumLiterals(Shared.CheckConclusionState.literals))
+  conclusion: Schema.NullOr(GraphQL.enumLiterals(Shared.CheckConclusionState.literals)),
+  /** The check suite that this run is a part of. */
+  checkSuite: CheckSuite
 })
 export interface NodesCheckRun extends Schema.Struct.Type<typeof NodesCheckRun.fields> {}
 
@@ -1680,7 +1682,7 @@ export const BranchCheckHistory = GraphQL.query("BranchCheckHistory", {
       { name: "ref", body: "String!" }
     ],
     selections: [
-      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){ref(qualifiedName:$", "ref", "){target{__typename...on Commit{history(first:20){nodes{statusCheckRollup{contexts(first:100){nodes{__typename...on StatusContext{context state}...on CheckRun{name status conclusion}}}}}}}}}}"] }
+      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){ref(qualifiedName:$", "ref", "){target{__typename...on Commit{history(first:20){nodes{statusCheckRollup{contexts(first:100){nodes{__typename...on StatusContext{context state}...on CheckRun{name status conclusion checkSuite{workflowRun{workflow{name}}}}}}}}}}}}}"] }
     ],
     fragments: []
   },

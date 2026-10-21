@@ -1279,7 +1279,13 @@ export function toBranchChecks(result: BranchCheckHistory.Result): ProviderBranc
       .filter(
         (context) => context.__typename === "CheckRun" || context.__typename === "StatusContext",
       )
-      .filter((context) => ["failure", "success"].includes(toCheckStatus(context)));
+      .filter((context) => ["failure", "success"].includes(toCheckStatus(context)))
+      // Names a job "Workflow / job" where two workflows share it, as a pull request's checks do.
+      .map((context) =>
+        context.__typename === "CheckRun"
+          ? { ...context, workflowName: context.checkSuite.workflowRun?.workflow.name ?? null }
+          : context,
+      );
     for (const check of toChecks(finished)) {
       if (!verdicts.has(check.name)) verdicts.set(check.name, check.status === "failure");
     }
