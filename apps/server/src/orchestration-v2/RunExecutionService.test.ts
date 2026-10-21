@@ -2487,6 +2487,44 @@ it.effect("refreshes pull requests after a provider stream exits with an error",
   }),
 );
 
+it.effect("fails the running provider turn with the run when event ingestion fails", () =>
+  Effect.gen(function* () {
+    const { finalEvents } = yield* captureRootRunTermination({
+      key: "ingestion-failure:provider-turn",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: (ids) =>
+        Stream.concat(
+          Stream.make({
+            type: "provider_turn.updated",
+            driver,
+            providerTurn: {
+              id: ids.rootProviderTurnId,
+              providerThreadId: ids.providerThreadId,
+              nodeId: ids.rootNodeId,
+              runAttemptId: ids.attemptId,
+              status: "running",
+            },
+          } as ProviderAdapter.ProviderAdapterV2Event),
+          Stream.fail(
+            new ProviderAdapter.ProviderAdapterEventStreamError({
+              driver,
+              providerSessionId: ProviderSessionId.make("session:ingestion-failure"),
+              cause: "provider process exited",
+            }),
+          ),
+        ),
+    });
+    assert.deepEqual(
+      finalEvents.flatMap((event) =>
+        event.type === "provider-turn.updated" || event.type === "run.updated"
+          ? [`${event.type}:${event.payload.status}`]
+          : [],
+      ),
+      ["provider-turn.updated:failed", "run.updated:failed"],
+    );
+  }),
+);
+
 it.effect("fails the run when its event stream ends without a root terminal", () =>
   Effect.gen(function* () {
     const { observed, finalEvents } = yield* captureRootRunTermination({
