@@ -4,16 +4,16 @@
 // Reset each navigation segment with a full document navigation to root, wait
 // for the app, then click A, B, Settings, Back/Escape, Back, Forward, Forward.
 // Use identical actions on base/head; report divergences without changing them.
-import { readFileSync } from "node:fs";
-const fixture = JSON.parse(readFileSync(new URL("./issue-16542.json", import.meta.url)));
+import * as NodeFS from "node:fs";
+const fixture = JSON.parse(NodeFS.readFileSync(new URL("./issue-16542.json", import.meta.url)));
 console.log(
   `(${async function seed(f) {
     const socket = new WebSocket(
       `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws?orchestrationProtocol=2&clientSurface=web`,
     );
     await new Promise((resolve, reject) => {
-      socket.onopen = resolve;
-      socket.onerror = reject;
+      socket.addEventListener("open", resolve, { once: true });
+      socket.addEventListener("error", reject, { once: true });
     });
     let id = 0;
     const rpc = (tag, payload) =>
