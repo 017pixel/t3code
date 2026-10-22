@@ -1295,12 +1295,48 @@ describe("deriveThreadPendingBackgroundTasks", () => {
             },
           ],
           turnItems: [
-            { ...item(1, "subagent", "session-child-1", ""), prompt: "child 1" },
-            { ...item(2, "subagent", "session-child-2", ""), prompt: "child 2" },
+            {
+              ...item(1, "subagent", "session-child-1", ""),
+              id: TurnItemId.make("item-child-1"),
+              prompt: "child 1",
+            },
+            {
+              ...item(2, "subagent", "session-child-2", ""),
+              id: TurnItemId.make("item-child-2"),
+              prompt: "child 2",
+            },
           ],
         }),
       ),
-    ).toEqual([{ taskId: "session-child-1", description: "child 1", kind: "subagent" }]);
+    ).toEqual([
+      {
+        taskId: "item-child-1",
+        kind: "subagent",
+        providerInstanceId: base.thread.providerInstanceId,
+      },
+    ]);
+  });
+
+  it("keeps an earlier run's roster-only monitor while a follow-up run executes", () => {
+    // Claude completes the Monitor launch row on success; only the roster tracks the task.
+    expect(
+      deriveThreadPendingBackgroundTasks(
+        projection({
+          runs: [run(1, "completed"), run(2, "running")],
+          providerThreads: [
+            {
+              id: "provider-thread-1",
+              providerInstanceId: base.thread.providerInstanceId,
+              pendingBackgroundTasks: [{ taskId: "b1htjkjev", kind: "monitor" }],
+            },
+          ],
+          turnItems: [
+            { ...item(1, "dynamic_tool", "toolu-monitor", ""), status: "completed" },
+            item(2, "command_execution", "shell-2", "sleep 15"),
+          ],
+        }),
+      ),
+    ).toEqual([{ taskId: "b1htjkjev", kind: "monitor" }]);
   });
 
   it("keeps the provider roster while a follow-up run only waits in the queue", () => {

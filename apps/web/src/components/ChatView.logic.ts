@@ -1677,7 +1677,8 @@ const LIVE_RUN_STATUSES = new Set(["queued", "preparing", "starting", "running"]
  * Background work the provider still runs after an earlier run ended. It
  * stays listed while a later run is live; that live run's own items are its
  * foreground work, so they never count as background. The provider roster is
- * not run-tied and can name an executing run's children, so it is ignored then.
+ * not run-tied, so it drops entries naming a live run's item by row or native id
+ * (Muse keys its roster by item id, the row by child session id).
  */
 export function deriveThreadPendingBackgroundTasks(projection: ThreadProjection | null) {
   if (projection === null) return [];
@@ -1688,17 +1689,24 @@ export function deriveThreadPendingBackgroundTasks(projection: ThreadProjection 
   const liveRunIds = new Set(
     projection.runs.filter((run) => LIVE_RUN_STATUSES.has(run.status)).map((run) => run.id),
   );
-  // A queued run can wait behind the roster's work; only a started run has children of its own.
-  const runIsExecuting = projection.runs.some(
-    (run) => run.status === "starting" || run.status === "running",
-  );
+  const foregroundTaskIds = new Set<string>();
+  for (const item of projection.turnItems) {
+    if (item.runId === null || !liveRunIds.has(item.runId)) continue;
+    foregroundTaskIds.add(item.id);
+    if (item.nativeItemRef?.nativeId) foregroundTaskIds.add(item.nativeItemRef.nativeId);
+  }
   const latestRun =
     usageLimitRunPresentedAsLatest(projection.runs, projection.turnItems, sessionError) ??
     latestUnheldRun(projection.runs.filter((run) => !liveRunIds.has(run.id)));
   return [
     ...derivePendingBackgroundWork({
       latestRun,
-      providerThreads: runIsExecuting ? [] : projection.providerThreads,
+      providerThreads: projection.providerThreads.map((thread) => ({
+        ...thread,
+        pendingBackgroundTasks: thread.pendingBackgroundTasks?.filter(
+          (task) => !foregroundTaskIds.has(task.taskId),
+        ),
+      })),
       turnItems: projection.turnItems.filter(
         (item) => item.runId === null || !liveRunIds.has(item.runId),
       ),
