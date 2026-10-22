@@ -63,10 +63,7 @@ else {
         break;
       case "account/read":
         result = {
-          account:
-            c.scenario === "R2"
-              ? { type: "chatgpt", email: "native@example.test", planType: "plus" }
-              : null,
+          account: null,
           requiresOpenaiAuth: false,
         };
         break;
