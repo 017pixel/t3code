@@ -3985,6 +3985,67 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
+  it.effect(
+    "creates fork PRs from origin with the fork owner selector when gh targets upstream",
+    () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        const originDir = yield* createBareRemote();
+        const upstreamDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", originDir]);
+        yield* runGit(repoDir, ["remote", "add", "upstream", upstreamDir]);
+        yield* runGit(repoDir, ["push", "upstream", "main"]);
+        yield* runGit(repoDir, ["config", "remote.upstream.gh-resolved", "base"]);
+        yield* runGit(repoDir, ["checkout", "-b", "fix-7382-repro"]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "changes.txt"), "change\n");
+        yield* runGit(repoDir, ["add", "changes.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Feature commit"]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "fix-7382-repro"]);
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "origin",
+          "https://github.com/juliusmarminge/t3code.git",
+          originDir,
+        );
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "upstream",
+          "https://github.com/pingdotgg/t3code.git",
+          upstreamDir,
+        );
+
+        const { manager, ghCalls } = yield* makeManager({
+          ghScenario: {
+            prListSequenceByHeadSelector: {
+              "fix-7382-repro": [
+                JSON.stringify([]),
+                JSON.stringify([
+                  {
+                    number: 7383,
+                    title: "Fix fork PR creation",
+                    url: "https://github.com/pingdotgg/t3code/pull/7383",
+                    baseRefName: "main",
+                    headRefName: "fix-7382-repro",
+                    state: "OPEN",
+                    isCrossRepository: true,
+                    headRepository: { nameWithOwner: "juliusmarminge/t3code" },
+                    headRepositoryOwner: { login: "juliusmarminge" },
+                  },
+                ]),
+              ],
+            },
+          },
+        });
+
+        yield* runStackedAction(manager, { cwd: repoDir, action: "create_pr" });
+
+        expect(ghCalls.filter((call) => call.startsWith("pr create "))).toEqual([
+          expect.stringContaining("pr create --base main --head juliusmarminge:fix-7382-repro "),
+        ]);
+      }),
+  );
+
   it.effect("rejects push/pr actions from detached HEAD", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
