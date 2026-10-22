@@ -134,6 +134,66 @@ describe("readAntigravityUsage", () => {
       }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect(
+    "counts each id-less Antigravity call once across its step, generation and retry copies",
+    () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const dir = yield* tempDir;
+        const usage = [
+          ...protoNumber(1, 1026),
+          ...protoNumber(2, 100),
+          ...protoNumber(3, 40),
+          ...protoNumber(4, 5),
+          ...protoNumber(5, 20),
+          ...protoNumber(9, 10),
+        ];
+        const stamp = protoNumber(1, 1780000000);
+        yield* seedDatabase(path.join(dir, "session-1.db"), (db) =>
+          Effect.gen(function* () {
+            yield* createTables(db);
+            // Two separate calls with identical counters, each stored four times.
+            for (const idx of [0, 1]) {
+              yield* db.run("INSERT INTO steps VALUES (?, ?)", [
+                idx,
+                new Uint8Array([
+                  ...protoBytes(9, usage),
+                  ...protoBytes(8, stamp),
+                  ...protoBytes(28, protoBytes(2, usage)),
+                ]),
+              ]);
+              yield* db.run("INSERT INTO gen_metadata VALUES (?, ?)", [
+                idx,
+                new Uint8Array(
+                  protoBytes(1, [
+                    ...protoBytes(4, usage),
+                    ...protoBytes(9, protoBytes(4, stamp)),
+                    ...protoBytes(17, protoBytes(2, usage)),
+                  ]),
+                ),
+              ]);
+            }
+          }),
+        );
+        const result = yield* readAntigravityUsage(dir, 0);
+        assert.deepStrictEqual(result.errors, []);
+        const totals = {
+          uncachedInputTokens: 100,
+          cachedInputTokens: 20,
+          cacheCreationTokens: 5,
+          outputTokens: 40,
+          reasoningTokens: 10,
+        };
+        assert.deepStrictEqual(
+          records(result).map((record) => ({ model: record.model, totals: record.totals })),
+          [
+            { model: "claude-opus-4-6", totals },
+            { model: "claude-opus-4-6", totals },
+          ],
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("uses the matching Antigravity generation model for each model-less step", () =>
     Effect.gen(function* () {
       const path = yield* Path.Path;
