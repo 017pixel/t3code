@@ -3,7 +3,6 @@ import type { EnvironmentId, IssueListInput, IssueListResult } from "@t3tools/co
 import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { useCallback } from "react";
 
 import { connectionAtomRuntime } from "../connection/runtime";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -59,10 +58,10 @@ const EMPTY_ISSUE_LIST = Atom.make({
 export function useIssueList(targets: ReadonlyArray<IssueListTarget>): MergedIssueListView {
   const key = JSON.stringify(targets);
   const view = useAtomValue(targets.length === 0 ? EMPTY_ISSUE_LIST : mergedIssueListFamily(key));
-  const refresh = useCallback(() => {
+  const refresh = () => {
     for (const target of JSON.parse(key) as ReadonlyArray<IssueListTarget>) {
       appAtomRegistry.refresh(issueEnvironment.list(target));
     }
-  }, [key]);
+  };
   return { ...view, refresh };
 }
