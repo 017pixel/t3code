@@ -451,10 +451,11 @@ export function routeProviderEvent(
       // A provider-native subagent's child thread follows the live run it is
       // attributed to. A resume reattributes it to the resuming run, which
       // never saw the child thread created when the subagent was not
-      // completed at its start (e.g. cancelled by a server restart).
+      // completed at its start (e.g. cancelled by a server restart). A
+      // nested one is runless and follows the owned child that resumed it.
       const adopted =
-        ownsRun(coordinator.runId) &&
-        !state.rootTurnEnded &&
+        ((ownsRun(coordinator.runId) && !state.rootTurnEnded) ||
+          (coordinator.runId === null && ownsChildThread(coordinator.threadId))) &&
         isOrchestrationV2WorkActive(coordinator.status) &&
         coordinator.origin === "provider_native" &&
         coordinator.childThreadId !== null &&

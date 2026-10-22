@@ -3233,6 +3233,23 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             for (const [nativeThreadId, state] of Object.entries(input.item.agentsStates)) {
               const subagent = subagents.get(nativeThreadId);
               if (subagent === undefined) {
+                // Codex can report a child resumed from an earlier session
+                // running before its turn starts, and the parent's turn can end
+                // in between. Reopening the restored task now keeps the resuming
+                // run ingesting until that turn arrives. `interacted` activity
+                // is not enough: send_message reports it without starting a turn.
+                const restored =
+                  state.status === "pendingInit" || state.status === "running"
+                    ? yield* restoreSubagentThread(nativeThreadId)
+                    : undefined;
+                if (restored !== undefined) {
+                  yield* emitSubagentTaskUpdate({
+                    subagent: restored,
+                    status: "running",
+                    reopen: true,
+                    result: null,
+                  });
+                }
                 continue;
               }
               const statuses = {

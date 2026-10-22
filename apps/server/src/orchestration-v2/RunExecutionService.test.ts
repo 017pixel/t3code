@@ -1615,6 +1615,182 @@ it.effect("ingests new member threads of an owned child after the root turn term
   }),
 );
 
+it.effect.each([
+  ["child", false],
+  ["nested child", true],
+] as const)(
+  "ingests a %s resumed after a restart whose turn starts after the root turn ends",
+  ([, nested]) =>
+    Effect.gen(function* () {
+      const key = `run-execution-restored-child-${nested ? "nested" : "direct"}`;
+      const threadId = ThreadId.make(`thread:${key}`);
+      const runId = RunId.make(`run:${key}`);
+      const attemptId = RunAttemptId.make(`attempt:${key}`);
+      const providerInstanceId = ProviderInstanceId.make("codex");
+      const providerThreadId = ProviderThreadId.make(`provider-thread:${key}`);
+      const rootProviderTurnId = ProviderTurnId.make(`provider-turn:${key}`);
+      const child = (name: string, parentThreadId: ThreadId, parentRunId: RunId | null) => {
+        const childThreadId = ThreadId.make(`thread:${key}:${name}`);
+        const childProviderThreadId = ProviderThreadId.make(`provider-thread:${key}:${name}`);
+        const providerTurnId = ProviderTurnId.make(`provider-turn:${key}:${name}:2`);
+        // The adapter reuses the saved task, so no app_thread.created arrives.
+        const task = (status: "running" | "completed") =>
+          ({
+            type: "subagent.updated",
+            driver,
+            subagent: {
+              id: NodeId.make(`node:${key}:${name}`),
+              threadId: parentThreadId,
+              runId: parentRunId,
+              parentNodeId: NodeId.make(`node:${key}:${name}:parent`),
+              origin: "provider_native",
+              createdBy: "agent",
+              driver,
+              providerInstanceId,
+              providerThreadId: childProviderThreadId,
+              childThreadId,
+              nativeTaskRef: null,
+              prompt: "Work",
+              title: name,
+              model: null,
+              status,
+              result: null,
+              startedAt: null,
+              completedAt: null,
+              updatedAt: DateTime.makeUnsafe(0),
+            },
+          }) satisfies ProviderAdapter.ProviderAdapterV2Event;
+        const turn = (status: "running" | "completed") =>
+          ({
+            type: "provider_turn.updated",
+            driver,
+            threadId: childThreadId,
+            providerTurn: {
+              id: providerTurnId,
+              providerThreadId: childProviderThreadId,
+              runAttemptId: null,
+              ordinal: 2,
+              status,
+            },
+          }) as ProviderAdapter.ProviderAdapterV2Event;
+        const message = {
+          type: "message.updated",
+          driver,
+          message: {
+            id: MessageId.make(`message:${key}:${name}`),
+            threadId: childThreadId,
+            runId: null,
+            role: "assistant",
+            text: `${name} after restart`,
+            streaming: false,
+          },
+        } as ProviderAdapter.ProviderAdapterV2Event;
+        return { childThreadId, task, turn, message };
+      };
+      const middle = child("middle", threadId, runId);
+      const leaf = child("leaf", middle.childThreadId, null);
+      const resumed = nested ? leaf : middle;
+      const events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event> = [
+        middle.task("running"),
+        {
+          type: "turn.terminal",
+          driver,
+          providerThreadId,
+          providerTurnId: rootProviderTurnId,
+          runOrdinal: 1,
+          status: "completed",
+          failure: null,
+          threadDisposition: "reusable",
+        },
+        middle.turn("running"),
+        ...(nested ? [leaf.task("running"), leaf.turn("running")] : []),
+        resumed.message,
+        ...(nested ? [leaf.turn("completed"), leaf.task("completed")] : []),
+        middle.turn("completed"),
+        middle.task("completed"),
+      ];
+      const ingested: Array<string> = [];
+      const released = yield* Deferred.make<void>();
+      const layerTest = RunExecutionService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            McpAppModelContext.layerEmpty,
+            Layer.mock(CheckpointService.CheckpointServiceV2)({
+              captureBaseline: () => Effect.void,
+            }),
+            layerTurnItemPositionsTest,
+            Layer.mock(EventSink.EventSinkV2)({
+              write: () => Effect.succeed([]),
+              writeWithEffects: () => Effect.succeed([]),
+              writeIfRunCurrent: () => Effect.succeed({ committed: true, storedEvents: [] }),
+            }),
+            IdAllocator.layer,
+            Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+              ingestNormalized: (input) =>
+                Effect.sync(() => {
+                  if (input.event.type === "message.updated") {
+                    ingested.push(input.event.message.threadId);
+                  }
+                  return [];
+                }),
+            }),
+            ServerSettings.layerTest(),
+          ),
+        ),
+      );
+
+      yield* Effect.gen(function* () {
+        const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
+        yield* runExecution.startRootRun({
+          commandId: CommandId.make(`command:${key}`),
+          appThread: { id: threadId } as OrchestrationV2AppThread,
+          providerSessionId: ProviderSessionId.make(`session:${key}`),
+          session: {
+            // Runs when ingestion drains the events or stops early.
+            events: Stream.fromIterable(events).pipe(
+              Stream.ensuring(Deferred.succeed(released, undefined)),
+            ),
+            startTurn: () => Effect.void,
+          } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
+          run: { id: runId, threadId, ordinal: 1, providerInstanceId } as OrchestrationV2Run,
+          rootNode: { id: NodeId.make(`node:${key}`) } as OrchestrationV2ExecutionNode,
+          checkpointScope: {
+            id: CheckpointScopeId.make(`checkpoint-scope:${key}`),
+          } as OrchestrationV2CheckpointScope,
+          providerThread: { id: providerThreadId, driver } as OrchestrationV2ProviderThread,
+          attempt: {
+            id: attemptId,
+            providerTurnId: rootProviderTurnId,
+          } as OrchestrationV2RunAttempt,
+          attemptId,
+          providerTurnOrdinal: 1,
+          message: {
+            messageId: MessageId.make(`message:${key}:user`),
+            text: "Follow up with the child.",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+          },
+          modelSelection: { instanceId: providerInstanceId, model: "gpt-5.4" },
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: process.cwd(),
+            approvalPolicy: "never",
+            sandboxPolicy: {
+              type: "readOnly",
+              access: { type: "fullAccess" },
+              networkAccess: false,
+            },
+          },
+        });
+        yield* Deferred.await(released);
+      }).pipe(Effect.provide(layerTest));
+
+      assert.deepEqual(ingested, [resumed.childThreadId]);
+    }),
+);
+
 it.effect("ends a nested native subagent and its thread when the root run is interrupted", () =>
   Effect.gen(function* () {
     const key = "run-execution-nested-native";
