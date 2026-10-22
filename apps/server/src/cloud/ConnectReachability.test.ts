@@ -3,8 +3,22 @@ import * as NodeFS from "node:fs";
 
 import { T3_CONNECT_TROUBLESHOOTING_SECTIONS, connectReachableMcpUrl } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
+import { HttpClient, HttpClientResponse } from "effect/http";
+import { ChildProcessSpawner } from "effect/process";
 
-import { classifyReachability, type ReachabilityFacts } from "./ConnectReachability.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import { CLOUD_ENDPOINT_RUNTIME_CONFIG } from "./config.ts";
+import {
+  ConnectReachability,
+  classifyReachability,
+  layer as connectReachabilityLayer,
+  type ReachabilityFacts,
+} from "./ConnectReachability.ts";
+import * as ManagedEndpointRuntime from "./ManagedEndpointRuntime.ts";
 
 const checkedAt = "2026-10-19T00:00:00.000Z";
 const connected = { readyConnections: 4, hostname: "env.example.test", protocol: "quic" };
@@ -75,6 +89,59 @@ describe("classifyReachability", () => {
     expect(
       classifyReachability(facts({ connector: notConnected, edgeReachable: true }), checkedAt),
     ).toMatchObject({ cause: "connector_not_ready" });
+  });
+});
+
+describe("ConnectReachability", () => {
+  it.effect("drops a result once the tunnel config it checked is replaced", () => {
+    const secrets = new Map([[CLOUD_ENDPOINT_RUNTIME_CONFIG, new TextEncoder().encode("first")]]);
+    const unused = Effect.die("unused");
+    const dependencies = Layer.mergeAll(
+      Layer.succeed(
+        ServerSecretStore.ServerSecretStore,
+        ServerSecretStore.ServerSecretStore.of({
+          get: (name) => Effect.sync(() => Option.fromNullishOr(secrets.get(name))),
+          set: () => unused,
+          create: () => unused,
+          getOrCreateRandom: () => unused,
+          remove: () => unused,
+        }),
+      ),
+      Layer.succeed(
+        ManagedEndpointRuntime.CloudManagedEndpointRuntime,
+        ManagedEndpointRuntime.CloudManagedEndpointRuntime.of({
+          applyConfig: () => unused,
+          inspectConnector: Effect.succeed(connected),
+          readinessChanged: Stream.empty,
+          recoveryRequests: Stream.empty,
+          requestRecovery: () => unused,
+          tunnelConnected: Stream.empty,
+          withLinkStateLock: (effect) => effect,
+        }),
+      ),
+      Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Effect.succeed(HttpClientResponse.fromWeb(request, new Response("{}"))),
+        ),
+      ),
+      Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() => unused),
+      ),
+    );
+
+    return Effect.gen(function* () {
+      const reachability = yield* ConnectReachability;
+      yield* reachability.check;
+      expect(Option.getOrNull(yield* reachability.latest)).toMatchObject({
+        hostname: "env.example.test",
+      });
+
+      // A relink stores a new tunnel before its connector reports in.
+      secrets.set(CLOUD_ENDPOINT_RUNTIME_CONFIG, new TextEncoder().encode("second"));
+      expect(yield* reachability.latest).toEqual(Option.none());
+    }).pipe(Effect.provide(connectReachabilityLayer.pipe(Layer.provide(dependencies))));
   });
 });
 
