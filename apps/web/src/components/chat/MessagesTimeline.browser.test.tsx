@@ -12,6 +12,7 @@ import { deriveTimelineEntriesFromVisibleTurnItems } from "../../session-logic";
 import { remarkThoughtPreview } from "./TimelineWorkEntryRow.logic";
 import { parseMarkdownWithMath } from "@t3tools/shared/markdownMath";
 import { collectThreadFindRanges } from "./threadFindHighlights";
+import { rememberTimelinePosition } from "./timelineScrollAnchoring";
 
 const environmentQuery = vi.hoisted(() => ({
   error: "Pull request not found",
@@ -276,7 +277,7 @@ describe("MessagesTimeline turn folds", () => {
     expect(screen.text()).toContain("Interim progress note");
   });
 
-  it("keeps a turn the user expanded open after switching threads and back", async () => {
+  it("keeps a restored expanded turn open when the next run starts", async () => {
     const props = baseProps();
     const firstRun = RunId.make("run-1");
     const secondRun = RunId.make("run-2");
@@ -294,22 +295,33 @@ describe("MessagesTimeline turn folds", () => {
         "assistant-final",
       ),
     ];
-    const completed = {
-      latestRun: { runId: firstRun, status: "completed", startedAt: at(0), completedAt: at(9) },
-    } satisfies Partial<TimelineProps>;
+    rememberTimelinePosition(
+      props.routeThreadKey,
+      {
+        rowId: "user-1",
+        offsetWithinRow: 0,
+        scrollOffset: 0,
+        atEnd: true,
+        disclosures: {
+          runs: new Set([firstRun]),
+          workGroups: new Set(),
+          attempts: new Set(),
+          workGroupState: { scrollPositions: new Map(), expandedEntries: new Set() },
+        },
+      },
+      false,
+    );
     const timeline = (entries: Entry[], extra: Partial<TimelineProps>) => (
       <MessagesTimeline {...props} timelineEntries={entries} {...extra} />
     );
-    await using screen = await renderElement(timeline(settled, completed));
-    const fold = () => screen.button(/^Worked for/);
-    await click(fold());
-    expect(screen.text()).toContain("Interim progress note");
-
-    await screen.rerender(
-      timeline([], { ...completed, displayThreadKey: `${props.routeThreadKey}-other` }),
+    await using screen = await renderElement(
+      timeline(settled, {
+        latestRun: { runId: firstRun, status: "completed", startedAt: at(0), completedAt: at(9) },
+      }),
     );
-    await screen.rerender(timeline(settled, completed));
+    const fold = () => screen.button(/^Worked for/);
     expect(fold().getAttribute("aria-expanded")).toBe("true");
+    expect(screen.text()).toContain("Interim progress note");
 
     await screen.rerender(
       timeline(
