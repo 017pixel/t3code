@@ -3451,6 +3451,9 @@ interface ActiveClaudeTurnContext {
   // CLI still holds in its queue (behind a foreground tool call) is dropped
   // when Stop closes the query, so the turn says which ones may not have arrived.
   readonly unreadSteers: Map<string, string>;
+  // Set as finalization starts: a steer admitted later would miss the
+  // unread-steer snapshot, so it fails and the orchestrator follows up instead.
+  steersClosed: boolean;
   readonly subagentsByTaskId: Map<string, ActiveClaudeSubagent>;
   readonly subagentsByToolUseId: Map<string, ActiveClaudeSubagent>;
   readonly subagentNodesByTaskId: Map<string, OrchestrationV2ExecutionNode["id"]>;
@@ -6623,6 +6626,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly threadDisposition?: "reusable" | "broken";
           readonly result?: SDKResultMessage;
         }) {
+          input.context.steersClosed = true;
           yield* reasoningDeltas.flushTurn(input.context.nativeTurnId);
           if (input.context.compaction?.status === "running") {
             yield* emitProviderEvent({
@@ -9576,6 +9580,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               compactionFailure: null,
               steeredSegmentUsage: [],
               unreadSteers: new Map(),
+              steersClosed: false,
               subagentsByTaskId: new Map(),
               subagentsByToolUseId: new Map(),
               subagentNodesByTaskId: new Map(),
@@ -9994,19 +9999,21 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             // the steer fails and the orchestrator starts the follow-up turn.
             if (
               (yield* Ref.get(activeTurn))?.providerTurnId !== turnInput.providerTurnId ||
-              (yield* Ref.get(queryContext)) !== existing
+              (yield* Ref.get(queryContext)) !== existing ||
+              // No yield between this check and the set below.
+              currentTurn.steersClosed
             ) {
               return yield* new ProviderAdapter.ProviderAdapterProtocolError({
                 driver: CLAUDE_PROVIDER,
                 detail: `Claude provider turn ${turnInput.providerTurnId} ended before the steer was sent.`,
               });
             }
+            currentTurn.unreadSteers.set(steerUuid, turnInput.message.text);
             yield* Ref.update(steeredTurns, (current) => {
               const next = new Set(current);
               next.add(turnInput.providerTurnId);
               return next;
             });
-            currentTurn.unreadSteers.set(steerUuid, turnInput.message.text);
             // A rejected offer reports the steer as failed, so Stop must not
             // warn about it too.
             yield* existing.query
