@@ -187,8 +187,15 @@ export function guardSidebarStalePress(list: HTMLElement) {
   };
   const press = (event: PointerEvent) => {
     swallowClick = false;
-    if (event.pointerType !== "mouse" || event.button !== 0 || hovered === null) return;
+    if (event.pointerType !== "mouse" || event.button !== 0) return;
     const target = childOf(event.target);
+    // After `trust`, this press is the user's deliberate aim: track it so a later remote
+    // shift is still caught. A local action it triggers can call `trust` again.
+    if (hovered === null) {
+      point = { x: event.clientX, y: event.clientY };
+      hovered = target;
+      return;
+    }
     if (target === hovered) return;
     hovered = target;
     swallowClick = true;

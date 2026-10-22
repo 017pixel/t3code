@@ -91,7 +91,7 @@ describe("sidebar stale press guard", () => {
   function list() {
     const stack = new DisposableStack();
     const node = document.createElement("ul");
-    const rows = ["alpha", "beta"].map((name) => {
+    const rows = ["alpha", "beta", "gamma"].map((name) => {
       const row = node.appendChild(document.createElement("li"));
       row.textContent = name;
       return row;
@@ -155,5 +155,25 @@ describe("sidebar stale press guard", () => {
     press(beta!);
 
     expect(clicked).toEqual(["alpha", "beta"]);
+  });
+
+  // regression: a trusted press must still arm the guard for a remote shift that follows it
+  it("swallows a remote shift after an untracked press that follows the user's own settle", () => {
+    const { stack, guard, rows, clicked, press } = list();
+    using _list = stack;
+    const [alpha, beta, gamma] = rows;
+    alpha!.addEventListener("click", () => {
+      guard.trust();
+      alpha!.remove();
+    });
+    alpha!.dispatchEvent(pointer("pointermove", { pointerType: "mouse", buttons: 0 }));
+    press(alpha!);
+    press(beta!);
+    beta!.remove();
+
+    press(gamma!);
+    press(gamma!);
+
+    expect(clicked).toEqual(["alpha", "beta", "gamma"]);
   });
 });
