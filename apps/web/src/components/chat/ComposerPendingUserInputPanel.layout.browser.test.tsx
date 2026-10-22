@@ -27,6 +27,7 @@ async function renderPanel(
     multiSelect = false,
     width = 320,
     options = [{ label: "Rolling", description: "One node at a time" }],
+    queue,
   }: {
     header: string;
     question?: string;
@@ -34,6 +35,7 @@ async function renderPanel(
     multiSelect?: boolean;
     width?: number;
     options?: { label: string; description: string }[];
+    queue?: { index: number; total: number };
   },
   run: (
     container: HTMLDivElement,
@@ -56,6 +58,9 @@ async function renderPanel(
                 createdAt: "2026-10-20T00:00:00.000Z",
                 dismissible: true,
                 responseCapability: "live",
+                ...(queue
+                  ? { queueQuestionIndex: queue.index, queueQuestionTotal: queue.total }
+                  : {}),
                 questions: Array.from({ length: questionCount }, (_, index) => ({
                   id: index === 0 ? "strategy" : `strategy-${index}`,
                   header,
@@ -279,6 +284,15 @@ it.each([
     );
   },
 );
+
+it("counts a single-question prompt across its simultaneous queue", async () => {
+  await page.viewport(1024, 900);
+  await renderPanel({ header: "Strategy", queue: { index: 2, total: 5 } }, async (container) => {
+    const actions = container.querySelector("[data-slot=composer-banner-actions]")!;
+    const spans = [...actions.querySelectorAll("span")].map((span) => span.textContent);
+    expect(spans).toContain("3/5");
+  });
+});
 
 it.each([
   ["wide", 640, true],

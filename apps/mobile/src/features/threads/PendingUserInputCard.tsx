@@ -82,7 +82,8 @@ function QuestionText(props: { readonly markdown: string }) {
 }
 
 export function PendingUserInputCard(props: PendingUserInputCardProps) {
-  const questionCount = props.pendingUserInput.questions.length;
+  const questionCount =
+    props.pendingUserInput.queueQuestionTotal ?? props.pendingUserInput.questions.length;
   const canRespond = props.pendingUserInput.responseCapability !== "not_resumable";
   const isResponding = props.respondingUserInputId === props.pendingUserInput.requestId;
   const responseDisabled = !canRespond || isResponding;

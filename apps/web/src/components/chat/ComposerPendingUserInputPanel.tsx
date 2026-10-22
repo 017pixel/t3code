@@ -181,8 +181,9 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   const toggleLabel = isCollapsed
     ? "Show the question and its options"
     : "Hide the question and its options";
+  const queueTotal = prompt.queueQuestionTotal ?? prompt.questions.length;
   const questionCount =
-    prompt.questions.length > 1 ? `${questionIndex + 1}/${prompt.questions.length}` : null;
+    queueTotal > 1 ? `${(prompt.queueQuestionIndex ?? 0) + questionIndex + 1}/${queueTotal}` : null;
   // Pulls the caret's icon-box padding in so the count and caret read as one cluster.
   const questionCountClassName =
     "-me-2 text-xs/4 font-medium text-muted-foreground tabular-nums sm:-me-1.5";
