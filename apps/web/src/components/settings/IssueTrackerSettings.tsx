@@ -89,20 +89,17 @@ function TrackerRow({
   const submit = async (token: string | null) => {
     setBusy(true);
     setFailure(null);
-    try {
-      const result = await connect({
-        environmentId,
-        input: { tracker: tracker.tracker, token },
-      });
-      if (result._tag === "Success") {
-        setDraft("");
-        return;
-      }
-      const error = squashAtomCommandFailure(result);
-      setFailure(error instanceof Error ? error.message : "The request failed.");
-    } finally {
-      setBusy(false);
+    const result = await connect({
+      environmentId,
+      input: { tracker: tracker.tracker, token },
+    });
+    setBusy(false);
+    if (result._tag === "Success") {
+      setDraft("");
+      return;
     }
+    const error = squashAtomCommandFailure(result);
+    setFailure(error instanceof Error ? error.message : "The request failed.");
   };
 
   const status = !tracker.connected ? (
@@ -216,17 +213,14 @@ function ProjectBindings({
 
   const change = async (projectId: ProjectId, scope: string) => {
     setPending(projectId);
-    try {
-      await bind({
-        environmentId,
-        input: {
-          projectId,
-          binding: scope === UNBOUND ? null : { tracker: tracker.tracker, scope },
-        },
-      });
-    } finally {
-      setPending(null);
-    }
+    await bind({
+      environmentId,
+      input: {
+        projectId,
+        binding: scope === UNBOUND ? null : { tracker: tracker.tracker, scope },
+      },
+    });
+    setPending(null);
   };
 
   return (
