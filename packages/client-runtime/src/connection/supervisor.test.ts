@@ -776,55 +776,50 @@ describe("EnvironmentSupervisor", () => {
     }),
   );
 
-  it.effect("keeps a live session through one slow foreground probe that later answers", () =>
-    Effect.gen(function* () {
-      const probeCalls = yield* Ref.make(0);
-      const firstProbeStarted = yield* Deferred.make<void>();
-      const secondProbeAnswered = yield* Deferred.make<void>();
-      const harness = yield* makeHarness({
-        probe: () =>
-          Ref.updateAndGet(probeCalls, (count) => count + 1).pipe(
-            Effect.flatMap((call) =>
-              call === 1
-                ? Deferred.succeed(firstProbeStarted, undefined).pipe(Effect.andThen(Effect.never))
-                : Deferred.succeed(secondProbeAnswered, undefined),
+  it.effect(
+    "keeps a live session when the automatic follow-up to a slow foreground probe answers",
+    () =>
+      Effect.gen(function* () {
+        const probeCount = yield* Ref.make(0);
+        const probeStarted = yield* Queue.unbounded<number>();
+        const harness = yield* makeHarness({
+          probe: () =>
+            Ref.updateAndGet(probeCount, (count) => count + 1).pipe(
+              Effect.tap((call) => Queue.offer(probeStarted, call)),
+              Effect.flatMap((call) => (call === 1 ? Effect.never : Effect.void)),
             ),
-          ),
-      });
-      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
-        initiallyDesired: true,
-      }).pipe(Effect.provide(harness.dependencies));
+        });
+        const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+          initiallyDesired: true,
+        }).pipe(Effect.provide(harness.dependencies));
 
-      yield* awaitState(
-        supervisor.state,
-        (state) => state.phase === "connected" && state.generation === 1,
-      );
-      yield* harness.wake("application-active");
-      yield* Deferred.await(firstProbeStarted);
-      // A busy server misses the foreground probe deadline once; the socket
-      // never closed.
-      yield* TestClock.adjust("18 seconds");
-      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
-      yield* harness.wake("application-active");
-      yield* Deferred.await(secondProbeAnswered);
+        yield* awaitState(
+          supervisor.state,
+          (state) => state.phase === "connected" && state.generation === 1,
+        );
+        yield* harness.wake("application-active");
+        expect(yield* Queue.take(probeStarted)).toBe(1);
+        // A busy server misses the foreground probe deadline once while the
+        // socket stays open; the supervisor asks again on its own.
+        yield* TestClock.adjust("15 seconds");
+        expect(yield* Queue.take(probeStarted)).toBe(2);
+        yield* TestClock.adjust("30 seconds");
 
-      expect(yield* Ref.get(harness.releaseCount)).toBe(0);
-      expect(yield* Ref.get(harness.sessionCount)).toBe(1);
-      expect((yield* SubscriptionRef.get(supervisor.state)).generation).toBe(1);
-    }).pipe(Effect.provide(TestClock.layer())),
+        expect(yield* Ref.get(harness.releaseCount)).toBe(0);
+        expect(yield* Ref.get(harness.sessionCount)).toBe(1);
+        expect(yield* SubscriptionRef.get(supervisor.state)).toMatchObject({
+          phase: "connected",
+          generation: 1,
+        });
+      }).pipe(Effect.provide(TestClock.layer())),
   );
 
-  it.effect("replaces a session after consecutive unanswered foreground probes", () =>
+  it.effect("replaces a session when the automatic follow-up probe also goes unanswered", () =>
     Effect.gen(function* () {
-      const probeCalls = yield* Ref.make(0);
-      const probeStarted = yield* Queue.unbounded<number>();
+      const probeCount = yield* Ref.make(0);
       const harness = yield* makeHarness({
-        // Misses, answers, then misses twice in a row.
         probe: () =>
-          Ref.updateAndGet(probeCalls, (count) => count + 1).pipe(
-            Effect.tap((call) => Queue.offer(probeStarted, call)),
-            Effect.flatMap((call) => (call === 2 ? Effect.void : Effect.never)),
-          ),
+          Ref.update(probeCount, (count) => count + 1).pipe(Effect.andThen(Effect.never)),
       });
       const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
         initiallyDesired: true,
@@ -834,21 +829,17 @@ describe("EnvironmentSupervisor", () => {
         supervisor.state,
         (state) => state.phase === "connected" && state.generation === 1,
       );
-      for (const attempt of [1, 2, 3]) {
-        yield* harness.wake("application-active");
-        expect(yield* Queue.take(probeStarted)).toBe(attempt);
-        yield* TestClock.adjust("18 seconds");
-      }
-      // The answer in between reset the tolerance, so the session survives.
-      expect(yield* Ref.get(harness.releaseCount)).toBe(0);
-
+      // One foreground event and no other signal: the follow-up's miss alone
+      // replaces the session.
       yield* harness.wake("application-active");
-      expect(yield* Queue.take(probeStarted)).toBe(4);
-      yield* TestClock.adjust("18 seconds");
+      yield* TestClock.adjust("15 seconds");
+      yield* TestClock.adjust("15 seconds");
       yield* awaitState(
         supervisor.state,
         (state) => state.phase === "connected" && state.generation === 2,
       );
+
+      expect(yield* Ref.get(probeCount)).toBe(2);
       expect(yield* Ref.get(harness.releaseCount)).toBe(1);
     }).pipe(Effect.provide(TestClock.layer())),
   );

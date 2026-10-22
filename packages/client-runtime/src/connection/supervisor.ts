@@ -608,9 +608,6 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       Stream.runForEach(() => requestBetterRouteCheck(lease)),
       Effect.forkScoped,
     );
-    // A busy server can miss one foreground probe while the socket is still
-    // healthy, so only a second consecutive miss replaces the session.
-    let missedForegroundProbe = false;
     for (;;) {
       const next = yield* takeSignal;
       const end = yield* connectedLeaseEnd(next, lease);
@@ -628,8 +625,11 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         continue;
       }
       yield* Ref.set(probeUnanswered, true);
-      const probe = yield* Effect.forkChild(lease.session.probe);
-      let foreground = isForegroundProbe(next);
+      let probe = yield* Effect.forkChild(lease.session.probe);
+      // A busy server can miss one foreground probe while the socket is still
+      // healthy, so the first miss asks again and only the follow-up's miss
+      // replaces the session.
+      let toleratesMiss = isForegroundProbe(next);
       let deadline = (yield* Clock.monotonicTimeNanos) + Duration.toNanosUnsafe(probeTimeout);
       for (;;) {
         const remaining = deadline - (yield* Clock.monotonicTimeNanos);
@@ -644,10 +644,11 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         ]);
         if (probeEvent._tag === "TimedOut") {
           yield* Fiber.interrupt(probe);
-          if (foreground && !missedForegroundProbe) {
-            missedForegroundProbe = true;
-            yield* Ref.set(probeUnanswered, false);
-            break;
+          if (toleratesMiss) {
+            toleratesMiss = false;
+            probe = yield* Effect.forkChild(lease.session.probe);
+            deadline = (yield* Clock.monotonicTimeNanos) + Duration.toNanosUnsafe(probeTimeout);
+            continue;
           }
           return yield* new ConnectionTransientError({
             reason: "timeout",
@@ -656,7 +657,6 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         }
         if (probeEvent._tag === "ProbeCompleted") {
           if (Exit.isSuccess(probeEvent.exit)) {
-            missedForegroundProbe = false;
             yield* Ref.set(probeUnanswered, false);
           }
           yield* probeEvent.exit;
@@ -671,7 +671,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         if (signalTimeout !== undefined) {
           // A retry or network signal wants a definite answer, even when its
           // own deadline lands after the foreground one.
-          if (!isForegroundProbe(probeEvent.signal)) foreground = false;
+          if (!isForegroundProbe(probeEvent.signal)) toleratesMiss = false;
           const signalDeadline =
             (yield* Clock.monotonicTimeNanos) + Duration.toNanosUnsafe(signalTimeout);
           if (signalDeadline < deadline) deadline = signalDeadline;
