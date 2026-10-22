@@ -38,6 +38,39 @@ const writeTextFile = Effect.fn("CodexHomeLayout.test.writeTextFile")(function* 
   yield* fileSystem.writeFileString(filePath, contents);
 });
 
+// Collects real (non-symlink) file contents so data preservation can be asserted without
+// prescribing where a reconciliation keeps or backs up a conflicting shadow entry.
+const readRegularFileContents = Effect.fn("CodexHomeLayout.test.readRegularFileContents")(
+  function* (roots: ReadonlyArray<string>) {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const contents: Array<string> = [];
+    for (const root of roots) {
+      for (const relativePath of yield* fileSystem.readDirectory(root, { recursive: true })) {
+        const entryPath = path.join(root, relativePath);
+        const isSymlink = yield* fileSystem.readLink(entryPath).pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        );
+        if (isSymlink) continue;
+        const info = yield* fileSystem.stat(entryPath);
+        if (info.type === "File") {
+          contents.push(yield* fileSystem.readFileString(entryPath));
+        }
+      }
+    }
+    return contents;
+  },
+);
+
+const isSymlink = Effect.fn("CodexHomeLayout.test.isSymlink")(function* (entryPath: string) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  return yield* fileSystem.readLink(entryPath).pipe(
+    Effect.as(true),
+    Effect.orElseSucceed(() => false),
+  );
+});
+
 it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
   describe("resolveCodexHomeLayout", () => {
     it.effect("uses the shared home for continuation and the shadow home for runtime", () =>
@@ -320,6 +353,88 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
           });
           expect(error.message).toBe(
             `Cannot create Codex shadow home entry 'config.toml' because '${path.join(shadowHome, "config.toml")}' already exists and is not a symlink.`,
+          );
+        }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "keeps working when Codex creates new entries in both homes between materializations",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const sharedHome = yield* makeTempDir("t3code-codex-shared-");
+          const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+          const shadowHome = path.join(shadowRoot, "shadow");
+          const layout = yield* resolveCodexHomeLayout(
+            decodeCodexSettings({ homePath: sharedHome, shadowHomePath: shadowHome }),
+          );
+
+          yield* materializeCodexShadowHome(layout);
+
+          // Entries Codex 0.163 creates on its own after the first materialization, plus a
+          // name no Codex release uses yet: the fix must not depend on an allowlist.
+          const runtimeFiles = [
+            ".tmp/runtime.lock",
+            "installation_id",
+            "queue_1.sqlite",
+            "goals_1.sqlite",
+            "future_state_42.sqlite",
+          ];
+          for (const runtimeFile of runtimeFiles) {
+            yield* writeTextFile(path.join(sharedHome, runtimeFile), `shared ${runtimeFile}`);
+            yield* writeTextFile(path.join(shadowHome, runtimeFile), `shadow ${runtimeFile}`);
+          }
+
+          yield* materializeCodexShadowHome(layout);
+
+          const shadowRootContents = yield* readRegularFileContents([shadowRoot]);
+          for (const runtimeFile of runtimeFiles) {
+            expect(yield* fileSystem.readFileString(path.join(sharedHome, runtimeFile))).toBe(
+              `shared ${runtimeFile}`,
+            );
+            expect(shadowRootContents).toContain(`shadow ${runtimeFile}`);
+          }
+        }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "reconciles regular shadow WAL and SHM sidecars of a linked SQLite database as one family",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const sharedHome = yield* makeTempDir("t3code-codex-shared-");
+          const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+          const shadowHome = path.join(shadowRoot, "shadow");
+          yield* writeTextFile(path.join(sharedHome, "logs_2.sqlite"), "shared logs db");
+          const layout = yield* resolveCodexHomeLayout(
+            decodeCodexSettings({ homePath: sharedHome, shadowHomePath: shadowHome }),
+          );
+
+          yield* materializeCodexShadowHome(layout);
+          expect(yield* isSymlink(path.join(shadowHome, "logs_2.sqlite"))).toBe(true);
+
+          // SQLite opens its journal next to the path it was given, so Codex writes regular
+          // sidecars beside the linked base database while the shared home has its own.
+          for (const suffix of ["-wal", "-shm"]) {
+            const name = `logs_2.sqlite${suffix}`;
+            yield* writeTextFile(path.join(sharedHome, name), `shared ${name}`);
+            yield* writeTextFile(path.join(shadowHome, name), `shadow ${name}`);
+          }
+
+          yield* materializeCodexShadowHome(layout);
+
+          const familyLinks = yield* Effect.forEach(
+            ["logs_2.sqlite", "logs_2.sqlite-wal", "logs_2.sqlite-shm"],
+            (name) => isSymlink(path.join(shadowHome, name)),
+          );
+          expect(new Set(familyLinks).size).toBe(1);
+          expect(yield* fileSystem.readFileString(path.join(sharedHome, "logs_2.sqlite-wal"))).toBe(
+            "shared logs_2.sqlite-wal",
+          );
+          expect(yield* readRegularFileContents([shadowRoot])).toContain(
+            "shadow logs_2.sqlite-wal",
           );
         }),
     );
