@@ -271,6 +271,18 @@ function syncWindowAppearance(
 
 type RevealSubscription = (listener: () => void) => void;
 
+// Wayland only emits `ready-to-show` after `show()`, so Linux also reveals on first load.
+function firstRevealSubscribers(
+  window: Electron.BrowserWindow,
+  platform: NodeJS.Platform,
+): RevealSubscription[] {
+  const subscribers: RevealSubscription[] = [(fire) => window.once("ready-to-show", fire)];
+  if (platform === "linux") {
+    subscribers.push((fire) => window.webContents.once("did-finish-load", fire));
+  }
+  return subscribers;
+}
+
 function bindFirstRevealTrigger(
   subscribers: readonly RevealSubscription[],
   reveal: () => void,
@@ -823,11 +835,7 @@ export const make = Effect.gen(function* () {
       );
     });
 
-    const revealSubscribers: RevealSubscription[] = [(fire) => window.once("ready-to-show", fire)];
-    if (environment.platform === "linux") {
-      revealSubscribers.push((fire) => window.webContents.once("did-finish-load", fire));
-    }
-    bindFirstRevealTrigger(revealSubscribers, () => {
+    bindFirstRevealTrigger(firstRevealSubscribers(window, environment.platform), () => {
       if (!window.isDestroyed()) {
         window.webContents.setBackgroundThrottling(true);
       }
@@ -936,7 +944,7 @@ export const make = Effect.gen(function* () {
     splash.once("closed", () => {
       void runPromise(Ref.set(splashWindowRef, Option.none()));
     });
-    splash.once("ready-to-show", () => {
+    bindFirstRevealTrigger(firstRevealSubscribers(splash, environment.platform), () => {
       if (!splash.isDestroyed()) {
         splash.show();
       }

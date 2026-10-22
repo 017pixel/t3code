@@ -193,17 +193,20 @@ const layerElectronTheme = Layer.succeed(ElectronTheme.ElectronTheme, {
   onUpdated: () => Effect.void,
 } satisfies ElectronTheme.ElectronTheme["Service"]);
 
-const layerDesktopEnvironment = DesktopEnvironment.layer(environmentInput).pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      NodeServices.layer,
-      DesktopConfig.layerTest({
-        T3CODE_PORT: "3773",
-        VITE_DEV_SERVER_URL: "http://127.0.0.1:5733",
-      }),
+const makeLayerDesktopEnvironment = (platform: NodeJS.Platform) =>
+  DesktopEnvironment.layer({ ...environmentInput, platform }).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        NodeServices.layer,
+        DesktopConfig.layerTest({
+          T3CODE_PORT: "3773",
+          VITE_DEV_SERVER_URL: "http://127.0.0.1:5733",
+        }),
+      ),
     ),
-  ),
-);
+  );
+
+const layerDesktopEnvironment = makeLayerDesktopEnvironment(environmentInput.platform);
 
 const desktopWindowBoundsEquivalence = Schema.toEquivalence(
   DesktopAppSettings.DesktopWindowBoundsSchema,
@@ -345,7 +348,10 @@ function layerTest(input: {
   );
 }
 
-const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | null)[]) =>
+const makeSplashScenario = (
+  createOutcomes: readonly (Electron.BrowserWindow | null)[],
+  platform: NodeJS.Platform = environmentInput.platform,
+) =>
   Effect.gen(function* () {
     const createdWindows = yield* Ref.make<Electron.BrowserWindow[]>([]);
     const createCalls = yield* Ref.make(0);
@@ -419,7 +425,7 @@ const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | n
             recordMetrics: () => Effect.void,
             shutdown: Effect.void,
           }),
-          layerDesktopEnvironment,
+          makeLayerDesktopEnvironment(platform),
           DesktopAppSettings.layerTest(),
           layerDesktopClientSettings,
           layerDesktopServerExposure,
@@ -990,6 +996,27 @@ describe("DesktopWindow", () => {
         assert.deepEqual(openedExternalUrls, ["https://accounts.microsoft.com/oauth"]);
       }).pipe(Effect.provide(layer));
     }),
+  );
+
+  it.effect(
+    "reveals the connecting splash on first load on Linux, where Wayland skips ready-to-show",
+    () =>
+      Effect.gen(function* () {
+        const splash = makeFakeBrowserWindow();
+        const scenario = yield* makeSplashScenario([splash.window], "linux");
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.showConnectingSplash;
+
+          const didFinishLoad = splash.webContentsOnce.mock.calls.find(
+            ([eventName]) => eventName === "did-finish-load",
+          )?.[1];
+          assert.isDefined(didFinishLoad);
+          didFinishLoad();
+          assert.equal(vi.mocked(splash.window.show).mock.calls.length, 1);
+        }).pipe(Effect.provide(scenario.layer));
+      }),
   );
 
   it.effect(
