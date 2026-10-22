@@ -222,6 +222,61 @@ describe("MessagesTimeline messages", () => {
   });
 });
 
+describe("MessagesTimeline turn folds", () => {
+  it("keeps a turn the user expanded open when the next run starts", async () => {
+    const props = baseProps();
+    const firstRun = RunId.make("run-1");
+    const secondRun = RunId.make("run-2");
+    const at = (second: number) => new Date(Date.parse(CREATED_AT) + second * 1000).toISOString();
+    const settled = [
+      message("First prompt", { runId: firstRun, inputIntent: "turn_start" }, "user-1"),
+      message(
+        "Interim progress note",
+        { role: "assistant", runId: firstRun, createdAt: at(2), updatedAt: at(2) },
+        "assistant-interim",
+      ),
+      message(
+        "Final reply",
+        { role: "assistant", runId: firstRun, createdAt: at(9), updatedAt: at(9) },
+        "assistant-final",
+      ),
+    ];
+    const timeline = (entries: Entry[], extra: Partial<TimelineProps>) => (
+      <MessagesTimeline {...props} timelineEntries={entries} {...extra} />
+    );
+    await using screen = await renderElement(
+      timeline(settled, {
+        latestRun: { runId: firstRun, status: "completed", startedAt: at(0), completedAt: at(9) },
+      }),
+    );
+    const fold = () => screen.button(/^Worked for/);
+    expect(screen.text()).not.toContain("Interim progress note");
+    await click(fold());
+    expect(screen.text()).toContain("Interim progress note");
+
+    await screen.rerender(
+      timeline(
+        [
+          ...settled,
+          message(
+            "Follow-up",
+            { runId: secondRun, inputIntent: "turn_start", createdAt: at(20), updatedAt: at(20) },
+            "user-2",
+          ),
+        ],
+        {
+          isWorking: true,
+          activeTurnInProgress: true,
+          latestRun: { runId: secondRun, status: "running", startedAt: at(21), completedAt: null },
+        },
+      ),
+    );
+
+    expect(fold().getAttribute("aria-expanded")).toBe("true");
+    expect(screen.text()).toContain("Interim progress note");
+  });
+});
+
 describe("MessagesTimeline automation prompts", () => {
   it("folds an automation prompt into a bubble titled by its task", async () => {
     setup({ scheduledTasks: [{ id: TASK_ID, title: "Nightly triage" }] });
