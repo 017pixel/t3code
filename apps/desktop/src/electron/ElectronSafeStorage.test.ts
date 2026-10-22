@@ -1,7 +1,10 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
 import { beforeEach, vi } from "vite-plus/test";
 
 const safeStorage = vi.hoisted(() => ({
@@ -80,6 +83,35 @@ describe("ElectronSafeStorage", () => {
         yield* Effect.exit(storage.decryptString(Buffer.from("ciphertext")));
         assert.equal(safeStorage.encryptStringAsync.mock.calls.length, 0);
         assert.equal(safeStorage.decryptStringAsync.mock.calls.length, 0);
+      }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
+  );
+
+  it.effect(
+    "refuses v10 ciphertext the async API produces when the keyring provider falls back",
+    () =>
+      Effect.gen(function* () {
+        // When the Freedesktop provider fails or is cancelled, Electron's async API
+        // still reports gnome_libsecret but encrypts with the fixed "peanuts" POSIX key.
+        safeStorage.getSelectedStorageBackend.mockReturnValue("gnome_libsecret");
+        safeStorage.isAsyncEncryptionAvailable.mockResolvedValue(true);
+        safeStorage.isEncryptionAvailable.mockReturnValue(true);
+        safeStorage.encryptStringAsync.mockResolvedValue(
+          Buffer.concat([Buffer.from("v10"), Buffer.from("opaque")]),
+        );
+        const storage = yield* ElectronSafeStorage.make;
+
+        const exit = yield* Effect.exit(storage.encryptString("secret"));
+        assert.isTrue(
+          Exit.isFailure(exit),
+          "fallback ciphertext must not be returned as protected storage",
+        );
+        if (Exit.isFailure(exit)) {
+          assert.instanceOf(
+            Option.getOrThrow(Cause.findErrorOption(exit.cause)),
+            ElectronSafeStorage.ElectronSafeStorageEncryptError,
+          );
+        }
+        assert.equal(safeStorage.encryptString.mock.calls.length, 0);
       }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
   );
 
