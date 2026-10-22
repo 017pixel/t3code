@@ -1,9 +1,11 @@
 // Run with Node and evaluate its output in an isolated app's new-thread draft,
 // with the scenario's Claude model selected. Submit through the normal composer;
 // this preserves the real SDK lifecycle instead of seeding projection rows.
-import { readFileSync } from "node:fs";
+import * as NodeFS from "node:fs";
 
-const scenario = JSON.parse(readFileSync(new URL("./scenario.json", import.meta.url), "utf8"));
+const scenario = JSON.parse(
+  NodeFS.readFileSync(new URL("./scenario.json", import.meta.url), "utf8"),
+);
 
 console.log(`(() => {
   if (!location.pathname.startsWith('/draft/')) {
