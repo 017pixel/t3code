@@ -1684,6 +1684,137 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect(
+    "keeps the user's permissions profile across an Auto → Full access → Auto round trip",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const nativeThreadId = "permissions-profile-thread";
+          const turnIds = ["profile-turn-1", "profile-turn-2", "profile-turn-3"];
+          // Codex only keeps a named profile while the turn's legacy sandboxPolicy
+          // equals its projection; selecting the profile by id restores its
+          // filesystem deny entries after a detour through Full access.
+          const turnPolicies = {
+            auto: {
+              approvalPolicy: "on-request",
+              approvalsReviewer: "auto_review",
+              permissions: "env-protected",
+            },
+            "full-access": {
+              approvalPolicy: "never",
+              approvalsReviewer: "user",
+              sandboxPolicy: { type: "dangerFullAccess" },
+            },
+          } as const;
+          const turnModes = ["auto", "full-access", "auto"] as const;
+          const turnText = (index: number) => `Profile round ${index + 1}.`;
+          const turnEvent = (
+            method: "turn/started" | "turn/completed",
+            turnId: string,
+          ): CodexReplay.CodexAppServerReplayEntry => ({
+            type: "emit_inbound",
+            label: `${turnId} ${method}`,
+            frame: {
+              method,
+              params: {
+                threadId: nativeThreadId,
+                turn: makeCodexReplayTurn({
+                  id: turnId,
+                  status: method === "turn/started" ? "inProgress" : "completed",
+                }),
+              },
+            },
+          });
+          const runTurnEntries = (
+            index: number,
+          ): ReadonlyArray<CodexReplay.CodexAppServerReplayEntry> => [
+            {
+              type: "expect_outbound",
+              label: `turn ${index + 1} (${turnModes[index]}) turn/start`,
+              frame: {
+                id: 3 + index,
+                method: "turn/start",
+                params: {
+                  threadId: nativeThreadId,
+                  input: [{ type: "text", text: turnText(index) }],
+                  cwd: "/workspace",
+                  model: "gpt-5.4",
+                  ...turnPolicies[turnModes[index]!],
+                  summary: "detailed",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: `turn ${index + 1} turn/start`,
+              frame: {
+                id: 3 + index,
+                result: {
+                  turn: makeCodexReplayTurn({ id: turnIds[index]!, status: "inProgress" }),
+                },
+              },
+            },
+            turnEvent("turn/started", turnIds[index]!),
+            turnEvent("turn/completed", turnIds[index]!),
+          ];
+          const preamble = codexReplayPreamble({
+            nativeThreadId,
+            nativeTurnId: turnIds[0]!,
+            prompt: turnText(0),
+          })
+            .slice(0, -3)
+            .map((entry) =>
+              entry.type === "emit_inbound" &&
+              entry.label === "thread/start" &&
+              Predicate.isObject(entry.frame) &&
+              Predicate.isObject(entry.frame.result)
+                ? {
+                    ...entry,
+                    frame: {
+                      ...entry.frame,
+                      result: {
+                        ...entry.frame.result,
+                        activePermissionProfile: { id: "env-protected", extends: ":workspace" },
+                      },
+                    },
+                  }
+                : entry,
+            );
+          const harness = yield* makeCodexReplayHarness(
+            makeCodexReplayTranscript({
+              scenario: "codex-permissions-profile-round-trip",
+              entries: [
+                ...preamble,
+                ...runTurnEntries(0),
+                ...runTurnEntries(1),
+                ...runTurnEntries(2),
+              ],
+            }),
+          );
+
+          for (const [index, runtimeMode] of turnModes.entries()) {
+            yield* harness.runtime.startTurn({
+              ...makeCodexTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now: yield* DateTime.now,
+                attemptId: RunAttemptId.make(`permissions-profile-${index + 1}`),
+                text: turnText(index),
+              }),
+              runOrdinal: index + 1,
+              providerTurnOrdinal: index + 1,
+              runtimePolicy: { ...CODEX_TEST_RUNTIME_POLICY, runtimeMode },
+            });
+            yield* harness.awaitTerminal(index + 1);
+          }
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
   it.effect("preserves T3 context on the wire and restores it after compaction", () =>
     Effect.scoped(
       Effect.gen(function* () {
