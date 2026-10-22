@@ -1,0 +1,9 @@
+{
+  "S": "ordinary sentinel",
+  "U": "Ultrathink:\nKeep this prefix in my example",
+  "R": "Explain this example\n\n<review_comment filePath=\"src/example.ts\">Keep this configurable.</review_comment>",
+  "W": "  keep\n    indented  \n",
+  "P": "PLEASE IMPLEMENT THIS PLAN:\n# Synthetic plan\nChange the example label.",
+  "B": "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]",
+  "D": "current draft"
+}
