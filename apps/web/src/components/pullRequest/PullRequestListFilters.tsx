@@ -175,6 +175,7 @@ function PullRequestFilterRadioGroup<Value extends string>({
           <MenuRadioItem
             key={option.value}
             value={option.value}
+            hideIndicator
             className={option.unavailable ? "data-disabled:pointer-events-auto" : undefined}
             disabled={option.unavailable !== undefined}
           >

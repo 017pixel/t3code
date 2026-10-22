@@ -199,7 +199,7 @@ function ScopeMenu({
           >
             {choices.map((option, index) => (
               <Fragment key={option.value}>
-                <MenuRadioItem value={option.value} closeOnClick>
+                <MenuRadioItem hideIndicator value={option.value} closeOnClick>
                   <span className="flex min-w-0 items-center gap-2">
                     <ScopeOptionLabel option={option} />
                     <MenuRadioItemIndicator />

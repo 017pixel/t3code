@@ -168,7 +168,7 @@ export function DeviceControlsRail(props: {
                   ["extra-large", "Extra large"],
                 ] as const
               ).map(([value, label]) => (
-                <MenuRadioItem key={value} value={value}>
+                <MenuRadioItem hideIndicator key={value} value={value}>
                   <span className="flex items-center gap-2">
                     <span className="flex-1">{label}</span>
                     <MenuRadioItemIndicator />
