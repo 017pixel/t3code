@@ -16,6 +16,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
 import * as NodeChildProcess from "node:child_process";
+import * as NodeURL from "node:url";
 const [homeArg, preset = "H", environment = "E1"] = process.argv.slice(2);
 if (!homeArg || !["H", "N", "P"].includes(preset) || !["E1", "E2"].includes(environment))
   throw Error(
@@ -226,7 +227,7 @@ NodeFS.copyFileSync(
 );
 NodeFS.writeFileSync(
   NodePath.join(home, "codex-fixture"),
-  `#!/bin/sh\nexec node '${NodePath.resolve(new URL("./provider.mjs", import.meta.url).pathname)}' "$@"\n`,
+  `#!/bin/sh\nexec node '${NodeURL.fileURLToPath(new URL("./provider.mjs", import.meta.url))}' "$@"\n`,
   { mode: 0o755 },
 );
 const manifest = {
