@@ -3449,7 +3449,7 @@ interface ActiveClaudeTurnContext {
   readonly steeredSegmentUsage: Array<SDKResultMessage["usage"]>;
   // Steer text by prompt uuid until a reply frame echoes the uuid. A steer the
   // CLI still holds in its queue (behind a foreground tool call) is dropped
-  // when Stop closes the query, so the turn says which ones never arrived.
+  // when Stop closes the query, so the turn says which ones may not have arrived.
   readonly unreadSteers: Map<string, string>;
   readonly subagentsByTaskId: Map<string, ActiveClaudeSubagent>;
   readonly subagentsByToolUseId: Map<string, ActiveClaudeSubagent>;
@@ -6765,7 +6765,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           if (input.status === "interrupted") {
             for (const [uuid, text] of unreadSteers) {
               const nativeItemId = `unread-steer:${uuid}`;
-              const notice = `Claude had not read your steer when the turn stopped, so it was not delivered. Resend it if you still need it: "${text}"`;
+              const notice = `Claude did not confirm reading your steer before Stop. It may not have been delivered. Resend it if needed: "${text}"`;
               yield* emitProviderEvent({
                 type: "turn_item.updated",
                 driver: CLAUDE_PROVIDER,
@@ -6788,7 +6788,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   ordinal: yield* resolveItemOrdinal(input.context, nativeItemId),
                   type: "system_notice",
                   status: "completed",
-                  title: "Steer not delivered",
+                  title: "Steer delivery not confirmed",
                   message: notice,
                   startedAt: input.completedAt,
                   completedAt: input.completedAt,
@@ -8720,11 +8720,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const liveQuery = yield* Ref.get(queryContext);
           // Only a reply frame proves the model read a steer: the CLI echoes
           // a queued message once it folds it into the turn's next request.
+          // Assistant frames echo only the request that began a reply, so a
+          // steer consumed between tool rounds shows up on the result alone.
           if (
             context !== null &&
             context.unreadSteers.size > 0 &&
             liveQuery?.query === input.query &&
-            (message.type === "assistant" || message.type === "stream_event")
+            (message.type === "assistant" ||
+              message.type === "stream_event" ||
+              message.type === "result")
           ) {
             for (const uuid of claudeEchoedPromptUuids(message)) {
               context.unreadSteers.delete(uuid);
@@ -10003,7 +10007,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               return next;
             });
             currentTurn.unreadSteers.set(steerUuid, turnInput.message.text);
-            yield* existing.query.offer(userMessage);
+            // A rejected offer reports the steer as failed, so Stop must not
+            // warn about it too.
+            yield* existing.query
+              .offer(userMessage)
+              .pipe(
+                Effect.onError(() => Effect.sync(() => currentTurn.unreadSteers.delete(steerUuid))),
+              );
           },
           (effect, turnInput) =>
             effect.pipe(

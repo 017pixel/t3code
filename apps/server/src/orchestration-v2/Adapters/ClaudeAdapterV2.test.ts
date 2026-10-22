@@ -2037,6 +2037,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly apiErrorStatus?: number;
     // null omits the field, as the CLI does on a zero-turn result.
     readonly terminalReason?: SDKResultMessage["terminal_reason"] | null;
+    readonly userMessageUuids?: ReadonlyArray<string>;
     readonly usage?: {
       readonly input_tokens: number;
       readonly output_tokens: number;
@@ -2067,6 +2068,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ...(input.origin === undefined ? {} : { origin: input.origin }),
       ...(input.errors === undefined ? {} : { errors: input.errors }),
       ...(input.apiErrorStatus === undefined ? {} : { api_error_status: input.apiErrorStatus }),
+      ...(input.userMessageUuids === undefined
+        ? {}
+        : { user_message_uuids: input.userMessageUuids }),
       ...(input.terminalReason === null
         ? {}
         : { terminal_reason: input.terminalReason ?? "completed" }),
@@ -3063,11 +3067,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   // regression: #15708 Stop must not silently drop a steer Claude queued behind a foreground task
   it.effect.each([
     {
-      readBeforeStop: false,
+      readBy: "none",
       title: "warns that a steer Claude never read before Stop was not delivered",
     },
-    { readBeforeStop: true, title: "does not warn about a steer Claude read before Stop" },
-  ])("$title", ({ readBeforeStop }) =>
+    { readBy: "assistant", title: "does not warn about a steer Claude read before Stop" },
+    {
+      readBy: "result",
+      title: "does not warn about a steer only a steering result echoed before Stop",
+    },
+  ] as const)("$title", ({ readBy }) =>
     Effect.gen(function* () {
       const harness = yield* makeWakeHarnessWithOptions({
         close: (sdkMessages) => Queue.shutdown(sdkMessages),
@@ -3137,9 +3145,20 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           attachments: [],
         },
       });
-      if (readBeforeStop) {
-        const steerUuid = harness.offeredMessages.at(-1)?.uuid;
-        assert.isDefined(steerUuid);
+      const steerUuid = harness.offeredMessages.at(-1)?.uuid;
+      assert.isDefined(steerUuid);
+      if (readBy === "result") {
+        // Consumed between tool rounds: no assistant frame echoes it.
+        yield* harness.offerAndWait(
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000015704",
+            result: "",
+            terminalReason: "aborted_tools",
+            userMessageUuids: [steerUuid],
+          }),
+        );
+      }
+      if (readBy === "assistant") {
         yield* harness.offerAndWait(
           claudeSdkFrame({
             type: "assistant",
@@ -3172,9 +3191,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             : [],
         );
       const undelivered = notices.find((message) =>
-        /not (been )?delivered|never (reached|delivered)/i.test(message ?? ""),
+        /not (have )?(been )?delivered|never (reached|delivered)/i.test(message ?? ""),
       );
-      if (readBeforeStop) {
+      if (readBy !== "none") {
         assert.isUndefined(undelivered);
         return;
       }
