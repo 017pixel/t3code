@@ -6411,32 +6411,42 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  // The SDK reports CronCreate, ScheduleWakeup and /loop jobs only through the Stop hook,
+  // which fires just before the turn's result.
+  const runStopHook = (
+    harness: Effect.Success<typeof makeWakeHarness>,
+    sessionCrons: ReadonlyArray<SessionCronSummary>,
+  ) =>
+    Effect.promise(async () => {
+      const matchers = harness.getOpenedOptions()?.hooks?.Stop ?? [];
+      for (const hook of matchers.flatMap((matcher) => matcher.hooks)) {
+        await hook(
+          {
+            hook_event_name: "Stop",
+            session_id: WAKE_NATIVE_SESSION,
+            transcript_path: "/tmp/transcript.jsonl",
+            cwd: "/tmp",
+            stop_hook_active: false,
+            background_tasks: [],
+            session_crons: [...sessionCrons],
+          },
+          undefined,
+          { signal: new AbortController().signal },
+        );
+      }
+    });
+  const pendingSessionCron: SessionCronSummary = {
+    id: "4e805017",
+    schedule: "20 12 22 10 *",
+    recurring: false,
+    prompt: "Append `date -u` to /tmp/cron.txt",
+  };
+
   it.effect("keeps a session with a pending session cron alive until no cron remains", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const harness = yield* makeWakeHarness;
         const now = yield* DateTime.now;
-        // The SDK reports CronCreate, ScheduleWakeup and /loop jobs only through the Stop hook,
-        // which fires just before the turn's result.
-        const stop = (sessionCrons: ReadonlyArray<SessionCronSummary>) =>
-          Effect.promise(async () => {
-            const matchers = harness.getOpenedOptions()?.hooks?.Stop ?? [];
-            for (const hook of matchers.flatMap((matcher) => matcher.hooks)) {
-              await hook(
-                {
-                  hook_event_name: "Stop",
-                  session_id: WAKE_NATIVE_SESSION,
-                  transcript_path: "/tmp/transcript.jsonl",
-                  cwd: "/tmp",
-                  stop_hook_active: false,
-                  background_tasks: [],
-                  session_crons: [...sessionCrons],
-                },
-                undefined,
-                { signal: new AbortController().signal },
-              );
-            }
-          });
         const turn = (ordinal: number, text: string) =>
           makeClaudeTestTurnInput({
             threadId: harness.threadId,
@@ -6449,14 +6459,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           });
 
         yield* harness.runtime.startTurn(turn(1, "At 12:20 append the date to a file."));
-        yield* stop([
-          {
-            id: "4e805017",
-            schedule: "20 12 22 10 *",
-            recurring: false,
-            prompt: "Append `date -u` to /tmp/cron.txt",
-          },
-        ]);
+        yield* runStopHook(harness, [pendingSessionCron]);
         yield* harness.offerAndWait(turnOneResult);
         yield* harness.awaitTerminal(1);
         assert.isTrue(
@@ -6465,7 +6468,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
 
         yield* harness.runtime.startTurn(turn(2, "Cancel that job."));
-        yield* stop([]);
+        yield* runStopHook(harness, []);
         yield* harness.offerAndWait(turnOneResult);
         yield* harness.awaitTerminal(2);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
@@ -6497,31 +6500,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           });
 
         yield* harness.runtime.startTurn(turn(1, "At 12:20 append the date to a file."));
-        yield* Effect.promise(async () => {
-          const matchers = harness.getOpenedOptions()?.hooks?.Stop ?? [];
-          for (const hook of matchers.flatMap((matcher) => matcher.hooks)) {
-            await hook(
-              {
-                hook_event_name: "Stop",
-                session_id: WAKE_NATIVE_SESSION,
-                transcript_path: "/tmp/transcript.jsonl",
-                cwd: "/tmp",
-                stop_hook_active: false,
-                background_tasks: [],
-                session_crons: [
-                  {
-                    id: "4e805017",
-                    schedule: "20 12 22 10 *",
-                    recurring: false,
-                    prompt: "Append `date -u` to /tmp/cron.txt",
-                  },
-                ],
-              },
-              undefined,
-              { signal: new AbortController().signal },
-            );
-          }
-        });
+        yield* runStopHook(harness, [pendingSessionCron]);
         yield* harness.offerAndWait(turnOneResult);
         yield* harness.awaitTerminal(1);
         assert.isTrue(yield* harness.hasPendingBackgroundWork);
@@ -6539,6 +6518,54 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* harness.awaitTerminal(2);
         assert.equal(harness.terminalEvents()[1]?.status, "interrupted");
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("keeps session crons pinned when the next turn fails without closing the CLI", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const turn = (ordinal: number, text: string) =>
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make(`attempt-claude-session-cron-failed:${ordinal}`),
+            text,
+            attachments: [],
+            providerTurnOrdinal: ordinal,
+          });
+
+        yield* harness.runtime.startTurn(turn(1, "At 12:20 append the date to a file."));
+        yield* runStopHook(harness, [pendingSessionCron]);
+        yield* harness.offerAndWait(turnOneResult);
+        yield* harness.awaitTerminal(1);
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
+
+        // A usage limit fails the turn through StopFailure, which carries no crons, and the
+        // CLI keeps running with the job still scheduled.
+        yield* harness.runtime.startTurn(turn(2, "Keep going."));
+        yield* harness.offerAndWait(
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000013439",
+            result: "Usage limit reached.",
+            isError: true,
+            apiErrorStatus: 429,
+            terminalReason: "api_error",
+          }),
+        );
+        yield* harness.awaitTerminal(2);
+        assert.equal(harness.terminalEvents()[1]?.status, "failed");
+        assert.isTrue(
+          yield* harness.hasPendingBackgroundWork,
+          "a failed turn must not forget crons the live CLI still holds",
+        );
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),

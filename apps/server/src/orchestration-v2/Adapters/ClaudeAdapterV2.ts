@@ -4688,16 +4688,23 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               updated.delete(nativeThreadId);
               return updated;
             });
-            yield* Ref.update(pendingSessionCronCountByNativeThread, (current) => {
-              if (!current.has(nativeThreadId)) {
-                return current;
-              }
-              const updated = new Map(current);
-              updated.delete(nativeThreadId);
-              return updated;
-            });
             yield* endClaudeMonitorTasks((_taskId, task) => task.nativeThreadId === nativeThreadId);
           });
+
+        // Session crons live in the CLI process: only its exit or replacement drops them. A failed
+        // result (usage limit, overload) leaves the process and its crons running.
+        const clearSessionCronCountForNativeThread = Effect.fnUntraced(function* (
+          nativeThreadId: string,
+        ) {
+          yield* Ref.update(pendingSessionCronCountByNativeThread, (current) => {
+            if (!current.has(nativeThreadId)) {
+              return current;
+            }
+            const updated = new Map(current);
+            updated.delete(nativeThreadId);
+            return updated;
+          });
+        });
 
         const clearWakeStateForNativeThread =
           /* Provider events include streaming deltas; avoid a span for each update. */
@@ -4752,6 +4759,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const preservedOpaqueTombstones = [...priorOpaqueTombstones].filter((taskId) =>
             bufferedTaskNotificationIds.has(taskId),
           );
+          yield* clearSessionCronCountForNativeThread(nativeThreadId);
           yield* clearPendingBackgroundTasksForNativeThread(nativeThreadId);
           yield* clearNativeThreadTaskIdSet(
             wakeEligibleBackgroundTasksByNativeThread,
@@ -6963,6 +6971,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           closedQuery: ClaudeLiveQueryContext,
           cause?: Cause.Cause<ClaudeAgentSdkQueryRunnerError>,
         ) {
+          yield* clearSessionCronCountForNativeThread(closedQuery.nativeThreadId);
           const current = yield* Ref.get(activeTurn);
           // A replacement query can reuse the native thread id; only this query's turn is ours.
           const context = closedQuery.lastTurn;
