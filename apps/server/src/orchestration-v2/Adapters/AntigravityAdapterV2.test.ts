@@ -868,6 +868,72 @@ describe("AntigravityAdapterV2 commands running past the reply", () => {
       }).pipe(Effect.provide(layerSession), Effect.scoped),
   );
 
+  it.live.each(["completed", "failed"] as const)(
+    "keeps the turn open past the reply until the command ends %s",
+    (finish) =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const crypto = yield* Crypto.Crypto;
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const pidPath = path.join(
+          yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-ag-finish-" }),
+          "pids",
+        );
+        const turn = yield* runningCommandTurn({
+          instanceId: ProviderInstanceId.make(`antigravity-finish-${finish}-test`),
+          name: `antigravity-finish-${finish}`,
+          makeRuntime: (input) =>
+            makeAntigravityAcpRuntime({
+              ...input,
+              childProcessSpawner,
+              spawn: {
+                command: process.execPath,
+                args: [mockAgentPath],
+                cwd: input.cwd,
+                env: {
+                  T3_ACP_ANTIGRAVITY: "1",
+                  T3_ACP_EMIT_RUNNING_COMMAND_THEN_HANG: "1",
+                  T3_ACP_RUNNING_COMMAND_END_TURN: "1",
+                  T3_ACP_RUNNING_COMMAND_FINISH: finish,
+                  T3_ACP_RUNNING_COMMAND_PID_PATH: pidPath,
+                },
+              },
+            }).pipe(Effect.provideService(Crypto.Crypto, crypto)),
+        });
+        // The reply closes once the adapter has handled end_turn.
+        yield* turn.takeUntil(
+          (event) =>
+            event.type === "message.updated" &&
+            event.message.role === "assistant" &&
+            !event.message.streaming,
+        );
+        assert.isFalse(
+          turn.seen.some((event) => event.type === "turn.terminal"),
+          "the running command holds the turn past end_turn",
+        );
+
+        // The command ends on its own terms once its `sleep` child exits.
+        const commandPid = Number((yield* fileSystem.readFileString(pidPath)).trim().split(" ")[1]);
+        process.kill(commandPid, "SIGKILL");
+        const terminal = yield* turn.takeUntil((event) => event.type === "turn.terminal");
+        assert.equal(terminal.type === "turn.terminal" ? terminal.status : undefined, "completed");
+        assert.include(
+          turn.seen.flatMap((event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.nativeItemRef?.nativeId === "tool-call-running-1"
+              ? [event.turnItem.status]
+              : [],
+          ),
+          finish,
+          "the command's own result releases the turn",
+        );
+      }).pipe(Effect.provide(layerSession), Effect.scoped),
+  );
+
   it.effect("completes the turn past pending commands and idles subagent batches", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;

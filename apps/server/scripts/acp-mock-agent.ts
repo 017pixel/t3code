@@ -77,6 +77,10 @@ const exitOnCancel = process.env.T3_ACP_EXIT_ON_CANCEL === "1";
 const runningCommandIgnoresTerm = process.env.T3_ACP_RUNNING_COMMAND_IGNORE_TERM === "1";
 const runningCommandPidPath = process.env.T3_ACP_RUNNING_COMMAND_PID_PATH;
 const runningCommandEndsTurn = process.env.T3_ACP_RUNNING_COMMAND_END_TURN === "1";
+const runningCommandFinishStatus = process.env.T3_ACP_RUNNING_COMMAND_FINISH as
+  | "completed"
+  | "failed"
+  | undefined;
 const runningCommandSeparateSession = process.env.T3_ACP_RUNNING_COMMAND_SEPARATE_SESSION === "1";
 const exitAfterRunningCommandLaunch = process.env.T3_ACP_EXIT_AFTER_RUNNING_COMMAND_LAUNCH === "1";
 const omitXAiPromptCompleteStopReason =
@@ -1452,6 +1456,7 @@ const program = Effect.gen(function* () {
       ) {
         const toolCallId = "tool-call-running-1";
         let runningCommandPublished: Promise<void> = Promise.resolve();
+        let runningCommandExited: Promise<void> = Promise.resolve();
         if (runningCommandPidPath !== undefined) {
           const command = runningCommandIgnoresTerm
             ? 'trap "" TERM; bash -c \'trap "" TERM; while :; do sleep 1; done\' & child=$!; printf "%s %s\n" "$$" "$child" > "$1"; echo published; wait "$child"'
@@ -1487,6 +1492,9 @@ const program = Effect.gen(function* () {
             );
             runningCommandPublished = new Promise((resolve) =>
               commandProcess.stdout.once("data", () => resolve()),
+            );
+            runningCommandExited = new Promise((resolve) =>
+              commandProcess.once("exit", () => resolve()),
             );
           }
         }
@@ -1546,6 +1554,29 @@ const program = Effect.gen(function* () {
         if (runningCommandEndsTurn) {
           // Antigravity answers end_turn while a command it started keeps running.
           yield* Effect.promise(() => runningCommandPublished);
+          if (runningCommandFinishStatus !== undefined) {
+            yield* agent.client.sessionUpdate({
+              sessionId: requestedSessionId,
+              update: {
+                sessionUpdate: "agent_message_chunk",
+                content: { type: "text", text: "The watcher is running." },
+              },
+            });
+            // The command finishes after the reply, once its process exits.
+            yield* Effect.promise(() => runningCommandExited).pipe(
+              Effect.andThen(
+                agent.client.sessionUpdate({
+                  sessionId: requestedSessionId,
+                  update: {
+                    sessionUpdate: "tool_call_update",
+                    toolCallId,
+                    status: runningCommandFinishStatus,
+                  },
+                }),
+              ),
+              Effect.forkDetach,
+            );
+          }
           return yield* finishPrompt(requestedSessionId, "end_turn");
         }
         while (!cancelledSessions.has(requestedSessionId)) {
