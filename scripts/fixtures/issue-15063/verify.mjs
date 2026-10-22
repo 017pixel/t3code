@@ -1,8 +1,8 @@
-import fs from "node:fs";
-import assert from "node:assert/strict";
-import { createRequire } from "node:module";
-const root = fs.realpathSync(new URL("../../..", import.meta.url));
-const require = createRequire(root + "/apps/server/package.json");
+import * as NodeFS from "node:fs";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeModule from "node:module";
+const root = NodeFS.realpathSync(new URL("../../..", import.meta.url));
+const require = NodeModule.createRequire(root + "/apps/server/package.json");
 const S = await import(require.resolve("effect/Schema"));
 const { OrchestrationV2ThreadProjectionJson: Projection } = await import(
   root + "/packages/contracts/src/orchestrationV2.ts"
@@ -11,8 +11,8 @@ const { ServerProvider } = await import(root + "/packages/contracts/src/server.t
 const { resolvePendingHandoff: resolve } = await import(
   root + "/packages/client-runtime/src/handoff.ts"
 );
-const tables = JSON.parse(fs.readFileSync(new URL("./synthetic.json", import.meta.url))).fixtures
-  .single;
+const tables = JSON.parse(NodeFS.readFileSync(new URL("./synthetic.json", import.meta.url)))
+  .fixtures.single;
 const tid = "mcp:62560f84-a9c3-410b-9654-2c196ab6f6e9";
 const mapping = {
   thread: "threads",
@@ -74,7 +74,7 @@ let results = [];
 function check(name, input, sel = selection, ps = providers, expected = null) {
   const valid = input == null ? input : decode(input);
   const actual = resolve(valid, sel, ps);
-  assert.deepEqual(actual, expected, name);
+  NodeAssert.deepEqual(actual, expected, name);
   results.push({ name, passed: true, actual });
 }
 const pending = { from: [{ instanceId: "codex" }], to: selection };

@@ -27,8 +27,7 @@ if not path.is_file():
 data = json.loads(pathlib.Path(__file__).with_name('synthetic.json').read_text())['fixtures'][args.variant]
 with sqlite3.connect(path) as db:
     # Refuse any populated home, including live state copied into a worktree.
-    count = db.execute('select count(*) from orchestration_v2_projection_runs').fetchone()[0]
-    if count:
+    if any(db.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() for table in data):
         parser.error('Refusing to replace populated state. Use a fresh evidence home.')
     db.execute('PRAGMA foreign_keys=OFF')
     for table, rows in data.items():
