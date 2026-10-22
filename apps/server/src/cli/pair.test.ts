@@ -4,22 +4,31 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { AuthStandardClientScopes } from "@t3tools/contracts";
+import { AuthStandardClientScopes, EnvironmentHttpApi } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, describe, expect, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
-import { FetchHttpClient } from "effect/http";
+import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
+import * as HttpApi from "effect/http-api/HttpApi";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command, CliError } from "effect/cli";
 
+import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as AuthHttp from "../auth/http.ts";
+import * as SessionStore from "../auth/SessionStore.ts";
 import { cli } from "../binCli.ts";
+import * as ServerConfig from "../config.ts";
 import {
   SERVICE_LAUNCHER_CONTEXT_ENV,
   SERVICE_LAUNCHER_PROTOCOL,
@@ -30,6 +39,7 @@ import {
   persistServerRuntimeState,
   type PersistedServerRuntimeState,
 } from "../serverRuntimeState.ts";
+import { resolveCliAuthConfig } from "./config.ts";
 import { DevServerNotProxiableError, resolveTailscaleLocalTarget } from "./pair.ts";
 
 import packageJson from "../../package.json" with { type: "json" };
@@ -448,5 +458,60 @@ describe("auth scope options", () => {
       assert.equal(scopeError.option, "scope");
       assert.equal(scopeError.value, "admin");
     }),
+  );
+});
+
+class AuthRoutesApi extends HttpApi.make("environment").add(EnvironmentHttpApi.groups.auth) {}
+
+describe("auth session list", () => {
+  // Issue #21236: only the running server knows which sessions hold an open
+  // WebSocket, so the CLI must not report them from the database alone.
+  it.effect("reports a session connected to the running server as connected", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-auth-connected-test-"),
+      );
+      const config = yield* resolveCliAuthConfig({ baseDir: Option.some(baseDir) }, Option.none());
+      const services = yield* Layer.build(
+        HttpRouter.serve(
+          HttpApiBuilder.layer(AuthRoutesApi).pipe(
+            Layer.provide(AuthHttp.layer),
+            Layer.provide(AuthHttp.layerAuthenticatedAuth),
+          ),
+          { disableListenLog: true, disableLogger: true },
+        ).pipe(
+          Layer.provideMerge(EnvironmentAuth.layerRuntime),
+          Layer.provideMerge(ServerConfig.layer(config)),
+          Layer.provideMerge(NodeHttpServer.layerTest),
+        ),
+      );
+      const origin = HttpServer.formatAddress(Context.get(services, HttpServer.HttpServer).address);
+      yield* persistServerRuntimeState({
+        path: config.serverRuntimeStatePath,
+        state: yield* makePersistedServerRuntimeState({
+          config: { host: "127.0.0.1", devUrl: undefined },
+          port: Number(new URL(origin).port),
+        }),
+      });
+      const sessions = Context.get(services, SessionStore.SessionStore);
+      const session = yield* sessions.issue({
+        subject: "cli-issued-session",
+        client: { label: "issue-21236", deviceType: "bot" },
+      });
+      // What the server does when that session's WebSocket opens.
+      yield* sessions.markConnected(session.sessionId);
+      const serverView = (yield* sessions.listActive()).find(
+        (entry) => entry.sessionId === session.sessionId,
+      );
+
+      const listed = JSON.parse(
+        yield* captureStdout(runCli(["auth", "session", "list", "--base-dir", baseDir, "--json"])),
+      ) as ReadonlyArray<{ readonly sessionId: string; readonly connected: boolean }>;
+      const cliView = listed.find((entry) => entry.sessionId === session.sessionId);
+
+      assert.isTrue(serverView?.connected);
+      assert.isDefined(cliView);
+      assert.isTrue(cliView?.connected);
+    }).pipe(Effect.scoped, Effect.provide(layerCliRuntime)),
   );
 });
