@@ -822,6 +822,124 @@ it.layer(
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
+  it.effect("persists a clear that lands while the history file is being rewritten", () =>
+    Effect.gen(function* () {
+      const realFs = yield* FileSystem.FileSystem;
+      const armed = yield* Ref.make(false);
+      const writing = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const gatedFs = FileSystem.FileSystem.of({
+        ...realFs,
+        writeFile: (path, data, options) =>
+          Effect.flatMap(Ref.getAndSet(armed, false), (gated) =>
+            gated
+              ? Deferred.succeed(writing, undefined).pipe(Effect.andThen(Deferred.await(release)))
+              : Effect.void,
+          ).pipe(Effect.andThen(realFs.writeFile(path, data, options))),
+      });
+      const { manager, ptyAdapter, logsDir } = yield* createManager(5, {
+        subprocessInspector: () =>
+          Effect.succeed({ hasRunningSubprocess: false, childCommand: null, processIds: [] }),
+      }).pipe(Effect.provideService(FileSystem.FileSystem, gatedFs));
+      yield* manager.open(openInput());
+      const published = yield* Deferred.make<void>();
+      const unsubscribe = yield* manager.subscribe((event) =>
+        event.type === "output" ? Deferred.succeed(published, undefined) : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+
+      yield* Ref.set(armed, true);
+      ptyAdapter.processes[0]!.emitData("old output\n");
+      yield* Deferred.await(published);
+      yield* TestClock.adjust("1 second");
+      // The first persist rewrites the whole file; clear while that write is in flight.
+      yield* Deferred.await(writing);
+      const cleared = yield* manager
+        .clear({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(cleared);
+      const persisted = yield* realFs.readFileString(yield* historyLogPath(logsDir));
+      // Close before asserting so a failure cannot strand the shell's kill escalation.
+      const closeTerminal = manager
+        .close({ threadId: "thread-1" })
+        .pipe(Effect.andThen(TestClock.adjust("1 second")));
+      yield* closeTerminal;
+      const reopened = yield* manager.open(openInput());
+      yield* closeTerminal;
+      expect(persisted).toBe("");
+      expect(reopened.history).toBe("");
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("keeps a line-capped history file near its retained size", () =>
+    Effect.gen(function* () {
+      const historyLineLimit = 100;
+      const line = `${"x".repeat(79)}\n`;
+      const batch = line.repeat(historyLineLimit);
+      const batches = 30;
+      const realFs = yield* FileSystem.FileSystem;
+      const bytesWritten = yield* Ref.make(0);
+      const persisted = yield* Ref.make(yield* Deferred.make<void>());
+      const countingFs = FileSystem.FileSystem.of({
+        ...realFs,
+        writeFile: (path, data, options) =>
+          realFs.writeFile(path, data, options).pipe(
+            Effect.tap(() => Ref.update(bytesWritten, (total) => total + data.byteLength)),
+            Effect.tap(() =>
+              Effect.flatMap(Ref.get(persisted), (done) => Deferred.succeed(done, undefined)),
+            ),
+          ),
+      });
+      // The byte cap is far above what the line cap retains.
+      const { manager, ptyAdapter, logsDir } = yield* createManager(historyLineLimit, {
+        historyByteLimit: 1024 * 1024,
+        subprocessInspector: () =>
+          Effect.succeed({ hasRunningSubprocess: false, childCommand: null, processIds: [] }),
+      }).pipe(Effect.provideService(FileSystem.FileSystem, countingFs));
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      const published = yield* Ref.make(yield* Deferred.make<void>());
+      const unsubscribe = yield* manager.subscribe((event) =>
+        event.type === "output"
+          ? Effect.flatMap(Ref.get(published), (done) => Deferred.succeed(done, undefined))
+          : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+
+      yield* Ref.set(bytesWritten, 0);
+      for (let index = 0; index < batches; index += 1) {
+        const outputPublished = yield* Deferred.make<void>();
+        const historyPersisted = yield* Deferred.make<void>();
+        yield* Ref.set(published, outputPublished);
+        yield* Ref.set(persisted, historyPersisted);
+        process.emitData(batch);
+        yield* Deferred.await(outputPublished);
+        yield* TestClock.adjust("1 second");
+        yield* Deferred.await(historyPersisted);
+      }
+      const writes = yield* Ref.get(bytesWritten);
+      const { size } = yield* realFs.stat(yield* historyLogPath(logsDir));
+      const closeTerminal = manager
+        .close({ threadId: "thread-1" })
+        .pipe(Effect.andThen(TestClock.adjust("1 second")));
+      yield* closeTerminal;
+      const reopened = yield* manager.open(openInput());
+      yield* closeTerminal;
+
+      const retained = new TerminalManager.BoundedTerminalHistory(
+        historyLineLimit,
+        batch.repeat(batches),
+      ).value();
+      expect(reopened.history).toBe(retained);
+      const emitted = batches * batch.length;
+      expect(Number(size), "history file bytes").toBeLessThanOrEqual(
+        2 * retained.length + 64 * 1024 + batch.length,
+      );
+      expect(writes, "bytes written").toBeLessThanOrEqual(2 * emitted);
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
   it.effect("retains plain Unicode and control characters around a split query", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();

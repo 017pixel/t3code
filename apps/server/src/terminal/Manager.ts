@@ -1011,6 +1011,10 @@ export class BoundedTerminalHistory {
     this.epoch += 1;
   }
 
+  get retainedBytes(): number {
+    return this.byteLength;
+  }
+
   /** The last `codeUnits` of the history, or null when some were already trimmed. */
   suffix(codeUnits: number): string | null {
     const parts: Array<string> = [];
@@ -1810,7 +1814,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   // Rewriting the whole history every debounce turns sustained output into
   // megabytes of disk writes per second. The file is an append log instead,
-  // compacted once it doubles the cap; restore reads only the capped tail.
+  // compacted once it doubles what the history retains, so rewrites stay
+  // amortized and the file stays near the line cap; restore reads only the capped tail.
   // Appends assume nothing else writes the file while its session lives:
   // history is only read, truncated, or deleted around open and close.
   const persistedHistories = new WeakMap<BoundedTerminalHistory, PersistedHistoryMark>();
@@ -1835,18 +1840,21 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     if (mark && pending !== null) {
       if (pending.length === 0) return;
       const { bytes, appendedLength } = encodeHistory(history, pending);
-      if (mark.fileBytes + bytes.byteLength <= 2 * historyByteLimit) {
+      const compactAt = Math.min(2 * historyByteLimit, 2 * history.retainedBytes + 64 * 1024);
+      if (mark.fileBytes + bytes.byteLength <= compactAt) {
         yield* fileSystem.writeFile(filePath, bytes, { flag: "a" });
         mark.appendedLength = appendedLength;
         mark.fileBytes += bytes.byteLength;
         return;
       }
     }
+    // A clear can land during the write; mark what was encoded, not what is current.
+    const epoch = history.epoch;
     const { bytes, appendedLength } = encodeHistory(history, history.value());
     persistedHistories.delete(history);
     yield* fileSystem.writeFile(filePath, bytes);
     persistedHistories.set(history, {
-      epoch: history.epoch,
+      epoch,
       appendedLength,
       fileBytes: bytes.byteLength,
     });
