@@ -76,6 +76,7 @@ const emitEmptySuccessfulBashThenHang =
 const exitOnCancel = process.env.T3_ACP_EXIT_ON_CANCEL === "1";
 const runningCommandIgnoresTerm = process.env.T3_ACP_RUNNING_COMMAND_IGNORE_TERM === "1";
 const runningCommandPidPath = process.env.T3_ACP_RUNNING_COMMAND_PID_PATH;
+const runningCommandEndsTurn = process.env.T3_ACP_RUNNING_COMMAND_END_TURN === "1";
 const runningCommandSeparateSession = process.env.T3_ACP_RUNNING_COMMAND_SEPARATE_SESSION === "1";
 const exitAfterRunningCommandLaunch = process.env.T3_ACP_EXIT_AFTER_RUNNING_COMMAND_LAUNCH === "1";
 const omitXAiPromptCompleteStopReason =
@@ -1453,8 +1454,8 @@ const program = Effect.gen(function* () {
         let runningCommandPublished: Promise<void> = Promise.resolve();
         if (runningCommandPidPath !== undefined) {
           const command = runningCommandIgnoresTerm
-            ? 'trap "" TERM; bash -c \'trap "" TERM; while :; do sleep 1; done\' & child=$!; printf "%s %s\n" "$$" "$child" > "$1"; wait "$child"'
-            : 'sleep 120 & child=$!; printf "%s %s\n" "$$" "$child" > "$1"; wait "$child"';
+            ? 'trap "" TERM; bash -c \'trap "" TERM; while :; do sleep 1; done\' & child=$!; printf "%s %s\n" "$$" "$child" > "$1"; echo published; wait "$child"'
+            : 'sleep 120 & child=$!; printf "%s %s\n" "$$" "$child" > "$1"; echo published; wait "$child"';
           if (runningCommandSeparateSession) {
             const launcher = [
               'const { spawn } = require("node:child_process");',
@@ -1479,9 +1480,14 @@ const program = Effect.gen(function* () {
             );
             detachedLauncher.unref();
           } else {
-            NodeChildProcess.spawn("bash", ["-c", command, "bash", runningCommandPidPath], {
-              stdio: "ignore",
-            });
+            const commandProcess = NodeChildProcess.spawn(
+              "bash",
+              ["-c", command, "bash", runningCommandPidPath],
+              { stdio: ["ignore", "pipe", "ignore"] },
+            );
+            runningCommandPublished = new Promise((resolve) =>
+              commandProcess.stdout.once("data", () => resolve()),
+            );
           }
         }
         yield* agent.client.sessionUpdate({
@@ -1536,6 +1542,11 @@ const program = Effect.gen(function* () {
           // The test sends `_test/exit` once T3 has recorded the published processes.
           yield* Effect.promise(() => runningCommandPublished);
           return yield* Effect.never;
+        }
+        if (runningCommandEndsTurn) {
+          // Antigravity answers end_turn while a command it started keeps running.
+          yield* Effect.promise(() => runningCommandPublished);
+          return yield* finishPrompt(requestedSessionId, "end_turn");
         }
         while (!cancelledSessions.has(requestedSessionId)) {
           yield* Effect.sleep("25 millis");
