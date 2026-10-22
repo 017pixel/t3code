@@ -74,6 +74,12 @@ export type AcpSessionRuntimeEvent =
   | {
       readonly _tag: "ConnectionTerminated";
       readonly error: EffectAcpErrors.AcpError;
+    }
+  | {
+      // A session/load response that arrived after replay idle replaced the
+      // provisional setup; its config/mode events were emitted just before.
+      readonly _tag: "SessionSetupAdopted";
+      readonly result: AcpSessionRuntimeStartResult;
     };
 
 const defaultSessionLoadTimeout = Duration.seconds(90);
@@ -1985,14 +1991,12 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
         return;
       }
       yield* Ref.set(lateSessionLoadRef, Option.none());
-      yield* Ref.set(startStateRef, {
-        _tag: "Started",
-        result: {
-          ...started,
-          sessionSetupResult: response,
-          modelConfigId: extractModelConfigId(response) ?? started.modelConfigId,
-        },
-      });
+      const result = {
+        ...started,
+        sessionSetupResult: response,
+        modelConfigId: extractModelConfigId(response) ?? started.modelConfigId,
+      };
+      yield* Ref.set(startStateRef, { _tag: "Started", result });
       const modeState = parseSessionModeState(response);
       if (modeState !== undefined) {
         yield* Ref.set(modeStateRef, modeState);
@@ -2008,6 +2012,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
           update: { sessionUpdate: "current_mode_update", currentModeId: modeState.currentModeId },
         });
       }
+      yield* Queue.offer(eventQueue, { _tag: "SessionSetupAdopted", result });
     });
     yield* Fiber.join(lateFiber).pipe(
       Effect.flatMap(
