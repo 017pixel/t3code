@@ -4049,31 +4049,51 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
-        const backgroundForSteer = Effect.fnUntraced(
-          function* (
-            context: ActiveClaudeTurnContext,
-            query: ClaudeAgentSdkQuerySession,
-            toolUseId: string,
-          ) {
-            if (
-              context.rootCommands.get(toolUseId) !== "steered" ||
-              (yield* Ref.get(activeTurn)) !== context ||
-              (yield* Ref.get(queryContext))?.query !== query ||
-              !context.toolCalls.has(toolUseId)
-            ) {
-              return;
+        // The SDK can't cancel a move, so each command has at most one in
+        // flight. A request made meanwhile, from another steer or the task's
+        // late registration, runs again once that move answers.
+        const rootCommandMoves = new Map<string, { rerun: boolean }>();
+        const backgroundForSteer = Effect.fn("ClaudeAdapterV2.backgroundForSteer")(function* (
+          context: ActiveClaudeTurnContext,
+          query: ClaudeAgentSdkQuerySession,
+          toolUseId: string,
+        ) {
+          const inFlight = rootCommandMoves.get(toolUseId);
+          if (inFlight !== undefined) {
+            inFlight.rerun = true;
+            return;
+          }
+          const move = { rerun: true };
+          rootCommandMoves.set(toolUseId, move);
+          yield* Effect.gen(function* () {
+            while (move.rerun) {
+              move.rerun = false;
+              if (
+                context.rootCommands.get(toolUseId) !== "steered" ||
+                (yield* Ref.get(activeTurn)) !== context ||
+                (yield* Ref.get(queryContext))?.query !== query ||
+                !context.toolCalls.has(toolUseId)
+              ) {
+                return;
+              }
+              const moved = yield* query.backgroundTasks(toolUseId).pipe(
+                Effect.catch((cause) =>
+                  Effect.logWarning("orchestration-v2.claude-steer-background-command-failed", {
+                    toolUseId,
+                    cause,
+                  }).pipe(Effect.as(false)),
+                ),
+              );
+              if (moved) {
+                context.rootCommands.delete(toolUseId);
+                return;
+              }
             }
-            if (yield* query.backgroundTasks(toolUseId)) {
-              context.rootCommands.delete(toolUseId);
-            }
-          },
-          (effect) =>
-            effect.pipe(
-              Effect.timeout("5 seconds"),
-              Effect.ignore({ log: "Warn" }),
-              Effect.forkIn(sessionScope),
-            ),
-        );
+          }).pipe(
+            Effect.ensuring(Effect.sync(() => rootCommandMoves.delete(toolUseId))),
+            Effect.forkIn(sessionScope),
+          );
+        });
         // A worktree handoff changes the project settings even within one session.
         let bypassCache: { cwd: string | null; availability: ClaudeBypassAvailability } | null =
           null;

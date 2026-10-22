@@ -3580,25 +3580,29 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           const moved = yield* Queue.unbounded<string>();
           const moves: Array<{ id: string; offered: number; registered: boolean }> = [];
           const registered = new Set(["registered"]);
+          const answers = new Map<string, Deferred.Deferred<void>>();
           const stopped: Array<string> = [];
           let interrupts = 0;
           let rejectOffer = false;
           const harness = yield* makeWakeHarnessWithOptions({
             backgroundTasks: (id) =>
               Effect.gen(function* () {
+                const isRegistered = registered.has(id);
                 moves.push({
                   id,
                   offered: harness.offeredMessages.length,
-                  registered: registered.has(id),
+                  registered: isRegistered,
                 });
                 yield* Queue.offer(moved, id);
+                const answer = answers.get(id);
+                if (answer !== undefined) yield* Deferred.await(answer);
                 if (id === "unsupported") {
                   return yield* new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
                     method: "backgroundTasks",
                     cause: new Error("Backgrounding unavailable."),
                   });
                 }
-                return registered.has(id);
+                return isRegistered;
               }),
             offer: () =>
               rejectOffer
@@ -3742,6 +3746,30 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             moves.filter((move) => move.id === "new"),
             [{ id: "new", offered: 5, registered: true }],
             "a later command waits for its own successful steer, even if another offer fails",
+          );
+          // A move that hasn't answered absorbs later requests for its command,
+          // then runs once more if it answered before the task registered.
+          const answer = yield* Deferred.make<void>();
+          answers.set("slow", answer);
+          yield* command("slow");
+          yield* steer("Stop waiting for the slow suite.");
+          yield* through("slow");
+          registered.add("slow");
+          yield* taskStarted("slow");
+          yield* steer("Still skip the slow suite.");
+          yield* through("control");
+          assert.lengthOf(
+            moves.filter((move) => move.id === "slow"),
+            1,
+          );
+          yield* Deferred.succeed(answer, undefined);
+          yield* through("slow");
+          yield* command("last");
+          yield* steer("Wrap up.");
+          yield* through("last");
+          assert.deepEqual(
+            moves.filter((move) => move.id === "slow").map((move) => move.registered),
+            [false, true],
           );
           assert.deepEqual(stopped, []);
           assert.equal(interrupts, 0);
