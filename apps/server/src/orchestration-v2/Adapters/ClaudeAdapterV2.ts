@@ -648,6 +648,7 @@ export interface ClaudeAgentSdkLoggedQueryOptions {
   readonly hasCanUseTool?: true;
   readonly hasEnvironment?: true;
   readonly hasMcpServers?: true;
+  readonly hasHooks?: true;
 }
 
 export type ClaudeAgentSdkProtocolLogEvent =
@@ -791,6 +792,7 @@ export function loggedClaudeQueryOptions(
     ...(options.canUseTool === undefined ? {} : { hasCanUseTool: true }),
     ...(options.env === undefined ? {} : { hasEnvironment: true }),
     ...(options.mcpServers === undefined ? {} : { hasMcpServers: true }),
+    ...(options.hooks === undefined ? {} : { hasHooks: true }),
   };
 }
 
@@ -1298,6 +1300,7 @@ export function makeClaudeQueryOptions(input: {
   readonly disallowedTools?: ReadonlyArray<string>;
   readonly permissionMode?: PermissionMode;
   readonly canUseTool?: CanUseTool;
+  readonly hooks?: ClaudeQueryOptions["hooks"];
   readonly onUserDialog?: ClaudeQueryOptions["onUserDialog"];
   readonly supportedDialogKinds?: ClaudeQueryOptions["supportedDialogKinds"];
   readonly allowDangerouslySkipPermissions?: boolean;
@@ -1364,6 +1367,7 @@ export function makeClaudeQueryOptions(input: {
     ...(input.allowedTools === undefined ? {} : { allowedTools: [...input.allowedTools] }),
     ...(input.disallowedTools === undefined ? {} : { disallowedTools: [...input.disallowedTools] }),
     ...(input.canUseTool === undefined ? {} : { canUseTool: input.canUseTool }),
+    ...(input.hooks === undefined ? {} : { hooks: input.hooks }),
     ...(input.allowDangerouslySkipPermissions === true
       ? { allowDangerouslySkipPermissions: true }
       : {}),
@@ -4116,6 +4120,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const pendingBackgroundTasksByNativeThread = yield* Ref.make(
           new Map<string, Map<string, OrchestrationV2PendingBackgroundTask>>(),
         );
+        // Session crons (CronCreate, ScheduleWakeup, /loop) live only in the CLI process and
+        // are reported solely by the Stop hook, each time as a full snapshot.
+        const pendingSessionCronCountByNativeThread = yield* Ref.make(new Map<string, number>());
         // Wake eligibility is separate from the Waiting roster. It survives empty
         // background_tasks_changed levels (SDK: empty level can precede task_notification) and
         // is consumed when the first idle notification is buffered/offered so duplicates cannot
@@ -4737,6 +4744,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const preservedOpaqueTombstones = [...priorOpaqueTombstones].filter((taskId) =>
             bufferedTaskNotificationIds.has(taskId),
           );
+          yield* Ref.update(pendingSessionCronCountByNativeThread, (current) => {
+            if (!current.has(nativeThreadId)) {
+              return current;
+            }
+            const updated = new Map(current);
+            updated.delete(nativeThreadId);
+            return updated;
+          });
           yield* clearPendingBackgroundTasksForNativeThread(nativeThreadId);
           yield* clearNativeThreadTaskIdSet(
             wakeEligibleBackgroundTasksByNativeThread,
@@ -9306,6 +9321,26 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   allowDangerouslySkipPermissions: queryPolicy.allowDangerouslySkipPermissions,
                 }),
             canUseTool,
+            hooks: {
+              Stop: [
+                {
+                  hooks: [
+                    (hookInput) =>
+                      runPromise(
+                        Effect.gen(function* () {
+                          if (hookInput.hook_event_name === "Stop") {
+                            const cronCount = hookInput.session_crons?.length ?? 0;
+                            yield* Ref.update(pendingSessionCronCountByNativeThread, (current) =>
+                              new Map(current).set(nativeThreadId, cronCount),
+                            );
+                          }
+                          return { continue: true };
+                        }),
+                      ),
+                  ],
+                },
+              ],
+            },
             onUserDialog,
             supportedDialogKinds: ["resume_return"],
             ...(appendSystemPromptFileText === undefined ? {} : { appendSystemPromptFileText }),
@@ -10055,6 +10090,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             }
             for (const subagent of (yield* Ref.get(sessionSubagentsByTaskId)).values()) {
               if (subagent.task.status === "running") {
+                return true;
+              }
+            }
+            // A session cron fires only in the live process, so releasing it would drop the job.
+            for (const cronCount of (yield* Ref.get(
+              pendingSessionCronCountByNativeThread,
+            )).values()) {
+              if (cronCount > 0) {
                 return true;
               }
             }
