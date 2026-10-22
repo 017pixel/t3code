@@ -1372,6 +1372,7 @@ export const make = Effect.gen(function* () {
         yield* Cache.invalidate(prLookupCache, cacheKey);
       }
     }
+    // Untraced: lookupStatusPr already spans this lookup.
     const visiblePr = Effect.fnUntraced(function* (pr: PullRequestInfo | null) {
       if (
         pr === null ||

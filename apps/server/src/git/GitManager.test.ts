@@ -1959,11 +1959,20 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
             headBranch: branch,
           },
           {
-            name: "outgrown PR in an upstream repository",
+            name: "outgrown PR from this fork into an upstream",
             number: 30,
             headSha: released,
             repository: "acme/t3code",
             headBranch: branch,
+            headRepository: "pingdotgg/t3code",
+          },
+          {
+            name: "outgrown PR from another fork",
+            number: 30,
+            headSha: released,
+            repository: "acme/t3code",
+            headBranch: branch,
+            headRepository: "someone-else/t3code",
           },
           {
             name: "another branch",
@@ -1998,6 +2007,13 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
                 headRefName: saved.headBranch,
                 headSha: saved.headSha,
                 state: "merged",
+                ...("headRepository" in saved
+                  ? {
+                      isCrossRepository: true,
+                      headRepositoryNameWithOwner: saved.headRepository,
+                      headRepositoryOwnerLogin: saved.headRepository.split("/")[0],
+                    }
+                  : {}),
               },
             },
           });
@@ -2031,7 +2047,8 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           { name: "older number at current head", superseded: false },
           { name: "newer number already outgrown", superseded: true },
           { name: "unfetched saved head", superseded: false },
-          { name: "outgrown PR in an upstream repository", superseded: true },
+          { name: "outgrown PR from this fork into an upstream", superseded: true },
+          { name: "outgrown PR from another fork", superseded: false },
           { name: "another branch", superseded: false },
         ]);
       }),
