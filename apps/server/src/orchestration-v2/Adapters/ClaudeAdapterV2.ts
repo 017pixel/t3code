@@ -8956,7 +8956,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
 
           const requestKind = providerRequestKindFromClaudeTool(toolName);
           // Claude's decision reason reaches the client separately, as the presentation's reason.
-          const explanation = (callbackOptions.title ?? callbackOptions.description)?.trim();
+          const explanation = callbackOptions.title?.trim() || callbackOptions.description?.trim();
           // The user approves the operation itself; Claude's text only explains it. The command
           // stays untrimmed: `trim` drops unicode blanks such as U+00A0 that a shell keeps.
           const command = ["command", "cmd", "script"]
