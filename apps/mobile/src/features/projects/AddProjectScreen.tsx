@@ -347,7 +347,8 @@ function useBrowsePathInput(environment: EnvironmentOption | null, pinnedDirecto
 
   // `~` expands on the host, so ask its browser for the absolute directory
   // before comparing the path with registered project roots. Path resolution
-  // trims `~/` to `~`, which is not a browse query, so restore the separator.
+  // trims `~/` to `~`, and the browse helper only recognizes `~/`, so restore
+  // the separator and accept Windows `~\` the way the host expands it.
   const resolveHomePath = async (path: string): Promise<string> => {
     if (
       !/^~(?:[\\/]|$)/.test(path) ||
@@ -357,7 +358,11 @@ function useBrowsePathInput(environment: EnvironmentOption | null, pinnedDirecto
     ) {
       return path;
     }
-    const browsePath = getFilesystemBrowsePath(path === "~" ? "~/" : path, environment.platform);
+    const browseQuery =
+      path === "~" || (isWindowsPlatform(environment.platform) && path.startsWith("~\\"))
+        ? `~/${path.slice(2)}`
+        : path;
+    const browsePath = getFilesystemBrowsePath(browseQuery, environment.platform);
     const result = await loadBrowsePath({
       environmentId: environment.environmentId,
       input: { partialPath: browsePath.directoryPath },

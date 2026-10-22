@@ -17,6 +17,7 @@ const state = vi.hoisted(() => ({
   baseDirectory: "",
   projects: [] as string[],
   home: "/home/tester",
+  os: "linux",
   supportsCloneTracking: false,
   registered: [] as Array<{
     environmentId: string;
@@ -32,7 +33,9 @@ const state = vi.hoisted(() => ({
 
 // Stands in for the server's `~` expansion, which filesystem.browse reports as parentPath.
 function expandHome(path: string): string {
-  return path === "~" || path.startsWith("~/") ? `${state.home}${path.slice(1)}` : path;
+  if (path !== "~" && !path.startsWith("~/") && !path.startsWith("~\\")) return path;
+  const expanded = `${state.home}${path.slice(1)}`;
+  return state.os === "windows" ? expanded.replaceAll("/", "\\") : expanded;
 }
 
 vi.mock("react", async (importOriginal) => ({
@@ -91,7 +94,7 @@ vi.mock("../../state/entities", () => ({
         "environment",
         {
           environment: {
-            platform: { os: "linux" },
+            platform: { os: state.os },
             capabilities: { projectCloneTracking: state.supportsCloneTracking },
           },
           settings: { addProjectBaseDirectory: state.baseDirectory },
@@ -113,17 +116,22 @@ vi.mock("../../state/use-remote-environment-registry", () => ({
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: (command: unknown) => command }));
 function browseResult(target: unknown) {
   const partialPath = (target as { input?: { partialPath?: string } } | null)?.input?.partialPath;
-  if (partialPath === undefined) return null;
-  // The server resolves a path without `~` or a root against its cwd, so an empty
-  // partialPath would browse the cwd's parent.
-  const expanded = partialPath === "" ? "/srv/t3/apps/server" : expandHome(partialPath);
+  if (partialPath === undefined || partialPath === "") return null;
+  const expanded = expandHome(partialPath);
   return {
-    parentPath: expanded.slice(0, expanded.lastIndexOf("/") + 1),
+    parentPath: expanded.slice(
+      0,
+      Math.max(expanded.lastIndexOf("/"), expanded.lastIndexOf("\\")) + 1,
+    ),
     entries: [],
   };
 }
 vi.mock("../../state/use-atom-query-runner", () => ({
   useAtomQueryRunner: () => async (target: unknown) => {
+    // filesystem.browse requires a non-empty partialPath.
+    if ((target as { input?: { partialPath?: string } } | null)?.input?.partialPath === "") {
+      return AsyncResult.failure(Cause.fail(new Error("Invalid filesystem.browse input")));
+    }
     const data = browseResult(target);
     return data ? AsyncResult.success(data) : AsyncResult.success(null);
   },
@@ -269,6 +277,8 @@ describe("adding an already registered project", () => {
     state.navigations = [];
     state.draftTexts = [];
     state.supportsCloneTracking = false;
+    state.home = "/home/tester";
+    state.os = "linux";
   });
 
   async function submitLocalFolder(path: string) {
@@ -291,12 +301,20 @@ describe("adding an already registered project", () => {
     },
   );
 
-  it("opens the home directory's project for ~/, not the server cwd's parent", async () => {
+  it("opens the existing project's draft for a Windows ~\\ folder", async () => {
+    state.os = "windows";
+    state.home = "C:\\Users\\tester";
+    state.registered = [{ ...existing, workspaceRoot: "C:\\Users\\tester\\repro\\bike-documents" }];
+
+    await submitLocalFolder("~\\repro\\bike-documents");
+
+    expect(state.alerts).toEqual([]);
+    expect(state.navigations).toEqual([existingDraft]);
+  });
+
+  it("opens the home directory's project for ~/", async () => {
     const home = { ...existing, id: "home-project", title: "Home", workspaceRoot: "/home/tester" };
-    state.registered = [
-      home,
-      { ...existing, id: "cwd-parent", title: "Apps", workspaceRoot: "/srv/t3/apps" },
-    ];
+    state.registered = [home];
 
     await submitLocalFolder("~/");
 
