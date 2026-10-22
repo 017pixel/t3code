@@ -1,4 +1,5 @@
 import type { DesktopBridge } from "@t3tools/contracts";
+import { ipcRenderer } from "electron";
 import { expect, it, vi } from "vite-plus/test";
 
 import * as IpcChannels from "./ipc/channels.ts";
@@ -47,4 +48,25 @@ it("polling topology reads do not block the renderer on synchronous IPC each tim
     .soft(syncCalls(IpcChannels.GET_LOCAL_ENVIRONMENT_BOOTSTRAPS_CHANNEL))
     .toBeLessThanOrEqual(1);
   expect.soft(syncCalls(IpcChannels.GET_LOCAL_ENVIRONMENT_ENABLED_CHANNEL)).toBeLessThanOrEqual(1);
+});
+
+it("an async topology refresh replaces the bootstraps later reads return", async () => {
+  vi.stubGlobal("window", { localStorage: { getItem: () => null, setItem: () => {} } });
+  await import("./preload.ts");
+  const bridge = exposed.get("desktopBridge") as DesktopBridge;
+  const wsl = {
+    id: "wsl:Ubuntu",
+    label: "WSL (Ubuntu)",
+    runningDistro: "Ubuntu",
+    httpBaseUrl: "http://127.0.0.1:4000/",
+    wsBaseUrl: "ws://127.0.0.1:4000/",
+  };
+  vi.mocked(ipcRenderer.invoke).mockResolvedValueOnce([wsl]).mockResolvedValueOnce([]);
+  sendSync.mockClear();
+
+  await bridge.refreshLocalEnvironmentBootstraps?.();
+  expect(bridge.getLocalEnvironmentBootstraps()).toEqual([wsl]);
+  await bridge.refreshLocalEnvironmentBootstraps?.();
+  expect(bridge.getLocalEnvironmentBootstraps()).toEqual([]);
+  expect(sendSync).not.toHaveBeenCalled();
 });
