@@ -19,3 +19,8 @@ send/persistence/recall, not real model execution or provider rewind. It reuses 
 repository's existing Codex protocol fixture. No screenshots, databases, secrets,
 or capture output belong in this directory. The setup guard requires the caller
 to identify its isolated home; it cannot attest which home a running server uses.
+
+For the attachment supplement, upload `synthetic.png` through the real composer.
+With an empty draft and pending attachment, ArrowUp must not replace the draft.
+Remove the attachment to resume recall. Reattach and send with an empty draft;
+inspect the persisted empty authoredPrompt separately from the visible recall.
