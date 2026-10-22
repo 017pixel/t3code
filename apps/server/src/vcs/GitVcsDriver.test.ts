@@ -680,7 +680,7 @@ it.effect.each(
     }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
 );
 
-it.effect.each(["normal", "flags", "sparse"] as const)(
+it.effect.each(["normal", "skip-worktree", "assume-unchanged", "sparse"] as const)(
   "checkpoint index inspection handles entries beyond the output cap (index=%s)",
   (indexMode) =>
     Effect.gen(function* () {
@@ -693,6 +693,7 @@ it.effect.each(["normal", "flags", "sparse"] as const)(
       yield* fs.writeFileString(path.join(cwd, ".gitattributes"), "stable filter=probe\n");
       yield* fs.writeFileString(path.join(cwd, "stable"), "unchanged\n");
       yield* fs.writeFileString(path.join(cwd, "z-skipped"), "original\n");
+      yield* fs.writeFileString(path.join(cwd, "z-deleted"), "original\n");
       yield* fs.makeDirectory(path.join(cwd, "excluded"));
       yield* fs.writeFileString(path.join(cwd, "excluded/file"), "absent\n");
       yield* fs.writeFileString(
@@ -700,19 +701,30 @@ it.effect.each(["normal", "flags", "sparse"] as const)(
         'require("node:fs").appendFileSync(".git/reads", "read\\n"); process.stdin.pipe(process.stdout);',
       );
       yield* git(["config", "filter.probe.clean", "node .git/filter.cjs"]);
+      yield* git(["config", "core.trustctime", "false"]);
       yield* fs.utimes(path.join(cwd, "stable"), 1_700_000_000, 1_700_000_000);
+      yield* fs.utimes(path.join(cwd, "z-skipped"), 1_700_000_000, 1_700_000_000);
       yield* git(["add", "."]);
       yield* git(["commit", "-m", "inspection fixture"]);
-      if (indexMode === "flags") yield* git(["update-index", "--skip-worktree", "z-skipped"]);
+      const flagged = indexMode === "skip-worktree" || indexMode === "assume-unchanged";
+      if (flagged) {
+        yield* git(["update-index", `--${indexMode}`, "z-skipped", "z-deleted"]);
+        yield* fs.remove(path.join(cwd, "z-deleted"));
+      }
       if (indexMode === "sparse")
         yield* git(["sparse-checkout", "set", "--cone", "--sparse-index", "included"]);
       yield* fs.writeFileString(path.join(cwd, "z-skipped"), "modified\n");
+      // A flagged edit with the indexed size and mtime is invisible to Git's stat check.
+      if (flagged) yield* fs.utimes(path.join(cwd, "z-skipped"), 1_700_000_000, 1_700_000_000);
       yield* fs.writeFileString(path.join(cwd, ".git/reads"), "");
       const originalIndex = yield* fs.readFile(path.join(cwd, ".git/index"));
+      let freshReadTrees = 0;
       const captureDriver = yield* GitVcsDriver.makeVcsDriverShape().pipe(
         Effect.provideService(VcsProcess.VcsProcess, {
-          run: (input) =>
-            liveProcess.run(
+          run: (input) => {
+            if (input.args.includes("read-tree") && !input.args.includes("--reset"))
+              freshReadTrees++;
+            return liveProcess.run(
               input.args.includes("ls-files")
                 ? {
                     ...input,
@@ -723,13 +735,19 @@ it.effect.each(["normal", "flags", "sparse"] as const)(
                     },
                   }
                 : input,
-            ),
+            );
+          },
         }),
       );
       yield* captureDriver.checkpoints.captureCheckpoint({ cwd, checkpointRef });
       assert.strictEqual((yield* git(["show", `${checkpointRef}:z-skipped`])).stdout, "modified\n");
-      if (indexMode !== "flags")
-        assert.strictEqual(yield* fs.readFileString(path.join(cwd, ".git/reads")), "");
+      const files = (yield* git(["ls-tree", "-z", "--name-only", checkpointRef])).stdout.split(
+        "\0",
+      );
+      if (flagged) assert.notInclude(files, "z-deleted");
+      else assert.include(files, "z-deleted");
+      assert.strictEqual(freshReadTrees, 0);
+      assert.strictEqual(yield* fs.readFileString(path.join(cwd, ".git/reads")), "");
       assert.deepEqual(yield* fs.readFile(path.join(cwd, ".git/index")), originalIndex);
     }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
 );
