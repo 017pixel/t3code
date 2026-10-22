@@ -1222,6 +1222,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             Layer.mock(ThreadManagementService.ThreadManagementService)({
               getThreadRecords: () =>
                 Effect.succeed(parentProjection([], { instanceId: claudeInstanceId, model: opus })),
+              isProviderInstanceEnabledForProject: () => Effect.succeed(true),
             }),
             ServerSettings.layerTest(),
             providerRegistryLayer([claude]),
@@ -1289,6 +1290,22 @@ describe("OrchestratorMcpService provider resolution", () => {
           ],
           "update_scheduled_task dropped the effort option from its target",
         );
+      }),
+    );
+
+    it.effect("update_scheduled_task rejects an option the model does not advertise", () =>
+      Effect.gen(function* () {
+        const upserts = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const input = {
+          scheduledTaskId: existing.id,
+          target: { options: [{ id: "effort", value: "ludicrous" }] },
+        };
+        const error = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.flatMap((mcp) => mcp.updateScheduledTask(scope, input).pipe(Effect.flip)),
+          Effect.provide(service(upserts)),
+        );
+        assert.equal(error.code, "invalid_request");
+        assert.deepEqual(yield* Ref.get(upserts), []);
       }),
     );
   });

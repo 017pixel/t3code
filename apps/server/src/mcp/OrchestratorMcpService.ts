@@ -1324,7 +1324,7 @@ const make = Effect.gen(function* () {
     const instanceId =
       input.target?.providerInstanceId ??
       (input.target?.driverKind === undefined
-        ? input.parent.thread.modelSelection.instanceId
+        ? input.inherit.modelSelection.instanceId
         : undefined);
     const resolved = resolveTarget(input);
     if (instanceId === undefined) return resolved;
@@ -1340,7 +1340,11 @@ const make = Effect.gen(function* () {
   };
 
   const resolveTarget = Effect.fn("OrchestratorMcpService.resolveTarget")(function* (input: {
-    readonly parent: Pick<OrchestrationV2ThreadProjection, "thread">;
+    /** Selection and project the target inherits from when it leaves a field unset. */
+    readonly inherit: Pick<
+      OrchestrationV2ThreadProjection["thread"],
+      "projectId" | "modelSelection"
+    >;
     readonly target: OrchestratorMcpTarget | undefined;
     readonly providers: ReadonlyArray<ServerProvider>;
     /**
@@ -1373,7 +1377,7 @@ const make = Effect.gen(function* () {
         (candidate) => providerConstraints(candidate, true).length === 0,
       );
       const inheritedCandidate = healthyCandidates.find(
-        (candidate) => candidate.instanceId === input.parent.thread.modelSelection.instanceId,
+        (candidate) => candidate.instanceId === input.inherit.modelSelection.instanceId,
       );
       const orderedCandidates = [
         ...(inheritedCandidate === undefined ? [] : [inheritedCandidate]),
@@ -1383,7 +1387,7 @@ const make = Effect.gen(function* () {
         const enabledForProject =
           input.skipProjectEnablementFilter === true ||
           (yield* threadManagement.isProviderInstanceEnabledForProject({
-            projectId: input.parent.thread.projectId,
+            projectId: input.inherit.projectId,
             instanceId: candidate.instanceId,
           }));
         if (enabledForProject) {
@@ -1400,7 +1404,7 @@ const make = Effect.gen(function* () {
         );
       }
     }
-    instanceId ??= input.parent.thread.modelSelection.instanceId;
+    instanceId ??= input.inherit.modelSelection.instanceId;
 
     const provider = input.providers.find((candidate) => candidate.instanceId === instanceId);
     if (provider === undefined) {
@@ -1426,7 +1430,7 @@ const make = Effect.gen(function* () {
       );
     }
 
-    const inheritedSelection = input.parent.thread.modelSelection;
+    const inheritedSelection = input.inherit.modelSelection;
     const requestedModel = input.target?.model;
     const model =
       requestedModel ??
@@ -1805,6 +1809,47 @@ const make = Effect.gen(function* () {
     return task;
   });
 
+  /**
+   * Without a target the task keeps the inherited selection and mode as-is. With one, the
+   * resolved provider must be enabled for the task's project and offer the stored runtime mode,
+   * so the scheduler never holds a task it cannot launch.
+   */
+  const resolveScheduledTaskTarget = Effect.fn("OrchestratorMcpService.resolveScheduledTaskTarget")(
+    function* (input: {
+      readonly inherit: Pick<
+        OrchestrationV2ThreadProjection["thread"],
+        "projectId" | "modelSelection"
+      >;
+      readonly target: OrchestratorMcpTarget | undefined;
+      readonly runtimeMode: RuntimeMode;
+    }) {
+      if (input.target === undefined) {
+        return { modelSelection: input.inherit.modelSelection, runtimeMode: input.runtimeMode };
+      }
+      const target = yield* resolveTargetRechecking({
+        inherit: input.inherit,
+        target: input.target,
+        providers: yield* loadProviders,
+      });
+      const instanceId = target.modelSelection.instanceId;
+      if (
+        !(yield* threadManagement.isProviderInstanceEnabledForProject({
+          projectId: input.inherit.projectId,
+          instanceId,
+        }))
+      ) {
+        return yield* failure(
+          "invalid_request",
+          `Provider instance "${instanceId}" is disabled for project ${input.inherit.projectId}.`,
+        );
+      }
+      return {
+        modelSelection: target.modelSelection,
+        runtimeMode: yield* resolveRuntimeMode(input.runtimeMode, undefined, target),
+      };
+    },
+  );
+
   return OrchestratorMcpService.of({
     scheduleTask: Effect.fn("OrchestratorMcpService.scheduleTask")(function* (scope, input) {
       const { parent, limits } = yield* loadCaller(scope);
@@ -1822,8 +1867,15 @@ const make = Effect.gen(function* () {
             : "bindToCurrentThread binds to this thread, which belongs to a different project.",
         );
       }
-      const modelSelection =
-        parent?.thread.modelSelection ?? (yield* projectDefaultModelSelection(project));
+      const { modelSelection, runtimeMode } = yield* resolveScheduledTaskTarget({
+        inherit: {
+          projectId,
+          modelSelection:
+            parent?.thread.modelSelection ?? (yield* projectDefaultModelSelection(project)),
+        },
+        target: input.target,
+        runtimeMode: limits.runtimeMode,
+      });
       const derivedTitle = input.prompt.split("\n")[0]?.trim() ?? "";
       const title =
         input.title ?? (derivedTitle.length > 0 ? derivedTitle.slice(0, 80) : "Scheduled task");
@@ -1836,7 +1888,7 @@ const make = Effect.gen(function* () {
         threadId: bindToCurrentThread && parent !== undefined ? parent.thread.id : null,
         workspaceStrategy: scheduledTaskWorkspaceStrategy(bindToCurrentThread),
         modelSelection,
-        runtimeMode: limits.runtimeMode,
+        runtimeMode,
         interactionMode: limits.interactionMode,
         createdBy: "agent",
         creationSource: "mcp",
@@ -1909,6 +1961,11 @@ const make = Effect.gen(function* () {
           input.bindToCurrentThread === undefined
             ? existing.workspaceStrategy
             : scheduledTaskWorkspaceStrategy(input.bindToCurrentThread);
+        const { modelSelection, runtimeMode } = yield* resolveScheduledTaskTarget({
+          inherit: existing,
+          target: input.target,
+          runtimeMode: existing.runtimeMode,
+        });
         const upsertInput: ScheduledTaskUpsertInput = {
           id: existing.id,
           title: input.title ?? existing.title,
@@ -1918,8 +1975,8 @@ const make = Effect.gen(function* () {
           projectId: existing.projectId,
           threadId,
           workspaceStrategy,
-          modelSelection: existing.modelSelection,
-          runtimeMode: existing.runtimeMode,
+          modelSelection,
+          runtimeMode,
           interactionMode: existing.interactionMode,
           createdBy: existing.createdBy,
           creationSource: existing.creationSource,
@@ -2166,7 +2223,7 @@ const make = Effect.gen(function* () {
       });
       const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
       const target = yield* resolveTargetRechecking({
-        parent,
+        inherit: parent.thread,
         target: input.target,
         providers,
         skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
@@ -2556,7 +2613,7 @@ const make = Effect.gen(function* () {
                     .pipe(Effect.mapError(threadManagementFailure))
                 : null;
               const target = yield* resolveTargetRechecking({
-                parent,
+                inherit: parent.thread,
                 target:
                   committedThread === null
                     ? request.target
