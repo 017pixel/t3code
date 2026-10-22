@@ -5,6 +5,10 @@ Run from the repository root: python3 scripts/fixtures/issue-16447.py
 Requires an already migrated .t3/userdata/statev2.sqlite. Removes copied project
 and conversation projections so no private sidebar/history appears in evidence.
 Does not change events or claim backend behavior. Never targets live T3 home.
+
+Deletes every projection table, so it refuses to touch the database until you
+mark it disposable yourself, after copying in data you can lose:
+  echo issue-16447-disposable > .t3/userdata/statev2.sqlite.issue-16447-disposable
 """
 import datetime
 import json
@@ -15,6 +19,9 @@ root = Path.cwd().resolve()
 db = root / '.t3/userdata/statev2.sqlite'
 if not (root / '.git').exists() or not db.exists() or db.resolve() == Path.home() / '.t3/userdata/statev2.sqlite':
     raise SystemExit('Run in the isolated, migrated worktree only')
+marker = db.with_name(db.name + '.issue-16447-disposable')
+if not marker.is_file() or marker.read_text().strip() != 'issue-16447-disposable':
+    raise SystemExit(f'Refusing to delete projections: create {marker} as described in this script\'s docstring')
 fixture = json.loads(Path(__file__).with_suffix('.json').read_text())
 c = sqlite3.connect(db)
 c.execute('PRAGMA foreign_keys=OFF')
