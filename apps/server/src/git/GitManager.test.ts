@@ -4795,7 +4795,16 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
-  it.effect("prepares a worktree PR thread in a clone of only the head fork", () =>
+  it.effect.each([
+    { host: "GitHub", root: "https://github.com", pullPath: "pull", forgejo: false },
+    // Forgejo names the head `owner/repo` without its installation mount.
+    {
+      host: "Forgejo under /git",
+      root: "https://forge.test/git",
+      pullPath: "pulls",
+      forgejo: true,
+    },
+  ])("prepares a worktree PR thread in a clone of only the head fork on $host", (forge) =>
     Effect.gen(function* () {
       // A contributor's clone of their own fork has no remote for the base repository; the head
       // repository still makes it a checkout of the pull request.
@@ -4806,7 +4815,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* configureVisibleRemoteUrlWithLocalRewrite(
         repoDir,
         "origin",
-        "https://github.com/octocat/codething-mvp.git",
+        `${forge.root}/octocat/codething-mvp.git`,
         forkDir,
       );
       yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
@@ -4819,26 +4828,36 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* runGit(repoDir, ["checkout", "main"]);
       yield* runGit(repoDir, ["branch", "-D", "feature/fork-only"]);
 
-      const { manager } = yield* makeManager({
-        ghScenario: {
-          pullRequest: {
-            number: 82,
-            title: "Fork-only PR",
-            url: "https://github.com/pingdotgg/codething-mvp/pull/82",
-            baseRefName: "main",
-            headRefName: "feature/fork-only",
-            state: "open",
-            isCrossRepository: true,
-            headRepositoryNameWithOwner: "octocat/codething-mvp",
-            headRepositoryOwnerLogin: "octocat",
-          },
-          repositoryCloneUrls: {
-            "octocat/codething-mvp": {
-              url: "https://github.com/octocat/codething-mvp.git",
-              sshUrl: "git@github.com:octocat/codething-mvp.git",
-            },
+      const ghScenario = {
+        pullRequest: {
+          number: 82,
+          title: "Fork-only PR",
+          url: `${forge.root}/pingdotgg/codething-mvp/${forge.pullPath}/82`,
+          baseRefName: "main",
+          headRefName: "feature/fork-only",
+          state: "open",
+          isCrossRepository: true,
+          headRepositoryNameWithOwner: "octocat/codething-mvp",
+          headRepositoryOwnerLogin: "octocat",
+        },
+        repositoryCloneUrls: {
+          "octocat/codething-mvp": {
+            url: `${forge.root}/octocat/codething-mvp.git`,
+            sshUrl: "git@github.com:octocat/codething-mvp.git",
           },
         },
+      };
+      const { manager } = yield* makeManager({
+        ghScenario,
+        ...(forge.forgejo
+          ? {
+              sourceControlProvider: {
+                ...createGitHubProviderWithFakeGh(ghScenario).service,
+                repositoryNameFromRemoteUrl:
+                  ForgejoSourceControlProvider.repositoryNameFromRemoteUrl,
+              },
+            }
+          : {}),
       });
 
       const result = yield* preparePullRequestThread(manager, {

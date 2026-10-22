@@ -2754,19 +2754,36 @@ export const make = Effect.gen(function* () {
   // shorthand like `gh:` only names the repository after rewriting.
   const ensurePullRequestBelongsToCheckout = Effect.fn("ensurePullRequestBelongsToCheckout")(
     function* (cwd: string, pullRequest: ResolvedPullRequest & PullRequestHeadRemoteInfo) {
+      const provider = yield* sourceControlProvider(cwd);
       const baseKey = pullRequestRepositoryKey(pullRequest.url);
       const headRepository = resolvePullRequestHeadRepositoryNameWithOwner(pullRequest);
+      // The head is named without the installation mount (Forgejo under `/git`) its web URL
+      // carries, and SSH remotes omit that mount too, so it is looked for at both.
+      const baseName =
+        baseKey === null
+          ? null
+          : parseRepositoryNameWithOwnerFromRemoteUrl(
+              `https://${baseKey}`,
+              provider,
+            )?.toLowerCase();
+      const headRoots =
+        baseKey === null
+          ? []
+          : [
+              baseKey.split("/")[0],
+              ...(baseName && baseKey.endsWith(`/${baseName}`)
+                ? [baseKey.slice(0, -baseName.length - 1)]
+                : []),
+            ];
       const repositoryKeys = new Set(
         baseKey === null
           ? []
           : [
               canonicalRepositoryKey(baseKey),
               ...(headRepository
-                ? [
-                    canonicalRepositoryKey(
-                      `${baseKey.split("/")[0]}/${headRepository.toLowerCase()}`,
-                    ),
-                  ]
+                ? headRoots.map((root) =>
+                    canonicalRepositoryKey(`${root}/${headRepository.toLowerCase()}`),
+                  )
                 : []),
             ],
       );
@@ -2831,7 +2848,7 @@ export const make = Effect.gen(function* () {
         return;
       }
       // Forgejo serves SSH from a host only its provider maps to the web host links are on.
-      const refine = (yield* sourceControlProvider(cwd)).refineRepositoryIdentity;
+      const refine = provider.refineRepositoryIdentity;
       const webUrls =
         refine === undefined
           ? []
