@@ -801,7 +801,7 @@ it.live("a sign-in prompt Chromium already dropped clears when answering it fail
       session.emit("Fetch.authRequired", basicChallenge);
       yield* Queue.takeAll(viewer.output);
       const failed = yield* broker
-        .invoke({
+        .invoke<PreviewAutomationStatus>({
           scope,
           tabId,
           operation: "dialog",
