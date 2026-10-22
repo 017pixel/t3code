@@ -3,7 +3,7 @@
 Start an empty isolated home once to migrate it, with project bootstrap disabled:
 
 ```sh
-node_modules/.bin/vp run dev --home-dir /tmp/minimap-proof --auto-bootstrap-project-from-cwd=false
+vp run dev --home-dir /tmp/minimap-proof --auto-bootstrap-project-from-cwd=false
 ```
 
 Stop that server, then seed and validate:

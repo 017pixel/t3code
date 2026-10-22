@@ -114,8 +114,8 @@ export function TimelineMinimap({
   }
   useEffect(() => {
     onMarksChange();
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Regrouped strips mount without their in-view state.
-  }, [markCount, onMarksChange]);
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Regrouped strips mount or change items without fresh in-view state.
+  }, [items, markCount, onMarksChange]);
   const activeMarkIndex =
     resolvedActiveIndex === null
       ? null

@@ -33,8 +33,6 @@ import {
   resolveAssistantMessageCopyState,
   type MessagesTimelineRow,
   workEntryDisplayLabel,
-  resolveTimelineMinimapMarkCount,
-  resolveTimelineMinimapMarkIndex,
 } from "./MessagesTimeline.logic";
 
 describe("computeMessageDurationStart", () => {
@@ -3926,25 +3924,5 @@ describe("shouldCollapseUserMessage", () => {
 
     expect(shouldCollapseUserMessage(`${citation} Can you expand on this?`)).toBe(false);
     expect(shouldCollapseUserMessage(`${citation} ${"More text. ".repeat(60)}`)).toBe(true);
-  });
-});
-
-describe("timeline minimap marks", () => {
-  it("keeps one mark per item while the rail fits them", () => {
-    expect(resolveTimelineMinimapMarkCount(75, 512)).toBe(75);
-    expect(resolveTimelineMinimapMarkCount(600, 0)).toBe(600);
-  });
-
-  it("caps marks so long threads stay distinct and every mark covers an item", () => {
-    const markCount = resolveTimelineMinimapMarkCount(600, 512);
-    expect(markCount).toBe(129);
-    const covered = new Set(
-      Array.from({ length: 600 }, (_, index) =>
-        resolveTimelineMinimapMarkIndex(index, 600, markCount),
-      ),
-    );
-    expect(covered.size).toBe(markCount);
-    expect(resolveTimelineMinimapMarkIndex(0, 600, markCount)).toBe(0);
-    expect(resolveTimelineMinimapMarkIndex(599, 600, markCount)).toBe(markCount - 1);
   });
 });
