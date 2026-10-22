@@ -171,7 +171,11 @@ const server = http.createServer((request, response) => {
     response.end(fixture);
     return;
   }
-  const headers = { ...request.headers, host: `localhost:${upstreamPort}` };
+  const headers = {
+    ...request.headers,
+    host: `localhost:${upstreamPort}`,
+    origin: `http://localhost:${upstreamPort}`,
+  };
   delete headers["accept-encoding"];
   const upstream = http.request(
     {
@@ -213,7 +217,11 @@ server.on("upgrade", (request, socket, head) => {
   const upstream = net.connect(upstreamPort, upstreamHost, () => {
     upstream.write(
       `${request.method} ${request.url} HTTP/1.1\r\n` +
-        Object.entries({ ...request.headers, host: `localhost:${upstreamPort}` })
+        Object.entries({
+          ...request.headers,
+          host: `localhost:${upstreamPort}`,
+          origin: `http://localhost:${upstreamPort}`,
+        })
           .map(([key, value]) => `${key}: ${value}\r\n`)
           .join("") +
         "\r\n",
