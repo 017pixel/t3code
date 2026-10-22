@@ -785,6 +785,38 @@ it.live("signs in to an HTTP Basic challenge without holding the action queue", 
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("a fresh tab opened to an HTTP Basic challenge returns with the sign-in prompt", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      // Chromium holds the first navigation until the challenge is answered.
+      initialNavigation = () => {
+        contexts[0]!.sessions[0]!.emit("Fetch.authRequired", basicChallenge);
+        return new Promise<void>(() => {});
+      };
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false, url: "http://localhost:18914/" },
+      });
+      expect(opened.dialog).toMatchObject({ type: "auth" });
+      const tabId = PreviewTabId.make(opened.tabId!);
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "dialog",
+        input: { accept: false },
+      });
+      expect(contexts[0]!.sessions[0]!.send).toHaveBeenCalledWith("Fetch.continueWithAuth", {
+        requestId: "auth-1",
+        authChallengeResponse: { response: "CancelAuth" },
+      });
+      expect(status.dialog).toBeNull();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("navigating away from an HTTP Basic challenge cancels it", () =>
   Effect.scoped(
     Effect.gen(function* () {

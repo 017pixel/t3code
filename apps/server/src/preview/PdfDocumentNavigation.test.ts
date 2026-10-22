@@ -11,7 +11,7 @@ function fixture(nativePdfViewer = false) {
     requestId: string;
     frameId: string;
     request: { url: string; method: string };
-    responseStatusCode: number;
+    responseStatusCode: number | undefined;
     responseHeaders: Array<{ name: string; value: string }>;
   }) => void = () => {
     throw new Error("Navigation handler was not installed");
@@ -41,14 +41,14 @@ function fixture(nativePdfViewer = false) {
       url = source,
       frameId = "main",
       method = "GET",
-      status = 200,
+      status: number | null = 200,
       contentType = "application/pdf",
     ) => {
       paused({
         requestId: "request-1",
         frameId,
         request: { url, method },
-        responseStatusCode: status,
+        responseStatusCode: status ?? undefined,
         responseHeaders: [{ name: "Content-Type", value: contentType }],
       });
       return completed.promise;
@@ -66,6 +66,26 @@ describe("PDF document navigation", () => {
     expect(Buffer.from(String(result.params.body), "base64").toString()).toContain(
       "<title>&lt;script>.pdf</title>",
     );
+  });
+
+  it("still commits PDF documents while every document also pauses for auth", async () => {
+    const test = fixture();
+    await installPdfDocumentNavigation(test.cdp, { handleAuthRequests: true });
+    expect(test.send).toHaveBeenCalledWith("Fetch.enable", {
+      patterns: [
+        { urlPattern: "*/api/assets/*", resourceType: "Document", requestStage: "Response" },
+        { urlPattern: "*", resourceType: "Document", requestStage: "Request" },
+      ],
+      handleAuthRequests: true,
+    });
+    // The request-stage pause of the same PDF has no response yet and must go on.
+    const requestStage = fixture();
+    await installPdfDocumentNavigation(requestStage.cdp, { handleAuthRequests: true });
+    expect(await requestStage.navigate(source, "main", "GET", null)).toEqual({
+      method: "Fetch.continueRequest",
+      params: { requestId: "request-1" },
+    });
+    expect((await test.navigate()).method).toBe("Fetch.fulfillRequest");
   });
 
   it("resumes navigation when committing the document fails", async () => {

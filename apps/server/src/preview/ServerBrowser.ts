@@ -782,7 +782,8 @@ const make = Effect.gen(function* () {
     if (!desktop) await prepareContext(context);
     const page = adopted?.page ?? desktop?.page ?? (await context.newPage());
     const cdp = await context.newCDPSession(page);
-    // A desktop page has no viewer that could show a sign-in prompt, so Electron keeps handling auth.
+    // Desktop tabs are left out: Electron has no login handler for them either, so
+    // a challenge there still shows no prompt. Sign-in is offered in environment-hosted tabs only.
     await installPdfDocumentNavigation(cdp, { handleAuthRequests: !desktop });
     // The desktop's page is already a normal browser. A popup's first request
     // went out before it became a tab; everything after presents as Chrome.
@@ -925,6 +926,8 @@ const make = Effect.gen(function* () {
       });
     });
     page.on("dialog", (dialog) => {
+      // Only one dialog can be answered; cancel a sign-in prompt rather than strand its request.
+      if (tab.dialog?.type === "auth") void tab.dialog.dismiss().catch(constVoid);
       tab.dialog = {
         type: dialog.type(),
         message: dialog.message(),
@@ -961,11 +964,10 @@ const make = Effect.gen(function* () {
       ((!adopted && !desktop) || isPdfAssetUrl(snapshot.navStatus.url))
     ) {
       const options = { waitUntil: "commit", timeout: NAVIGATION_TIMEOUT_MS } as const;
-      tab.initialNavigation = (
-        (desktop || adopted) && page.url() === snapshot.navStatus.url
-          ? page.reload(options)
-          : page.goto(snapshot.navStatus.url, options)
-      ).then(constVoid);
+      const url = snapshot.navStatus.url;
+      tab.initialNavigation = settleUnlessAuth(tab, () =>
+        (desktop || adopted) && page.url() === url ? page.reload(options) : page.goto(url, options),
+      );
 
       if (tab.control.agentId !== null) tab.control.track(tab.initialNavigation);
       else void tab.initialNavigation.catch(constVoid);
@@ -1484,50 +1486,60 @@ const make = Effect.gen(function* () {
     return `${target.protocol ?? "http"}://localhost:${target.port}${path.startsWith("/") || path === "" ? path : `/${path}`}`;
   };
 
+  /**
+   * A sign-in prompt holds its navigation until it is answered, so stop waiting
+   * once one shows; the action queue must stay free for the dialog's answer.
+   */
+  const settleUnlessAuth = (tab: ServerTab, start: () => Promise<unknown>): Promise<void> => {
+    let onAuth = constVoid;
+    const authRequested = new Promise<void>((resolve) => {
+      onAuth = resolve;
+      tab.authWaiters.add(onAuth);
+    });
+    const settled = start()
+      .then(constVoid)
+      .finally(() => tab.authWaiters.delete(onAuth));
+    return Promise.race([settled, authRequested]);
+  };
+
   const navigate = async (
     tab: ServerTab,
     url: string,
     readiness: "load" | "domContentLoaded" | "none",
     timeout: number,
   ) => {
-    // A sign-in prompt holds the navigation until it is answered, outside the action queue.
-    let onAuth = constVoid;
-    const authRequested = new Promise<"auth">((resolve) => {
-      onAuth = () => resolve("auth");
-      tab.authWaiters.add(onAuth);
-    });
-    const navigation = tab.page.goto(url, {
-      timeout,
-      waitUntil:
-        readiness === "domContentLoaded"
-          ? "domcontentloaded"
-          : readiness === "none"
-            ? "commit"
-            : "load",
-    });
-    void navigation.finally(() => tab.authWaiters.delete(onAuth)).catch(constVoid);
+    const goto = () =>
+      tab.page.goto(url, {
+        timeout,
+        waitUntil:
+          readiness === "domContentLoaded"
+            ? "domcontentloaded"
+            : readiness === "none"
+              ? "commit"
+              : "load",
+      });
     if (readiness === "none") {
-      tab.control.track(Promise.race([navigation, authRequested]));
+      tab.control.track(settleUnlessAuth(tab, goto));
       return;
     }
-    const navigated = navigation.catch((cause: unknown) => {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      if (message.includes("Download is starting")) {
-        throw new ServerBrowserPage.ServerBrowserOperationError(
-          "PreviewAutomationExecutionError",
-          `${url} is a file this browser cannot show, so it was downloaded instead. preview_status lists it under downloads.`,
-        );
-      }
-      if (/ERR_[A-Z_]+/.test(message)) {
-        throw new ServerBrowserPage.ServerBrowserOperationError(
-          "PreviewAutomationExecutionError",
-          `Navigation to ${url} failed: ${ServerBrowserPage.parseNetError(message).description}`,
-        );
-      }
-      throw cause;
-    });
-    const settled = navigated.then(() => "navigated" as const);
-    if ((await Promise.race([settled, authRequested])) === "auth") void settled.catch(constVoid);
+    const navigated = () =>
+      goto().catch((cause: unknown) => {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        if (message.includes("Download is starting")) {
+          throw new ServerBrowserPage.ServerBrowserOperationError(
+            "PreviewAutomationExecutionError",
+            `${url} is a file this browser cannot show, so it was downloaded instead. preview_status lists it under downloads.`,
+          );
+        }
+        if (/ERR_[A-Z_]+/.test(message)) {
+          throw new ServerBrowserPage.ServerBrowserOperationError(
+            "PreviewAutomationExecutionError",
+            `Navigation to ${url} failed: ${ServerBrowserPage.parseNetError(message).description}`,
+          );
+        }
+        throw cause;
+      });
+    await settleUnlessAuth(tab, navigated);
   };
 
   const withCaptureLock = <A>(tab: ServerTab, operation: () => Promise<A>): Promise<A> => {
@@ -1878,7 +1890,8 @@ const make = Effect.gen(function* () {
         return tab.control.agent(
           request.agentSessionId,
           async () => {
-            if (tab.dialog)
+            // A new tab's first navigation may already be waiting for sign-in; report it.
+            if (tab.dialog && (existing || tab.dialog.type !== "auth"))
               throw new BrowserControlInterrupted(
                 "A browser dialog is pending. Read preview_status and use preview_dialog first.",
                 "dialogPending",
@@ -1898,10 +1911,10 @@ const make = Effect.gen(function* () {
                 }),
               );
             }
-            if (!existing && url) {
-              await tab.page
-                .waitForLoadState("load", { timeout: navigationTimeout })
-                .catch(constVoid);
+            if (!existing && url && tab.dialog?.type !== "auth") {
+              await settleUnlessAuth(tab, () =>
+                tab.page.waitForLoadState("load", { timeout: navigationTimeout }).catch(constVoid),
+              );
             }
             return statusWithTitle(tab, request.agentSessionId);
           },
