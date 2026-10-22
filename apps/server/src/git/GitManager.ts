@@ -2784,18 +2784,21 @@ export const make = Effect.gen(function* () {
                 // `key url` from config, `name\turl (fetch)` from `remote -v`; URLs may hold spaces.
                 const separator = line.search(/\s/);
                 if (separator === -1) return [];
+                const name = line.slice(0, separator).replace(/^remote\.(.*)\.url$/, "$1");
                 const url = line
                   .slice(separator + 1)
                   .replace(/ \((?:fetch|push)\)$/, "")
                   .trim();
-                return url ? [url] : [];
+                return name && url ? [{ name, url }] : [];
               }),
             ),
           );
-      const remoteUrls = [
-        ...(yield* listRemoteUrls(["config", "--get-regexp", "^remote\\..*\\.url$"])),
-        ...(yield* listRemoteUrls(["remote", "-v"])),
-      ];
+      const remotes = new Map(
+        [
+          ...(yield* listRemoteUrls(["config", "--get-regexp", "^remote\\..*\\.url$"])),
+          ...(yield* listRemoteUrls(["remote", "-v"])),
+        ].map(({ name, url }) => [url, name]),
+      );
       // An SSH alias such as `git@github-work:owner/repo` names a github.com repository.
       const remoteRepositoryKey = (remoteUrl: string) => {
         const key = normalizeGitRemoteUrl(remoteUrl);
@@ -2806,7 +2809,56 @@ export const make = Effect.gen(function* () {
             : key,
         );
       };
-      if (!remoteUrls.some((remoteUrl) => repositoryKeys.has(remoteRepositoryKey(remoteUrl)))) {
+      // Keys drop the port, but two servers can share a hostname; an HTTP URL names its server.
+      const httpPort = (value: string) => {
+        try {
+          const url = new URL(value);
+          return url.protocol === "http:" || url.protocol === "https:" ? url.port : null;
+        } catch {
+          return null;
+        }
+      };
+      const pullRequestPort = httpPort(pullRequest.url);
+      const samePort = (url: string) => {
+        const port = httpPort(url);
+        return port === null || pullRequestPort === null || port === pullRequestPort;
+      };
+      if (
+        [...remotes.keys()].some(
+          (remoteUrl) => repositoryKeys.has(remoteRepositoryKey(remoteUrl)) && samePort(remoteUrl),
+        )
+      ) {
+        return;
+      }
+      // Forgejo serves SSH from a host only its provider maps to the web host links are on.
+      const refine = (yield* sourceControlProvider(cwd)).refineRepositoryIdentity;
+      const webUrls =
+        refine === undefined
+          ? []
+          : yield* Effect.forEach(remotes, ([remoteUrl, remoteName]) =>
+              refine({
+                identity: {
+                  canonicalKey: normalizeGitRemoteUrl(remoteUrl),
+                  locator: { source: "git-remote", remoteName, remoteUrl },
+                  rootPath: cwd,
+                },
+                resolveContext: (input) =>
+                  sourceControlProviders
+                    .resolveHandle(input)
+                    .pipe(Effect.map((handle) => handle.context)),
+              }).pipe(
+                Effect.map((identity) => identity.webUrl),
+                Effect.orElseSucceed(() => undefined),
+              ),
+            );
+      if (
+        !webUrls.some(
+          (webUrl) =>
+            webUrl !== undefined &&
+            repositoryKeys.has(canonicalRepositoryKey(normalizeGitRemoteUrl(webUrl))) &&
+            samePort(webUrl),
+        )
+      ) {
         return yield* new GitManagerError({
           operation: "preparePullRequestThread",
           cwd,

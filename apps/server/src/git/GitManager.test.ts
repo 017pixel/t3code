@@ -4571,20 +4571,57 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         });
 
-        const exit = yield* Effect.exit(
-          preparePullRequestThread(manager, {
-            cwd: repoDir,
-            reference: "https://github.com/pingdotgg/t3code/pull/23165",
-            mode,
-          }),
-        );
+        const error = yield* preparePullRequestThread(manager, {
+          cwd: repoDir,
+          reference: "https://github.com/pingdotgg/t3code/pull/23165",
+          mode,
+        }).pipe(Effect.flip);
 
-        expect(exit._tag).toBe("Failure");
+        expect(error.message).toContain(
+          "Pull request #23165 belongs to github.com/pingdotgg/t3code, and this project is not a checkout of it.",
+        );
         expect(gitCommands.filter((command) => command.startsWith("fetch"))).toEqual([]);
         const worktrees = (yield* runGit(repoDir, ["worktree", "list", "--porcelain"])).stdout;
         expect(worktrees.match(/^worktree /gm)).toHaveLength(1);
         expect((yield* runGit(repoDir, ["branch", "--show-current"])).stdout.trim()).toBe("main");
       }),
+  );
+
+  it.effect("refuses a PR from a server on another port of the checkout's host", () =>
+    Effect.gen(function* () {
+      // Forgejo keeps a login per `host:port`, so a link to the server on :4000 is read there
+      // even from a checkout of the same path on :3000.
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["remote", "add", "origin", "http://forge.test:3000/team/repo.git"]);
+
+      const gitCommands: string[] = [];
+      const { manager } = yield* makeManager({
+        gitCommands,
+        ghScenario: {
+          pullRequest: {
+            number: 5,
+            title: "Other server's PR",
+            url: "http://forge.test:4000/team/repo/pulls/5",
+            baseRefName: "main",
+            headRefName: "feature/other-server",
+            state: "open",
+            isCrossRepository: false,
+          },
+        },
+      });
+
+      const error = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "http://forge.test:4000/team/repo/pulls/5",
+        mode: "worktree",
+      }).pipe(Effect.flip);
+
+      expect(error.message).toContain(
+        "Pull request #5 belongs to forge.test/team/repo, and this project is not a checkout of it.",
+      );
+      expect(gitCommands.filter((command) => command.startsWith("fetch"))).toEqual([]);
+    }),
   );
 
   it.effect("prepares a worktree PR thread through an insteadOf shorthand remote", () =>
@@ -4694,6 +4731,67 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       expect(
         (yield* runGit(result.worktreePath as string, ["show", "HEAD:alias.txt"])).stdout,
       ).toBe("alias\n");
+    }),
+  );
+
+  it.effect("prepares a worktree PR thread through a Forgejo SSH host remote", () =>
+    Effect.gen(function* () {
+      // Forgejo serves SSH from its own host; only the provider knows `ssh.forge.test` is the
+      // repository behind `forge.test` web links.
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/forgejo-ssh"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "forgejo.txt"), "forgejo\n");
+      yield* runGit(repoDir, ["add", "forgejo.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Forgejo SSH PR branch"]);
+      yield* runGit(repoDir, ["push", "origin", "feature/forgejo-ssh"]);
+      yield* runGit(repoDir, ["push", "origin", "HEAD:refs/pull/86/head"]);
+      yield* runGit(repoDir, ["checkout", "main"]);
+      yield* runGit(repoDir, ["branch", "-D", "feature/forgejo-ssh"]);
+      yield* runGit(repoDir, ["remote", "set-url", "origin", "git@ssh.forge.test:team/repo.git"]);
+      yield* runGit(repoDir, ["config", "ssh.variant", "simple"]);
+      yield* runGit(repoDir, [
+        "config",
+        "core.sshCommand",
+        `sh -c 'exec git-upload-pack "$0"' '${remoteDir}'`,
+      ]);
+
+      const { service } = createGitHubProviderWithFakeGh({
+        pullRequest: {
+          number: 86,
+          title: "Forgejo SSH PR",
+          url: "http://forge.test:3000/git/team/repo/pulls/86",
+          baseRefName: "main",
+          headRefName: "feature/forgejo-ssh",
+          state: "open",
+          isCrossRepository: false,
+        },
+      });
+      const { manager } = yield* makeManager({
+        sourceControlProvider: {
+          ...service,
+          refineRepositoryIdentity: ({ identity }) =>
+            Effect.succeed(
+              identity.locator.remoteUrl === "git@ssh.forge.test:team/repo.git"
+                ? { ...identity, webUrl: "http://forge.test:3000/git/team/repo" }
+                : identity,
+            ),
+        },
+      });
+
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "86",
+        mode: "worktree",
+      });
+
+      expect(result.worktreePath).not.toBeNull();
+      expect(
+        (yield* runGit(result.worktreePath as string, ["show", "HEAD:forgejo.txt"])).stdout,
+      ).toBe("forgejo\n");
     }),
   );
 

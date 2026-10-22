@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Create isolated repositories; refuse to overwrite an existing fixture."""
-import json, os, pathlib, subprocess, sys
+import json, os, pathlib, subprocess
 fixture = json.loads(pathlib.Path(__file__).with_name('fixture.json').read_text())
-root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else fixture['root']).resolve()
+root = pathlib.Path(fixture['root']).resolve()
 if not str(root).startswith('/tmp/'):
-    raise SystemExit('Choose an isolated fixture root below /tmp.')
+    raise SystemExit('Set fixture.json root to an isolated directory below /tmp.')
 paths = [root / project['directory'] for project in fixture['projects']]
 if any(path.exists() for path in paths):
-    raise SystemExit('Fixture exists; refusing to overwrite it. Use a fresh root or restore a stopped snapshot.')
+    raise SystemExit('Fixture exists; refusing to overwrite it. Remove it or restore a stopped snapshot.')
 for project, path in zip(fixture['projects'], paths):
     path.mkdir(parents=True)
     def git(*args):
