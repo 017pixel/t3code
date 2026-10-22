@@ -1386,7 +1386,11 @@ describe("OrchestratorMcpService provider resolution", () => {
     }),
   );
 
-  it.effect("rejects explicit delegation to an OpenCode model hidden in Provider settings", () =>
+  it.effect.each([
+    { name: "explicit", inheritsHiddenModel: false, replay: false, expected: "model_unavailable" },
+    { name: "inherited", inheritsHiddenModel: true, replay: false, expected: "model_unavailable" },
+    { name: "accepted replay", inheritsHiddenModel: false, replay: true, expected: "accepted" },
+  ] as const)("hidden OpenCode model delegation: $name", (testCase) =>
     Effect.gen(function* () {
       const opencodeInstanceId = ProviderInstanceId.make("opencode");
       const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
@@ -1414,11 +1418,16 @@ describe("OrchestratorMcpService provider resolution", () => {
       const layerDependencies = Layer.mergeAll(
         NodeServices.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
-          hasReceipt: () => Effect.succeed(false),
+          hasReceipt: () => Effect.succeed(testCase.replay),
           getThreadRecords: (threadId) =>
             Effect.succeed(
               threadId === parentThreadId
-                ? parentProjection(delegated ? [task] : [])
+                ? parentProjection(
+                    delegated ? [task] : [],
+                    testCase.inheritsHiddenModel
+                      ? { instanceId: opencodeInstanceId, model: "opencode-go/deepseek-v4-pro" }
+                      : undefined,
+                  )
                 : childProjection,
             ),
           dispatch: (command) =>
@@ -1476,10 +1485,14 @@ describe("OrchestratorMcpService provider resolution", () => {
         const result = yield* service
           .delegateTask(scope, {
             task: "Summarize the diff.",
-            target: {
-              providerInstanceId: opencodeInstanceId,
-              model: "opencode-go/deepseek-v4-pro",
-            },
+            ...(testCase.inheritsHiddenModel
+              ? {}
+              : {
+                  target: {
+                    providerInstanceId: opencodeInstanceId,
+                    model: "opencode-go/deepseek-v4-pro",
+                  },
+                }),
             mode: "async",
             clientRequestId: "delegate-hidden-model-1",
           })
@@ -1489,12 +1502,8 @@ describe("OrchestratorMcpService provider resolution", () => {
               onFailure: (error) => error.code,
             }),
           );
-        assert.equal(
-          result,
-          "model_unavailable",
-          "Delegation must reject a model hidden in Provider settings before starting a child task.",
-        );
-        assert.deepEqual(yield* Ref.get(dispatched), []);
+        assert.equal(result, testCase.expected);
+        if (!testCase.replay) assert.deepEqual(yield* Ref.get(dispatched), []);
       }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
     }),
   );

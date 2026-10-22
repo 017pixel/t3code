@@ -316,6 +316,13 @@ function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): Orchestrato
 const FULL_CATALOG_DRIVERS: ReadonlySet<string> = new Set(["codex", "claudeAgent", "muse", "grok"]);
 const LISTED_MODEL_LIMIT = 8;
 
+type ModelPreferences =
+  | { readonly hiddenModels: ReadonlyArray<string>; readonly modelOrder: ReadonlyArray<string> }
+  | undefined;
+
+const isModelVisible = (model: ServerProviderModel, preferences: ModelPreferences) =>
+  model.isCustom || !preferences?.hiddenModels.includes(model.slug);
+
 /**
  * Picks the models orchestrator_capabilities shows for one provider. Hidden
  * models never appear. With search terms, lists matches; otherwise lists pinned
@@ -324,15 +331,13 @@ const LISTED_MODEL_LIMIT = 8;
  */
 function listCapabilityModels(input: {
   readonly provider: ServerProvider;
-  readonly preferences:
-    | { readonly hiddenModels: ReadonlyArray<string>; readonly modelOrder: ReadonlyArray<string> }
-    | undefined;
+  readonly preferences: ModelPreferences;
   readonly isPinned: (model: ServerProviderModel) => boolean;
   readonly searchTerms: ReadonlyArray<string>;
 }) {
   const rank = new Map(input.preferences?.modelOrder.map((slug, index) => [slug, index]));
   const visible = input.provider.models
-    .filter((model) => model.isCustom || !input.preferences?.hiddenModels.includes(model.slug))
+    .filter((model) => isModelVisible(model, input.preferences))
     .toSorted((a, b) => (rank.get(a.slug) ?? rank.size) - (rank.get(b.slug) ?? rank.size));
   if (input.searchTerms.length > 0) {
     const matches = visible.filter((model) => {
@@ -1426,13 +1431,22 @@ const make = Effect.gen(function* () {
       );
     }
 
+    // A replay of an accepted command starts nothing new, so it ignores settings changed since.
+    const preferences =
+      input.skipProjectEnablementFilter === true
+        ? undefined
+        : (yield* serverSettings.getSettings.pipe(
+            Effect.mapError(() =>
+              failure("orchestration_error", "Unable to read server settings."),
+            ),
+          )).providerModelPreferences?.[instanceId];
     const inheritedSelection = input.parent.thread.modelSelection;
     const requestedModel = input.target?.model;
     const model =
       requestedModel ??
       (instanceId === inheritedSelection.instanceId
         ? inheritedSelection.model
-        : provider?.models[0]?.slug);
+        : provider.models.find((candidate) => isModelVisible(candidate, preferences))?.slug);
     if (model === undefined) {
       return yield* failure(
         "model_unavailable",
@@ -1448,6 +1462,16 @@ const make = Effect.gen(function* () {
       return yield* failure(
         "model_unavailable",
         `Model ${requestedModel} is not advertised by provider ${instanceId}.`,
+      );
+    }
+    if (
+      provider.models.some(
+        (candidate) => candidate.slug === model && !isModelVisible(candidate, preferences),
+      )
+    ) {
+      return yield* failure(
+        "model_unavailable",
+        `Model ${model} is hidden in Provider settings for provider ${instanceId}.`,
       );
     }
 
