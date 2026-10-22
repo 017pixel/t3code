@@ -18,7 +18,7 @@ if (
   !NodePath.isAbsolute(values["workspace-root"])
 ) {
   throw new Error(
-    "Usage: node scripts/seed-archived-thread-links.mjs --base-dir <stopped isolated T3 home> --workspace-root <absolute directory>",
+    "Usage: node apps/web/test/fixtures/archived-thread-links/seed.mjs --base-dir <stopped isolated T3 home> --workspace-root <absolute directory>",
   );
 }
 const base = NodeFS.realpathSync(values["base-dir"]);
