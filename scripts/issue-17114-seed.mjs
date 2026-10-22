@@ -1,8 +1,14 @@
 // Run in an authenticated isolated Vite app with preview_evaluate:
 // (await import('/@fs/ABSOLUTE_WORKTREE/scripts/issue-17114-seed.mjs')).seed({environmentId, workspaceRoot, modelSelection})
+// Pass fixtureOrigin when the fixture runs with a different PORT.
 // Keep returned IDs private. No provider turn is started. Use separate paired
 // browser profiles for additional viewers; this helper grants no credentials.
-export async function seed({ environmentId, workspaceRoot, modelSelection }) {
+export async function seed({
+  environmentId,
+  workspaceRoot,
+  modelSelection,
+  fixtureOrigin = "http://127.0.0.1:18914",
+}) {
   const { appAtomRegistry: registry } = await import("/src/rpc/atomRegistry.ts");
   const { projectEnvironment } = await import("/src/state/projects.ts");
   const { threadEnvironment } = await import("/src/state/threads.ts");
@@ -36,7 +42,7 @@ export async function seed({ environmentId, workspaceRoot, modelSelection }) {
   const tab = await run(previewEnvironment.open, {
     threadId,
     runtime: "server",
-    url: "http://127.0.0.1:18914/public",
+    url: `${fixtureOrigin}/public`,
     reveal: false,
   });
   return { environmentId, projectId, threadId, tabId: tab.tabId };
