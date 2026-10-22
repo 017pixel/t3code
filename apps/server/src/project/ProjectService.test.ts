@@ -88,7 +88,8 @@ const layerProjectServiceDependencies = Layer.mergeAll(
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "project-service-race-" })),
-  Layer.provide(NodeServices.layer),
+  // ProjectService.make reads workspace git metadata, so the harness exposes the filesystem too.
+  Layer.provideMerge(NodeServices.layer),
 );
 
 const waitForProject = Effect.fn("ProjectServiceTest.waitForProject")(function* (
@@ -412,6 +413,20 @@ it.layer(layerTest)("ProjectService", (it) => {
           });
           assert.equal(worktree.workspaceRoot, worktreeRoot);
         }
+
+        // A primary checkout may keep its git dir inside itself; worktrees elsewhere are fine.
+        const checkout = NodePath.join(fixture, "separate-git-dir");
+        NodeFS.mkdirSync(checkout);
+        git(checkout, "init", "-b", "develop", "--separate-git-dir", ".metadata", checkout);
+        git(checkout, "commit", "--allow-empty", "-m", "init");
+        git(checkout, "worktree", "add", NodePath.join(fixture, "external"), "-b", "external");
+        const primary = yield* service.create({
+          commandId: CommandId.make("command:bare-root:separate-git-dir"),
+          projectId: ProjectId.make("project:bare-root:separate-git-dir"),
+          title: "separate git dir",
+          workspaceRoot: checkout,
+        });
+        assert.equal(primary.workspaceRoot, checkout);
       }),
   );
 
