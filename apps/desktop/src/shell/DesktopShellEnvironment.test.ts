@@ -81,18 +81,22 @@ function runShellEnvironment(input: {
       platform: input.platform,
     } as DesktopEnvironment.DesktopEnvironment["Service"]),
   );
-  const layerSpawner = Layer.succeed(
-    ChildProcessSpawner.ChildProcessSpawner,
-    ChildProcessSpawner.make((command) => {
-      if (input.failure !== undefined) return Effect.fail(input.failure);
-      const result = input.handler!(command);
-      return Effect.succeed(
-        typeof result === "string"
-          ? makeProcess(result)
-          : makeProcess(result.output, result.exitCode),
-      );
-    }),
-  );
+  const handler = input.handler;
+  const layerSpawner =
+    handler === undefined
+      ? Layer.empty
+      : Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make((command) => {
+            if (input.failure !== undefined) return Effect.fail(input.failure);
+            const result = handler(command);
+            return Effect.succeed(
+              typeof result === "string"
+                ? makeProcess(result)
+                : makeProcess(result.output, result.exitCode),
+            );
+          }),
+        );
 
   const program = Effect.gen(function* () {
     const shellEnvironment = yield* DesktopShellEnvironment.DesktopShellEnvironment;
@@ -102,11 +106,7 @@ function runShellEnvironment(input: {
   }).pipe(
     Effect.provide(
       DesktopShellEnvironment.layer.pipe(
-        Layer.provide(
-          input.handler === undefined
-            ? Layer.mergeAll(layerEnvironment, NodeServices.layer)
-            : Layer.mergeAll(layerEnvironment, NodeServices.layer, layerSpawner),
-        ),
+        Layer.provide(Layer.mergeAll(layerEnvironment, NodeServices.layer, layerSpawner)),
       ),
     ),
   );
@@ -195,6 +195,25 @@ describe("DesktopShellEnvironment", () => {
         assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "synthetic-token-22816");
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps an inherited CLAUDE_CODE_OAUTH_TOKEN over the login shell's", () =>
+    Effect.gen(function* () {
+      const env: NodeJS.ProcessEnv = {
+        SHELL: "/bin/zsh",
+        PATH: "/usr/bin",
+        CLAUDE_CODE_OAUTH_TOKEN: "inherited-token",
+      };
+
+      yield* runShellEnvironment({
+        env,
+        platform: "darwin",
+        handler: () =>
+          envOutput({ PATH: "/usr/bin", CLAUDE_CODE_OAUTH_TOKEN: "shell-profile-token" }),
+      });
+
+      assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "inherited-token");
+    }),
   );
 
   it.effect("does not mix login-shell locale categories into an inherited locale", () =>
