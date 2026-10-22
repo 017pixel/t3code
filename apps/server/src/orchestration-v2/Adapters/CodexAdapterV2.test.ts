@@ -5324,8 +5324,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.isTrue(childUpdates.every((event) => event.subagent.id === saved.subagent.id));
           assert.equal(childUpdates.at(-1)?.subagent.runId, "run-attempt-after-restart");
           if (savedTurns > 0) {
-            // The run that resumed the child stops ingesting once its root turn
-            // ends with no running children, so the early reopen must come first.
+            // A collab item that reports the child running reopens it before the
+            // root turn ends.
             const reopenedAt = harness.events.findIndex(
               (event) =>
                 event.type === "subagent.updated" &&
