@@ -972,7 +972,15 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
               yield* execute({
                 operation,
                 cwd: input.cwd,
-                args: [...indexConfig, "update-index", "-z", "--index-info"],
+                // core.ignorestat would mark these assume-unchanged, hiding edits from add -A.
+                args: [
+                  ...indexConfig,
+                  "-c",
+                  "core.ignorestat=false",
+                  "update-index",
+                  "-z",
+                  "--index-info",
+                ],
                 stdin: flagged.join("\0") + "\0",
                 env: commitEnv,
               });

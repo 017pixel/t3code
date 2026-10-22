@@ -720,6 +720,7 @@ it.effect.each(["normal", "skip-worktree", "assume-unchanged", "sparse"] as cons
       const flagged = indexMode === "skip-worktree" || indexMode === "assume-unchanged";
       if (flagged) {
         yield* git(["update-index", `--${indexMode}`, "z-skipped", "z-deleted"]);
+        yield* git(["config", "core.ignorestat", "true"]);
         yield* fs.remove(path.join(cwd, "z-deleted"));
       }
       if (indexMode === "sparse")
