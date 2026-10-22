@@ -2353,6 +2353,111 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
+  it.live(
+    "restores the native build mode after a Plan turn that followed a late session/load",
+    () =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const path = yield* Path.Path;
+        const selfInvocation = yield* resolveSelfInvocation();
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
+        const adopted = yield* Deferred.make<void>();
+        let acpRuntime: AcpSessionRuntime.AcpSessionRuntime["Service"] | undefined;
+        const instanceId = ProviderInstanceId.make("acp-test-late-session-load-plan");
+        const threadId = ThreadId.make("thread-acp-late-session-load-plan");
+        const adapter = yield* makeAcpAdapterV2({
+          instanceId,
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            makeRuntime: makeMockRuntime({
+              childProcessSpawner,
+              mockAgentPath,
+              protocolEvents,
+              environment: {
+                T3_ACP_DELAY_LOAD_SESSION_AFTER_REPLAY: "1",
+                T3_ACP_LOAD_SESSION_DELAY_MS: "500",
+              },
+              sessionLoadReplayIdleGap: "100 millis",
+              wrapRuntime: (runtime) => {
+                acpRuntime = runtime;
+                return {
+                  ...runtime,
+                  getEvents: () =>
+                    runtime
+                      .getEvents()
+                      .pipe(
+                        Stream.tap((event) =>
+                          event._tag === "SessionSetupAdopted"
+                            ? Deferred.succeed(adopted, undefined)
+                            : Effect.void,
+                        ),
+                      ),
+                };
+              },
+            }),
+          },
+          selfInvocation,
+        });
+        const policy = (interactionMode: "default" | "plan") =>
+          ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+            runtimeMode: "full-access",
+            interactionMode,
+            cwd: process.cwd(),
+          });
+        const planPolicy = policy("plan");
+        const modelSelection = { instanceId, model: "default" } as const;
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-acp-late-load-plan"),
+          modelSelection,
+          runtimePolicy: planPolicy,
+          initialNativeThreadId: "mock-session-1",
+        });
+        yield* Deferred.await(adopted).pipe(Effect.timeoutOption("5 seconds"));
+        yield* acpRuntime!.drainEvents;
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy: planPolicy,
+        });
+        yield* Queue.clear(protocolEvents);
+        const now = yield* DateTime.now;
+        const runTurn = Effect.fnUntraced(function* (
+          ordinal: number,
+          runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+        ) {
+          yield* runtime.startTurn(
+            makeTurnInput({ threadId, providerThread, instanceId, runtimePolicy, now, ordinal }),
+          );
+          yield* runtime.events.pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runDrain,
+          );
+          const modeValues: Array<unknown> = [];
+          while (true) {
+            const event = yield* Queue.take(protocolEvents);
+            if (event.direction !== "outgoing") continue;
+            const request = rawProtocolRequest(event);
+            if (request?.method === "session/prompt") return modeValues;
+            if (request?.method === "session/set_config_option") {
+              modeValues.push((request.params as { readonly value?: unknown }).value);
+            }
+          }
+        });
+
+        assert.deepEqual(yield* runTurn(0, planPolicy), ["architect"]);
+        assert.deepEqual(
+          yield* runTurn(1, policy("default")),
+          ["ask"],
+          "Build must restore the mode the late session/load reported, not the provisional setup's",
+        );
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
   it.live("preserves new-session fallback when an eager ACP session load is stale", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;

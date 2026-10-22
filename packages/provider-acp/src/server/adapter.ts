@@ -5955,6 +5955,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           // options, so the next turn re-applies it against the real ones.
           yield* Ref.set(activeSelection, null);
           yield* Ref.set(activeInteractionMode, null);
+          // The runtime only adopts when no mode or option changed since the
+          // provisional start, so no Plan switch was applied and any build
+          // snapshot holds the provisional state rather than the real one.
+          nativeBuildConfigurationBySessionId.delete(result.sessionId);
           yield* refreshModelSwitchCapability;
           yield* (
             flavor.onSessionConfigurationUpdate?.(
