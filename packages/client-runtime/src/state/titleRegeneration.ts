@@ -4,8 +4,9 @@ import type { Atom, AtomRegistry } from "effect/reactivity";
 
 import type { EnvironmentThreadShell } from "./models.ts";
 
-/** Call before sending the command; abort when it is rejected. Null cancels
-    observation; undefined allows a disconnected client to reconnect until the deadline. */
+/** Call before sending the command; abort when it is rejected. A missing shell
+    (undefined while disconnected, null while absent from the index) is watched until the
+    deadline, so a reconnect or index refresh can still deliver the failure. */
 export function waitForTitleRegenerationFailure(input: {
   readonly registry: AtomRegistry.AtomRegistry;
   readonly atom: Atom.Atom<EnvironmentThreadShell | null | undefined>;
@@ -18,11 +19,10 @@ export function waitForTitleRegenerationFailure(input: {
   const observation = Effect.callback<string | null>((resume) => {
     let sawInFlight = false;
     const inspect = (thread: EnvironmentThreadShell | null | undefined) => {
-      if (thread === undefined) {
+      if (thread == null) {
         if (deadlineElapsed) resume(Effect.succeed(null));
         return;
       }
-      if (thread === null) return resume(Effect.succeed(null));
       if (thread.titleRegenerationFailure?.requestId === input.requestId) {
         return resume(Effect.succeed(thread.titleRegenerationFailure.message));
       }

@@ -474,7 +474,7 @@ describe("title regeneration on thread shells", () => {
     }
   });
 
-  it("observes a failure after reconnect and releases disconnected requests at their deadline", async () => {
+  it("observes a failure after reconnect or an index gap and releases disconnected requests at their deadline", async () => {
     vi.useFakeTimers();
     const { registry, threads, snapshotAtom } = makeHarness();
     const unmountSnapshot = registry.mount(snapshotAtom(environmentId));
@@ -526,12 +526,20 @@ describe("title regeneration on thread shells", () => {
       expect(stop).toHaveBeenCalledTimes(1);
 
       set(inFlight);
+      const unindexed = watch();
+      await unindexed.ready;
+      registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [] });
+      set({ ...v2ThreadShell, titleRegenerationFailure: { requestId, message } });
+      await expect(unindexed.result).resolves.toBe(message);
+      expect(stop).toHaveBeenCalledTimes(2);
+
+      set(inFlight);
       const disconnected = watch();
       await disconnected.ready;
       registry.set(statusAtom, "empty");
       await vi.advanceTimersByTimeAsync(5 * 60_000);
       await expect(disconnected.result).resolves.toBeNull();
-      expect(stop).toHaveBeenCalledTimes(2);
+      expect(stop).toHaveBeenCalledTimes(3);
 
       registry.set(statusAtom, "live");
       const overdue = watch();
@@ -542,7 +550,7 @@ describe("title regeneration on thread shells", () => {
       expect(settled).not.toHaveBeenCalled();
       registry.set(statusAtom, "cached");
       await expect(overdue.result).resolves.toBeNull();
-      expect(stop).toHaveBeenCalledTimes(3);
+      expect(stop).toHaveBeenCalledTimes(4);
     } finally {
       controller.abort();
       unmountSnapshot();
