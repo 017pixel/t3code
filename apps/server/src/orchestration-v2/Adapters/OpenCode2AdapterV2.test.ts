@@ -1221,6 +1221,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       const deep: Array<string> = [];
       const middleTurns = new Map<string, string>();
       const pendingSnapshots = new Map<string, boolean>();
+      const variants = new Map<string, unknown>();
       let rootVariant: unknown;
       const terminals: Array<string> = [];
       const changed = yield* Deferred.make<void>();
@@ -1234,9 +1235,10 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
               if (nativeId != null && event.pendingBackgroundWork !== undefined) {
                 pendingSnapshots.set(nativeId, event.pendingBackgroundWork);
               }
-              if (nativeId === SESSION)
-                rootVariant =
-                  event.providerThread.nativeMetadata?.modelSelection?.options?.[0]?.value;
+              const variant =
+                event.providerThread.nativeMetadata?.modelSelection?.options?.[0]?.value;
+              if (nativeId != null) variants.set(nativeId, variant);
+              if (nativeId === SESSION) rootVariant = variant;
             }
             if (event.type === "subagent.updated" && event.subagent.title === "Deep") {
               deep.push(event.subagent.status);
@@ -1267,6 +1269,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         middleTurns,
         terminals,
         pendingSnapshots,
+        variants,
         get rootVariant() {
           return rootVariant;
         },
@@ -1334,6 +1337,88 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       yield* watch.until(() => watch.rootVariant === "none");
       assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
       assert.strictEqual(watch.pendingSnapshots.get(MIDDLE), false);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("clears the caller's pending work when a called session's held wake runs", () =>
+    Effect.gen(function* () {
+      const OTHER = "ses_other00000000000000000000";
+      const offers: Array<ProviderContinuationRequests.ProviderContinuationRequest> = [];
+      const gate = makeProviderReplayGate(["drained"]);
+      const { runtime, thread } = yield* resumed(
+        [
+          out("session.get", { sessionID: OTHER }),
+          replyData("session.get", sessionInfo({ id: OTHER })),
+          out("permission.list", { sessionID: OTHER }),
+          replyData("permission.list", []),
+          out("session.form.list", { sessionID: OTHER }),
+          replyData("session.form.list", []),
+          event("session.execution.started", { sessionID: OTHER }),
+          event("session.execution.succeeded", { sessionID: OTHER }),
+          out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+          promptAccepted,
+          event("session.execution.started", { sessionID: SESSION }),
+          event("session.tool.input.started", {
+            ...toolOf(SESSION, "call-other"),
+            name: "subagent",
+          }),
+          event("session.tool.called", {
+            ...toolOf(SESSION, "call-other"),
+            name: "subagent",
+            input: { description: "Other", prompt: "again" },
+            executed: false,
+          }),
+          event("session.tool.progress", {
+            ...toolOf(SESSION, "call-other"),
+            metadata: { sessionID: OTHER, status: "running" },
+          }),
+          event("session.tool.success", {
+            ...toolOf(SESSION, "call-other"),
+            content: [{ type: "text", text: "OTHER_OK" }],
+            metadata: { sessionID: OTHER, status: "completed", truncated: false },
+            executed: false,
+          }),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+          event(
+            "session.model.selected",
+            {
+              sessionID: OTHER,
+              model: { providerID: "opencode", id: "big-pickle", variant: "none" },
+            },
+            "drained",
+          ),
+        ],
+        { replayGate: gate },
+      ).pipe(
+        Effect.provideService(ProviderContinuationRequests.ProviderContinuationRequests, {
+          offer: (request) =>
+            Effect.sync(() => {
+              offers.push(request);
+            }),
+          take: Effect.never,
+        }),
+      );
+      const other = yield* runtime.resumeThread({
+        providerThread: {
+          ...thread,
+          id: ProviderThreadId.make("provider-thread:opencode2-adapter:other"),
+          nativeThreadRef: { driver: OPENCODE_PROVIDER, nativeId: OTHER, strength: "strong" },
+        },
+        threadId,
+        modelSelection: bigPickle,
+        runtimePolicy: policy(),
+      });
+      const watch = yield* watchNested(runtime);
+      yield* watch.until(() => offers.length === 1);
+      yield* runtime.startTurn(withLineage(thread));
+      assert.isTrue(yield* Effect.promise(() => gate.waitForReached("drained")));
+      // The called session's held wake is its caller's pending work too.
+      yield* watch.until(() => watch.pendingSnapshots.get(SESSION) === true);
+      yield* runtime.startTurn(continuationTurn(other, offers[0]!));
+      gate.release("drained");
+      yield* watch.until(() => watch.variants.get(OTHER) === "none");
+      assert.isFalse(watch.pendingSnapshots.get(OTHER));
+      assert.isFalse(watch.pendingSnapshots.get(SESSION));
     }).pipe(Effect.scoped),
   );
 
