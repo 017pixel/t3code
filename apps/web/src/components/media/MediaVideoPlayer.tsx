@@ -12,6 +12,7 @@ import { MediaActions, type MediaActionSource } from "./MediaActions";
 interface MediaVideoPlayerProps {
   readonly src: string | null;
   readonly label: string;
+  readonly unavailableDetail?: string | undefined;
   readonly sourceFailed?: boolean | undefined;
   readonly originalUrl?: string | undefined;
   readonly revision?: string | null | undefined;
@@ -30,6 +31,7 @@ interface MediaVideoPlayerProps {
 export function MediaVideoPlayer({
   src: latestSrc,
   label,
+  unavailableDetail,
   sourceFailed = false,
   originalUrl,
   revision = null,
@@ -139,7 +141,7 @@ export function MediaVideoPlayer({
         >
           <span className="inline-flex items-center gap-1.5">
             <TriangleAlertIcon aria-hidden className="size-3.5 shrink-0" />
-            Video unavailable{label ? ` · ${label}` : ""}
+            {["Video unavailable", label, unavailableDetail].filter(Boolean).join(" · ")}
           </span>
           <span className="flex flex-wrap items-center justify-center gap-2">
             {latestSrc !== null || onRetry ? (
