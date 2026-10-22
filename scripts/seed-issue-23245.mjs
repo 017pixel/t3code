@@ -31,6 +31,7 @@ settings.providerInstances = {
     enabled: false,
   },
 };
+await NodeFSP.mkdir(NodePath.dirname(path), { recursive: true });
 const temporary = `${path}.${process.pid}.tmp`;
 await NodeFSP.writeFile(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
 await NodeFSP.rename(temporary, path);
