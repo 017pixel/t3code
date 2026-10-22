@@ -1779,6 +1779,43 @@ describe("AcpRegistryAdapterV2", () => {
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
+  it.effect("closes a v2 agent's running tool when its prompt goes idle with an error", () =>
+    Effect.gen(function* () {
+      const session = yield* openClaudeReplaySession(
+        [
+          ...claudeFrames.open,
+          ...claudeFrames.prompt(1),
+          claudeFrames.update(CLAUDE_ROOT_SESSION, {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "read-1",
+            name: "Read",
+            title: "Read file",
+            kind: "read",
+            status: "in_progress",
+            rawInput: { file_path: "README.md" },
+          }),
+          claudeFrames.update(CLAUDE_ROOT_SESSION, {
+            sessionUpdate: "state_update",
+            state: "idle",
+            stopReason: "error",
+            error: { code: -32000, message: "Provider turn failed." },
+          }),
+        ],
+        undefined,
+        false,
+        "acplause",
+      );
+      yield* session.runtime.startTurn(session.turnInput(1));
+      const seen = yield* session.until((event) => event.type === "turn.terminal");
+      const tool = seen.findLast(
+        (event) =>
+          event.type === "turn_item.updated" && event.turnItem.nativeItemRef?.nativeId === "read-1",
+      );
+      if (tool?.type !== "turn_item.updated") throw new Error("Missing tool item");
+      assert.equal(tool.turnItem.status, "failed");
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
   it.effect("keeps Claude activity after a refused Stop and closes it on retry", () =>
     Effect.gen(function* () {
       const gate = makeProviderReplayGate(["close-response", "queued-close-response"]);
