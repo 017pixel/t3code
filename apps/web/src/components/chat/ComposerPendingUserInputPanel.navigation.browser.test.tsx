@@ -189,6 +189,8 @@ it("keeps a typed answer in the thread draft when the question is cancelled by S
   const environmentId = EnvironmentId.make("stop-environment");
   const projection = questionProjection(threadRef.threadId, ["first"]);
   const answer = "Purple please. This typed question answer must survive Stop.";
+  const draftTarget = { environmentId, threadId: threadRef.threadId };
+  useComposerDraftStore.getState().setPrompt(draftTarget, "Earlier draft");
   await using screen = await render(
     <PendingRequestsProbe environmentId={environmentId} projection={projection} />,
   );
@@ -210,8 +212,35 @@ it("keeps a typed answer in the thread draft when the question is cancelled by S
     />,
   );
   expect(requests.activePendingUserInput).toBeNull();
-  const draft = useComposerDraftStore
-    .getState()
-    .getComposerDraft({ environmentId, threadId: threadRef.threadId });
-  expect(draft?.prompt ?? "").toContain(answer);
+  expect(useComposerDraftStore.getState().getComposerDraft(draftTarget)?.prompt).toBe(
+    `Earlier draft\n\n${answer}`,
+  );
+});
+
+it("does not return an answer to the thread draft once the question is resolved", async () => {
+  using _timers = fakeTimers();
+  const environmentId = EnvironmentId.make("resolve-environment");
+  const projection = questionProjection(threadRef.threadId, ["first"]);
+  await using screen = await render(
+    <PendingRequestsProbe environmentId={environmentId} projection={projection} />,
+  );
+  await act(() => requests.onChangeActivePendingUserInputCustomAnswer("question-0", "Sent"));
+  await screen.rerender(
+    <PendingRequestsProbe
+      environmentId={environmentId}
+      projection={{
+        ...projection,
+        runtimeRequests: projection.runtimeRequests.map((request) => ({
+          ...request,
+          status: "resolved",
+          resolvedAt: projection.updatedAt,
+        })),
+      }}
+    />,
+  );
+  expect(
+    useComposerDraftStore
+      .getState()
+      .getComposerDraft({ environmentId, threadId: threadRef.threadId })?.prompt ?? "",
+  ).toBe("");
 });
