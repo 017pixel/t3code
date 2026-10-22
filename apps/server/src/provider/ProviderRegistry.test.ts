@@ -431,13 +431,24 @@ it.layer(
           Effect.succeed(
             makeCodexProbeSnapshot({
               account: { account: null, requiresOpenaiAuth: false },
-              rateLimits,
+              rateLimits: { ...rateLimits, authRequired: true },
             }),
           ),
         );
         assert.strictEqual(customProvider.status, "ready");
         assert.strictEqual(customProvider.models[0]?.slug, "gpt-live-codex");
         assert.deepStrictEqual(customProvider.usageLimits?.unavailable, { reason: "unsupported" });
+
+        // Any other failure in that account shape stays transient.
+        const transient = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+          Effect.succeed(
+            makeCodexProbeSnapshot({
+              account: { account: null, requiresOpenaiAuth: false },
+              rateLimits,
+            }),
+          ),
+        );
+        assert.strictEqual(transient.usageLimits?.unavailable?.reason, "probeFailed");
 
         // The same account shape with native auth can still answer with limits.
         const nativeAuth = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
