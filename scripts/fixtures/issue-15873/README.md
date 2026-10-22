@@ -19,7 +19,10 @@ ports and authenticate through the startup pairing URL. The seeder prints
 fixture names and thread IDs. Each fixture has its own project; find its
 `project_id` in `fixtures()` or the projection database for direct navigation.
 Seeding is idempotent; use a clean migrated database for a clean sidebar.
-Never run this against the installed app's userdata.
+The seeder accepts only resolved `statev2.sqlite` paths under this script's
+checkout `.t3` directory (including `.t3/capture` and `.t3/pass2`). Symlinks
+that escape that directory and the installed app's `.t3` home are rejected
+before the database is opened. Never run this against the installed app's userdata.
 
 - G retains the genuine queued-gap chronology and turn-start answer shape.
 - A removes the intervening run and consistently remaps the later run to 2.

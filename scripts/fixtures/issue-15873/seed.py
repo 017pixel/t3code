@@ -64,6 +64,8 @@ def fixtures():
                         p['runId'] = first; p['nodeId'] = root_id
                         for key in ('createdAt', 'startedAt', 'completedAt', 'updatedAt'):
                             if key in p: p[key] = '2026-10-21T23:24:01.000Z'
+                        for column, key in (('created_at', 'createdAt'), ('updated_at', 'updatedAt')):
+                            if column in r: r[column] = p[key]
                         if 'ordinal' in p: p['ordinal'] = 1000007; r['ordinal'] = 1000007
                         r['payload_json'] = json.dumps(p)
                     elif p.get('runId') == first and p.get('ordinal', 0) >= 1000007:
@@ -100,6 +102,12 @@ def fixtures():
         p = json.loads(tr['payload_json']); p['title'] = tr['title']; tr['payload_json'] = json.dumps(p)
         # Normalize derived chronology and checkpoint links after removing a run.
         retained_runs = {r['run_id']: r['ordinal'] for r in data['orchestration_v2_projection_runs']}
+        last_run_ordinal = max(retained_runs.values())
+        for r in data['orchestration_v2_projection_provider_threads']:
+            p = json.loads(r['payload_json'])
+            if r['last_run_ordinal'] != last_run_ordinal or p['lastRunOrdinal'] != last_run_ordinal:
+                r['last_run_ordinal'] = p['lastRunOrdinal'] = last_run_ordinal
+                r['payload_json'] = json.dumps(p)
         for r in data['orchestration_v2_projection_turn_items']:
             p = json.loads(r['payload_json'])
             if p.get('runId') and p['ordinal'] >= 2000000:
@@ -108,6 +116,7 @@ def fixtures():
         previous = None
         for i, r in enumerate(data['orchestration_v2_projection_checkpoints']):
             p = json.loads(r['payload_json']); p['parentCheckpointId'] = previous
+            r['app_run_ordinal'] = p['appRunOrdinal'] = retained_runs.get(r['run_id'])
             r['parent_checkpoint_id'] = previous
             previous = p['id']; r['payload_json'] = json.dumps(p)
         if data['orchestration_v2_projection_checkpoint_scopes']:
@@ -126,7 +135,8 @@ def fixtures():
 
 
 def validate(data):
-    runs = {r['run_id'] for r in data['orchestration_v2_projection_runs']}
+    runs = {r['run_id']: r['ordinal'] for r in data['orchestration_v2_projection_runs']}
+    last_run_ordinal = max(runs.values())
     nodes = {r['node_id'] for r in data['orchestration_v2_projection_nodes']}
     messages = {r['message_id']: json.loads(r['payload_json']) for r in data['orchestration_v2_projection_messages']}
     positions = set()
@@ -137,6 +147,14 @@ def validate(data):
             if 'payload_json' in r:
                 p = json.loads(r['payload_json'])
                 if r.get('run_id'): assert p.get('runId', p.get('id')) == r['run_id'], table
+                for column, key in (('created_at', 'createdAt'), ('updated_at', 'updatedAt')):
+                    if column in r and key in p: assert r[column] == p[key], (table, column)
+                if table == 'orchestration_v2_projection_runs':
+                    assert r['ordinal'] == p['ordinal'], 'run ordinal mismatch'
+                if table == 'orchestration_v2_projection_provider_threads':
+                    assert r['last_run_ordinal'] == p['lastRunOrdinal'] == last_run_ordinal, 'last run ordinal mismatch'
+                if table == 'orchestration_v2_projection_checkpoints':
+                    assert r['app_run_ordinal'] == p['appRunOrdinal'] == runs.get(r['run_id']), 'checkpoint run ordinal mismatch'
             if table == 'orchestration_v2_projection_turn_items':
                 assert r['ordinal'] not in positions, ('duplicate position', r['ordinal'])
                 positions.add(r['ordinal'])
@@ -148,7 +166,9 @@ def validate(data):
 
 def seed(db_path):
     path = pathlib.Path(db_path).resolve()
-    if '.t3' not in path.parts or path.name != 'statev2.sqlite' or path.is_relative_to(pathlib.Path.home() / '.t3'):
+    disposable = HERE.parents[2] / '.t3'
+    live = (pathlib.Path.home() / '.t3').resolve()
+    if path.name != 'statev2.sqlite' or not path.is_relative_to(disposable) or path.is_relative_to(live):
         raise ValueError('Only a migrated disposable worktree .t3 database is accepted')
     all_data = fixtures()
     db = sqlite3.connect(path)
