@@ -438,6 +438,23 @@ it.layer(
         assert.strictEqual(customProvider.status, "ready");
         assert.strictEqual(customProvider.models[0]?.slug, "gpt-live-codex");
         assert.deepStrictEqual(customProvider.usageLimits?.unavailable, { reason: "unsupported" });
+
+        // The same account shape with native auth can still answer with limits.
+        const nativeAuth = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+          Effect.succeed(
+            makeCodexProbeSnapshot({
+              account: { account: null, requiresOpenaiAuth: false },
+              rateLimits: {
+                snapshot: {
+                  primary: { usedPercent: 12, resetsAt: 1_784_000_000, windowDurationMins: 300 },
+                },
+                resetCredits: null,
+              },
+            }),
+          ),
+        );
+        assert.strictEqual(nativeAuth.usageLimits?.unavailable, undefined);
+        assert.strictEqual(nativeAuth.usageLimits?.windows?.[0]?.usedPercent, 12);
       }),
     );
   });

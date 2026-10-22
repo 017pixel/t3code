@@ -789,8 +789,15 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   const accountStatus = managedAuth
     ? { status: "ready" as const, auth: managedAuth, message: undefined }
     : accountProbeStatus(snapshot);
+  // Without an OpenAI account (e.g. a custom model_provider) the usage RPC
+  // fails by design; it can still succeed with native auth, so keep asking.
+  const accountlessUsageFailure =
+    !snapshot.account.account &&
+    !snapshot.account.requiresOpenaiAuth &&
+    snapshot.rateLimits !== undefined &&
+    "failure" in snapshot.rateLimits;
   const usageLimits =
-    snapshot.account.account?.type === "apiKey"
+    snapshot.account.account?.type === "apiKey" || accountlessUsageFailure
       ? makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" })
       : snapshot.rateLimits === undefined || "failure" in snapshot.rateLimits
         ? makeUnavailableUsageLimits({
