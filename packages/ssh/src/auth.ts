@@ -202,25 +202,30 @@ export const buildSshChildEnvironment = Effect.fn("ssh/auth.buildSshChildEnviron
   };
 });
 
-// Offer the password prompt only when the server accepts a password-style
-// method. When the agent failed to sign for a key, that signing error is the
-// diagnostic to surface; a password prompt would hide it.
-export function canRetrySshAuthWithPassword(error: unknown): boolean {
+const SSH_AUTH_METHODS = new Set([
+  "publickey",
+  "password",
+  "keyboard-interactive",
+  "hostbased",
+  "gssapi-with-mic",
+]);
+
+export function isSshAuthFailure(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   const normalized = message.toLowerCase();
+  // When the agent refused to sign for a key, that error is what the user must
+  // fix. Surface it instead of hiding it behind a password prompt.
   if (/(?:^|\n)sign_and_send_pubkey: signing failed [^\n]* from agent: /u.test(normalized)) {
     return false;
   }
   const deniedPrefix = "permission denied (";
   const deniedStart = normalized.indexOf(deniedPrefix);
   const deniedEnd = deniedStart === -1 ? -1 : normalized.indexOf(")", deniedStart);
-  if (deniedEnd !== -1) {
-    return normalized
-      .slice(deniedStart + deniedPrefix.length, deniedEnd)
-      .split(",")
-      .some((method) => method === "password" || method === "keyboard-interactive");
-  }
   return (
+    (deniedEnd !== -1 &&
+      SSH_AUTH_METHODS.has(
+        normalized.slice(deniedStart + deniedPrefix.length, deniedEnd).split(",")[0] ?? "",
+      )) ||
     /authentication failed/u.test(normalized) ||
     /too many authentication failures/u.test(normalized)
   );

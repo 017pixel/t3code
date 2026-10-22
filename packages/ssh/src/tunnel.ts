@@ -1448,7 +1448,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         readonly error: SshEnvironmentEffectError;
       },
     ): Effect.fn.Return<T, SshEnvironmentEffectError, SshEnvironmentEffectContext> {
-      if (!SshAuth.canRetrySshAuthWithPassword(input.error)) {
+      if (!SshAuth.isSshAuthFailure(input.error)) {
         return yield* input.error;
       }
 
