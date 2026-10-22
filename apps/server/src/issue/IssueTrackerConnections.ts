@@ -124,57 +124,58 @@ const make = Effect.gen(function* () {
     ),
   });
 
-  const disconnect = (api: StandaloneIssueTrackerApi) =>
-    Effect.gen(function* () {
-      yield* secrets
-        .remove(issueTrackerSecretName(api.kind))
-        .pipe(Effect.mapError(secretFailure(api.kind, "The credential could not be removed.")));
-      // Bindings to a tracker nobody is signed into would only produce errors in every listing.
-      yield* bindings
-        .removeTracker(api.kind)
-        .pipe(
-          Effect.mapError(secretFailure(api.kind, "The project bindings could not be cleared.")),
-        );
-      return disconnected(api);
-    });
+  const disconnect = Effect.fn("IssueTrackerConnections.disconnect")(function* (
+    api: StandaloneIssueTrackerApi,
+  ) {
+    yield* secrets
+      .remove(issueTrackerSecretName(api.kind))
+      .pipe(Effect.mapError(secretFailure(api.kind, "The credential could not be removed.")));
+    // Bindings to a tracker nobody is signed into would only produce errors in every listing.
+    yield* bindings
+      .removeTracker(api.kind)
+      .pipe(Effect.mapError(secretFailure(api.kind, "The project bindings could not be cleared.")));
+    return disconnected(api);
+  });
 
-  const connect: IssueTrackerConnections["Service"]["connect"] = (input) =>
-    Effect.gen(function* () {
-      const api = yield* requireTracker(input.tracker);
-      if (input.token === null) return yield* disconnect(api);
-      const probe = yield* api.probeCredential(input.token).pipe(
-        Effect.mapError(
-          (error) =>
-            new IssueTrackerConnectionError({
-              tracker: input.tracker,
-              reason: error.reason === "unauthenticated" ? "rejected" : "failed",
-              detail: error.detail,
-              cause: error,
-            }),
-        ),
-      );
-      yield* secrets
-        .set(issueTrackerSecretName(api.kind), encoder.encode(input.token))
-        .pipe(Effect.mapError(secretFailure(api.kind, "The credential could not be stored.")));
-      return {
-        ...api.standalone,
-        connected: true,
-        account: probe.account,
-        detail: null,
-        scopes: probe.scopes,
-      };
-    });
+  const connect: IssueTrackerConnections["Service"]["connect"] = Effect.fn(
+    "IssueTrackerConnections.connect",
+  )(function* (input) {
+    const api = yield* requireTracker(input.tracker);
+    if (input.token === null) return yield* disconnect(api);
+    const probe = yield* api.probeCredential(input.token).pipe(
+      Effect.mapError(
+        (error) =>
+          new IssueTrackerConnectionError({
+            tracker: input.tracker,
+            reason: error.reason === "unauthenticated" ? "rejected" : "failed",
+            detail: error.detail,
+            cause: error,
+          }),
+      ),
+    );
+    yield* secrets
+      .set(issueTrackerSecretName(api.kind), encoder.encode(input.token))
+      .pipe(Effect.mapError(secretFailure(api.kind, "The credential could not be stored.")));
+    return {
+      ...api.standalone,
+      connected: true,
+      account: probe.account,
+      detail: null,
+      scopes: probe.scopes,
+    };
+  });
 
-  const bindProject: IssueTrackerConnections["Service"]["bindProject"] = (input) =>
-    Effect.gen(function* () {
-      // Unbinding names no tracker; the first registered one carries any report.
-      const tracker =
-        input.binding === null ? anyTracker : (yield* requireTracker(input.binding.tracker)).kind;
-      const updatedAt = DateTime.formatIso(yield* DateTime.now);
-      yield* bindings
-        .set({ projectId: input.projectId, binding: input.binding, updatedAt })
-        .pipe(Effect.mapError(secretFailure(tracker, "The project binding could not be saved.")));
-    });
+  const bindProject: IssueTrackerConnections["Service"]["bindProject"] = Effect.fn(
+    "IssueTrackerConnections.bindProject",
+  )(function* (input) {
+    // Unbinding names no tracker; the first registered one carries any report.
+    const tracker =
+      input.binding === null ? anyTracker : (yield* requireTracker(input.binding.tracker)).kind;
+    const updatedAt = DateTime.formatIso(yield* DateTime.now);
+    yield* bindings
+      .set({ projectId: input.projectId, binding: input.binding, updatedAt })
+      .pipe(Effect.mapError(secretFailure(tracker, "The project binding could not be saved.")));
+  });
 
   return IssueTrackerConnections.of({ list, connect, bindProject });
 });

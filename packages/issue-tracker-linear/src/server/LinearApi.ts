@@ -28,8 +28,6 @@ const LinearApiConfig = Config.all({
   apiUrl: Config.String("T3CODE_LINEAR_API_URL").pipe(Config.withDefault(DEFAULT_API_URL)),
 });
 
-// --- Linear's shapes -----------------------------------------------------------------------
-
 export const LinearUser = Schema.Struct({
   id: Schema.String,
   name: Schema.NullOr(Schema.String),
@@ -159,8 +157,6 @@ const LinearIssueDetail = Schema.Struct({
 });
 type LinearIssueDetail = typeof LinearIssueDetail.Type;
 
-// --- Documents -----------------------------------------------------------------------------
-
 const USER_FIELDS = "id name displayName email avatarUrl";
 const STATE_FIELDS = "id name type position";
 const LABEL_FIELDS = "id name color";
@@ -249,8 +245,6 @@ const COMMENT_REACTIONS_QUERY = `query T3CommentReactions($id: String!) {
   comment(id: $id) { reactions { ${REACTION_FIELDS} } }
 }`;
 
-// --- Envelopes -----------------------------------------------------------------------------
-
 const GraphQlError = Schema.Struct({
   message: Schema.String,
   extensions: Schema.optional(Schema.Struct({ code: Schema.optional(Schema.String) })),
@@ -297,8 +291,6 @@ const ReactionsData = Schema.Struct({
     Schema.NullOr(Schema.Struct({ reactions: Schema.Array(LinearReaction) })),
   ),
 });
-
-// --- Service -------------------------------------------------------------------------------
 
 /** The team with the workspace-wide labels that any of its issues may also carry. */
 export interface LinearTeamScope {
@@ -407,69 +399,68 @@ export const make = Effect.gen(function* () {
         ),
       );
 
-  const execute = <S extends Schema.Top>(
+  const execute = Effect.fn("LinearApi.execute")(function* <S extends Schema.Top>(
     operation: string,
     document: string,
     variables: Record<string, unknown>,
     data: S,
     token?: string,
-  ): Effect.Effect<S["Type"], IssueTrackerError, S["DecodingServices"]> =>
-    Effect.gen(function* () {
-      const key = token ?? (yield* storedToken(operation));
-      const now = yield* Clock.currentTimeMillis;
-      const response = yield* httpClient
-        .execute(
-          HttpClientRequest.post(config.apiUrl).pipe(
-            // A personal API key goes in as-is; `Bearer` is for OAuth tokens, which this is not.
-            HttpClientRequest.setHeader("authorization", key),
-            HttpClientRequest.acceptJson,
-            HttpClientRequest.bodyJsonUnsafe({ query: document, variables }),
-          ),
-        )
-        .pipe(
-          Effect.mapError((cause) =>
-            fail(operation, "failed", "Linear could not be reached.", { cause }),
-          ),
-        );
-      const retryAt = retryAtFromHeader(
-        response.headers["x-ratelimit-requests-reset"] ??
-          response.headers["x-ratelimit-complexity-reset"],
-        now,
-      );
-      const rateLimited = () =>
-        fail(
-          operation,
-          "rate-limited",
-          "Linear's rate limit was reached.",
-          retryAt === undefined ? {} : { retryAt },
-        );
-      if (response.status === 429) return yield* rateLimited();
-      if (response.status === 401 || response.status === 403) {
-        return yield* fail(operation, "unauthenticated", "Linear rejected the API key.");
-      }
-      const envelope = yield* HttpClientResponse.schemaBodyJson(Envelope(data))(response).pipe(
+  ): Effect.fn.Return<S["Type"], IssueTrackerError, S["DecodingServices"]> {
+    const key = token ?? (yield* storedToken(operation));
+    const now = yield* Clock.currentTimeMillis;
+    const response = yield* httpClient
+      .execute(
+        HttpClientRequest.post(config.apiUrl).pipe(
+          // A personal API key goes in as-is; `Bearer` is for OAuth tokens, which this is not.
+          HttpClientRequest.setHeader("authorization", key),
+          HttpClientRequest.acceptJson,
+          HttpClientRequest.bodyJsonUnsafe({ query: document, variables }),
+        ),
+      )
+      .pipe(
         Effect.mapError((cause) =>
-          fail(
-            operation,
-            "failed",
-            `Linear returned HTTP ${response.status} with an unexpected body.`,
-            { cause },
-          ),
+          fail(operation, "failed", "Linear could not be reached.", { cause }),
         ),
       );
-      if (isRateLimited(envelope.errors)) return yield* rateLimited();
-      if (isUnauthenticated(envelope.errors)) {
-        return yield* fail(operation, "unauthenticated", "Linear rejected the API key.");
-      }
-      if (envelope.data === undefined || envelope.data === null) {
-        return yield* fail(
+    const retryAt = retryAtFromHeader(
+      response.headers["x-ratelimit-requests-reset"] ??
+        response.headers["x-ratelimit-complexity-reset"],
+      now,
+    );
+    const rateLimited = () =>
+      fail(
+        operation,
+        "rate-limited",
+        "Linear's rate limit was reached.",
+        retryAt === undefined ? {} : { retryAt },
+      );
+    if (response.status === 429) return yield* rateLimited();
+    if (response.status === 401 || response.status === 403) {
+      return yield* fail(operation, "unauthenticated", "Linear rejected the API key.");
+    }
+    const envelope = yield* HttpClientResponse.schemaBodyJson(Envelope(data))(response).pipe(
+      Effect.mapError((cause) =>
+        fail(
           operation,
           "failed",
-          errorDetail(envelope.errors, `Linear returned HTTP ${response.status}.`),
-        );
-      }
-      return envelope.data;
-    });
+          `Linear returned HTTP ${response.status} with an unexpected body.`,
+          { cause },
+        ),
+      ),
+    );
+    if (isRateLimited(envelope.errors)) return yield* rateLimited();
+    if (isUnauthenticated(envelope.errors)) {
+      return yield* fail(operation, "unauthenticated", "Linear rejected the API key.");
+    }
+    if (envelope.data === undefined || envelope.data === null) {
+      return yield* fail(
+        operation,
+        "failed",
+        errorDetail(envelope.errors, `Linear returned HTTP ${response.status}.`),
+      );
+    }
+    return envelope.data;
+  });
 
   const mutate = (
     operation: string,

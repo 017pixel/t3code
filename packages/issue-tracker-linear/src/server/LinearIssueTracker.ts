@@ -417,114 +417,107 @@ export const make: Effect.Effect<StandaloneIssueTrackerApi, never, LinearApi.Lin
         );
       },
 
-      getIssue: (input) =>
-        Effect.gen(function* () {
-          const identifier = yield* requireIdentifier("getIssue", input.key);
-          const [issue, viewer] = yield* Effect.all([
-            linear.getIssue(identifier, COMMENTS_PAGE),
-            viewerId,
-          ]);
-          if (issue === null) return yield* notFound("getIssue");
-          return {
-            ...toSummary(issue, issue.comments.nodes.length),
-            body: issue.description ?? "",
-            viewer,
-            viewerPermissions: VIEWER_PERMISSIONS,
-            reactions: toReactions(issue.reactions, viewer),
-            comments: issue.comments.nodes.map((comment) => toComment(comment, viewer)),
-            commentsCursor: issue.comments.pageInfo.hasNextPage
-              ? issue.comments.pageInfo.endCursor
-              : null,
-            events: toEvents(issue.history.nodes),
-            linkedPullRequests: toLinkedPullRequests(issue.attachments.nodes),
-          };
-        }),
+      getIssue: Effect.fn("LinearIssueTracker.getIssue")(function* (input) {
+        const identifier = yield* requireIdentifier("getIssue", input.key);
+        const [issue, viewer] = yield* Effect.all([
+          linear.getIssue(identifier, COMMENTS_PAGE),
+          viewerId,
+        ]);
+        if (issue === null) return yield* notFound("getIssue");
+        return {
+          ...toSummary(issue, issue.comments.nodes.length),
+          body: issue.description ?? "",
+          viewer,
+          viewerPermissions: VIEWER_PERMISSIONS,
+          reactions: toReactions(issue.reactions, viewer),
+          comments: issue.comments.nodes.map((comment) => toComment(comment, viewer)),
+          commentsCursor: issue.comments.pageInfo.hasNextPage
+            ? issue.comments.pageInfo.endCursor
+            : null,
+          events: toEvents(issue.history.nodes),
+          linkedPullRequests: toLinkedPullRequests(issue.attachments.nodes),
+        };
+      }),
 
-      getComments: (input) =>
-        Effect.gen(function* () {
-          const identifier = yield* requireIdentifier("getComments", input.key);
-          const [page, viewer] = yield* Effect.all([
-            linear.getComments({ identifier, first: COMMENTS_PAGE, after: input.cursor }),
-            viewerId,
-          ]);
-          return {
-            comments: page.nodes.map((comment) => toComment(comment, viewer)),
-            nextCursor: page.nextCursor,
-          };
-        }),
+      getComments: Effect.fn("LinearIssueTracker.getComments")(function* (input) {
+        const identifier = yield* requireIdentifier("getComments", input.key);
+        const [page, viewer] = yield* Effect.all([
+          linear.getComments({ identifier, first: COMMENTS_PAGE, after: input.cursor }),
+          viewerId,
+        ]);
+        return {
+          comments: page.nodes.map((comment) => toComment(comment, viewer)),
+          nextCursor: page.nextCursor,
+        };
+      }),
 
-      create: (input) =>
-        Effect.gen(function* () {
-          const scope = yield* requireTeam("create", input.scope);
-          const labels = yield* labelIds("create", scope, input.labels);
-          const assignee = yield* assigneeId("create", scope, input.assignees);
-          const created = yield* linear.createIssue({
-            teamId: scope.team.id,
-            title: input.title,
-            description: input.body,
-            labelIds: labels,
-            ...(assignee === null ? {} : { assigneeId: assignee }),
-          });
-          return { key: created.identifier, displayKey: created.identifier, url: created.url };
-        }),
+      create: Effect.fn("LinearIssueTracker.create")(function* (input) {
+        const scope = yield* requireTeam("create", input.scope);
+        const labels = yield* labelIds("create", scope, input.labels);
+        const assignee = yield* assigneeId("create", scope, input.assignees);
+        const created = yield* linear.createIssue({
+          teamId: scope.team.id,
+          title: input.title,
+          description: input.body,
+          labelIds: labels,
+          ...(assignee === null ? {} : { assigneeId: assignee }),
+        });
+        return { key: created.identifier, displayKey: created.identifier, url: created.url };
+      }),
 
-      comment: (input) =>
-        Effect.gen(function* () {
-          const issue = yield* requireTeamIssue("comment", input);
-          yield* linear.createComment({ issueId: issue.id, body: input.body });
-        }),
+      comment: Effect.fn("LinearIssueTracker.comment")(function* (input) {
+        const issue = yield* requireTeamIssue("comment", input);
+        yield* linear.createComment({ issueId: issue.id, body: input.body });
+      }),
 
-      update: (input) =>
-        Effect.gen(function* () {
-          const { identifier } = yield* requireTeamIssue("update", input);
-          const patch: Record<string, unknown> = {};
-          if (input.title !== undefined) patch.title = input.title;
-          if (input.body !== undefined) patch.description = input.body;
-          if (input.labels !== undefined || input.assignees !== undefined) {
-            const scope = yield* requireTeam("update", input.scope);
-            if (input.labels !== undefined)
-              patch.labelIds = yield* labelIds("update", scope, input.labels);
-            if (input.assignees !== undefined)
-              patch.assigneeId = yield* assigneeId("update", scope, input.assignees);
-          }
-          yield* linear.updateIssue(identifier, patch);
-        }),
+      update: Effect.fn("LinearIssueTracker.update")(function* (input) {
+        const { identifier } = yield* requireTeamIssue("update", input);
+        const patch: Record<string, unknown> = {};
+        if (input.title !== undefined) patch.title = input.title;
+        if (input.body !== undefined) patch.description = input.body;
+        if (input.labels !== undefined || input.assignees !== undefined) {
+          const scope = yield* requireTeam("update", input.scope);
+          if (input.labels !== undefined)
+            patch.labelIds = yield* labelIds("update", scope, input.labels);
+          if (input.assignees !== undefined)
+            patch.assigneeId = yield* assigneeId("update", scope, input.assignees);
+        }
+        yield* linear.updateIssue(identifier, patch);
+      }),
 
-      setState: (input) =>
-        Effect.gen(function* () {
-          const { identifier } = yield* requireTeamIssue("setState", input);
-          const scope = yield* requireTeam("setState", input.scope);
-          const states = scope.team.states.nodes.toSorted(
-            (a, b) => (a.position ?? 0) - (b.position ?? 0),
-          );
-          const wanted =
-            input.state === "closed"
-              ? states.find((state) => state.type === (input.closeReason ?? "completed"))
-              : (states.find((state) => state.type === "unstarted") ??
-                states.find((state) => state.type === "backlog") ??
-                states.find((state) => state.type === "triage"));
-          if (wanted === undefined)
-            return yield* failed("setState", "This team has no workflow state for that change.");
-          yield* linear.updateIssue(identifier, { stateId: wanted.id });
-        }),
+      setState: Effect.fn("LinearIssueTracker.setState")(function* (input) {
+        const { identifier } = yield* requireTeamIssue("setState", input);
+        const scope = yield* requireTeam("setState", input.scope);
+        const states = scope.team.states.nodes.toSorted(
+          (a, b) => (a.position ?? 0) - (b.position ?? 0),
+        );
+        const wanted =
+          input.state === "closed"
+            ? states.find((state) => state.type === (input.closeReason ?? "completed"))
+            : (states.find((state) => state.type === "unstarted") ??
+              states.find((state) => state.type === "backlog") ??
+              states.find((state) => state.type === "triage"));
+        if (wanted === undefined)
+          return yield* failed("setState", "This team has no workflow state for that change.");
+        yield* linear.updateIssue(identifier, { stateId: wanted.id });
+      }),
 
-      setReaction: (input) =>
-        Effect.gen(function* () {
-          const issue = yield* requireTeamIssue("setReaction", input);
-          const emoji = EMOJI_BY_CONTENT[input.content];
-          const target =
-            input.subjectId === undefined ? { issueId: issue.id } : { commentId: input.subjectId };
-          if (input.reacted) {
-            yield* linear.createReaction({ ...target, emoji });
-            return;
-          }
-          const viewer = yield* viewerId;
-          const reactions = yield* linear.listReactions(target);
-          const own = reactions.find(
-            (reaction) => reaction.emoji === emoji && reaction.user?.id === viewer,
-          );
-          if (own !== undefined) yield* linear.deleteReaction(own.id);
-        }),
+      setReaction: Effect.fn("LinearIssueTracker.setReaction")(function* (input) {
+        const issue = yield* requireTeamIssue("setReaction", input);
+        const emoji = EMOJI_BY_CONTENT[input.content];
+        const target =
+          input.subjectId === undefined ? { issueId: issue.id } : { commentId: input.subjectId };
+        if (input.reacted) {
+          yield* linear.createReaction({ ...target, emoji });
+          return;
+        }
+        const viewer = yield* viewerId;
+        const reactions = yield* linear.listReactions(target);
+        const own = reactions.find(
+          (reaction) => reaction.emoji === emoji && reaction.user?.id === viewer,
+        );
+        if (own !== undefined) yield* linear.deleteReaction(own.id);
+      }),
 
       listTemplates: (input) =>
         requireTeam("listTemplates", input.scope).pipe(
