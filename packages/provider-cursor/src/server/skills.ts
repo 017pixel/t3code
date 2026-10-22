@@ -198,17 +198,19 @@ const discoverSkillsInRoot = Effect.fn("discoverCursorSkillsInRoot")(function* (
       return;
     }
     for (const entry of [...entries].sort()) {
+      // Installed dependencies can exhaust the shared budget and hide unrelated skills.
+      if (entry === "node_modules") continue;
+      const child = path.join(directory, entry);
+      const info = yield* orUndefined(fileSystem.stat(child), input.budget);
+      // Only directories can hold skills, so only they spend the budget: a skill
+      // shipping many ordinary files must not hide its siblings.
+      if (info?.type !== "Directory") continue;
+      if (depth >= MAX_SKILL_DEPTH) continue;
       if (input.budget.remainingEntries === 0) {
         input.budget.exhausted = true;
         return;
       }
       input.budget.remainingEntries -= 1;
-      // Installed dependencies can exhaust the shared budget and hide unrelated skills.
-      if (entry === "node_modules") continue;
-      const child = path.join(directory, entry);
-      const info = yield* orUndefined(fileSystem.stat(child), input.budget);
-      if (info?.type !== "Directory") continue;
-      if (depth >= MAX_SKILL_DEPTH) continue;
       yield* visit(child, depth + 1);
     }
   });
