@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentId } from "@t3tools/contracts";
+import { AuthStandardClientScopes, EnvironmentId } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -55,6 +55,13 @@ const relaySessionInput = {
   ttl: Duration.hours(1),
   client: { label: "Relay desktop", deviceType: "desktop" },
 } as const;
+
+const preSplitStandardScopes = [
+  "orchestration:read",
+  "orchestration:operate",
+  "terminal:operate",
+  "relay:read",
+] as const;
 
 const makeDiskSessionStoreLayer = Effect.fn("makeDiskSessionStoreLayer")(function* (
   baseDir: string,
@@ -286,6 +293,28 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
         ),
       ),
     ),
+  );
+
+  // Issue 17310: T3 Connect sessions minted before the scope split recorded the
+  // standard grant of that time, so they must reach today's standard grant.
+  it.effect.each([
+    { subject: "cloud-connect", expected: AuthStandardClientScopes },
+    { subject: "one-time-token", expected: preSplitStandardScopes },
+  ])("verifies a pre-split $subject DPoP session with its current grant", ({ subject, expected }) =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const issued = yield* sessions.issue({
+        subject,
+        method: "dpop-access-token",
+        proofKeyThumbprint: "proof-key",
+        ttl: Duration.hours(1),
+        scopes: preSplitStandardScopes,
+      });
+
+      expect([...(yield* sessions.verify(issued.token)).scopes].toSorted()).toEqual(
+        [...expected].toSorted(),
+      );
+    }).pipe(Effect.provide(layerSessionStore())),
   );
 
   it.effect("atomically replaces active sessions with the same subject and method", () =>
