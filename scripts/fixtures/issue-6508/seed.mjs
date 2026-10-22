@@ -227,7 +227,7 @@ NodeFS.copyFileSync(
 );
 NodeFS.writeFileSync(
   NodePath.join(home, "codex-fixture"),
-  `#!/bin/sh\nexec node '${NodeURL.fileURLToPath(new URL("./provider.mjs", import.meta.url))}' "$@"\n`,
+  `#!/bin/sh\nexec node '${NodeURL.fileURLToPath(new URL("./provider.mjs", import.meta.url)).replaceAll("'", `'"'"'`)}' "$@"\n`,
   { mode: 0o755 },
 );
 const manifest = {
