@@ -10,7 +10,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
-import type * as Scope from "effect/Scope";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeOS from "node:os";
 
 function logPathHydrationWarning(message: string, error?: unknown): void {
@@ -19,17 +19,37 @@ function logPathHydrationWarning(message: string, error?: unknown): void {
   );
 }
 
-/** Returns whether a login shell answered with a PATH. */
-function hydratePosixPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): boolean {
+// mise's record of the PATH entries it added. It must travel with the
+// shell's PATH, or `mise x` can rebuild PATH behind a same-named wrapper
+// (`exec mise x claude -- claude`) that then re-runs itself forever.
+const LOGIN_SHELL_ENVIRONMENT_NAMES = ["PATH", "__MISE_DIFF", "JAVA_HOME"];
+const SLOW_LOGIN_SHELL_TIMEOUT_MS = 20_000;
+
+function readSlowLoginShellEnvironment(shell: string): Partial<Record<string, string>> {
+  return readEnvironmentFromLoginShell(shell, LOGIN_SHELL_ENVIRONMENT_NAMES, (file, args, options) =>
+    NodeChildProcess.execFileSync(file, args, { ...options, timeout: SLOW_LOGIN_SHELL_TIMEOUT_MS }),
+  );
+}
+
+function hydratePosixPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): void {
   let shellEnvironment: Partial<Record<string, string>> = {};
+  let waitedForSlowShell = false;
   for (const shell of listLoginShellCandidates(platform, env.SHELL)) {
     try {
-      // mise's record of the PATH entries it added. It must travel with the
-      // shell's PATH, or `mise x` can rebuild PATH behind a same-named wrapper
-      // (`exec mise x claude -- claude`) that then re-runs itself forever.
-      shellEnvironment = readEnvironmentFromLoginShell(shell, ["PATH", "__MISE_DIFF", "JAVA_HOME"]);
+      shellEnvironment = readEnvironmentFromLoginShell(shell, LOGIN_SHELL_ENVIRONMENT_NAMES);
     } catch (error) {
       logPathHydrationWarning(`Failed to read PATH from login shell ${shell}.`, error);
+      // A profile can be slow only while the machine boots. Wait for it once,
+      // here: providers copy this env when they are built, so a later read
+      // would never reach them.
+      if (!waitedForSlowShell && (error as NodeJS.ErrnoException | null)?.code === "ETIMEDOUT") {
+        waitedForSlowShell = true;
+        try {
+          shellEnvironment = readSlowLoginShellEnvironment(shell);
+        } catch (retryError) {
+          logPathHydrationWarning(`Failed to read PATH from slow login shell ${shell}.`, retryError);
+        }
+      }
     }
 
     if (shellEnvironment.PATH) break;
@@ -49,7 +69,6 @@ function hydratePosixPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): bo
   if (!env.JAVA_HOME && shellEnvironment.JAVA_HOME) {
     env.JAVA_HOME = shellEnvironment.JAVA_HOME;
   }
-  return shellPath !== undefined && shellPath.length > 0;
 }
 
 export function hydratePosixHome(
@@ -64,11 +83,9 @@ export function hydratePosixHome(
   }
 }
 
-const PATH_HYDRATION_RETRY_DELAY = "30 seconds";
-
 export const fixPath = Effect.fn("fixPath")(function* (options?: {
   readonly shellEnvironmentPrepared?: boolean | undefined;
-}): Effect.fn.Return<void, never, FileSystem.FileSystem | Path.Path | Scope.Scope> {
+}): Effect.fn.Return<void, never, FileSystem.FileSystem | Path.Path> {
   const platform = yield* HostProcess.Platform;
   const env = yield* HostProcess.Environment;
 
@@ -105,19 +122,13 @@ export const fixPath = Effect.fn("fixPath")(function* (options?: {
     ),
   );
   if (options?.shellEnvironmentPrepared === true) return;
-  const hydrate = Effect.sync(() => hydratePosixPath(env, platform)).pipe(
+  yield* Effect.sync(() => hydratePosixPath(env, platform)).pipe(
     Effect.catchDefect((defect) =>
       Effect.sync(() => {
         logPathHydrationWarning("Failed to hydrate PATH from the user environment.", defect);
-        return false;
       }),
     ),
   );
-  if (yield* hydrate) return;
-  // A profile that is slow only while the machine boots (network mounts,
-  // first-run plugin managers) would otherwise leave PATH unhydrated for the
-  // whole server lifetime. Ask once more after startup settles.
-  yield* Effect.forkScoped(Effect.sleep(PATH_HYDRATION_RETRY_DELAY).pipe(Effect.andThen(hydrate)));
 });
 
 export const expandHomePath = Effect.fn(function* (input: string) {
