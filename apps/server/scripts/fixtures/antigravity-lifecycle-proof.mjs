@@ -13,18 +13,20 @@ if (!scenarioPath)
   );
 const initialScenario = readFileSync(scenarioPath, "utf8").trim();
 const running = ["completed", "failed", "passthrough"].includes(initialScenario);
+const mockEnv = { ...process.env };
+delete mockEnv.T3_ACP_RUNNING_COMMAND_FINISH;
+if (["completed", "failed"].includes(initialScenario)) {
+  mockEnv.T3_ACP_RUNNING_COMMAND_FINISH = initialScenario;
+}
 const mock = spawn(
   process.execPath,
   [fileURLToPath(new URL("../acp-mock-agent.ts", import.meta.url))],
   {
     env: {
-      ...process.env,
+      ...mockEnv,
       T3_ACP_ANTIGRAVITY: "1",
       T3_ACP_EMIT_RUNNING_COMMAND_THEN_HANG: running ? "1" : "0",
       T3_ACP_RUNNING_COMMAND_END_TURN: running ? "1" : "0",
-      T3_ACP_RUNNING_COMMAND_FINISH: ["completed", "failed"].includes(initialScenario)
-        ? initialScenario
-        : "",
     },
     stdio: ["pipe", "pipe", "inherit"],
   },
