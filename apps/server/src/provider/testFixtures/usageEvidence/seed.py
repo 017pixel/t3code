@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Seed an initialized, stopped, disposable worktree .t3; never use production userdata."""
-import json, pathlib, sqlite3, sys
+import json, pathlib, sqlite3, subprocess, sys
 root=pathlib.Path.cwd().resolve()
 base=root/'.t3/userdata'
-if not (root/'.git').exists() or base.resolve()==(pathlib.Path.home()/'.t3/userdata').resolve():
+if not (root/'.git').is_file() or base.resolve()!=base or base.resolve()==(pathlib.Path.home()/'.t3/userdata').resolve():
+    raise SystemExit('Run from an isolated worktree with its server stopped')
+git=subprocess.run(['git','rev-parse','--path-format=absolute','--show-toplevel','--git-dir','--git-common-dir'],capture_output=True,text=True)
+paths=git.stdout.splitlines()
+if git.returncode or len(paths)!=3 or pathlib.Path(paths[0]).resolve()!=root or paths[1]==paths[2]:
     raise SystemExit('Run from an isolated worktree with its server stopped')
 scenario=sys.argv[1]
 if scenario not in ['S1','S2','S3','R1','R2','R3']: raise SystemExit('Unknown scenario')
