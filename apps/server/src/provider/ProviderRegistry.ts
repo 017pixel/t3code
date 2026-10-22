@@ -141,6 +141,7 @@ export function upsertProviderWorkspaceSnapshot(
       ? (previousSnapshot?.slashCommands ?? scopedSnapshot.slashCommands)
       : scopedSnapshot.slashCommands,
     ...(scopedSnapshot.slashCommandsPending ? { slashCommandsPending: true } : {}),
+    ...(scopedSnapshot.hooksSkipped ? { hooksSkipped: true } : {}),
     skills: scopedSnapshot.skills,
     ...(optionDescriptors === undefined ? {} : { optionDescriptors }),
   } satisfies NonNullable<ServerProvider["workspaceSnapshots"]>[number];
@@ -426,9 +427,6 @@ export const layer = Layer.effect(
     const workspaceRefreshesRef = yield* Ref.make<
       ReadonlyMap<ProviderInstance, ReadonlyMap<string, { readonly runHooks: boolean }>>
     >(new Map());
-    // Snapshots a scan published without running hooks. A caller that may
-    // run hooks rescans them rather than reusing their partial commands.
-    const hookFreeWorkspaceSnapshots = new WeakSet<object>();
     const maintenanceActionStatesRef = yield* Ref.make<
       ReadonlyMap<ProviderInstanceId, { readonly update?: ServerProviderUpdateState | undefined }>
     >(new Map());
@@ -941,10 +939,16 @@ export const layer = Layer.effect(
       if (
         !provider ||
         !provider.enabled ||
+        // A hook-free scan would replace commands that hooks registered with
+        // fewer, so a read-only caller keeps the full inventory, even stale.
+        (!runHooks &&
+          scannedFrom &&
+          !scannedFrom.slashCommandsPending &&
+          !scannedFrom.hooksSkipped) ||
         (!input.fresh &&
           scannedFrom &&
           !scannedFrom.slashCommandsPending &&
-          !(runHooks && hookFreeWorkspaceSnapshots.has(scannedFrom)) &&
+          !(runHooks && scannedFrom.hooksSkipped) &&
           isProviderWorkspaceSnapshotCurrent(scannedFrom, DateTime.toEpochMillis(now)))
       ) {
         return providers;
@@ -994,8 +998,9 @@ export const layer = Layer.effect(
                   ) {
                     return candidate;
                   }
-                  const next = upsertProviderWorkspaceSnapshot(candidate, input.cwd, {
+                  return upsertProviderWorkspaceSnapshot(candidate, input.cwd, {
                     ...scopedSnapshot,
+                    hooksSkipped: !runHooks,
                     checkedAt: scannedAt,
                     // Unless the driver reports its own command discovery,
                     // commands come from the health check. A failed check
@@ -1003,9 +1008,6 @@ export const layer = Layer.effect(
                     slashCommandsPending:
                       scopedSnapshot.slashCommandsPending ?? scopedSnapshot.status === "error",
                   });
-                  const published = workspaceSnapshotOf(next);
-                  if (published && !runHooks) hookFreeWorkspaceSnapshots.add(published);
-                  return next;
                 });
               });
             }),

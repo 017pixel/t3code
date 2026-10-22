@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   getProviderSkillsForSlashMenu,
   hasCompleteProviderWorkspaceSnapshot,
+  hasCurrentProviderWorkspaceSnapshot,
   resolveProviderForCwd,
   resolveProviderSkillsForCwd,
   resolveProviderSlashCommandsForCwd,
@@ -122,6 +123,21 @@ describe("workspace provider snapshots", () => {
     expect(hasCompleteProviderWorkspaceSnapshot(provider, "/workspace/project-b")).toBe(false);
     expect(hasCompleteProviderWorkspaceSnapshot(undefined, "/workspace/project-a")).toBe(false);
     expect(hasCompleteProviderWorkspaceSnapshot(provider, null)).toBe(false);
+  });
+
+  it("asks again for a current snapshot that a read-only client scanned without hooks", () => {
+    const now = Date.parse(provider.workspaceSnapshots[0]!.checkedAt);
+    const hookFree = {
+      ...provider,
+      workspaceSnapshots: provider.workspaceSnapshots.map((snapshot) => ({
+        ...snapshot,
+        hooksSkipped: true,
+      })),
+    } satisfies ServerProvider;
+    expect(hasCurrentProviderWorkspaceSnapshot(provider, "/workspace/project-a", now)).toBe(true);
+    expect(hasCurrentProviderWorkspaceSnapshot(hookFree, "/workspace/project-a", now)).toBe(false);
+    // Commands stay usable meanwhile, so the request cannot retry in a loop.
+    expect(hasCompleteProviderWorkspaceSnapshot(hookFree, "/workspace/project-a")).toBe(true);
   });
 });
 

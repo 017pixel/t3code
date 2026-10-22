@@ -1461,8 +1461,12 @@ it.layer(
           const registry = yield* ProviderRegistry.ProviderRegistry;
           const scan = registry.refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" });
           const operatorScan = scan.pipe(Effect.provideService(WorkspaceScanRunsHooks, true));
-          const commandNames = Effect.map(registry.getProviders, (providers) =>
-            providers[0]?.workspaceSnapshots?.[0]?.slashCommands.map((command) => command.name),
+          const workspaceSnapshot = Effect.map(
+            registry.getProviders,
+            (providers) => providers[0]?.workspaceSnapshots?.[0],
+          );
+          const commandNames = Effect.map(workspaceSnapshot, (snapshot) =>
+            snapshot?.slashCommands.map((command) => command.name),
           );
 
           // A read-only caller scans without hooks; another reuses that scan.
@@ -1470,6 +1474,8 @@ it.layer(
           yield* scan;
           assert.strictEqual(yield* Ref.get(hookFreeScans), 1);
           assert.deepStrictEqual(yield* commandNames, ["compact"]);
+          // Clients read this to ask an operator's server for a hook scan.
+          assert.strictEqual((yield* workspaceSnapshot)?.hooksSkipped, true);
 
           // An operator does not reuse it inside the TTL, and a read-only
           // caller arriving meanwhile joins the scan instead of starting one.
@@ -1481,12 +1487,19 @@ it.layer(
           yield* Deferred.succeed(releaseHookScan, undefined);
           yield* Fiber.join(operator);
           assert.deepStrictEqual(yield* commandNames, ["compact", "handoffs"]);
+          assert.strictEqual((yield* workspaceSnapshot)?.hooksSkipped, undefined);
 
           // The full inventory then serves both kinds of caller.
           yield* scan;
           yield* operatorScan;
           assert.strictEqual(yield* Ref.get(hookScans), 1);
           assert.strictEqual(yield* Ref.get(hookFreeScans), 1);
+
+          // Once stale, a read-only caller still does not swap it for fewer commands.
+          yield* TestClock.adjust(PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS);
+          yield* scan;
+          assert.strictEqual(yield* Ref.get(hookFreeScans), 1);
+          assert.deepStrictEqual(yield* commandNames, ["compact", "handoffs"]);
         }).pipe(Effect.provide(runtimeServices));
       }),
     );
