@@ -2255,26 +2255,29 @@ it.layer(
       ),
     );
 
-    it.effect("does not offer effort above the CLI's maxEffortLevel cap", () =>
+    it.effect("marks effort above the CLI's maxEffortLevel cap as capped", () =>
       Effect.gen(function* () {
         // Claude Code silently clamps `--effort max` to the settings.json
-        // `maxEffortLevel`, so offering Max would show an effort the turn never uses.
+        // `maxEffortLevel`, so a plain "Max" label would show an effort the turn never uses.
         const status = yield* checkClaudeProviderStatus(
           defaultClaudeSettings,
           claudeCapabilities({ maxEffortLevel: "xhigh" }),
         );
-        const effortOptions = status.models.flatMap((model) =>
+        const maxOptions = status.models.flatMap((model) =>
           (model.capabilities?.optionDescriptors ?? []).flatMap((descriptor) =>
             descriptor.id === "effort" && descriptor.type === "select"
-              ? [{ slug: model.slug, options: descriptor.options.map((option) => option.id) }]
+              ? descriptor.options
+                  .filter((option) => option.id === "max")
+                  .map((option) => ({ slug: model.slug, label: option.label }))
               : [],
           ),
         );
-        assert.isTrue(effortOptions.some(({ options }) => options.includes("xhigh")));
-        assert.deepStrictEqual(
-          effortOptions.filter(({ options }) => options.includes("max")).map(({ slug }) => slug),
-          [],
-        );
+        assert.isNotEmpty(maxOptions);
+        for (const { slug, label } of maxOptions) {
+          // Sonnet 4.6 already sends Max as `high`, under the cap.
+          if (slug === "claude-sonnet-4-6") assert.strictEqual(label, "Max", slug);
+          else assert.include(label, "capped to Extra High", slug);
+        }
       }).pipe(
         Effect.provide(
           layerMockSpawner((args) => {

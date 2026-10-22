@@ -324,16 +324,15 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
       const claude = yield* registry.getInstance(claudeId);
 
       const snapshot = yield* claude!.snapshot.refresh;
-      const effortOptions = snapshot.models.flatMap((model) =>
+      const effortLabels = snapshot.models.flatMap((model) =>
         (model.capabilities?.optionDescriptors ?? []).flatMap((descriptor) =>
           descriptor.id === "effort" && descriptor.type === "select"
-            ? descriptor.options.map((option) => option.id)
+            ? descriptor.options.map((option) => option.label)
             : [],
         ),
       );
-      expect(effortOptions).toContain("high");
-      expect(effortOptions).not.toContain("xhigh");
-      expect(effortOptions).not.toContain("max");
+      expect(effortLabels).toContain("High");
+      expect(effortLabels).toContain("Extra High (capped to High)");
     }).pipe(Effect.provide(layerTest)),
   );
 

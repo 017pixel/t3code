@@ -367,7 +367,7 @@ const probeClaudeCapabilities = (
   claudeSettings: ClaudeSettings,
   environment?: NodeJS.ProcessEnv,
   cwd?: string,
-  includeUsage = true,
+  includeStatus = true,
 ) => {
   const abort = new AbortController();
   return Effect.gen(function* () {
@@ -403,20 +403,21 @@ const probeClaudeCapabilities = (
         // Usage has its own deadline so a slow optional request cannot discard initialization.
         // Only the rate limits are read, so skip the local transcript scan that fills
         // `behaviors`: with a few GB of transcripts it outlasts the deadline.
-        // The effort cap shares that deadline, concurrently, so a CLI that never answers
-        // `get_settings` costs no extra wait.
+        // The effort cap is read alongside it under the same deadline, so a CLI that never
+        // answers `get_settings` delays the probe by at most that one timeout. Workspace probes
+        // only keep slash commands, so they skip both reads.
         const usageCheckedAt = DateTime.formatIso(yield* DateTime.now);
         const { getSettings } = q as ClaudeSettingsQuery;
         const [usageResult, settingsResult] = yield* Effect.all(
           [
-            includeUsage
+            includeStatus
               ? Effect.tryPromise(() =>
                   q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({
                     skipBehaviors: true,
                   }),
                 ).pipe(Effect.timeout(DEFAULT_TIMEOUT_MS), Effect.result)
               : Effect.succeed(undefined),
-            getSettings
+            includeStatus && getSettings
               ? Effect.tryPromise(() => getSettings.call(q)).pipe(
                   Effect.timeout(DEFAULT_TIMEOUT_MS),
                   Effect.result,

@@ -212,20 +212,29 @@ function claudeEffortRank(level: string | undefined): number {
   return CLAUDE_EFFORT_LEVELS.indexOf(level as ClaudeEffortLevel);
 }
 
+const CLAUDE_EFFORT_LABELS: Record<ClaudeEffortLevel, string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra High",
+  max: "Max",
+};
+
 /**
- * Claude Code clamps every effort above settings.json `maxEffortLevel` to it, so offering a
- * higher level would show an effort the turn never runs. A level is judged by its own name, as
- * the user reads it, even where `effortMap` remaps it; other values (Ultracode) by the level they
- * map to, and values that map to none (prompt-injected Ultrathink) stay. A dropped default falls
- * back to the highest remaining plain level, which is what the CLI would run.
+ * Claude Code clamps every effort above settings.json `maxEffortLevel` to it. Options above the
+ * cap are relabelled rather than removed: a stored selection that no longer matched any option
+ * would fall back to the descriptor default and run below the cap. An option counts as above the
+ * cap only when both the level it reads as and the level the CLI is sent are, so an `effortMap`
+ * that already sends Max as High keeps its label, and values that map to no level (prompt-injected
+ * Ultrathink) are never capped.
  */
 export function capClaudeCatalogEffort(
   catalog: ClaudeModelCatalog,
   models: ReadonlyArray<ServerProviderModel>,
   maxEffortLevel: ClaudeEffortLevel | undefined,
 ): ReadonlyArray<ServerProviderModel> {
+  if (!maxEffortLevel) return models;
   const capRank = claudeEffortRank(maxEffortLevel);
-  if (capRank < 0) return models;
   return models.map((model) => {
     if (!model.capabilities?.optionDescriptors) return model;
     return {
@@ -234,37 +243,22 @@ export function capClaudeCatalogEffort(
         ...model.capabilities,
         optionDescriptors: model.capabilities.optionDescriptors.map((descriptor) => {
           if (descriptor.id !== "effort" || descriptor.type !== "select") return descriptor;
-          const options = descriptor.options.filter((option) => {
-            const rank = claudeEffortRank(option.id);
-            return (
-              (rank >= 0
-                ? rank
-                : claudeEffortRank(normalizeClaudeCatalogEffort(catalog, option.id, model.slug))) <=
-              capRank
-            );
-          });
-          if (options.length === descriptor.options.length) return descriptor;
-          const { currentValue, ...rest } = descriptor;
-          const keepsCurrentValue =
-            currentValue !== undefined && options.some((option) => option.id === currentValue);
-          const droppedDefault =
-            descriptor.options.some((option) => option.isDefault) &&
-            !options.some((option) => option.isDefault);
-          const fallbackDefault = droppedDefault
-            ? options.reduce<string | undefined>(
-                (best, option) =>
-                  claudeEffortRank(option.id) > claudeEffortRank(best) ? option.id : best,
-                undefined,
-              )
-            : undefined;
+          const capLabel =
+            descriptor.options.find((option) => option.id === maxEffortLevel)?.label ??
+            CLAUDE_EFFORT_LABELS[maxEffortLevel];
           return {
-            ...rest,
-            ...(keepsCurrentValue ? { currentValue } : {}),
-            options: fallbackDefault
-              ? options.map((option) =>
-                  option.id === fallbackDefault ? { ...option, isDefault: true } : option,
-                )
-              : options,
+            ...descriptor,
+            options: descriptor.options.map((option) => {
+              const idRank = claudeEffortRank(option.id);
+              const sentRank = claudeEffortRank(
+                normalizeClaudeCatalogEffort(catalog, option.id, model.slug),
+              );
+              const displayedRank = idRank >= 0 ? idRank : sentRank;
+              const runsRank = sentRank >= 0 ? sentRank : idRank;
+              return displayedRank > capRank && runsRank > capRank
+                ? { ...option, label: `${option.label} (capped to ${capLabel})` }
+                : option;
+            }),
           };
         }),
       },

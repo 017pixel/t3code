@@ -225,10 +225,10 @@ describe("Claude model catalog", () => {
     );
   });
 
-  it("falls back to the highest level under the cap when the default is above it", () => {
-    const model = {
-      slug: "claude-synthetic-next",
-      name: "Claude Synthetic Next",
+  it("marks effort options that would run above the cap without changing ids or defaults", () => {
+    const effortModel = (slug: string) => ({
+      slug,
+      name: slug,
       isCustom: false,
       capabilities: {
         optionDescriptors: [
@@ -238,31 +238,63 @@ describe("Claude model catalog", () => {
             type: "select" as const,
             options: [
               { id: "medium", label: "Medium" },
-              { id: "high", label: "High" },
-              { id: "xhigh", label: "Extra High", isDefault: true },
+              { id: "high", label: "High", isDefault: true },
+              { id: "xhigh", label: "Extra High" },
+              { id: "max", label: "Max" },
               { id: "ultracode", label: "Ultracode" },
               { id: "ultrathink", label: "Ultrathink" },
             ],
           },
         ],
       },
-    };
+    });
+    const models = [effortModel("claude-plain"), effortModel("claude-remapped")];
     const catalog: ClaudeModelCatalog = {
       models: [
         {
-          model,
+          model: models[0]!,
           runtime: { effortMap: { ultracode: "xhigh", ultrathink: null } },
+          compatibility: {},
+        },
+        {
+          model: models[1]!,
+          runtime: { effortMap: { max: "high", xhigh: "max", ultrathink: null } },
           compatibility: {},
         },
       ],
     };
+    const options = (cap: "high" | "xhigh") =>
+      capClaudeCatalogEffort(catalog, models, cap).map((model) => {
+        const effort = model.capabilities?.optionDescriptors?.[0];
+        return effort?.type === "select" ? effort.options : undefined;
+      });
 
-    const [capped] = capClaudeCatalogEffort(catalog, [model], "high");
-    const effort = capped?.capabilities?.optionDescriptors?.[0];
-    assert.deepStrictEqual(effort?.type === "select" ? effort.options : undefined, [
-      { id: "medium", label: "Medium" },
-      { id: "high", label: "High", isDefault: true },
-      { id: "ultrathink", label: "Ultrathink" },
+    assert.deepStrictEqual(options("high"), [
+      [
+        { id: "medium", label: "Medium" },
+        { id: "high", label: "High", isDefault: true },
+        { id: "xhigh", label: "Extra High (capped to High)" },
+        { id: "max", label: "Max (capped to High)" },
+        { id: "ultracode", label: "Ultracode (capped to High)" },
+        { id: "ultrathink", label: "Ultrathink" },
+      ],
+      [
+        { id: "medium", label: "Medium" },
+        { id: "high", label: "High", isDefault: true },
+        { id: "xhigh", label: "Extra High (capped to High)" },
+        { id: "max", label: "Max" },
+        { id: "ultracode", label: "Ultracode" },
+        { id: "ultrathink", label: "Ultrathink" },
+      ],
     ]);
+    // An effortMap that sends Extra High as max stays unmarked under an xhigh cap: the CLI runs
+    // it at xhigh, which is what the label says.
+    assert.deepStrictEqual(
+      options("xhigh").map((model) => model?.map((option) => option.label)),
+      [
+        ["Medium", "High", "Extra High", "Max (capped to Extra High)", "Ultracode", "Ultrathink"],
+        ["Medium", "High", "Extra High", "Max", "Ultracode", "Ultrathink"],
+      ],
+    );
   });
 });
