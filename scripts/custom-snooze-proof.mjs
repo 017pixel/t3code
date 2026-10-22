@@ -9,6 +9,7 @@ import net from "node:net";
 // proof.reset() only unsnoozes the two fixture IDs; proof.cleanup() deletes them.
 const upstreamPort = Number(process.argv[2]);
 const port = Number(process.argv[3]);
+const upstreamHost = process.env.PROOF_UPSTREAM_HOST || "::1";
 if (![upstreamPort, port].every((value) => Number.isInteger(value) && value > 1024)) {
   throw new Error("Usage: node scripts/custom-snooze-proof.mjs <vite-port> <fixture-port>");
 }
@@ -174,7 +175,7 @@ const server = http.createServer((request, response) => {
   delete headers["accept-encoding"];
   const upstream = http.request(
     {
-      hostname: "127.0.0.1",
+      hostname: upstreamHost,
       port: upstreamPort,
       path: request.url,
       method: request.method,
@@ -209,7 +210,7 @@ const server = http.createServer((request, response) => {
   request.pipe(upstream);
 });
 server.on("upgrade", (request, socket, head) => {
-  const upstream = net.connect(upstreamPort, "127.0.0.1", () => {
+  const upstream = net.connect(upstreamPort, upstreamHost, () => {
     upstream.write(
       `${request.method} ${request.url} HTTP/1.1\r\n` +
         Object.entries({ ...request.headers, host: `localhost:${upstreamPort}` })
