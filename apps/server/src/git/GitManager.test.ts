@@ -744,6 +744,7 @@ function makeManager(input?: {
   ghScenario?: FakeGhScenario;
   sourceControlProvider?: SourceControlProvider["Service"];
   sourceControlContext?: SourceControlProviderRegistry.SourceControlProviderHandle["context"];
+  sourceControlHandleError?: SourceControlProviderFailure;
   textGeneration?: Partial<FakeGitTextGeneration>;
   serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
   setupScriptRunner?: ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"];
@@ -843,7 +844,9 @@ function makeManager(input?: {
           resolveLink: (input) => provider.resolveLink?.(input),
           get: () => Effect.succeed(provider),
           resolveHandle: () =>
-            Effect.succeed({ provider, context: input?.sourceControlContext ?? null }),
+            input?.sourceControlHandleError
+              ? Effect.fail(input.sourceControlHandleError)
+              : Effect.succeed({ provider, context: input?.sourceControlContext ?? null }),
           resolve: () => Effect.succeed(provider),
           discover: Effect.succeed([]),
         }),
@@ -3647,6 +3650,84 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
             .toContainEqual(
               expect.objectContaining({ kind: "phase_started", phase: "pr", label: message }),
             );
+        }
+      }),
+  );
+
+  it.effect.each([false, true])(
+    "creates a PR when optional provider detection fails (parent published: %s)",
+    (published) =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        const remoteDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "publish", remoteDir]);
+        yield* runGit(repoDir, ["push", "publish", "main"]);
+        yield* runGit(repoDir, ["checkout", "-b", "parent"]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "parent.txt"), "parent work\n");
+        yield* runGit(repoDir, ["add", "parent.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Parent commit"]);
+        if (published) yield* runGit(repoDir, ["push", "publish", "parent"]);
+        yield* runGit(repoDir, ["checkout", "-b", "child"]);
+        yield* runGit(repoDir, ["config", "branch.child.gh-merge-base", "parent"]);
+        yield* runGit(repoDir, ["config", "branch.child.t3-merge-base-ref", "refs/heads/parent"]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "child.txt"), "child work\n");
+        yield* runGit(repoDir, ["add", "child.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Child commit"]);
+        yield* runGit(repoDir, ["push", "-u", "publish", "child"]);
+
+        const expectedBase = published ? "parent" : "main";
+        const generatedInputs: TextGeneration.PrContentGenerationInput[] = [];
+        const events: GitActionProgressEvent[] = [];
+        const { manager, ghCalls } = yield* makeManager({
+          sourceControlHandleError: new SourceControlProviderFailure({
+            provider: SourceControlProviderKind.make("unknown"),
+            operation: "detectProvider",
+            cwd: repoDir,
+            detail: "Failed to detect source control provider.",
+          }),
+          textGeneration: {
+            generatePrContent: (input) => {
+              generatedInputs.push(input);
+              return Effect.succeed({ title: "Child PR", body: "Child body" });
+            },
+          },
+        });
+        const result = yield* runStackedAction(
+          manager,
+          { cwd: repoDir, action: "create_pr" },
+          {
+            progressReporter: {
+              publish: (event) =>
+                Effect.sync(() => {
+                  events.push(event);
+                }),
+            },
+          },
+        );
+
+        expect(result.pr.status).toBe("created");
+        expect(result.pr.baseBranch).toBe(expectedBase);
+        expect(generatedInputs).toHaveLength(1);
+        expect(generatedInputs[0]!.baseBranch).toBe(expectedBase);
+        expect(generatedInputs[0]!.commitSummary).toContain("Child commit");
+        expect(generatedInputs[0]!.diffPatch).toContain("+child work");
+        expect(ghCalls.filter((call) => call.startsWith("pr create "))).toEqual([
+          expect.stringContaining(`pr create --base ${expectedBase} --head child`),
+        ]);
+        if (published) {
+          expect(generatedInputs[0]!.commitSummary).not.toContain("Parent commit");
+          expect(generatedInputs[0]!.diffPatch).not.toContain("+parent work");
+          expect(result.toast.description).not.toContain("unavailable");
+        } else {
+          expect(generatedInputs[0]!.commitSummary).toContain("Parent commit");
+          expect(generatedInputs[0]!.diffPatch).toContain("+parent work");
+          const message =
+            "Base publish/parent is unavailable in this checkout. Using default branch main.";
+          expect(result.toast.description).toContain(message);
+          expect(events).toContainEqual(
+            expect.objectContaining({ kind: "phase_started", phase: "pr", label: message }),
+          );
         }
       }),
   );

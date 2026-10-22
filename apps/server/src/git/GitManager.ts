@@ -2073,52 +2073,56 @@ export const make = Effect.gen(function* () {
       let baseRemotes = [publishedRemote];
       let targetRepository: string | null = null;
       if (!recordedBase.baseRef.startsWith("refs/remotes/")) {
-        const handle = yield* sourceControlProviders.resolveHandle({ cwd });
-        const remotesResult = yield* gitCore.execute({
-          operation: "GitManager.resolvePrBase.remotes",
-          cwd,
-          args: ["remote", "-v"],
-        });
-        const remotes = parseFetchRemotes(remotesResult.stdout);
-        if (handle.provider.kind === "github") {
-          const hostHint = handle.context
-            ? (urlHost(handle.context.provider.baseUrl) ?? undefined)
-            : undefined;
-          const defaultHost = hostHint ?? environment.GH_HOST ?? "github.com";
-          const resolved = yield* gitCore.execute({
-            operation: "GitManager.resolvePrBase.resolved",
+        const handle = yield* sourceControlProviders
+          .resolveHandle({ cwd })
+          .pipe(Effect.catchTags({ SourceControlProviderError: () => Effect.succeed(null) }));
+        if (handle) {
+          const remotesResult = yield* gitCore.execute({
+            operation: "GitManager.resolvePrBase.remotes",
             cwd,
-            args: ["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"],
-            allowNonZeroExit: true,
+            args: ["remote", "-v"],
           });
-          const target =
-            parseGitHubRepositorySelector(environment.GH_REPO ?? "", defaultHost) ??
-            resolveGitHubRepository({
-              remotes: remotesResult.stdout,
-              resolved: resolved.stdout,
-              hostHint,
-              defaultHost,
-            }).locator;
-          if (target) {
-            targetRepository = `${target.host}/${target.owner}/${target.name}`.toLowerCase();
+          const remotes = parseFetchRemotes(remotesResult.stdout);
+          if (handle.provider.kind === "github") {
+            const hostHint = handle.context
+              ? (urlHost(handle.context.provider.baseUrl) ?? undefined)
+              : undefined;
+            const defaultHost = hostHint ?? environment.GH_HOST ?? "github.com";
+            const resolved = yield* gitCore.execute({
+              operation: "GitManager.resolvePrBase.resolved",
+              cwd,
+              args: ["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"],
+              allowNonZeroExit: true,
+            });
+            const target =
+              parseGitHubRepositorySelector(environment.GH_REPO ?? "", defaultHost) ??
+              resolveGitHubRepository({
+                remotes: remotesResult.stdout,
+                resolved: resolved.stdout,
+                hostHint,
+                defaultHost,
+              }).locator;
+            if (target) {
+              targetRepository = `${target.host}/${target.owner}/${target.name}`.toLowerCase();
+            }
+          } else if (handle.context) {
+            targetRepository = normalizeGitRemoteUrl(handle.context.remoteUrl);
           }
-        } else if (handle.context) {
-          targetRepository = normalizeGitRemoteUrl(handle.context.remoteUrl);
-        }
-        if (targetRepository) {
-          baseRemotes = remotes
-            .filter((remote) => {
-              const key = normalizeGitRemoteUrl(remote.url);
-              const host =
-                handle.provider.kind === "github" ? gitHubApiHostForRemote(remote.url) : null;
-              return (
-                (host ? `${host}/${key.split("/").slice(1).join("/")}` : key) === targetRepository
+          if (targetRepository) {
+            baseRemotes = remotes
+              .filter((remote) => {
+                const key = normalizeGitRemoteUrl(remote.url);
+                const host =
+                  handle.provider.kind === "github" ? gitHubApiHostForRemote(remote.url) : null;
+                return (
+                  (host ? `${host}/${key.split("/").slice(1).join("/")}` : key) === targetRepository
+                );
+              })
+              .map((remote) => remote.name)
+              .toSorted((left, right) =>
+                left === publishedRemote ? -1 : right === publishedRemote ? 1 : 0,
               );
-            })
-            .map((remote) => remote.name)
-            .toSorted((left, right) =>
-              left === publishedRemote ? -1 : right === publishedRemote ? 1 : 0,
-            );
+          }
         }
       }
       const remoteRefs = recordedBase.baseRef.startsWith("refs/remotes/")
