@@ -114,7 +114,9 @@ vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: (command: unkno
 function browseResult(target: unknown) {
   const partialPath = (target as { input?: { partialPath?: string } } | null)?.input?.partialPath;
   if (partialPath === undefined) return null;
-  const expanded = expandHome(partialPath);
+  // The server resolves a path without `~` or a root against its cwd, so an empty
+  // partialPath would browse the cwd's parent.
+  const expanded = partialPath === "" ? "/srv/t3/apps/server" : expandHome(partialPath);
   return {
     parentPath: expanded.slice(0, expanded.lastIndexOf("/") + 1),
     entries: [],
@@ -288,6 +290,29 @@ describe("adding an already registered project", () => {
       expect(state.navigations).toEqual([existingDraft]);
     },
   );
+
+  it("opens the home directory's project for ~/, not the server cwd's parent", async () => {
+    const home = { ...existing, id: "home-project", title: "Home", workspaceRoot: "/home/tester" };
+    state.registered = [
+      home,
+      { ...existing, id: "cwd-parent", title: "Apps", workspaceRoot: "/srv/t3/apps" },
+    ];
+
+    await submitLocalFolder("~/");
+
+    expect(state.alerts).toEqual([]);
+    expect(state.navigations).toEqual([
+      {
+        index: 0,
+        routes: [
+          {
+            name: "NewTaskDraft",
+            params: { environmentId: "environment", projectId: home.id, title: home.title },
+          },
+        ],
+      },
+    ]);
+  });
 
   it.each([false, true])(
     "opens the existing project's draft with the prompt before cloning (clone tracking: %s)",
