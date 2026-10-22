@@ -805,13 +805,14 @@ export const make = Effect.gen(function* () {
   ) {
     const ready = yield* SynchronizedRef.modifyEffect(headWatchersRef, (activeWatchers) => {
       const existing = activeWatchers.get(cwd);
-      if (existing) {
+      if (existing && existing.fiber.pollUnsafe() === undefined) {
         const nextWatchers = new Map(activeWatchers).set(cwd, {
           ...existing,
           subscriberCount: existing.subscriberCount + 1,
         });
         return Effect.succeed([existing.ready, nextWatchers] as const);
       }
+      // A watch that ended, say before the repository existed, restarts for everyone holding it.
       return Effect.gen(function* () {
         const ready = yield* Deferred.make<void>();
         const fiber = yield* watchHead(cwd, ready).pipe(
@@ -823,7 +824,7 @@ export const make = Effect.gen(function* () {
         const nextWatchers = new Map(activeWatchers).set(cwd, {
           fiber,
           ready,
-          subscriberCount: 1,
+          subscriberCount: (existing?.subscriberCount ?? 0) + 1,
         });
         return [ready, nextWatchers] as const;
       });

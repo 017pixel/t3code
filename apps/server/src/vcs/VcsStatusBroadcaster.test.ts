@@ -806,39 +806,115 @@ describe("VcsStatusBroadcaster", () => {
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
-  it.effect("subscribers share one HEAD watch that ends with the last of them", () => {
-    const state = {
-      currentLocalStatus: baseLocalStatus,
-      currentRemoteStatus: baseRemoteStatus as VcsStatusRemoteResult | null,
-      localStatusCalls: 0,
-      remoteStatusCalls: 0,
-      localInvalidationCalls: 0,
-      remoteInvalidationCalls: 0,
-      headPathCalls: 0,
-    };
+  it.effect("subscribers share one HEAD watch that ends with the last of them", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const gitDir = yield* fs.makeTempDirectoryScoped({ prefix: "vcs-head-watch-" });
+      const headPath = path.join(gitDir, "HEAD");
+      yield* fs.writeFileString(headPath, "ref: refs/heads/main\n");
+      const state = {
+        currentLocalStatus: baseLocalStatus,
+        currentRemoteStatus: baseRemoteStatus as VcsStatusRemoteResult | null,
+        localStatusCalls: 0,
+        remoteStatusCalls: 0,
+        localInvalidationCalls: 0,
+        remoteInvalidationCalls: 0,
+        headPath,
+        headPathCalls: 0,
+      };
 
-    return Effect.gen(function* () {
-      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
-      const subscribe = Effect.gen(function* () {
-        const received = yield* Deferred.make<void>();
-        const fiber = yield* Stream.runForEach(
-          broadcaster.streamStatus({ cwd: "/repo", includeRemote: false }),
-          () => Deferred.succeed(received, undefined),
-        ).pipe(Effect.forkScoped);
-        yield* Deferred.await(received);
-        return fiber;
-      });
+      yield* Effect.gen(function* () {
+        const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+        const subscribe = Effect.gen(function* () {
+          const received = yield* Deferred.make<void>();
+          const fiber = yield* Stream.runForEach(
+            broadcaster.streamStatus({ cwd: "/repo", includeRemote: false }),
+            () => Deferred.succeed(received, undefined),
+          ).pipe(Effect.forkScoped);
+          yield* Deferred.await(received);
+          return fiber;
+        });
 
-      const first = yield* subscribe;
-      const second = yield* subscribe;
-      assert.strictEqual(state.headPathCalls, 1);
+        const first = yield* subscribe;
+        const second = yield* subscribe;
+        assert.strictEqual(state.headPathCalls, 1);
 
-      yield* Fiber.interrupt(first);
-      yield* Fiber.interrupt(second);
-      yield* subscribe;
-      assert.strictEqual(state.headPathCalls, 2);
-    }).pipe(Effect.provide(layerTestFor(state)), Effect.scoped);
-  });
+        yield* Fiber.interrupt(first);
+        yield* Fiber.interrupt(second);
+        yield* subscribe;
+        assert.strictEqual(state.headPathCalls, 2);
+      }).pipe(Effect.provide(layerTestFor(state)), Effect.scoped);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("a HEAD watch that ended restarts for the next subscriber and keeps earlier ones", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const gitDir = yield* fs.makeTempDirectoryScoped({ prefix: "vcs-head-watch-" });
+      const headPath = path.join(gitDir, "HEAD");
+      yield* fs.writeFileString(headPath, "ref: refs/heads/main\n");
+      const state: Parameters<typeof layerTestFor>[0] = {
+        currentLocalStatus: { ...baseLocalStatus, isDefaultRef: true, refName: "main" },
+        currentRemoteStatus: null,
+        localStatusCalls: 0,
+        remoteStatusCalls: 0,
+        localInvalidationCalls: 0,
+        remoteInvalidationCalls: 0,
+        headPathCalls: 0,
+      };
+
+      yield* Effect.gen(function* () {
+        const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+        const subscribe = Effect.gen(function* () {
+          const subscribed = yield* Deferred.make<void>();
+          const refs = new Map<string, Deferred.Deferred<void>>();
+          const sawRef = (refName: string) => {
+            const existing = refs.get(refName);
+            if (existing) return existing;
+            const created = Deferred.makeUnsafe<void>();
+            refs.set(refName, created);
+            return created;
+          };
+          let clientState: VcsStatusResult | null = null;
+          const fiber = yield* Stream.runForEach(
+            broadcaster.streamStatus({ cwd: "/repo", includeRemote: false }),
+            (event) =>
+              Effect.gen(function* () {
+                clientState = applyGitStatusStreamEvent(clientState, event);
+                yield* Deferred.succeed(subscribed, undefined);
+                yield* Deferred.succeed(sawRef(clientState.refName ?? ""), undefined);
+              }),
+          ).pipe(Effect.forkScoped);
+          yield* Deferred.await(subscribed);
+          return { fiber, sawRef };
+        });
+        const checkout = (refName: string) =>
+          Effect.gen(function* () {
+            state.currentLocalStatus = { ...baseLocalStatus, isDefaultRef: false, refName };
+            const lockPath = path.join(gitDir, "HEAD.lock");
+            yield* fs.writeFileString(lockPath, `ref: refs/heads/${refName}\n`);
+            yield* fs.rename(lockPath, headPath);
+          });
+
+        // The repository has no HEAD yet, so the first watch ends at once.
+        const first = yield* subscribe;
+        state.headPath = headPath;
+        const second = yield* subscribe;
+        assert.strictEqual(state.headPathCalls, 2);
+
+        yield* checkout("one");
+        yield* Deferred.await(first.sawRef("one"));
+        yield* Deferred.await(second.sawRef("one"));
+
+        // The replacement belongs to both subscribers, so the second leaving keeps it.
+        yield* Fiber.interrupt(second.fiber);
+        yield* checkout("two");
+        yield* Deferred.await(first.sawRef("two"));
+      }).pipe(Effect.provide(layerTestFor(state)), Effect.scoped);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 
   it.effect("releases remote demand while passive observers remain", () => {
     const state = {
