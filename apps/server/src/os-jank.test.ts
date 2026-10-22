@@ -3,6 +3,7 @@ import { it as effectIt } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { CommandAvailability, WindowsShellEnvironment } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Observe the existing synchronous shell probe without launching the user's login shell.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeOS from "node:os";
@@ -63,6 +64,37 @@ effectIt.effect("hydrates PATH when the desktop handoff is absent", () =>
     (probe) => Effect.sync(() => probe.mockRestore()),
   ),
 );
+
+effectIt.effect("hydrates PATH once a login shell that timed out at startup answers", () => {
+  let loginIsSlow = true;
+  return Effect.acquireUseRelease(
+    Effect.sync(() =>
+      vi.spyOn(NodeChildProcess, "execFileSync").mockImplementation((file) => {
+        if (loginIsSlow) {
+          throw Object.assign(new Error(`spawnSync ${String(file)} ETIMEDOUT`), {
+            code: "ETIMEDOUT",
+          });
+        }
+        return "__T3CODE_ENV_PATH_START__\n/opt/tools/bin\n__T3CODE_ENV_PATH_END__\n";
+      }),
+    ),
+    () =>
+      Effect.gen(function* () {
+        const env: NodeJS.ProcessEnv = { SHELL: "/bin/bash", PATH: "/usr/bin" };
+
+        yield* fixPath().pipe(
+          Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.provideService(HostProcess.Environment, env),
+          Effect.provide(NodeServices.layer),
+        );
+        loginIsSlow = false;
+        yield* TestClock.adjust("1 minute");
+
+        assert.equal(env.PATH, "/opt/tools/bin:/usr/bin");
+      }),
+    (probe) => Effect.sync(() => probe.mockRestore()),
+  );
+});
 
 effectIt.effect("keeps mise's PATH record with the login shell PATH", () =>
   Effect.acquireUseRelease(
