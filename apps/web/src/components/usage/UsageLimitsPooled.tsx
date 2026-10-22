@@ -74,6 +74,14 @@ function AccountChip({ email }: { readonly email: string }) {
   );
 }
 
+function accountLabel(account: LimitAccount): string {
+  return account.displayName || providerClients.get(account.driver)?.label || account.driver;
+}
+
+/**
+ * Hub accounts with an email get the two-letter chip; every other account gets
+ * the provider glyph, so no account is left without a mark.
+ */
 function AccountAvatar({
   account,
   className,
@@ -81,24 +89,18 @@ function AccountAvatar({
   readonly account: LimitAccount;
   readonly className?: string;
 }) {
-  if (account.redeem) {
-    return (
-      <ProviderInstanceIcon
-        driverKind={account.driver}
-        displayName={
-          account.displayName ??
-          providerClients.get(account.driver)?.label ??
-          String(account.driver)
-        }
-        accentColor={account.accentColor}
-        showBadge={Boolean(account.displayName)}
-        indicatorBackground="var(--popover)"
-        className={cn("size-5", className)}
-        iconClassName="size-4 text-foreground/80"
-      />
-    );
-  }
-  return account.email ? <AccountChip email={account.email} /> : null;
+  if (account.email && !account.redeem) return <AccountChip email={account.email} />;
+  return (
+    <ProviderInstanceIcon
+      driverKind={account.driver}
+      displayName={accountLabel(account)}
+      accentColor={account.accentColor}
+      showBadge={Boolean(account.displayName)}
+      indicatorBackground="var(--popover)"
+      className={cn("size-5", className)}
+      iconClassName="size-4 text-foreground/80"
+    />
+  );
 }
 
 function AccountName({
@@ -116,11 +118,7 @@ function AccountName({
       </span>
     );
   }
-  return (
-    <span className={className}>
-      {providerClients.get(account.driver)?.label ?? String(account.driver)}
-    </span>
-  );
+  return <span className={className}>{accountLabel(account)}</span>;
 }
 
 function Row({ label, children }: { readonly label: string; readonly children: ReactNode }) {
@@ -162,9 +160,7 @@ function SegmentPopover({
       <div className="flex min-w-0 flex-col gap-0.5">
         <span className="flex items-center gap-2 text-sm font-medium text-foreground">
           <AccountAvatar account={account} />
-          <span className="truncate">
-            {account.displayName ?? providerClients.get(account.driver)?.label ?? account.driver}
-          </span>
+          <span className="truncate">{accountLabel(account)}</span>
         </span>
         {account.email ? (
           <RedactedSensitiveText
@@ -391,9 +387,9 @@ function SegmentTriggers({
         ) : null}
         <span
           aria-hidden
-          className="absolute inset-0 flex items-center justify-center overflow-hidden rounded-md text-3xs leading-none font-semibold text-foreground/80 tabular-nums @2xl/pool:hidden"
+          className="absolute inset-0 isolate flex items-center justify-center overflow-hidden rounded-md @2xl/pool:hidden"
         >
-          {index}
+          <AccountAvatar account={account} />
         </span>
         <div className="relative hidden h-full min-w-0 items-center gap-1.5 overflow-hidden rounded-md px-2 text-xs @2xl/pool:flex">
           {showAccountName ? (
@@ -452,16 +448,19 @@ function LegendRow({
       render={<Button variant="ghost" size="compact" />}
       className="min-w-0 @2xl/pool:hidden"
     >
-      <span className="relative inline-flex size-4 shrink-0 items-center justify-center rounded-sm text-3xs leading-none font-semibold text-foreground/80 tabular-nums">
+      <span className="relative inline-flex size-5 shrink-0 items-center justify-center rounded-sm">
         <span
           aria-hidden
           className="absolute inset-0 rounded-sm opacity-35"
           style={{ backgroundColor: color }}
         />
-        <span className="sr-only">Segment </span>
-        <span className="relative">{index}</span>
+        {/* Positioned to paint above the tint; isolated so the icon's z-index stays in the row. */}
+        <span className="relative isolate inline-flex">
+          <AccountAvatar account={account} />
+        </span>
       </span>
-      <AccountName account={account} className="min-w-0 truncate font-medium text-foreground" />
+      {/* The mark already carries an email account's initials, so the label is its provider. */}
+      <span className="min-w-0 truncate font-medium text-foreground">{accountLabel(account)}</span>
       <span className="shrink-0 font-semibold text-foreground tabular-nums">{remaining}%</span>
       <span className="ms-auto flex shrink-0 items-center gap-1.5 text-2xs text-muted-foreground tabular-nums">
         {resetsIn?.replace("resets in ", "↻ ") ?? ""}
