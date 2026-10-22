@@ -1830,6 +1830,41 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             yield* Ref.set(initialized, true);
           }),
         );
+        // Codex silently skips enabled hooks that are untrusted or modified since
+        // review, so running anyway would drop the user's hooks without a trace.
+        // Checked before every thread start, resume, and turn because hooks can
+        // change while the session is open.
+        const requireReviewedHooks = Effect.fn("CodexAdapterV2.requireReviewedHooks")(function* (
+          cwd: string | null,
+        ) {
+          const listed = yield* client
+            .request("hooks/list", cwd === null ? {} : { cwds: [cwd] })
+            .pipe(
+              Effect.catchTags({
+                // Codex versions without hooks/list have no hook review to bypass.
+                CodexAppServerRequestError: (error) =>
+                  error.code === -32601 ? Effect.succeed(null) : Effect.fail(error),
+              }),
+            );
+          const pending =
+            listed?.data.flatMap((entry) =>
+              entry.hooks.filter(
+                (hook) =>
+                  hook.enabled &&
+                  (hook.trustStatus === "untrusted" || hook.trustStatus === "modified"),
+              ),
+            ) ?? [];
+          if (pending.length === 0) return;
+          const one = pending.length === 1;
+          const sources = [...new Set(pending.map((hook) => hook.sourcePath))].join(", ");
+          const where = cwd === null ? "" : ` in ${cwd}`;
+          const homePath = adapterOptions.settings.homePath;
+          const home = homePath ? ` with CODEX_HOME=${homePath}` : "";
+          return yield* Effect.fail(
+            `Codex will not run ${one ? "an enabled hook" : `${pending.length} enabled hooks`} until ${one ? "it is" : "they are"} reviewed (${sources}). ` +
+              `Run \`codex /hooks\`${where}${home} to review or disable ${one ? "it" : "them"}, then try again.`,
+          );
+        });
         const now = yield* DateTime.now;
         const session = providerSession({
           providerSessionId: input.providerSessionId,
@@ -6355,6 +6390,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             codexInput: ReadonlyArray<CodexSchema.V2TurnStartParams__UserInput>,
           ) {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
+            yield* requireReviewedHooks(turnInput.runtimePolicy.cwd);
             const mcpSession = yield* mcpSessions.read(turnInput.threadId);
             const turnStartParams = yield* buildCodexTurnStartParams({
               nativeThreadId: threadId,
@@ -6639,6 +6675,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           }),
           ensureThread: (threadInput) =>
             ensureInitialized.pipe(
+              Effect.andThen(requireReviewedHooks(threadInput.runtimePolicy.cwd)),
               Effect.andThen(mcpSessions.read(threadInput.threadId)),
               Effect.flatMap((mcpSession) =>
                 client.request(
@@ -6689,6 +6726,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 }),
               });
               const response = yield* ensureInitialized.pipe(
+                Effect.andThen(requireReviewedHooks(threadInput.runtimePolicy?.cwd ?? session.cwd)),
                 Effect.andThen(
                   resume.pipe(
                     Effect.catchTags({
