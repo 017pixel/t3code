@@ -409,7 +409,17 @@ describe("DesktopConnectionCatalogStore", () => {
       );
       yield* Ref.set(key, "regenerated-key");
 
-      yield* store.get.pipe(Effect.flip);
+      const error = yield* store.get.pipe(Effect.flip);
+      assert.instanceOf(
+        error,
+        DesktopConnectionCatalogStore.DesktopConnectionCatalogStoreWriteError,
+      );
+      assert.equal(error.operation, "preserve-undecryptable-catalog");
+      assert.isFalse(
+        (yield* fileSystem.readDirectory(path.dirname(catalogPath))).some((name) =>
+          name.endsWith(".undecryptable"),
+        ),
+      );
       assert.equal(yield* fileSystem.readFileString(catalogPath), original);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );

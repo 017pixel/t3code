@@ -460,10 +460,12 @@ export const make = Effect.gen(function* () {
       );
       // Back up the document that failed to decrypt, not the file at `catalogPath`: a
       // concurrent `set` may already have replaced it.
-      yield* writeDocument({ fileSystem, path, catalogPath: backupPath, document, suffix });
+      yield* writeDocument({ fileSystem, path, catalogPath: backupPath, document, suffix }).pipe(
+        Effect.mapError(preserveError),
+      );
       yield* Effect.logWarning(
         "The desktop connection catalog can no longer be decrypted; starting a new one.",
-        { catalogPath, backupPath, error: decryptError },
+        { catalogPath, backupPath, reason: decryptError._tag },
       );
     }
     return Option.none<string>();
