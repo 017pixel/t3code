@@ -183,11 +183,34 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
       throw new Error("Unexpected locator action");
     }),
     isClosed: () => closed,
-    close: vi.fn(async () => {
-      if (!closed) {
+    // Models Playwright: unload handlers always run, but `beforeunload` only with
+    // `runBeforeUnload`, and a guarding page stays open behind a `beforeunload` dialog.
+    beforeUnload: "none" as "none" | "listen" | "guard",
+    unloadEvents: [] as string[],
+    beforeUnloadDialog: null as null | {
+      accept: ReturnType<typeof vi.fn>;
+      dismiss: ReturnType<typeof vi.fn>;
+    },
+    close: vi.fn(async (options?: { runBeforeUnload?: boolean }) => {
+      if (closed) return;
+      const finish = () => {
+        if (closed) return;
+        page.unloadEvents.push("pagehide", "visibilitychange");
         closed = true;
         events.emit("close");
-      }
+      };
+      if (!options?.runBeforeUnload || page.beforeUnload === "none") return finish();
+      page.unloadEvents.push("beforeunload");
+      if (page.beforeUnload === "listen") return finish();
+      const dialog = {
+        type: () => "beforeunload",
+        message: () => "",
+        defaultValue: () => "",
+        accept: vi.fn(async () => finish()),
+        dismiss: vi.fn(async () => {}),
+      };
+      page.beforeUnloadDialog = dialog;
+      events.emit("dialog", dialog);
     }),
   };
   const context = {
@@ -669,6 +692,56 @@ it.live("reports a pending dialog without evaluating the page and resolves it ex
         input: {},
       });
       expect(resolved.dialog).toBeNull();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("closing a tab runs the page's beforeunload handlers", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const page = contexts[0]!.page;
+      page.beforeUnload = "listen";
+      yield* broker.invoke({ scope, tabId, operation: "close", input: {} });
+      expect(page.isClosed()).toBe(true);
+      expect(page.unloadEvents).toEqual(["beforeunload", "pagehide", "visibilitychange"]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("closing a tab with an unsaved-changes guard still closes it", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      // A profile context is shared, so closing the tab cannot fall back to closing its context.
+      yield* browser.reportProfiles({
+        profiles: [{ id: "profile-work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "profile-work",
+      });
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false, profileId: "profile-work" },
+      });
+      const tabId = PreviewTabId.make(opened.tabId!);
+      expect(contextRequests).toEqual([{ profileId: "profile-work", isolated: false }]);
+      const page = contexts[0]!.page;
+      page.beforeUnload = "guard";
+      const closed = new Promise<void>((resolve) => page.once("close", () => resolve()));
+      yield* broker.invoke({ scope, tabId, operation: "close", input: {} });
+      expect(page.beforeUnloadDialog).not.toBeNull();
+      // Without this bound, a close stuck behind the unanswered dialog only fails at the suite timeout.
+      yield* Effect.promise(() => closed).pipe(
+        Effect.timeoutOrElse({
+          duration: "2 seconds",
+          orElse: () =>
+            Effect.die(new Error("The tab stayed open behind its beforeunload dialog.")),
+        }),
+      );
+      expect(page.beforeUnloadDialog!.accept).toHaveBeenCalledTimes(1);
+      expect(page.unloadEvents).toEqual(["beforeunload", "pagehide", "visibilitychange"]);
     }),
   ).pipe(Effect.provide(layer)),
 );
