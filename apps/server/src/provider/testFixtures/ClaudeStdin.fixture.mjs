@@ -35,11 +35,17 @@ function record(text) {
       typeof blocks === "string"
         ? [blocks]
         : blocks?.filter((b) => b.type === "text").map((b) => b.text);
-    NodeFS.appendFileSync(
-      output,
-      JSON.stringify({ at: new Date().toISOString(), pid: process.pid, texts }) + "\n",
-      { mode: 0o600 },
-    );
+    // `mode` only applies on create; fchmod also tightens a log that already existed.
+    const fd = NodeFS.openSync(output, "a", 0o600);
+    try {
+      NodeFS.fchmodSync(fd, 0o600);
+      NodeFS.writeSync(
+        fd,
+        JSON.stringify({ at: new Date().toISOString(), pid: process.pid, texts }) + "\n",
+      );
+    } finally {
+      NodeFS.closeSync(fd);
+    }
   }
 }
 process.stdin.on("data", (chunk) => {
