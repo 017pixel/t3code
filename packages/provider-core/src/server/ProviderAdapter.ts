@@ -436,6 +436,21 @@ export interface ProviderAdapterV2TurnInput {
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
   readonly appContext?: ReadonlyArray<{ readonly key: string; readonly text: string }>;
+  /**
+   * Reads a provider-native child of this thread saved by an earlier session,
+   * so activity it resumes after a restart keeps the child's original identity.
+   */
+  readonly readSubagentThread?: (
+    childThreadId: ThreadId,
+  ) => Effect.Effect<ProviderAdapterV2SubagentThread | null>;
+}
+
+export interface ProviderAdapterV2SubagentThread {
+  readonly subagent: OrchestrationV2Subagent;
+  readonly childThread: OrchestrationV2AppThread;
+  readonly providerThread: OrchestrationV2ProviderThread;
+  readonly turnItem: Extract<OrchestrationV2TurnItem, { readonly type: "subagent" }>;
+  readonly latestProviderTurnOrdinal: number;
 }
 
 export interface ProviderAdapterV2SteerInput {

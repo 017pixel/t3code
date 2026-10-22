@@ -2704,6 +2704,71 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             });
           });
 
+        // A child spawned by an earlier session can be resumed by the parent
+        // after a restart. Its saved launch identity, not the resuming tool
+        // call, owns the child thread, task and turn item.
+        const restoreSubagentThread =
+          /* Provider events include streaming deltas; avoid a span for each update. */
+          Effect.fnUntraced(function* (nativeThreadId: string) {
+            const rootContext = Array.from((yield* Ref.get(activeTurns)).values()).find(
+              (context) => context.subagent === null,
+            );
+            const readSubagentThread = rootContext?.input.readSubagentThread;
+            if (rootContext === undefined || readSubagentThread === undefined) return undefined;
+            const childThreadId = idAllocator.derive.threadFromProviderThread({
+              driver: CODEX_PROVIDER,
+              nativeThreadId,
+            });
+            const saved = yield* readSubagentThread(childThreadId);
+            const nativeItemId = saved?.subagent.nativeTaskRef?.nativeId;
+            if (
+              saved === null ||
+              nativeItemId == null ||
+              saved.providerThread.nativeThreadRef?.nativeId !== nativeThreadId
+            )
+              return undefined;
+            const subagent: CodexSubagentThreadContext = {
+              parentContext: rootContext,
+              providerThread: {
+                ...saved.providerThread,
+                providerSessionId: rootContext.providerThread.providerSessionId,
+              },
+              childThread: saved.childThread,
+              subagentNodeId: saved.subagent.id,
+              childRootNodeId: idAllocator.derive.nodeFromProviderItem({
+                driver: CODEX_PROVIDER,
+                nativeItemId: `${nativeItemId}:thread-root`,
+              }),
+              childThreadId,
+              nativeToolCallId: nativeItemId,
+              ordinal: 1,
+              nativeTurnIds: new Set<string>(),
+              startedAt: saved.subagent.startedAt ?? rootContext.startedAt,
+              turnItemId: saved.turnItem.id,
+              turnItemOrdinal: saved.turnItem.ordinal,
+              task: saved.subagent,
+            };
+            const registered = yield* Ref.modify(subagentThreads, (current) => {
+              const existing = current.get(nativeThreadId);
+              return existing === undefined
+                ? [subagent, new Map(current).set(nativeThreadId, subagent)]
+                : [existing, current];
+            });
+            if (registered === subagent) {
+              // Continue after the saved turns so the resumed one reopens the task.
+              yield* Ref.update(nextProviderTurnOrdinals, (current) =>
+                new Map(current).set(
+                  String(subagent.providerThread.id),
+                  Math.max(
+                    current.get(String(subagent.providerThread.id)) ?? 0,
+                    saved.latestProviderTurnOrdinal,
+                  ),
+                ),
+              );
+            }
+            return registered;
+          });
+
         const rememberSubagentTurnStarted =
           /* Provider events include streaming deltas; avoid a span for each update. */
           Effect.fnUntraced(function* (input: {
@@ -2711,7 +2776,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             readonly nativeTurnId: string;
             readonly startedAt: DateTime.Utc;
           }) {
-            const subagent = (yield* Ref.get(subagentThreads)).get(input.nativeThreadId);
+            const subagent =
+              (yield* Ref.get(subagentThreads)).get(input.nativeThreadId) ??
+              (yield* restoreSubagentThread(input.nativeThreadId));
             if (subagent !== undefined) {
               yield* emitSubagentProviderTurnStarted(subagent, input);
               return;

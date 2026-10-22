@@ -5058,12 +5058,67 @@ describe("CodexAdapterV2 post-settle continuation", () => {
   it.effect("restores an existing child resumed by the parent on a fresh adapter session", () =>
     Effect.scoped(
       Effect.gen(function* () {
+        const scenario = "codex-resumed-child-after-restart";
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const childThreadId = idAllocator.derive.threadFromProviderThread({
+          driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+          nativeThreadId: RESUME_CHILD_THREAD,
+        });
+        // The earlier session spawns the child; its events stand in for the
+        // projection the restarted server reads back.
+        const earlier = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario,
+            entries: resumeSubagentTranscript.entries.slice(
+              0,
+              resumeSubagentTranscript.entries.findIndex(
+                (entry) => entry.type === "emit_inbound" && entry.label === "turn/completed/root",
+              ) + 1,
+            ),
+          }),
+        );
+        yield* earlier.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: earlier.threadId,
+            providerThread: earlier.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-before-restart"),
+            text: RESUME_PROMPT,
+          }),
+        );
+        yield* TestClock.adjust("100 millis");
+        yield* earlier.awaitTerminal(1);
+        const savedSubagent = earlier.subagentUpdates().at(-1)!.subagent;
+        assert.equal(savedSubagent.childThreadId, childThreadId);
+        const saved: ProviderAdapter.ProviderAdapterV2SubagentThread = {
+          subagent: savedSubagent,
+          childThread: earlier.events.flatMap((event) =>
+            event.type === "app_thread.created" && event.appThread.id === childThreadId
+              ? [event.appThread]
+              : [],
+          )[0]!,
+          providerThread: earlier.events.flatMap((event) =>
+            event.type === "provider_thread.updated" &&
+            event.providerThread.id === savedSubagent.providerThreadId
+              ? [event.providerThread]
+              : [],
+          )[0]!,
+          turnItem: earlier.events.flatMap((event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "subagent" &&
+            event.turnItem.subagentId === savedSubagent.id
+              ? [event.turnItem]
+              : [],
+          )[0]!,
+          latestProviderTurnOrdinal: 1,
+        };
+
         // A fresh harness stands in for a restarted server: the child was spawned
         // by an earlier adapter session, so this one first hears of it through
         // the parent's followupTask call.
         const harness = yield* makeCodexReplayHarness(
           makeCodexReplayTranscript({
-            scenario: "codex-resumed-child-after-restart",
+            scenario,
             entries: [
               ...codexReplayPreamble({
                 nativeThreadId: RESUME_NATIVE_THREAD,
@@ -5107,29 +5162,37 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ],
           }),
         );
-        const idAllocator = yield* IdAllocator.IdAllocatorV2;
-        const childThreadId = idAllocator.derive.threadFromProviderThread({
-          driver: CodexAdapterV2.CODEX_DRIVER_KIND,
-          nativeThreadId: RESUME_CHILD_THREAD,
-        });
 
-        yield* harness.runtime.startTurn(
-          makeCodexTestTurnInput({
+        yield* harness.runtime.startTurn({
+          ...makeCodexTestTurnInput({
             threadId: harness.threadId,
             providerThread: harness.providerThread,
             now: yield* DateTime.now,
             attemptId: RunAttemptId.make("attempt-after-restart"),
             text: RESUME_PROMPT,
           }),
-        );
+          readSubagentThread: (threadId) =>
+            Effect.succeed(threadId === childThreadId ? saved : null),
+        });
         yield* harness.awaitTerminal(1);
 
         const childUpdates = harness
           .subagentUpdates()
           .filter((event) => event.subagent.childThreadId === childThreadId);
+        // The final answer reports its result while the child is still running.
         assert.deepEqual(
-          childUpdates.map((event) => event.subagent.status),
+          [...new Set(childUpdates.map((event) => event.subagent.status))],
           ["running", "completed"],
+        );
+        assert.isTrue(childUpdates.every((event) => event.subagent.id === savedSubagent.id));
+        assert.isFalse(harness.events.some((event) => event.type === "app_thread.created"));
+        assert.isTrue(
+          harness.events.some(
+            (event) =>
+              event.type === "provider_turn.updated" &&
+              event.providerTurn.providerThreadId === saved.providerThread.id &&
+              event.providerTurn.ordinal === 2,
+          ),
         );
         assert.equal(childUpdates.at(-1)?.subagent.result, "PROBE_AFTER_RESTART");
         assert.isTrue(

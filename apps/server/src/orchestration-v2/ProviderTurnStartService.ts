@@ -167,6 +167,52 @@ export const layer: Layer.Layer<
             Effect.catchCause(() => Effect.succeed(input.inheritedBackgroundTurnItems)),
           ),
         shouldStartProviderTurn: () => isCurrentAttemptInStatus("running"),
+        readSubagentThread: Effect.fn("ProviderTurnStartService.readSubagentThread")(
+          function* (childThreadId: ThreadId) {
+            const parent = yield* projectionStore.getThreadRecords(
+              input.threadId,
+              ["subagents", "turnItems"],
+              { turnItemTypes: ["subagent"] },
+            );
+            const subagent = parent.subagents.find(
+              (task) => task.origin === "provider_native" && task.childThreadId === childThreadId,
+            );
+            const turnItem = parent.turnItems.find(
+              (item): item is Extract<typeof item, { readonly type: "subagent" }> =>
+                item.type === "subagent" && item.subagentId === subagent?.id,
+            );
+            if (subagent === undefined || turnItem === undefined) return null;
+            const child = yield* projectionStore.getThreadRecords(childThreadId, [
+              "providerThreads",
+              "providerTurns",
+            ]);
+            const providerThread = child.providerThreads.find(
+              (thread) => thread.id === subagent.providerThreadId,
+            );
+            if (providerThread === undefined) return null;
+            return {
+              subagent,
+              childThread: child.thread,
+              providerThread,
+              turnItem,
+              latestProviderTurnOrdinal: Math.max(
+                0,
+                ...child.providerTurns
+                  .filter((turn) => turn.providerThreadId === providerThread.id)
+                  .map((turn) => turn.ordinal),
+              ),
+            };
+          },
+          (effect, childThreadId) =>
+            effect.pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Failed to read a saved provider-native subagent.", {
+                  childThreadId,
+                  cause,
+                }).pipe(Effect.as(null)),
+              ),
+            ),
+        ),
         shouldFinalizeRun: () =>
           projectionStore.getRuntimeRecoveryProjection(input.threadId).pipe(
             Effect.map((current) => {
@@ -1317,6 +1363,7 @@ export const layer: Layer.Layer<
             sameNativeThread &&
             !acceptedAttempts.some((source) => source.nativeThreadId !== undefined)),
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
+        readSubagentThread: runControls.readSubagentThread,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
         message: {
