@@ -18,22 +18,23 @@ process.stdin.on("data", (chunk) => {
   const lines = pending.split("\n");
   pending = lines.pop();
   for (const line of lines) {
+    let value;
     try {
-      const value = JSON.parse(line);
-      if (value.type !== "user") continue;
-      const blocks = value.message?.content;
-      const texts =
-        typeof blocks === "string"
-          ? [blocks]
-          : blocks?.filter((b) => b.type === "text").map((b) => b.text);
-      NodeFS.appendFileSync(
-        output,
-        JSON.stringify({ at: new Date().toISOString(), pid: process.pid, texts }) + "\n",
-        { mode: 0o600 },
-      );
+      value = JSON.parse(line);
     } catch {
-      /* Non-JSON CLI input is forwarded without recording. */
+      continue;
     }
+    if (value.type !== "user") continue;
+    const blocks = value.message?.content;
+    const texts =
+      typeof blocks === "string"
+        ? [blocks]
+        : blocks?.filter((b) => b.type === "text").map((b) => b.text);
+    NodeFS.appendFileSync(
+      output,
+      JSON.stringify({ at: new Date().toISOString(), pid: process.pid, texts }) + "\n",
+      { mode: 0o600 },
+    );
   }
 });
 process.stdin.on("end", () => child.stdin.end());
