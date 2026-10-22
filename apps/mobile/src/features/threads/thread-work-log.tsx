@@ -500,7 +500,7 @@ interface ThreadWorkLogProps {
   readonly onPressPreview: (source: FilePreviewSource) => void;
 }
 
-/** `itemId` is the Read that viewed the image; each Read shows the file as it was then signed. */
+/** `itemId` separates each Read's signing cache entry from other Reads of the same path. */
 export type ViewedImageRenderer = (image: MarkdownImageRequest, itemId: string) => ReactNode;
 
 export function ThreadWorkLog(props: ThreadWorkLogProps) {

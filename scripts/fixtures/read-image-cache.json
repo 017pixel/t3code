@@ -1,0 +1,237 @@
+{
+  "clock": "2026-10-22T07:00:00.000Z",
+  "environmentId": "13138000-0000-4000-8000-000000000003",
+  "project": {
+    "project_id": "13138000-0000-4000-8000-000000000002",
+    "title": "Image cache proof",
+    "workspace_root": "/tmp/issue-13138-fixture/workspace",
+    "scripts_json": "[]",
+    "created_at": "2026-10-22T07:00:00.000Z",
+    "updated_at": "2026-10-22T07:00:00.000Z"
+  },
+  "thread": {
+    "createdBy": "user",
+    "creationSource": "web",
+    "id": "13138000-0000-4000-8000-000000000001",
+    "projectId": "13138000-0000-4000-8000-000000000002",
+    "title": "Read image cache fixture",
+    "providerInstanceId": "claudeAgent",
+    "modelSelection": {
+      "instanceId": "claudeAgent",
+      "model": "claude-sonnet-5-5"
+    },
+    "runtimeMode": "full-access",
+    "interactionMode": "default",
+    "branch": null,
+    "worktreePath": null,
+    "pullRequests": [],
+    "activeProviderThreadId": null,
+    "lineage": {
+      "parentThreadId": null,
+      "relationshipToParent": null,
+      "rootThreadId": "13138000-0000-4000-8000-000000000001"
+    },
+    "forkedFrom": null,
+    "createdAt": "2026-10-22T07:00:00.000Z",
+    "updatedAt": "2026-10-22T07:00:00.000Z",
+    "archivedAt": null,
+    "settledOverride": null,
+    "settledAt": null,
+    "snoozedUntil": null,
+    "snoozedAt": null,
+    "lastVisitedAt": "2026-10-22T07:00:00.000Z",
+    "titleRegeneration": null,
+    "deletedAt": null
+  },
+  "run": {
+    "id": "issue-13138-run",
+    "threadId": "13138000-0000-4000-8000-000000000001",
+    "ordinal": 1,
+    "providerInstanceId": "claudeAgent",
+    "modelSelection": {
+      "instanceId": "claudeAgent",
+      "model": "claude-sonnet-5-5"
+    },
+    "providerThreadId": null,
+    "userMessageId": "issue-13138-user",
+    "rootNodeId": "issue-13138-root",
+    "activeAttemptId": null,
+    "status": "completed",
+    "queuePosition": null,
+    "requestedAt": "2026-10-22T07:00:00.000Z",
+    "startedAt": "2026-10-22T07:00:00.000Z",
+    "completedAt": "2026-10-22T07:00:00.000Z",
+    "checkpointId": null,
+    "contextHandoffId": null,
+    "workspacePreparation": {
+      "type": "root"
+    }
+  },
+  "node": {
+    "id": "issue-13138-root",
+    "threadId": "13138000-0000-4000-8000-000000000001",
+    "runId": "issue-13138-run",
+    "parentNodeId": null,
+    "rootNodeId": "issue-13138-root",
+    "kind": "root_turn",
+    "status": "completed",
+    "countsForRun": true,
+    "providerThreadId": null,
+    "providerTurnId": null,
+    "nativeItemRef": null,
+    "runtimeRequestId": null,
+    "checkpointScopeId": null,
+    "startedAt": "2026-10-22T07:00:00.000Z",
+    "completedAt": "2026-10-22T07:00:00.000Z"
+  },
+  "items": [
+    {
+      "id": "issue-13138-read-1",
+      "threadId": "13138000-0000-4000-8000-000000000001",
+      "runId": "issue-13138-run",
+      "nodeId": "issue-13138-root",
+      "providerThreadId": null,
+      "providerTurnId": null,
+      "nativeItemRef": null,
+      "parentItemId": null,
+      "ordinal": 2,
+      "status": "completed",
+      "title": "Read square.png",
+      "startedAt": "2026-10-22T07:00:00.000Z",
+      "completedAt": "2026-10-22T07:00:00.000Z",
+      "updatedAt": "2026-10-22T07:00:00.000Z",
+      "type": "dynamic_tool",
+      "toolName": "Read",
+      "viewedImagePath": "/tmp/issue-13138-fixture/outside/square.png",
+      "input": {
+        "file_path": "/tmp/issue-13138-fixture/outside/square.png"
+      },
+      "output": {
+        "type": "image",
+        "file": {
+          "type": "image/png",
+          "originalSize": 334,
+          "dimensions": {
+            "originalWidth": 100,
+            "originalHeight": 100,
+            "displayWidth": 100,
+            "displayHeight": 100
+          },
+          "sizeBytes": 334
+        }
+      }
+    },
+    {
+      "threadId": "13138000-0000-4000-8000-000000000001",
+      "runId": "issue-13138-run",
+      "nodeId": "issue-13138-root",
+      "providerThreadId": null,
+      "providerTurnId": null,
+      "nativeItemRef": null,
+      "parentItemId": null,
+      "status": "completed",
+      "startedAt": "2026-10-22T07:00:00.000Z",
+      "completedAt": "2026-10-22T07:00:00.000Z",
+      "updatedAt": "2026-10-22T07:00:00.000Z",
+      "id": "issue-13138-label-1",
+      "ordinal": 3,
+      "type": "assistant_message",
+      "title": null,
+      "messageId": "issue-13138-label-1",
+      "text": "Next Read: green",
+      "streaming": false
+    },
+    {
+      "id": "issue-13138-read-2",
+      "threadId": "13138000-0000-4000-8000-000000000001",
+      "runId": "issue-13138-run",
+      "nodeId": "issue-13138-root",
+      "providerThreadId": null,
+      "providerTurnId": null,
+      "nativeItemRef": null,
+      "parentItemId": null,
+      "ordinal": 4,
+      "status": "completed",
+      "title": "Read square.png",
+      "startedAt": "2026-10-22T07:00:00.000Z",
+      "completedAt": "2026-10-22T07:00:00.000Z",
+      "updatedAt": "2026-10-22T07:00:00.000Z",
+      "type": "dynamic_tool",
+      "toolName": "Read",
+      "viewedImagePath": "/tmp/issue-13138-fixture/outside/square.png",
+      "input": {
+        "file_path": "/tmp/issue-13138-fixture/outside/square.png"
+      },
+      "output": {
+        "type": "image",
+        "file": {
+          "type": "image/png",
+          "originalSize": 334,
+          "dimensions": {
+            "originalWidth": 100,
+            "originalHeight": 100,
+            "displayWidth": 100,
+            "displayHeight": 100
+          },
+          "sizeBytes": 334
+        }
+      }
+    },
+    {
+      "threadId": "13138000-0000-4000-8000-000000000001",
+      "runId": "issue-13138-run",
+      "nodeId": "issue-13138-root",
+      "providerThreadId": null,
+      "providerTurnId": null,
+      "nativeItemRef": null,
+      "parentItemId": null,
+      "status": "completed",
+      "startedAt": "2026-10-22T07:00:00.000Z",
+      "completedAt": "2026-10-22T07:00:00.000Z",
+      "updatedAt": "2026-10-22T07:00:00.000Z",
+      "id": "issue-13138-label-2",
+      "ordinal": 5,
+      "type": "assistant_message",
+      "title": null,
+      "messageId": "issue-13138-label-2",
+      "text": "Next Read: blue",
+      "streaming": false
+    },
+    {
+      "id": "issue-13138-read-3",
+      "threadId": "13138000-0000-4000-8000-000000000001",
+      "runId": "issue-13138-run",
+      "nodeId": "issue-13138-root",
+      "providerThreadId": null,
+      "providerTurnId": null,
+      "nativeItemRef": null,
+      "parentItemId": null,
+      "ordinal": 6,
+      "status": "completed",
+      "title": "Read square.png",
+      "startedAt": "2026-10-22T07:00:00.000Z",
+      "completedAt": "2026-10-22T07:00:00.000Z",
+      "updatedAt": "2026-10-22T07:00:00.000Z",
+      "type": "dynamic_tool",
+      "toolName": "Read",
+      "viewedImagePath": "/tmp/issue-13138-fixture/outside/square.png",
+      "input": {
+        "file_path": "/tmp/issue-13138-fixture/outside/square.png"
+      },
+      "output": {
+        "type": "image",
+        "file": {
+          "type": "image/png",
+          "originalSize": 334,
+          "dimensions": {
+            "originalWidth": 100,
+            "originalHeight": 100,
+            "displayWidth": 100,
+            "displayHeight": 100
+          },
+          "sizeBytes": 334
+        }
+      }
+    }
+  ]
+}
