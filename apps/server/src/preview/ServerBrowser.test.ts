@@ -737,6 +737,27 @@ it.live("closing an isolated tab closes its context only after the page closes",
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("closing a tab force-closes a page that never finishes unloading", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const context = contexts[0]!;
+      const page = context.page;
+      page.beforeUnload = "listen";
+      page.unloadGate = Promise.withResolvers<void>();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      yield* broker.invoke({ scope, tabId, operation: "close", input: {} });
+      vi.advanceTimersByTime(4_999);
+      expect(page.isClosed()).toBe(false);
+      expect(context.close).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(page.isClosed()).toBe(true);
+      yield* Effect.promise(() => context.closing.promise);
+      expect(vi.getTimerCount()).toBe(0);
+    }).pipe(Effect.ensuring(Effect.sync(() => vi.useRealTimers()))),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("closing a tab with an unsaved-changes guard still closes it", () =>
   Effect.scoped(
     Effect.gen(function* () {

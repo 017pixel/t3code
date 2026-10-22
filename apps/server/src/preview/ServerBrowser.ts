@@ -350,6 +350,7 @@ const IDLE_SWEEP_INTERVAL = "1 minute";
 
 const DOWNLOAD_LIMIT = 20;
 const ABORTED_NAVIGATION_DOWNLOAD_WAIT_MS = 5_000;
+const PAGE_CLOSE_GRACE_MS = 5_000;
 const DOWNLOAD_MAX_BYTES = 1024 * 1024 * 1024;
 
 const tabKey = (threadId: string, tabId: string) => `${threadId}\u0000${tabId}`;
@@ -679,6 +680,9 @@ const make = Effect.gen(function* () {
       const closed = page.isClosed()
         ? Promise.resolve()
         : new Promise<void>((resolve) => page.once("close", () => resolve()));
+      // A renderer that never finishes unloading would outlive its tab, so force it closed.
+      const forceClose = setTimeout(() => void page.close().catch(constVoid), PAGE_CLOSE_GRACE_MS);
+      void closed.then(() => clearTimeout(forceClose));
       void page
         .close({ runBeforeUnload: tab.dialog === null })
         .catch(() => page.close())
