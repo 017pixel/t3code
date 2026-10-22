@@ -315,6 +315,9 @@ const WORKFLOW_MEMBER_TRANSCRIPT_FLUSH_MS = 500;
 const BACKGROUND_MOVE_TIMEOUT_MS = 5_000;
 // Matches the stderr tail the SDK keeps for a CLI it spawns itself.
 const CLAUDE_STDERR_TAIL_LENGTH = 2_048;
+// Claude Code's refusal of bypassPermissions as root, which it explains only on stderr (#15882).
+const CLAUDE_ROOT_REFUSAL =
+  "--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons";
 
 const CLAUDE_GROUP_WATCH_SCRIPT = [
   "{ trap '' TERM; read -r _ <&3; kill -TERM 0; sleep 5; kill -KILL 0; } </dev/null >/dev/null 2>&1 &",
@@ -539,15 +542,14 @@ export class ClaudeAgentSdkQueryRunnerError extends Schema.TaggedError<ClaudeAge
   }
 }
 
-export class ClaudeCodeStartupError extends Schema.TaggedError<ClaudeCodeStartupError>()(
-  "ClaudeCodeStartupError",
+export class ClaudeCodeRootRefusalError extends Schema.TaggedError<ClaudeCodeRootRefusalError>()(
+  "ClaudeCodeRootRefusalError",
   {
-    stderr: Schema.String,
-    cause: Schema.optional(Schema.Defect()),
+    cause: Schema.Defect(),
   },
 ) {
   override get message(): string {
-    return `Claude Code exited before it started: ${this.stderr}`;
+    return `Claude Code exited before it started: ${CLAUDE_ROOT_REFUSAL}`;
   }
 }
 
@@ -962,8 +964,8 @@ export const layerQueryRunner: Layer.Layer<
                 executableArgs: [...launch.args, ...(queryOptions.executableArgs ?? [])],
               };
         // Only a CLI that fails before its first message explains itself on
-        // stderr, such as refusing bypassPermissions as root (#15882); later
-        // stderr stays out of turn failures.
+        // stderr. The known root refusal becomes a curated failure; any other
+        // stderr can hold private text, so it stays out of turn failures.
         let stderrTail = "";
         let answered = false;
         const appendStderr = (text: string) => {
@@ -1041,9 +1043,9 @@ export const layerQueryRunner: Layer.Layer<
 
         return {
           messages: Stream.fromAsyncIterable(claudeQueryMessages(queryRuntime), (cause) => {
-            const stderr = answered ? "" : stderrTail.trim();
+            const refusedRoot = !answered && stderrTail.includes(CLAUDE_ROOT_REFUSAL);
             return queryRunnerError(
-              stderr.length > 0 ? new ClaudeCodeStartupError({ stderr, cause }) : cause,
+              refusedRoot ? new ClaudeCodeRootRefusalError({ cause }) : cause,
               "fromAsyncIterable",
             );
           }).pipe(
