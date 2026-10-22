@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Seed an initialized, stopped, disposable worktree .t3; never use production userdata."""
-import json, pathlib, sqlite3, subprocess, sys
+import json, pathlib, shutil, sqlite3, subprocess, sys
 root=pathlib.Path.cwd().resolve()
 base=root/'.t3/userdata'
 if not (root/'.git').is_file() or base.resolve()!=base or base.resolve()==(pathlib.Path.home()/'.t3/userdata').resolve():
@@ -12,7 +12,15 @@ if git.returncode or len(paths)!=3 or pathlib.Path(paths[0]).resolve()!=root or 
 scenario=sys.argv[1]
 if scenario not in ['S1','S2','S3','R1','R2','R3']: raise SystemExit('Unknown scenario')
 fixture=pathlib.Path(__file__).resolve().parent
-home=base/'usage-evidence-empty-home'; home.mkdir(exist_ok=True)
+home=base/'usage-evidence-empty-home'
+control=pathlib.Path('/tmp/issue-11873-evidence/control.json')
+milestones=control.with_suffix('.json.milestones')
+if home.is_symlink() or control.parent.resolve()!=control.parent or control.is_symlink() or milestones.is_symlink():
+    raise SystemExit('Fixture home and control paths must not be symlinks')
+if home.exists(): shutil.rmtree(home)
+home.mkdir()
+control.parent.mkdir(exist_ok=True)
+milestones.unlink(missing_ok=True)
 config={'homePath':str(home),'binaryPath':'codex','launchArgs':'-c model_providers.cliproxy.name="cliproxy" -c model_providers.cliproxy.base_url="http://127.0.0.1:8317/v1" -c model_providers.cliproxy.env_key="ANTHROPIC_AUTH_TOKEN" -c model_providers.cliproxy.wire_api="responses" -c model_provider="cliproxy"'}
 if scenario in ['S3','R2','R3']:
     config={'homePath':str(home),'binaryPath':str(fixture/'peer.mjs')}
@@ -20,7 +28,6 @@ settings={'projectSettingsFolded':True,'providerInstances':{'codex':{'driver':'c
 if scenario in ['S2','R1']:
     settings['usageLimitSources']={'evidence-proxy':{'kind':'cliproxy','url':'http://127.0.0.1:18317','managementKey':'public-evidence-dummy-key','enabled':True,'label':'Demo proxy source'}}
 (base/'settings.json').write_text(json.dumps(settings,indent=2)+'\n')
-control=pathlib.Path('/tmp/issue-11873-evidence/control.json');control.parent.mkdir(exist_ok=True)
 control.write_text(json.dumps({'scenario':scenario,'phase':'auth' if scenario=='R3' else 'success'}))
 c=sqlite3.connect(base/'statev2.sqlite')
 # Only projection context is seeded; provider responses still traverse the live RPC boundary.
