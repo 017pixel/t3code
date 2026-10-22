@@ -2827,7 +2827,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             providerThread: harness.providerThread,
             now: yield* DateTime.now,
             attemptId: RunAttemptId.make("attempt-codex-enabled-project-config"),
-            text: "Check the tool.",
+            text: "Reply with the requested recovery marker.",
           }),
         );
         yield* harness.awaitTerminal(1);
@@ -2868,7 +2868,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               providerThread: harness.providerThread,
               now: yield* DateTime.now,
               attemptId: RunAttemptId.make("attempt-codex-project-config-timeout"),
-              text: "Reply anyway.",
+              text: "Reply with the requested recovery marker.",
             }),
           )
           .pipe(Effect.forkScoped);
