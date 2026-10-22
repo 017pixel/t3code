@@ -34,7 +34,8 @@ export function limitRecoveryCommand(
   const identity = `${thread.id}:${thread.latestRunId}:${resetMs}`;
   const recovery = thread.limitRecovery;
   if (recovery?.runId !== thread.latestRunId || recovery.resetAt !== thread.usageLimitResetAt) {
-    if (!autoResume && (!snooze || resetMs <= nowMs)) return null;
+    // Only a window still ahead arms; an expired one waits for a manual resume (#21716).
+    if (resetMs <= nowMs || (!autoResume && !snooze)) return null;
     return {
       type: "thread.metadata.update",
       commandId: CommandId.make(`limit-arm:${identity}`),
@@ -43,7 +44,7 @@ export function limitRecoveryCommand(
         runId: thread.latestRunId,
         resetAt: thread.usageLimitResetAt,
         autoResume,
-        snooze: snooze && resetMs > nowMs,
+        snooze,
       },
     };
   }
