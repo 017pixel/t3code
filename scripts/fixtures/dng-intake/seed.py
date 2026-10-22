@@ -13,6 +13,7 @@ for port in (7840,15880,7492,15532):
  if result == 0: raise RuntimeError(f'Stop isolated server on {port} first')
 db=root/'.t3/userdata/statev2.sqlite'
 if not db.is_file(): raise FileNotFoundError(db)
+environment=(root/'.t3/userdata/environment-id').read_text().strip()
 c=sqlite3.connect(db)
 if c.execute("select 1 from orchestration_v2_effect_outbox where status in ('pending','running')").fetchone():
  c.close()
@@ -39,5 +40,5 @@ with c:
   else: item['streaming']=False
   c.execute('insert into orchestration_v2_projection_turn_items values(?,?,?,?,?,?,?,?,?,?,?,?)',(item['id'],populated,run,None,None,None,None,i,item['type'],'completed',ts,json.dumps(item)))
 rows={t:c.execute('select * from '+t+' order by 1').fetchall() for t in ['projection_projects','orchestration_v2_projection_threads','orchestration_v2_projection_messages','orchestration_v2_projection_runs','orchestration_v2_projection_runtime_requests','orchestration_v2_projection_turn_items']}
-print(json.dumps(dict(seedHash=hashlib.sha256(json.dumps(rows,sort_keys=True).encode()).hexdigest(),threads=[populated,empty],environment=(root/'.t3/userdata/environment-id').read_text().strip())))
+print(json.dumps(dict(seedHash=hashlib.sha256(json.dumps(rows,sort_keys=True).encode()).hexdigest(),threads=[populated,empty],environment=environment)))
 pathlib.Path('/tmp/dng-evidence-workspace').mkdir(exist_ok=True)

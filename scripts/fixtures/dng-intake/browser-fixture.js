@@ -157,8 +157,7 @@ export function installSyntheticEvents() {
       });
       return { prevented: e.defaultPrevented };
     };
-    window.__reset = async () => {
-      const d = await import("/src/composerDraftStore.ts");
+    const activeEnvironmentId = (d) => {
       const [, route, id] = location.pathname.split("/");
       const environmentId =
         route === "draft"
@@ -166,7 +165,11 @@ export function installSyntheticEvents() {
               ?.environmentId
           : route;
       if (!environmentId) throw new Error("Cannot resolve the active draft environment");
-      d.clearComposerDraftsEnvironment(environmentId);
+      return environmentId;
+    };
+    window.__reset = async () => {
+      const d = await import("/src/composerDraftStore.ts");
+      d.clearComposerDraftsEnvironment(activeEnvironmentId(d));
       document.querySelector("[role=textbox][contenteditable=true]")?.focus();
     };
     window.__state = async () => {
@@ -188,13 +191,20 @@ export function installSyntheticEvents() {
       }
       const d = await import("/src/composerDraftStore.ts"),
         u = await import("/src/lib/attachmentUploadQueue.ts");
+      const environmentId = activeEnvironmentId(d);
+      const threadKeyPrefix = d.composerTargetKey({ environmentId, threadId: "" });
       return new Promise((resolve) => {
         let unsubscribeDraft = () => {};
         let unsubscribeUpload = () => {};
         const check = () => {
-          const files = Object.values(d.useComposerDraftStore.getState().draftsByThreadKey).flatMap(
-            (d) => [...(d.files ?? []), ...(d.images ?? [])],
-          );
+          const state = d.useComposerDraftStore.getState();
+          const files = Object.entries(state.draftsByThreadKey)
+            .filter(
+              ([key]) =>
+                key.startsWith(threadKeyPrefix) ||
+                state.getDraftSession(key)?.environmentId === environmentId,
+            )
+            .flatMap(([, draft]) => [...(draft.files ?? []), ...(draft.images ?? [])]);
           const s = u.useAttachmentUploadStore.getState().uploadsByImageId;
           if (
             files.length >= expectedCount &&
