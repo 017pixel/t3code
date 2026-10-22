@@ -150,7 +150,9 @@ describe("resolveSearchUrlTemplate", () => {
 
 describe("normalizePreviewUrl", () => {
   it("tells agents how to open a blank tab and which URLs are accepted", () => {
-    expect(() => normalizePreviewUrl("about:blank")).toThrow(/omit (?:the )?url[^.]*blank tab/i);
+    expect(() => normalizePreviewUrl("about:blank")).toThrow(
+      /preview_open, omit url[^.]*blank tab/i,
+    );
     expect(() => normalizePreviewUrl("about:blank")).toThrow(/http\(s\)/i);
     expect(() => normalizePreviewUrl("about:blank")).toThrow(/schemeless host/i);
   });

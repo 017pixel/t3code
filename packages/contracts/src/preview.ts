@@ -367,7 +367,7 @@ export class PreviewInvalidUrlError extends Schema.TaggedError<PreviewInvalidUrl
 ) {
   override get message() {
     const protocol = this.protocol === undefined ? "" : `: ${this.protocol}`;
-    return `Invalid preview URL (${this.reason}${protocol}; input length ${this.inputLength}). Use an http(s) URL or a schemeless host such as localhost:5173, or omit url to open a blank tab.`;
+    return `Invalid preview URL (${this.reason}${protocol}; input length ${this.inputLength}). Use an http(s) URL or a schemeless host such as localhost:5173. With preview_open, omit url to open a blank tab.`;
   }
 }
 
