@@ -594,7 +594,17 @@ it.effect.each(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const driver = yield* GitVcsDriver.makeVcsDriverShape();
+      const liveProcess = yield* VcsProcess.VcsProcess;
+      let freshReadTrees = 0;
+      const driver = yield* GitVcsDriver.makeVcsDriverShape().pipe(
+        Effect.provideService(VcsProcess.VcsProcess, {
+          run: (input) => {
+            if (input.args.includes("read-tree") && input.args.includes("index.sparse=true"))
+              freshReadTrees++;
+            return liveProcess.run(input);
+          },
+        }),
+      );
       const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-checkpoint-sparse-" });
       const { git } = yield* makeCheckpointFixture(driver, cwd);
       const write = Effect.fn(function* (name: string, contents: string) {
@@ -677,6 +687,7 @@ it.effect.each(
           "working outside\n",
         );
       }
+      assert.strictEqual(freshReadTrees, indexState === "missing" ? 2 : 0);
     }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
 );
 
