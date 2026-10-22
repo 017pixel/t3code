@@ -505,6 +505,46 @@ describe("VcsStatusBroadcaster", () => {
     }).pipe(Effect.provide(layerTestFor(state)));
   });
 
+  it.effect("a background poll publishes a branch checked out outside T3 Code", () => {
+    const state = {
+      currentLocalStatus: { ...baseLocalStatus, isDefaultRef: true, refName: "main" },
+      currentRemoteStatus: baseRemoteStatus as VcsStatusRemoteResult | null,
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+    };
+
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      const events: Array<VcsStatusStreamEvent> = [];
+      const initialRemote = yield* Deferred.make<void>();
+      const nextRemote = yield* Deferred.make<void>();
+      yield* Stream.runForEach(broadcaster.streamStatus({ cwd: "/repo" }), (event) =>
+        Effect.gen(function* () {
+          events.push(event);
+          if (event._tag !== "remoteUpdated") return;
+          yield* Deferred.succeed(
+            event.remote?.hasUpstream ? initialRemote : nextRemote,
+            undefined,
+          );
+        }),
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(initialRemote);
+
+      // `git switch -c repro` in the terminal: nothing calls a refresh RPC.
+      state.currentLocalStatus = { ...baseLocalStatus, isDefaultRef: false, refName: "repro" };
+      state.currentRemoteStatus = { ...baseRemoteStatus, hasUpstream: false };
+      yield* TestClock.adjust(Duration.seconds(30));
+      yield* Deferred.await(nextRemote);
+
+      const localRefs = events.flatMap((event) =>
+        event._tag === "localUpdated" ? [event.local.refName] : [],
+      );
+      assert.deepStrictEqual(localRefs, ["repro"]);
+    }).pipe(Effect.provide(layerTestFor(state)), Effect.scoped);
+  });
+
   it.effect("releases remote demand while passive observers remain", () => {
     const state = {
       currentLocalStatus: baseLocalStatus,
