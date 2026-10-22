@@ -11,6 +11,7 @@ const safeStorage = vi.hoisted(() => ({
   isAsyncEncryptionAvailable: vi.fn(),
   encryptStringAsync: vi.fn(),
   decryptStringAsync: vi.fn(),
+  getSelectedStorageBackend: vi.fn(),
 }));
 
 vi.mock("electron", () => ({ safeStorage }));
@@ -56,6 +57,30 @@ describe("ElectronSafeStorage", () => {
       assert.equal(safeStorage.encryptString.mock.calls.length, 0);
       assert.equal(safeStorage.decryptString.mock.calls.length, 0);
     }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
+  );
+
+  it.effect(
+    "does not store secrets through the async API on the plaintext basic_text backend",
+    () =>
+      Effect.gen(function* () {
+        // Electron reports async encryption as available on basic_text even though
+        // the sync API, which refuses that backend, reports it unavailable.
+        safeStorage.getSelectedStorageBackend.mockReturnValue("basic_text");
+        safeStorage.isAsyncEncryptionAvailable.mockResolvedValue(true);
+        safeStorage.isEncryptionAvailable.mockReturnValue(false);
+        safeStorage.encryptStringAsync.mockResolvedValue(Buffer.from("ciphertext"));
+        safeStorage.decryptStringAsync.mockResolvedValue({
+          result: "secret",
+          shouldReEncrypt: false,
+        });
+        const storage = yield* ElectronSafeStorage.make;
+        assert.isFalse(yield* storage.isEncryptionAvailable);
+
+        yield* Effect.exit(storage.encryptString("secret"));
+        yield* Effect.exit(storage.decryptString(Buffer.from("ciphertext")));
+        assert.equal(safeStorage.encryptStringAsync.mock.calls.length, 0);
+        assert.equal(safeStorage.decryptStringAsync.mock.calls.length, 0);
+      }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
   );
 
   it.effect.each(["unavailable", "rejected"] as const)(
