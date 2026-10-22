@@ -9695,14 +9695,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   yield* handleSdkMessage({ query: querySession.query, message: lastResult });
                   return;
                 }
-                // Only a notification makes Claude wake the root; a subagent
-                // resuming on its own does not, and must not hold the root busy.
-                const canWakeRoot = drained.some(
-                  (entry) =>
-                    (entry.type === "system" && entry.subtype === "task_notification") ||
-                    isClaudeRootTurnFrame(entry),
-                );
-                if ((hasOpaqueTaskNotification || !canWakeRoot) && !context.nativeWakeStarted) {
+                if (hasOpaqueTaskNotification && !context.nativeWakeStarted) {
                   const completedAt = yield* DateTime.now;
                   yield* finalizeActiveTurn({ context, status: "completed", completedAt });
                 } else if (!context.nativeWakeStarted) {
