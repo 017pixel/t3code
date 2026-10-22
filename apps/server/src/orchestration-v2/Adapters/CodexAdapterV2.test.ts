@@ -51,7 +51,7 @@ import * as Stream from "effect/Stream";
 import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
 import * as Exit from "effect/Exit";
-import type * as Cause from "effect/Cause";
+import * as Cause from "effect/Cause";
 import * as PlatformError from "effect/PlatformError";
 import { TestClock } from "effect/testing";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
@@ -808,25 +808,16 @@ describe("CodexAdapterV2 process exit", () => {
       // Drain runnable lifecycle work before inspecting the reader; no wall-clock deadline.
       yield* TestClock.adjust(0);
       const readerExit = eventReader.pollUnsafe();
-      assert.isDefined(readerExit, "dead Codex sessions must end their event stream");
+      // A clean end of stream reads as manual_shutdown to the session manager, so
+      // only a stream failure retires the dead process as a runtime error.
       assert.isTrue(
         readerExit !== undefined &&
-          (Exit.isFailure(readerExit) ||
-            events.some(
-              (event) =>
-                event.type === "provider_session.updated" &&
-                (event.providerSession.status === "error" ||
-                  event.providerSession.status === "stopped"),
-            )),
+          Exit.isFailure(readerExit) &&
+          Schema.is(ProviderAdapter.ProviderAdapterEventStreamError)(
+            Cause.squash(readerExit.cause),
+          ),
         "the session manager must receive process death so it can retire the shared process",
       );
-      if (active) {
-        assert.isTrue(
-          (readerExit !== undefined && Exit.isFailure(readerExit)) ||
-            events.some((event) => event.type === "turn.terminal" && event.status === "failed"),
-          "an active turn must fail or its subscriber must receive the process failure",
-        );
-      }
     }).pipe(
       Effect.scoped,
       Effect.provide(

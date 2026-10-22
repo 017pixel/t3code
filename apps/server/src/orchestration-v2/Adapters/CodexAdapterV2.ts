@@ -1843,6 +1843,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ProviderAdapter.ProviderAdapterEventStreamError
         >();
         // Drain final notifications before the session manager retires the dead process.
+        // Queue.fail lets readers take items already buffered before they see the failure.
         yield* client.awaitTermination.pipe(
           Effect.catch((cause) =>
             Queue.fail(
