@@ -262,18 +262,25 @@ it.effect("keeps one queued occurrence of a recurring task while its bound threa
         yield* Effect.flatten(Ref.get(runDueWork));
       }
 
-      const { runs, messages } = yield* Ref.get(thread);
-      const queuedOccurrences = runs
-        .filter((run) => run.status === "queued")
-        .map((run) => messages.find((message) => message.id === run.userMessageId))
-        .filter((message) => message?.scheduledTaskId === task.id)
-        .map((message) => message?.id);
-      expect(queuedOccurrences).toHaveLength(1);
+      const queuedOccurrences = Ref.get(thread).pipe(
+        Effect.map(
+          ({ runs, messages }) =>
+            runs
+              .filter((run) => run.status === "queued")
+              .map((run) => messages.find((message) => message.id === run.userMessageId))
+              .filter((message) => message?.scheduledTaskId === task.id).length,
+        ),
+      );
+      expect(yield* queuedOccurrences).toBe(1);
       // Skipped intervals still move the schedule forward.
       const [listed] = (yield* service.list()).tasks;
       expect(Date.parse(listed?.nextRunAt ?? "")).toBeGreaterThan(
         Date.parse("2026-07-01T09:03:03.000Z"),
       );
+
+      // Run now is an explicit request, so it still queues behind the held one.
+      yield* service.runNow({ id: task.id });
+      expect(yield* queuedOccurrences).toBe(2);
     }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(layerDependencies))));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
