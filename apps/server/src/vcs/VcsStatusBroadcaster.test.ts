@@ -82,6 +82,7 @@ function layerTestFor(state: {
   beforeRemoteStatus?: Effect.Effect<void>;
   headPath?: string;
   headPathCalls?: number;
+  failLocalStatus?: boolean;
 }) {
   return VcsStatusBroadcaster.layer.pipe(
     Layer.provideMerge(NodeServices.layer),
@@ -95,20 +96,34 @@ function layerTestFor(state: {
     Layer.provide(
       Layer.mock(GitWorkflowService.GitWorkflowService)({
         localStatus: () =>
-          Effect.sync(() => {
+          Effect.suspend(() => {
             state.localStatusCalls += 1;
-            return state.currentLocalStatus;
+            return state.failLocalStatus
+              ? Effect.fail(
+                  new GitManagerError({
+                    operation: "VcsStatusBroadcaster.test",
+                    cwd: "/repo",
+                    detail: "index.lock is held",
+                  }),
+                )
+              : Effect.succeed(state.currentLocalStatus);
           }),
+        // Captured before the hook, like a read that resolved the branch and then waits on
+        // its PR lookup.
         remoteStatus: (_input, options) =>
-          Effect.suspend(() => state.beforeRemoteStatus ?? Effect.void).pipe(
-            Effect.andThen(
-              Effect.sync(() => {
-                state.remoteStatusCalls += 1;
-                state.remoteStatusRefreshUpstreamValues?.push(options?.refreshUpstream);
-                return state.currentRemoteStatus;
-              }),
-            ),
-          ),
+          Effect.suspend(() => {
+            const remote = state.currentRemoteStatus;
+            return (state.beforeRemoteStatus ?? Effect.void).pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  state.remoteStatusCalls += 1;
+                  state.remoteStatusRefreshUpstreamValues?.push(options?.refreshUpstream);
+                  return remote;
+                }),
+              ),
+            );
+          }),
+        checkedOutBranch: () => Effect.sync(() => state.currentLocalStatus.refName),
         invalidateLocalStatus: () =>
           Effect.sync(() => {
             state.localInvalidationCalls += 1;
@@ -551,6 +566,115 @@ describe("VcsStatusBroadcaster", () => {
     }).pipe(Effect.provide(layerTestFor(state)), Effect.scoped);
   });
 
+  it.effect("a checkout during a poll's remote read cannot pair branches", () => {
+    const state: Parameters<typeof layerTestFor>[0] = {
+      currentLocalStatus: { ...baseLocalStatus, isDefaultRef: true, refName: "main" },
+      currentRemoteStatus: { ...remoteStatusWithPr, aheadCount: 1 },
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+    };
+
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      yield* broadcaster.getStatus({ cwd: "/repo" });
+      const clientStates: Array<VcsStatusResult> = [];
+      const subscribed = yield* Deferred.make<void>();
+      const checkedOut = yield* Deferred.make<void>();
+      yield* Stream.runForEach(broadcaster.streamStatus({ cwd: "/repo" }), (event) =>
+        Effect.gen(function* () {
+          const next = applyGitStatusStreamEvent(clientStates.at(-1) ?? null, event);
+          clientStates.push(next);
+          yield* Deferred.succeed(subscribed, undefined);
+          if (next.refName === "repro") yield* Deferred.succeed(checkedOut, undefined);
+        }),
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(subscribed);
+
+      const lookupStarted = yield* Deferred.make<void>();
+      const finishLookup = yield* Deferred.make<void>();
+      state.beforeRemoteStatus = Deferred.succeed(lookupStarted, undefined).pipe(
+        Effect.andThen(Deferred.await(finishLookup)),
+      );
+      // The poll reads main's remote and is still looking up its PR.
+      state.currentRemoteStatus = { ...remoteStatusWithPr, aheadCount: 2 };
+      yield* TestClock.adjust(Duration.seconds(30));
+      yield* Deferred.await(lookupStarted);
+      delete state.beforeRemoteStatus;
+      // `git switch -c repro` in the terminal lands before the poll reads local status.
+      state.currentLocalStatus = { ...baseLocalStatus, isDefaultRef: false, refName: "repro" };
+      state.currentRemoteStatus = { ...baseRemoteStatus, hasUpstream: false };
+      yield* Deferred.succeed(finishLookup, undefined);
+      yield* Deferred.await(checkedOut);
+
+      assert.deepStrictEqual(
+        clientStates.map((status) => [
+          status.refName,
+          status.pr?.number ?? null,
+          status.aheadCount,
+        ]),
+        [
+          ["main", remoteStatusWithPr.pr?.number, 1],
+          ["repro", null, 0],
+        ],
+      );
+    }).pipe(Effect.provide(layerTestFor(state)), Effect.scoped);
+  });
+
+  it.effect("a poll whose local read fails never shows a new branch with old metadata", () => {
+    const state: Parameters<typeof layerTestFor>[0] = {
+      currentLocalStatus: { ...baseLocalStatus, isDefaultRef: true, refName: "main" },
+      currentRemoteStatus: remoteStatusWithPr,
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+    };
+
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      yield* broadcaster.getStatus({ cwd: "/repo" });
+      const clientStates: Array<VcsStatusResult> = [];
+      const received = [yield* Deferred.make<void>()];
+      yield* Stream.runForEach(broadcaster.streamStatus({ cwd: "/repo" }), (event) =>
+        Effect.gen(function* () {
+          clientStates.push(applyGitStatusStreamEvent(clientStates.at(-1) ?? null, event));
+          yield* Deferred.succeed(received[clientStates.length - 1]!, undefined);
+        }),
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(received[0]!);
+
+      // An editor commit holds index.lock while main moves ahead.
+      state.failLocalStatus = true;
+      state.currentRemoteStatus = { ...remoteStatusWithPr, aheadCount: 1 };
+      received.push(yield* Deferred.make<void>());
+      yield* TestClock.adjust(Duration.seconds(30));
+      yield* Deferred.await(received[1]!);
+      assert.deepStrictEqual(
+        [clientStates[1]?.refName, clientStates[1]?.aheadCount, clientStates[1]?.pr],
+        ["main", 1, remoteStatusWithPr.pr],
+      );
+
+      // Still locked after `git switch -c repro`: repro's remote cannot go out under main.
+      state.currentLocalStatus = { ...baseLocalStatus, isDefaultRef: false, refName: "repro" };
+      state.currentRemoteStatus = { ...baseRemoteStatus, hasUpstream: false };
+      const failedLocalCalls = state.localStatusCalls;
+      received.push(yield* Deferred.make<void>());
+      yield* TestClock.adjust(Duration.seconds(30));
+      assert.strictEqual(state.localStatusCalls, failedLocalCalls + 1);
+
+      state.failLocalStatus = false;
+      yield* TestClock.adjust(Duration.seconds(30));
+      yield* Deferred.await(received[2]!);
+      assert.strictEqual(clientStates.length, 3);
+      assert.deepStrictEqual(
+        [clientStates[2]?.refName, clientStates[2]?.hasUpstream, clientStates[2]?.pr],
+        ["repro", false, null],
+      );
+    }).pipe(Effect.provide(layerTestFor(state)), Effect.scoped);
+  });
+
   it.effect("a terminal checkout publishes the new branch without waiting for a poll", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -674,6 +798,7 @@ describe("VcsStatusBroadcaster", () => {
                   : Effect.void,
               ),
             ),
+          checkedOutBranch: () => Effect.succeed(baseLocalStatus.refName),
           invalidateLocalStatus: () =>
             Effect.sync(() => {
               state.localInvalidationCalls += 1;

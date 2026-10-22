@@ -37,6 +37,7 @@ import * as ServerSettings from "../serverSettings.ts";
 const VCS_STATUS_REFRESH_FAILURE_BASE_DELAY = Duration.seconds(30);
 const VCS_STATUS_REFRESH_FAILURE_MAX_DELAY = Duration.minutes(15);
 const MAX_FAILURE_DIAGNOSTIC_VALUES = 8;
+const CHECKOUT_RACE_ATTEMPTS = 3;
 const MAX_FAILURE_DIAGNOSTIC_VALUE_LENGTH = 128;
 
 function boundedDiagnosticValue(value: string): string {
@@ -494,25 +495,55 @@ export const make = Effect.gen(function* () {
         if (options?.refreshUpstream !== false) {
           yield* workflow.invalidateRemoteStatus(cwd);
         }
-        const remote = yield* workflow.remoteStatus({ cwd }, options);
-        const pulled =
-          options?.refreshUpstream === false
-            ? null
-            : yield* maybeAutoPull(cwd, remote, options?.policyCwds ?? [cwd]);
-        if (pulled !== null) return pulled.remote;
-        if (remote === null) return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
-        // The remote read follows the checked-out branch but does not carry its name, so a
-        // checkout made outside T3 Code, such as one with no upstream, only reaches clients
-        // through local status. A changed local goes out with the remote in one snapshot so
-        // clients never pair the new branch with the previous branch's PR or counts.
-        yield* workflow.invalidateLocalStatus(cwd);
-        const local = yield* workflow.localStatus({ cwd });
-        const cachedLocal = (yield* getCachedStatus(cwd))?.local;
-        if (cachedLocal?.fingerprint === fingerprintStatusPart(local)) {
-          return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
+        // A checkout outside T3 Code can land between these reads, and the remote result does
+        // not name its branch. Reading the branch around it keeps one branch's PR and counts
+        // from reaching clients beside another branch's name.
+        for (let attempt = 1; attempt <= CHECKOUT_RACE_ATTEMPTS; attempt += 1) {
+          // The first read may hold the previous branch's result in the remote cache.
+          if (attempt > 1) yield* workflow.invalidateRemoteStatus(cwd);
+          const branch = yield* workflow.checkedOutBranch(cwd);
+          const remote = yield* workflow.remoteStatus(
+            { cwd },
+            attempt === 1 ? options : { ...options, refreshUpstream: false },
+          );
+          if ((yield* workflow.checkedOutBranch(cwd)) !== branch) continue;
+          const pulled =
+            options?.refreshUpstream === false
+              ? null
+              : yield* maybeAutoPull(cwd, remote, options?.policyCwds ?? [cwd]);
+          if (pulled !== null) return pulled.remote;
+          if (remote === null) {
+            return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
+          }
+          const cached = yield* getCachedStatus(cwd);
+          const previousRemote = cached?.remote?.value;
+          const branchShown = cached?.local?.value.refName === branch;
+          const countsMoved =
+            !previousRemote ||
+            previousRemote.aheadCount !== remote.aheadCount ||
+            previousRemote.behindCount !== remote.behindCount ||
+            previousRemote.aheadOfDefaultCount !== remote.aheadOfDefaultCount;
+          if (branchShown && !countsMoved) {
+            return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
+          }
+          yield* workflow.invalidateLocalStatus(cwd);
+          const local = yield* workflow.localStatus({ cwd }).pipe(
+            // A commit in an editor can hold index.lock. The remote still belongs to the
+            // branch clients show, but must not go out under the name of a branch they don't.
+            Effect.catch((error) => (branchShown ? Effect.succeed(null) : Effect.fail(error))),
+          );
+          if (local === null) {
+            return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
+          }
+          if (local.refName !== branch) continue;
+          if (cached?.local?.fingerprint === fingerprintStatusPart(local)) {
+            return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
+          }
+          yield* updateCachedStatus(cwd, local, remote, { publish: true });
+          return remote;
         }
-        yield* updateCachedStatus(cwd, local, remote, { publish: true });
-        return remote;
+        // HEAD kept moving. The HEAD watch refreshes again once it settles.
+        return (yield* getCachedStatus(cwd))?.remote?.value ?? null;
       }),
     );
   });
