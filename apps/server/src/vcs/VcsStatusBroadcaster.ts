@@ -38,6 +38,12 @@ const VCS_STATUS_REFRESH_FAILURE_BASE_DELAY = Duration.seconds(30);
 const VCS_STATUS_REFRESH_FAILURE_MAX_DELAY = Duration.minutes(15);
 const MAX_FAILURE_DIAGNOSTIC_VALUES = 8;
 const CHECKOUT_RACE_ATTEMPTS = 3;
+// A held index.lock fails the read, and its removal moves no HEAD to trigger another.
+const CHECKOUT_REFRESH_RETRY = Schedule.exponential(Duration.seconds(1)).pipe(
+  Schedule.modifyDelay(({ duration }) =>
+    Effect.succeed(Duration.min(duration, Duration.seconds(30))),
+  ),
+);
 const MAX_FAILURE_DIAGNOSTIC_VALUE_LENGTH = 128;
 
 function boundedDiagnosticValue(value: string): string {
@@ -785,7 +791,12 @@ export const make = Effect.gen(function* () {
         Stream.filter((event) => path.basename(event.path) === "HEAD"),
         // A rebase moves HEAD many times; refresh once for whatever arrived during a refresh.
         Stream.buffer({ capacity: 1, strategy: "sliding" }),
-        Stream.runForEach(() => refreshCheckedOutRef(cwd).pipe(Effect.ignoreCause({ log: true }))),
+        Stream.runForEach(() =>
+          refreshCheckedOutRef(cwd).pipe(
+            Effect.retry(CHECKOUT_REFRESH_RETRY),
+            Effect.ignoreCause({ log: true }),
+          ),
+        ),
       );
   });
 
