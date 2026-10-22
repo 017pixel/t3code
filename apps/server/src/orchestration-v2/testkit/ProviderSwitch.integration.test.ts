@@ -2225,6 +2225,117 @@ describe("orchestration v2 provider switching", () => {
     ),
   );
 
+  // regression: #20343 sending to an instance with separate history must release the old session
+  it.live(
+    "detaches the previous instance's session when a send hands off to another instance",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace("handoff-releases-session");
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const secondSelection: ModelSelection = {
+            ...CLAUDE_MODEL_SELECTION,
+            instanceId: ProviderInstanceId.make("claude-second-account"),
+          };
+          // No shared continuation key: each Claude instance owns its own native history.
+          const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+            makeTestAdapter({
+              instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              responseByRunOrdinal: { 1: "First account complete" },
+              capturedTurns,
+            }),
+            makeTestAdapter({
+              instanceId: secondSelection.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: secondSelection,
+              responseByRunOrdinal: { 2: "Second account complete" },
+              capturedTurns,
+            }),
+          ]);
+          const handoffThreadId = ThreadId.make("thread:handoff-releases-session");
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const send = (ordinal: number, modelSelection: ModelSelection) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                createdBy: "user",
+                creationSource: "web",
+                commandId: CommandId.make(`command:handoff-releases-session:${ordinal}`),
+                threadId: handoffThreadId,
+                messageId: MessageId.make(`message:handoff-releases-session:${ordinal}`),
+                text: `Prompt ${ordinal}`,
+                attachments: [],
+                modelSelection,
+                dispatchMode: { type: "start_immediately" },
+              });
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:handoff-releases-session:create"),
+              threadId: handoffThreadId,
+              projectId: ProjectId.make("project:handoff-releases-session"),
+              title: "Handoff releases session",
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: cwd,
+            });
+            yield* send(1, CLAUDE_MODEL_SELECTION);
+            yield* worker.drain();
+            const afterFirst = yield* waitForIdle(handoffThreadId);
+            const firstSession = afterFirst.providerSessions.find(
+              (session) => session.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
+            );
+            assert.equal(firstSession?.status, "ready");
+
+            yield* send(2, secondSelection);
+            yield* worker.drain();
+            const afterSecond = yield* waitForIdle(handoffThreadId);
+            yield* worker.drain();
+            const projection = yield* orchestrator.getThreadProjection(handoffThreadId);
+
+            assert.deepEqual(
+              projection.runs.map((run) => [run.providerInstanceId, run.status]),
+              [
+                [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+                [secondSelection.instanceId, "completed"],
+              ],
+            );
+            assert.lengthOf(afterSecond.contextHandoffs, 1);
+            assert.deepEqual(
+              projection.providerSessions.map((session) => session.providerInstanceId),
+              [secondSelection.instanceId],
+            );
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name: "handoff-releases-session",
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: {
+                      type: "readOnly",
+                      access: { type: "fullAccess" },
+                      networkAccess: false,
+                    },
+                  },
+                },
+                layerRegistry,
+              ),
+            ),
+          );
+        }),
+      ),
+  );
+
   // regression: #21314 a queued PR update must follow the provider that took over the thread
   it.live.each([
     ["automatic", "Claude"],
