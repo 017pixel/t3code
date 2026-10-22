@@ -13,7 +13,7 @@ import * as Scope from "effect/Scope";
 import { describe, expect } from "vite-plus/test";
 
 import { checkpointRefForThreadTurn } from "./Utils.ts";
-import { parseTurnDiffFilesFromNumstat } from "./Diffs.ts";
+import { isGitImport, parseTurnDiffFilesFromNumstat } from "./Diffs.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -508,6 +508,168 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
         expect(yield* checkpointStore.listAuthoredPaths(refs)).toEqual(
           new Set(["README.md", "shared.txt"]),
         );
+      }),
+    );
+
+    // A turn that switches branches starts from the branch it switched to, while a reset or
+    // rename keeps the branch it had.
+    const captureTurnAcrossHeadMove = (
+      threadId: string,
+      moveHead: (
+        cwd: string,
+      ) => Effect.Effect<
+        void,
+        VcsError | PlatformError.PlatformError,
+        VcsProcess.VcsProcess | FileSystem.FileSystem
+      >,
+    ) =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        const id = ThreadId.make(threadId);
+        const refs = {
+          cwd: tmp,
+          fromCheckpointRef: checkpointRefForThreadTurn(id, 1),
+          toCheckpointRef: checkpointRefForThreadTurn(id, 2),
+        };
+        yield* writeTextFile(NodePath.join(tmp, "shared.txt"), "base\n");
+        yield* git(tmp, ["add", "."]);
+        yield* git(tmp, ["commit", "-m", "base"]);
+        yield* git(tmp, ["branch", "branch-b"]);
+        yield* git(tmp, ["checkout", "-b", "branch-a"]);
+        yield* writeTextFile(NodePath.join(tmp, "shared.txt"), "A content\n");
+        yield* writeTextFile(NodePath.join(tmp, "a.txt"), "A only\n");
+        yield* git(tmp, ["add", "."]);
+        yield* git(tmp, ["commit", "-m", "branch A change"]);
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: refs.fromCheckpointRef,
+        });
+
+        yield* moveHead(tmp);
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: refs.toCheckpointRef,
+          previousCheckpointRef: refs.fromCheckpointRef,
+        });
+
+        const patch = yield* checkpointStore.diffCheckpoints({ ...refs, ignoreWhitespace: false });
+        const numstat = yield* checkpointStore.diffCheckpoints({
+          ...refs,
+          ignoreWhitespace: false,
+          format: "numstat",
+        });
+        const authoredPaths = yield* checkpointStore.listAuthoredPaths(refs);
+        return {
+          authoredPaths,
+          changedLines: patch
+            .split("\n")
+            .filter((line) => /^[-+]/.test(line) && !/^(---|\+\+\+) /.test(line)),
+          files: parseTurnDiffFilesFromNumstat(numstat).filter(
+            (file) => !isGitImport(file, authoredPaths),
+          ),
+        };
+      });
+
+    it.effect.each([
+      ["switch", "branch-b"],
+      ["switch", "--detach", "branch-b"],
+    ])("diffs from the destination after git %s", (switchArgs) =>
+      Effect.gen(function* () {
+        const turn = yield* captureTurnAcrossHeadMove("checkpoint-switch", (cwd) =>
+          Effect.gen(function* () {
+            yield* git(cwd, switchArgs);
+            yield* writeTextFile(NodePath.join(cwd, "shared.txt"), "B edit\n");
+          }),
+        );
+
+        expect(turn.changedLines).toEqual(["-base", "+B edit"]);
+        expect(turn.files).toEqual([{ path: "shared.txt", additions: 1, deletions: 1 }]);
+        expect(turn.authoredPaths).toEqual(new Set(["a.txt", "shared.txt"]));
+      }),
+    );
+
+    it.effect("keeps a reset's deletions when the turn then switches branches", () =>
+      Effect.gen(function* () {
+        const turn = yield* captureTurnAcrossHeadMove("checkpoint-reset-switch", (cwd) =>
+          Effect.gen(function* () {
+            yield* git(cwd, ["reset", "--hard", "HEAD~1"]);
+            yield* git(cwd, ["switch", "branch-b"]);
+            yield* writeTextFile(NodePath.join(cwd, "b.txt"), "B only\n");
+          }),
+        );
+
+        expect(turn.changedLines).toEqual(["-A only", "+B only", "-A content", "+base"]);
+        expect(turn.files).toEqual([
+          { path: "a.txt", additions: 0, deletions: 1 },
+          { path: "b.txt", additions: 1, deletions: 0 },
+          { path: "shared.txt", additions: 1, deletions: 1 },
+        ]);
+      }),
+    );
+
+    it.effect("does not replay a switch that an earlier checkpoint already followed", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        const id = ThreadId.make("checkpoint-switch-then-reset");
+        const [first, second, third] = [1, 2, 3].map((turn) =>
+          checkpointRefForThreadTurn(id, turn),
+        );
+        yield* git(tmp, ["branch", "branch-b"]);
+        yield* git(tmp, ["checkout", "-b", "branch-a"]);
+        yield* writeTextFile(NodePath.join(tmp, "a.txt"), "A only\n");
+        yield* git(tmp, ["add", "."]);
+        yield* git(tmp, ["commit", "-m", "branch A change"]);
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: first! });
+        yield* git(tmp, ["switch", "branch-b"]);
+        yield* writeTextFile(NodePath.join(tmp, "b.txt"), "B only\n");
+        yield* git(tmp, ["add", "."]);
+        yield* git(tmp, ["commit", "-m", "branch B change"]);
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: second!,
+          previousCheckpointRef: first!,
+        });
+
+        yield* git(tmp, ["reset", "--hard", "HEAD~1"]);
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: third!,
+          previousCheckpointRef: second!,
+        });
+
+        const refs = { cwd: tmp, fromCheckpointRef: second!, toCheckpointRef: third! };
+        const numstat = yield* checkpointStore.diffCheckpoints({
+          ...refs,
+          ignoreWhitespace: false,
+          format: "numstat",
+        });
+        const authoredPaths = yield* checkpointStore.listAuthoredPaths(refs);
+        expect(
+          parseTurnDiffFilesFromNumstat(numstat).filter(
+            (file) => !isGitImport(file, authoredPaths),
+          ),
+        ).toEqual([{ path: "b.txt", additions: 0, deletions: 1 }]);
+      }),
+    );
+
+    it.effect("keeps a reset's deletions when the turn renames its branch", () =>
+      Effect.gen(function* () {
+        const turn = yield* captureTurnAcrossHeadMove("checkpoint-rename-reset", (cwd) =>
+          Effect.gen(function* () {
+            yield* git(cwd, ["branch", "-m", "renamed"]);
+            yield* git(cwd, ["reset", "--hard", "HEAD~1"]);
+          }),
+        );
+
+        expect(turn.changedLines).toEqual(["-A only", "-A content", "+base"]);
+        expect(turn.files).toEqual([
+          { path: "a.txt", additions: 0, deletions: 1 },
+          { path: "shared.txt", additions: 1, deletions: 1 },
+        ]);
       }),
     );
   });
