@@ -33,7 +33,7 @@ async function renderPanel(
     questionCount?: number;
     multiSelect?: boolean;
     width?: number;
-    options?: { label: string; description: string }[];
+    options?: { label: string; description: string; customAnswer?: boolean }[];
     queue?: { index: number; total: number };
   },
   run: (
@@ -344,3 +344,46 @@ it.each([
     );
   },
 );
+
+it("renders a custom-answer option as a static downward hint after selectable options", async () => {
+  await page.viewport(1024, 900);
+  await renderPanel(
+    {
+      header: "Theme",
+      options: [
+        { label: "System", description: "Follow the OS" },
+        { label: "Dark", description: "Always dark" },
+        {
+          label: "Write my own answer",
+          description: "Write my own answer",
+          customAnswer: true,
+        },
+      ],
+    },
+    async (container) => {
+      const selectableRows = [...container.querySelectorAll("button[aria-pressed]")];
+      expect(
+        selectableRows.map(
+          (row) => row.querySelector("[data-pending-user-input-option-key]")?.textContent,
+        ),
+      ).toEqual(["1", "2"]);
+
+      const customAnswerRow = container.querySelector<HTMLElement>(
+        "[data-pending-user-input-custom-answer-option]",
+      )!;
+      expect(customAnswerRow.tagName).toBe("DIV");
+      expect(customAnswerRow.getAttribute("aria-pressed")).toBeNull();
+      expect(customAnswerRow.textContent).toContain("Write my own answer");
+      expect(customAnswerRow.querySelector("svg")).not.toBeNull();
+      expect(customAnswerRow.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+        selectableRows.at(-1)!.getBoundingClientRect().bottom,
+      );
+
+      const selectableKey = selectableRows[0]!.querySelector(
+        "[data-pending-user-input-option-key]",
+      )!;
+      const customAnswerIcon = customAnswerRow.querySelector("svg")!;
+      expect(centerX(customAnswerIcon)).toBe(centerX(selectableKey));
+    },
+  );
+});

@@ -244,6 +244,12 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
         {props.pendingUserInput.questions.map((question) => {
           const draft = props.drafts[question.id];
           const showHeader = !isGenericUserInputQuestionHeader(question.header);
+          const selectableOptions = question.options.filter(
+            (option) => option.customAnswer !== true,
+          );
+          const customAnswerOptions = question.options.filter(
+            (option) => option.customAnswer === true,
+          );
           return (
             <View key={question.id} className="gap-2 pt-1">
               <View className="-mx-4 gap-1.5 bg-foreground/3 px-4 py-2">
@@ -258,7 +264,7 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
                 ) : null}
               </View>
               <View className="gap-0.5">
-                {question.options.map((option) => {
+                {selectableOptions.map((option) => {
                   const optionValue = option.value ?? option.label.trim();
                   const selected = isPendingUserInputOptionSelected(question, draft, optionValue);
                   const description =
@@ -308,6 +314,44 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
                         </Text>
                       ) : null}
                     </Pressable>
+                  );
+                })}
+                {customAnswerOptions.map((option) => {
+                  const optionValue = option.value ?? option.label.trim();
+                  const description =
+                    option.description !== option.label ? option.description : undefined;
+                  return (
+                    <View
+                      key={`custom-answer:${optionValue}`}
+                      className={cn(
+                        "min-h-12 w-full justify-center gap-0.5 rounded-xl px-2 py-2",
+                        responseDisabled && "opacity-50",
+                      )}
+                    >
+                      <View className="flex-row items-start gap-3">
+                        <Text className="min-w-0 flex-1 font-t3-medium text-sm text-foreground">
+                          {option.label}
+                        </Text>
+                        <View
+                          accessibilityElementsHidden
+                          importantForAccessibility="no-hide-descendants"
+                          className="h-[19px] w-4 items-center justify-center"
+                        >
+                          <SymbolView
+                            name="arrow.down"
+                            size={16}
+                            tintColorClassName="accent-foreground-muted"
+                            type="monochrome"
+                            weight="bold"
+                          />
+                        </View>
+                      </View>
+                      {description ? (
+                        <Text className="pr-7 font-sans text-xs text-foreground-muted">
+                          {description}
+                        </Text>
+                      ) : null}
+                    </View>
                   );
                 })}
               </View>

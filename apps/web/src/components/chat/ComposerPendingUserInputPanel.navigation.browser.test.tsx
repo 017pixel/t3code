@@ -13,6 +13,7 @@ import {
   togglePendingUserInputOptionSelection,
   type PendingUserInputDraftAnswer,
 } from "../../pendingUserInput";
+import type { PendingUserInput } from "../../session-logic";
 
 vi.mock(import("../ChatMarkdown"), async (importOriginal) => ({
   ...(await importOriginal()),
@@ -26,7 +27,7 @@ import { usePendingThreadRequests } from "./usePendingThreadRequests";
 
 const threadRef = { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") };
 
-const defaultPrompt = {
+const defaultPrompt: PendingUserInput = {
   requestId: RuntimeRequestId.make("question-navigation"),
   createdAt: "2026-10-09T00:00:00.000Z",
   dismissible: false,
@@ -40,7 +41,7 @@ const defaultPrompt = {
   })),
 };
 
-function Questions({ prompt }: { prompt: typeof defaultPrompt }) {
+function Questions({ prompt }: { prompt: PendingUserInput }) {
   const [questionIndex, setQuestionIndex] = useState(0);
   const [answers, setAnswers] = useState<Record<string, PendingUserInputDraftAnswer>>({});
   return (
@@ -144,6 +145,51 @@ it("swaps the chosen option's number for a check in place and restores it when t
   ]);
   await act(() => vi.advanceTimersByTime(200));
   expect(activeIndex()).toBe("1");
+});
+
+it("does not select or advance from a custom-answer hint", async () => {
+  using _timers = fakeTimers();
+  const prompt: PendingUserInput = {
+    ...defaultPrompt,
+    questions: [
+      {
+        ...defaultPrompt.questions[0]!,
+        options: [
+          { label: "Rolling", description: "One node at a time" },
+          { label: "Canary", description: "A slice of traffic first" },
+          {
+            label: "Write my own answer",
+            description: "Write my own answer",
+            customAnswer: true,
+          },
+        ],
+      },
+    ],
+  };
+  await using screen = await render(<Questions prompt={prompt} />);
+  const keys = () => optionKeys(screen.container);
+  const activeIndex = () => screen.container.querySelector("output")!.textContent;
+  const unpressed = [
+    { pressed: "false", key: "1" },
+    { pressed: "false", key: "2" },
+  ];
+  expect(keys()).toEqual(unpressed);
+
+  const customAnswer = screen.container.querySelector<HTMLElement>(
+    "[data-pending-user-input-custom-answer-option]",
+  )!;
+  expect(customAnswer.tagName).toBe("DIV");
+  await act(() => customAnswer.click());
+  await pressKey("3");
+  await act(() => vi.advanceTimersByTime(200));
+  expect(activeIndex()).toBe("0");
+  expect(keys()).toEqual(unpressed);
+
+  await pressKey("2");
+  expect(keys()).toEqual([
+    { pressed: "false", key: "1" },
+    { pressed: "true", key: "check" },
+  ]);
 });
 
 function questionProjection(threadId: ThreadId, requestIds = ["first", "second"]) {

@@ -7,7 +7,7 @@ import {
   derivePendingUserInputProgress,
   type PendingUserInputDraftAnswer,
 } from "../../pendingUserInput";
-import { CheckIcon } from "lucide-react";
+import { ArrowDownIcon, CheckIcon } from "lucide-react";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { cn } from "~/lib/utils";
 import { ComposerBanner } from "./ComposerBanner";
@@ -130,6 +130,13 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
 
   const handleOptionSelection = (questionId: string, optionValue: string) => {
     if (disabled || isResponding) return;
+    if (
+      activeQuestion?.options.some(
+        (option) => option.customAnswer === true && (option.value ?? option.label) === optionValue,
+      )
+    ) {
+      return;
+    }
     if (activeQuestion?.multiSelect) {
       onToggleOption(questionId, optionValue);
       return;
@@ -163,9 +170,12 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
       }
       const digit = Number.parseInt(event.key, 10);
       if (Number.isNaN(digit) || digit < 1 || digit > 9) return;
+      const selectableOptions = activeQuestion.options.filter(
+        (option) => option.customAnswer !== true,
+      );
       const optionIndex = digit - 1;
-      if (optionIndex >= activeQuestion.options.length) return;
-      const option = activeQuestion.options[optionIndex];
+      if (optionIndex >= selectableOptions.length) return;
+      const option = selectableOptions[optionIndex];
       if (!option) return;
       event.preventDefault();
       selectOptionFromShortcut(activeQuestion.id, option.value ?? option.label);
@@ -177,6 +187,12 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   if (!activeQuestion) {
     return null;
   }
+  const selectableOptionEntries = activeQuestion.options.flatMap((option, index) =>
+    option.customAnswer === true ? [] : [{ option, index }],
+  );
+  const customAnswerOptions = activeQuestion.options.filter(
+    (option) => option.customAnswer === true,
+  );
   const showHeader = !isGenericUserInputQuestionHeader(activeQuestion.header);
   const toggleLabel = isCollapsed
     ? "Show the question and its options"
@@ -301,7 +317,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
             </div>
             {/* Row fills hang 12px past the text column so labels stay on its edge. */}
             <div className="-mx-3 mt-1.5">
-              {activeQuestion.options.map((option, index) => {
+              {selectableOptionEntries.map(({ option, index }, selectableIndex) => {
                 const optionValue = option.value ?? option.label;
                 const isOptimisticallySelected =
                   optimisticSingleSelect?.questionId === activeQuestion.id &&
@@ -347,11 +363,37 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                     >
                       {isSelected ? (
                         <CheckIcon aria-hidden className="size-4 text-primary" strokeWidth={2.5} />
-                      ) : index < 9 ? (
-                        index + 1
+                      ) : selectableIndex < 9 ? (
+                        selectableIndex + 1
                       ) : null}
                     </span>
                   </button>
+                );
+              })}
+              {customAnswerOptions.map((option) => {
+                const optionValue = option.value ?? option.label;
+                return (
+                  <div
+                    key={`${activeQuestion.id}:custom-answer:${optionValue}`}
+                    data-pending-user-input-custom-answer-option
+                    className={cn(
+                      "grid w-full grid-cols-[min(40%,16rem)_minmax(0,1fr)_--spacing(5)] items-baseline gap-x-4 rounded-lg ps-3 pe-2 py-2 text-left",
+                      "@max-[480px]:grid-cols-[minmax(0,1fr)_--spacing(5)] @max-[480px]:gap-y-0.5",
+                      (disabled || isResponding) && "opacity-50",
+                    )}
+                  >
+                    <span className="col-start-1 row-start-1 text-sm/5 text-foreground/90">
+                      {option.label}
+                    </span>
+                    <span className="col-start-2 row-start-1 -mb-px text-xs/5 text-muted-foreground @max-[480px]:col-start-1 @max-[480px]:row-start-2 @max-[480px]:mb-0 @max-[480px]:text-xs/4 @max-[480px]:empty:hidden">
+                      {option.description && option.description !== option.label
+                        ? option.description
+                        : null}
+                    </span>
+                    <span className="col-start-3 row-start-1 flex size-5 items-center justify-center self-start text-muted-foreground/60 @max-[480px]:col-start-2">
+                      <ArrowDownIcon aria-hidden className="size-4" strokeWidth={2.5} />
+                    </span>
+                  </div>
                 );
               })}
             </div>
