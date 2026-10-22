@@ -257,8 +257,10 @@ prior findings, responses, and unresolved objections. Track each round by its ow
 a distinct `clientRequestId` per round, stable across retries of that round.
 `childThreadId` is backing storage, not a target for another independent review round through
 `t3_thread_send`. A follow-up that needs the same child's conversation goes to
-`childThreadId` through `t3_thread_send`; it starts a fresh task in that thread and
-does not reopen the completed one.
+`childThreadId` through `t3_thread_send`. After the original task completes, a follow-up
+starts a fresh task in that thread without reopening the completed one. With the default
+`mode: "auto"`, a message to a fully active child steers its existing task; use
+`mode: "queue"` when the follow-up needs a separate turn.
 
 Delegation requires an active parent run owned by the MCP credential's
 provider session. The request becomes the V2 command
