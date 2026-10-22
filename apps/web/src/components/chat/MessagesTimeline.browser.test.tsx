@@ -1,6 +1,15 @@
-import { EnvironmentId, MessageId, RunId, ScheduledTaskId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  MessageId,
+  RunId,
+  ScheduledTaskId,
+  ThreadId,
+  TurnItemId,
+  type OrchestrationV2TurnItem,
+} from "@t3tools/contracts";
 import type { LegendListRef } from "@legendapp/list/react";
-import { createRef, type ComponentProps, type ReactElement } from "react";
+import { DateTime } from "effect";
+import { createRef, useSyncExternalStore, type ComponentProps, type ReactElement } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import "~/index.css";
@@ -10,6 +19,7 @@ import { MessagesTimeline } from "./MessagesTimeline";
 import { remarkThoughtPreview } from "./TimelineWorkEntryRow.logic";
 import { parseMarkdownWithMath } from "@t3tools/shared/markdownMath";
 import { collectThreadFindRanges } from "./threadFindHighlights";
+import { deriveTimelineEntriesFromVisibleTurnItems } from "../../session-logic";
 
 const environmentQuery = vi.hoisted(() => ({
   error: "Pull request not found",
@@ -26,6 +36,30 @@ vi.mock(import("~/state/query"), async (original) => ({
     isSuccess: false,
     refresh: () => {},
   })) as never,
+}));
+
+// The thread's checkpoint summaries, as a store so a checkpoint can land after render.
+const checkpoints = vi.hoisted(() => {
+  let runIds: ReadonlyArray<string> = [];
+  const listeners = new Set<() => void>();
+  return {
+    get: () => runIds,
+    set: (next: ReadonlyArray<string>) => {
+      runIds = next;
+      for (const listener of listeners) listener();
+    },
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+});
+vi.mock(import("~/state/entities"), async (original) => ({
+  ...(await original()),
+  useThreadCheckpointSummaries: (() =>
+    useSyncExternalStore(checkpoints.subscribe, checkpoints.get).map((runId) => ({
+      runId,
+    }))) as never,
 }));
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-local");
@@ -262,6 +296,74 @@ describe("MessagesTimeline automation prompts", () => {
     expect(screen.buttons("Edit from here")).toHaveLength(0);
     await click(screen.button(/^Automation/));
     expect(screen.buttons("Edit from here")).toHaveLength(1);
+  });
+});
+
+describe("MessagesTimeline file change Open diff", () => {
+  const THREAD_ID = ThreadId.make("thread-open-diff");
+  const PARENT_THREAD_ID = ThreadId.make("thread-parent");
+  const RUN_ID = RunId.make("run-edit");
+
+  function fileChange(sourceThreadId: ThreadId): Entry[] {
+    const now = DateTime.makeUnsafe(CREATED_AT);
+    const item = {
+      id: TurnItemId.make("item-file-change"),
+      threadId: sourceThreadId,
+      runId: RUN_ID,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 0,
+      status: "completed",
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      type: "file_change",
+      fileName: "src/notes.md",
+      newStr: "notes\n",
+    } satisfies OrchestrationV2TurnItem;
+    return deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: [
+        {
+          item,
+          position: 0,
+          visibility: sourceThreadId === THREAD_ID ? "local" : "inherited",
+          sourceThreadId,
+          sourceItemId: item.id,
+        },
+      ],
+      optimisticMessages: [],
+    });
+  }
+
+  async function renderExpanded(entries: Entry[]) {
+    const screen = await renderTimeline(entries, {
+      routeThreadKey: `${ENVIRONMENT_ID}:${THREAD_ID}`,
+    });
+    // Finished work folds into a "Worked for" group, whose open state the thread keeps.
+    if (screen.buttons(/1 file$/).length === 0) await click(screen.button(/^Worked for/));
+    await click(screen.button(/1 file$/));
+    expect(screen.text()).toContain("src/notes.md");
+    return screen;
+  }
+
+  // The diff panel can only show a run this thread holds a checkpoint for.
+  it("offers Open diff on an edit only once its turn's checkpoint lands", async () => {
+    checkpoints.set([]);
+    await using screen = await renderExpanded(fileChange(THREAD_ID));
+    expect(screen.buttons("Open diff")).toHaveLength(0);
+
+    await act(() => checkpoints.set([RUN_ID]));
+    expect(screen.buttons("Open diff")).toHaveLength(1);
+  });
+
+  it("does not offer Open diff on an inherited edit whose run id has a local checkpoint", async () => {
+    checkpoints.set([RUN_ID]);
+    await using screen = await renderExpanded(fileChange(PARENT_THREAD_ID));
+    expect(screen.buttons("Open diff")).toHaveLength(0);
   });
 });
 
