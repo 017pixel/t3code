@@ -1612,156 +1612,149 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
   );
 
-  it.effect("replays a delegation retried under a credential reissued for the same thread", () =>
-    Effect.gen(function* () {
-      const otherParentThreadId = ThreadId.make("thread:mcp-providers-other-parent");
-      const tasksByCommandId = new Map<string, Record<string, unknown>>();
-      const delegatedCommandIds: Array<string> = [];
-      const tasksFor = (threadId: ThreadId) =>
-        Array.from(tasksByCommandId.values()).filter((task) => task.threadId === threadId);
-      const layerDependencies = Layer.mergeAll(
-        NodeServices.layer,
-        Layer.mock(ThreadManagementService.ThreadManagementService)({
-          getThreadRecords: (threadId) =>
-            Effect.sync(() => {
-              if (threadId !== parentThreadId && threadId !== otherParentThreadId) {
-                return childProjection;
-              }
-              const projection = parentProjection(tasksFor(threadId));
-              return {
-                ...projection,
-                thread: { ...projection.thread, id: threadId },
-              } as OrchestrationV2ThreadProjection;
-            }),
-          hasReceipt: (commandId) => Effect.sync(() => tasksByCommandId.has(commandId)),
-          isProviderInstanceEnabledForProject: () => Effect.succeed(true),
-          assertProviderInstanceEnabled: () => Effect.void,
-          // Mirrors command-receipt replay: a known command id returns the
-          // task it already created, a new one creates another.
-          dispatch: (command) =>
-            Effect.sync(() => {
-              const request = command as Extract<
-                OrchestrationV2ServerCommand,
-                { type: "delegated_task.request" }
-              >;
-              delegatedCommandIds.push(request.commandId);
-              const existing = tasksByCommandId.get(request.commandId);
-              const ordinal = tasksByCommandId.size + 1;
-              const task = existing ?? {
-                id: NodeId.make(`node:mcp-reissue-task-${ordinal}`),
-                threadId: request.parentThreadId,
-                runId: parentRunId,
-                parentNodeId,
-                origin: "app_owned",
-                createdBy: "agent",
-                driver: ProviderDriverKind.make("codex"),
-                providerInstanceId: codexInstanceId,
-                providerThreadId: null,
-                childThreadId: ThreadId.make(`thread:mcp-reissue-child-${ordinal}`),
-                nativeTaskRef: null,
-                prompt: request.task,
-                title: null,
-                model: "gpt-5.4",
-                status: "running",
-                result: null,
-                startedAt: null,
-                completedAt: null,
-              };
-              tasksByCommandId.set(request.commandId, task);
-              return {
-                sequence: 1,
-                storedEvents: [
-                  {
-                    sequence: 1,
-                    commandId: request.commandId,
-                    event: { type: "subagent.updated", payload: task },
-                  },
-                ],
-              } as never;
-            }),
-        }),
-        providerRegistryLayer([
-          providerSnapshot({
+  it.live("replays a delegation retried under a credential reissued for the same thread", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const otherParentThreadId = ThreadId.make("thread:mcp-providers-other-parent");
+        const driver = ProviderDriverKind.make("codex");
+        const cwd = yield* checkpointWorkspace("mcp-delegate-reissue");
+        const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+          {
             instanceId: codexInstanceId,
-            driver: ProviderDriverKind.make("codex"),
-            model: "gpt-5.4",
-          }),
-        ]),
-        adapterRegistryLayer([codexInstanceId]),
-        Layer.mock(ProjectService.ProjectService)({}),
-        Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
-        ServerSettings.layerTest(),
-      );
-
-      // A server restart builds a new registry, and the provider session
-      // reconnects with a freshly issued credential for the same thread.
-      const issueScope = (threadId: ThreadId) =>
-        Effect.gen(function* () {
-          const registry = yield* McpSessionRegistry.__testing.make().pipe(
-            Effect.provideService(
-              HttpServer.HttpServer,
-              HttpServer.HttpServer.of({
-                address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 43123),
-                serve: (() => Effect.void) as HttpServer.HttpServer["Service"]["serve"],
-              }),
-            ),
-            Effect.provideService(
-              ServerEnvironment.ServerEnvironment,
-              ServerEnvironment.ServerEnvironment.of({
-                getEnvironmentId: Effect.succeed(scope.environmentId),
-                getDescriptor: Effect.die("unused"),
-              }),
-            ),
-            Effect.provide(NodeServices.layer),
-          );
-          const issued = yield* registry.issue({
-            threadId,
-            providerInstanceId: codexInstanceId,
-          });
-          const resolved = yield* registry.resolve(
-            issued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
-          );
-          assert.isDefined(resolved);
-          return resolved!;
-        });
-
-      yield* Effect.gen(function* () {
-        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-        const delegate = (callerScope: McpInvocationScope, clientRequestId: string) =>
-          service.delegateTask(callerScope, {
-            task: "Reply with only PROBE_DONE. Do not use tools.",
-            target: { providerInstanceId: codexInstanceId, model: "gpt-5.4" },
-            mode: "async",
-            clientRequestId,
-          });
-
-        const beforeRestart = yield* issueScope(parentThreadId);
-        const first = yield* delegate(beforeRestart, "issue-16184-runtime-key");
-        const sameCredentialRetry = yield* delegate(beforeRestart, "issue-16184-runtime-key");
-        assert.equal(sameCredentialRetry.taskId, first.taskId);
-
-        const otherThread = yield* delegate(
-          yield* issueScope(otherParentThreadId),
-          "issue-16184-runtime-key",
+            driver,
+            getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+            planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
+            openSession: () =>
+              Effect.die("This test exercises committed commands before provider execution."),
+          },
+        ]);
+        const layerDatabase = SqlitePersistence.layerMemory;
+        const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
+          { name: "mcp-delegate-reissue", runtimePolicyOverride: { cwd } },
+          layerRegistry,
+          { databaseLayer: layerDatabase, runEffectWorker: false },
         );
-        assert.notEqual(otherThread.taskId, first.taskId);
-        assert.notEqual(otherThread.childThreadId, first.childThreadId);
-
-        const afterRestart = yield* issueScope(parentThreadId);
-        assert.notEqual(
-          afterRestart.thread.providerSessionId,
-          beforeRestart.thread.providerSessionId,
+        const layerSettings = ServerSettings.layerTest();
+        const layerThreads = ThreadManagementService.layer.pipe(
+          Layer.provideMerge(layerOrchestrator),
+          Layer.provide(
+            LegacyV1ThreadImporter.layer.pipe(
+              Layer.provide(layerOrchestrator),
+              Layer.provide(layerDatabase),
+            ),
+          ),
+          Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
+          Layer.provideMerge(layerSettings),
         );
-        const newKey = yield* delegate(afterRestart, "issue-16184-runtime-key-2");
-        assert.notEqual(newKey.taskId, first.taskId);
+        const layerTest = layerOrchestratorService.pipe(
+          Layer.provideMerge(layerThreads),
+          Layer.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              layerRegistry,
+              layerSettings,
+              providerRegistryLayer([
+                providerSnapshot({ instanceId: codexInstanceId, driver, model: "gpt-5.4" }),
+              ]),
+              Layer.mock(ProjectService.ProjectService)({}),
+              Layer.mock(SecretRequests.SecretRequests)({}),
+              Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+            ),
+          ),
+        );
 
-        const retryAfterRestart = yield* delegate(afterRestart, "issue-16184-runtime-key");
-        assert.equal(delegatedCommandIds[4], delegatedCommandIds[0]);
-        assert.equal(retryAfterRestart.taskId, first.taskId);
-        assert.equal(retryAfterRestart.childThreadId, first.childThreadId);
-      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
-    }),
+        // A server restart builds a new registry, and the provider session
+        // reconnects with a freshly issued credential for the same thread.
+        const issueScope = (threadId: ThreadId) =>
+          Effect.gen(function* () {
+            const registry = yield* McpSessionRegistry.__testing.make().pipe(
+              Effect.provideService(
+                HttpServer.HttpServer,
+                HttpServer.HttpServer.of({
+                  address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 43123),
+                  serve: (() => Effect.void) as HttpServer.HttpServer["Service"]["serve"],
+                }),
+              ),
+              Effect.provideService(
+                ServerEnvironment.ServerEnvironment,
+                ServerEnvironment.ServerEnvironment.of({
+                  getEnvironmentId: Effect.succeed(scope.environmentId),
+                  getDescriptor: Effect.die("unused"),
+                }),
+              ),
+            );
+            const issued = yield* registry.issue({ threadId, providerInstanceId: codexInstanceId });
+            const resolved = yield* registry.resolve(
+              issued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+            );
+            assert.isDefined(resolved);
+            return resolved!;
+          });
+
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          for (const threadId of [parentThreadId, otherParentThreadId]) {
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`${threadId}:create`),
+              threadId,
+              projectId,
+              title: "MCP parent",
+              modelSelection: { instanceId: codexInstanceId, model: "gpt-5.4" },
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: cwd,
+            });
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`${threadId}:start`),
+              threadId,
+              messageId: MessageId.make(`${threadId}:message`),
+              text: "Delegate a task.",
+              attachments: [],
+              dispatchMode: { type: "start_immediately" },
+            });
+          }
+          const delegate = (callerScope: McpInvocationScope, clientRequestId: string) =>
+            service.delegateTask(callerScope, {
+              task: "Reply with only PROBE_DONE.",
+              target: { providerInstanceId: codexInstanceId, model: "gpt-5.4" },
+              mode: "async",
+              clientRequestId,
+            });
+          const childThreadIds = Effect.map(
+            orchestrator.getThreadProjection(parentThreadId),
+            (projection) => projection.subagents.map((task) => task.childThreadId),
+          );
+
+          const beforeRestart = yield* issueScope(parentThreadId);
+          const first = yield* delegate(beforeRestart, "delegate-reissue");
+          const otherThread = yield* delegate(
+            yield* issueScope(otherParentThreadId),
+            "delegate-reissue",
+          );
+          assert.notEqual(otherThread.childThreadId, first.childThreadId);
+
+          const afterRestart = yield* issueScope(parentThreadId);
+          assert.notEqual(
+            afterRestart.thread.providerSessionId,
+            beforeRestart.thread.providerSessionId,
+          );
+          const retry = yield* delegate(afterRestart, "delegate-reissue");
+          assert.equal(retry.taskId, first.taskId);
+          assert.deepEqual(yield* childThreadIds, [first.childThreadId]);
+
+          const fresh = yield* delegate(afterRestart, "delegate-reissue-2");
+          assert.deepEqual(yield* childThreadIds, [first.childThreadId, fresh.childThreadId]);
+        }).pipe(Effect.provide(layerTest));
+      }).pipe(Effect.provide(NodeServices.layer)),
+    ),
   );
 
   it.live.each([
