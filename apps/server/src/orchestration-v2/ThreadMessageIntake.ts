@@ -54,9 +54,19 @@ const releaseUnusedClaims = Effect.fn("ThreadMessageIntake.releaseUnusedClaims")
 });
 
 export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(function* (
-  command: OrchestrationV2Command,
+  input: OrchestrationV2Command,
 ) {
   const threads = yield* ThreadManagement.ThreadManagementService;
+  // Ignore server-only metadata options even for callers that bypass schema decoding.
+  const command =
+    input.type === "thread.metadata.update"
+      ? {
+          ...input,
+          preserveProviderSession: undefined,
+          expectedActiveRunId: undefined,
+          finalizedRunId: undefined,
+        }
+      : input;
   if (command.type === "runtime-request.respond" && command.attachmentsByQuestionId) {
     const config = yield* ServerConfig.ServerConfig;
     const incomingByQuestionId = command.attachmentsByQuestionId;

@@ -760,6 +760,8 @@ export const OrchestrationV2ProviderSession = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   status: Schema.Literals(["starting", "ready", "running", "waiting", "stopped", "error"]),
   cwd: TrimmedNonEmptyString,
+  // Requested checkout of the turn that observed native movement.
+  cwdChangeSource: Schema.optional(TrimmedNonEmptyString),
   model: Schema.NullOr(TrimmedNonEmptyString),
   capabilities: OrchestrationV2ProviderCapabilities,
   createdAt: Schema.DateTimeUtc,
@@ -2696,6 +2698,8 @@ export const OrchestrationV2Command = Schema.Union([
     worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     expectedWorktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+    /** Reject branch adoption in a shared worktree; location changes still commit without a branch. */
+    requireExclusiveWorktree: Schema.optional(Schema.Boolean),
     /** Reject unless no message or run has landed on this thread. */
     expectedEmpty: Schema.optional(Schema.Boolean),
     limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecoveryUpdate)),
@@ -3080,7 +3084,14 @@ const OrchestrationV2InternalCommand = Schema.Union([
 ]);
 export type OrchestrationV2InternalCommand = typeof OrchestrationV2InternalCommand.Type;
 
-export type OrchestrationV2ServerCommand = OrchestrationV2Command | OrchestrationV2InternalCommand;
+export type OrchestrationV2ServerCommand =
+  | Exclude<OrchestrationV2Command, { readonly type: "thread.metadata.update" }>
+  | (Extract<OrchestrationV2Command, { readonly type: "thread.metadata.update" }> & {
+      readonly preserveProviderSession?: boolean | undefined;
+      readonly expectedActiveRunId?: RunId | null | undefined;
+      readonly finalizedRunId?: RunId | undefined;
+    })
+  | OrchestrationV2InternalCommand;
 
 export const ORCHESTRATION_V2_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",

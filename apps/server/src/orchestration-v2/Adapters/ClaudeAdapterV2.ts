@@ -27,6 +27,7 @@ import {
   type ForkSessionOptions,
   type ForkSessionResult,
   getSessionMessages,
+  type HookCallback,
   getSubagentMessages,
   query,
   resolveSettings as resolveClaudeSettings,
@@ -1287,6 +1288,7 @@ export function makeClaudeQueryOptions(input: {
   readonly supportedDialogKinds?: ClaudeQueryOptions["supportedDialogKinds"];
   readonly allowDangerouslySkipPermissions?: boolean;
   readonly appendSystemPromptFileText?: string;
+  readonly hooks?: ClaudeQueryOptions["hooks"];
 }): ClaudeAgentSdkQueryOptions {
   const compiledSelection = compileClaudeModelSelection(input.modelSelection);
   const {
@@ -1370,6 +1372,7 @@ export function makeClaudeQueryOptions(input: {
     ...(input.supportedDialogKinds === undefined
       ? {}
       : { supportedDialogKinds: input.supportedDialogKinds }),
+    ...(input.hooks === undefined ? {} : { hooks: input.hooks }),
     ...(input.settings?.binaryPath
       ? { pathToClaudeCodeExecutable: input.settings.binaryPath }
       : {}),
@@ -4299,6 +4302,40 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
 
         const emitProviderEvent = (event: ProviderAdapter.ProviderAdapterV2Event) =>
           Queue.offer(events, event).pipe(Effect.asVoid);
+
+        // A root session can move without a T3 worktree handoff.
+        const trackedCwd = yield* Ref.make(session.cwd);
+        const followWorktreeCwdChange = Effect.fn("ClaudeAdapterV2.followWorktreeCwdChange")(
+          function* (nextCwd: string) {
+            const previousCwd = yield* Ref.get(trackedCwd);
+            if (nextCwd === previousCwd) return;
+            yield* Ref.set(trackedCwd, nextCwd);
+            const updatedAt = yield* DateTime.now;
+            const context = yield* Ref.get(activeTurn);
+            yield* emitProviderEvent({
+              type: "provider_session.updated",
+              driver: CLAUDE_PROVIDER,
+              providerSession: {
+                ...session,
+                cwd: nextCwd,
+                cwdChangeSource: context?.input.runtimePolicy.cwd ?? undefined,
+                updatedAt,
+              },
+            });
+          },
+        );
+
+        const onWorktreeTool: HookCallback = (hookInput) =>
+          runPromise(
+            Effect.gen(function* () {
+              // agent_type can also describe the root of a --agent session.
+              if (hookInput.agent_id) return {};
+              if (hookInput.hook_event_name === "PostToolUse") {
+                yield* followWorktreeCwdChange(hookInput.cwd);
+              }
+              return {};
+            }),
+          );
 
         // Reports one root request's usage as the current context. Usage
         // without input is a placeholder, never a measurement.
@@ -9294,6 +9331,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             onUserDialog,
             supportedDialogKinds: ["resume_return"],
             ...(appendSystemPromptFileText === undefined ? {} : { appendSystemPromptFileText }),
+            hooks: {
+              PostToolUse: [{ matcher: "^(EnterWorktree|ExitWorktree)$", hooks: [onWorktreeTool] }],
+            },
           });
           const querySession = yield* queryRunner
             .open({
@@ -9313,6 +9353,21 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   : Effect.void,
               ),
             );
+          // A replacement process starts at its requested cwd, not the previous process's move.
+          const openedCwd = queryOptions.cwd ?? process.cwd();
+          if (openedCwd !== (yield* Ref.get(trackedCwd))) {
+            yield* Ref.set(trackedCwd, openedCwd);
+            yield* emitProviderEvent({
+              type: "provider_session.updated",
+              driver: CLAUDE_PROVIDER,
+              providerSession: {
+                ...session,
+                cwd: openedCwd,
+                cwdChangeSource: undefined,
+                updatedAt: yield* DateTime.now,
+              },
+            });
+          }
           // Marked only after a successful open: a failed create must not
           // leave the runtime believing the native session exists, or the
           // retry would resume a session that was never created.

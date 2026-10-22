@@ -99,6 +99,8 @@ import {
   OLDER_THREAD_USER_TURN_LIMIT,
 } from "./threadHistoryPaging.ts";
 
+export const WORKSPACE_CHANGED_DETACH_REASON = "Workspace changed.";
+
 export class ProjectionStoreApplyEventError extends Schema.TaggedError<ProjectionStoreApplyEventError>()(
   "ProjectionStoreApplyEventError",
   {
@@ -404,6 +406,11 @@ export interface ProjectionStoreV2Shape {
     options: ProjectionTimelinePageOptions,
   ) => Effect.Effect<ProjectionTimelinePage, ProjectionStoreV2Error>;
   readonly getMessageCount: (threadId: ThreadId) => Effect.Effect<number, ProjectionStoreV2Error>;
+  readonly hasSiblingThreadWithWorktreePath: (input: {
+    readonly threadId: ThreadId;
+    readonly projectId: ProjectId;
+    readonly worktreePath: string;
+  }) => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly getNextTurnItemOrdinal: (
     threadId: ThreadId,
   ) => Effect.Effect<number, ProjectionStoreV2Error>;
@@ -526,6 +533,17 @@ export interface ProjectionStoreV2Shape {
     threadId: ThreadId,
     targetInstanceId?: ProviderInstanceId,
   ) => Effect.Effect<ProjectionThreadProviderContext, ProjectionStoreV2Error>;
+  readonly getProviderSession: (
+    threadId: ThreadId,
+    providerSessionId: ProviderSessionId,
+  ) => Effect.Effect<
+    OrchestrationV2ThreadProjection["providerSessions"][number] | undefined,
+    ProjectionStoreV2Error
+  >;
+  readonly isProviderSessionShared: (
+    threadId: ThreadId,
+    providerSessionId: ProviderSessionId,
+  ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly getRuntimeResponseContext: (
     threadId: ThreadId,
     requestId: RuntimeRequestId,
@@ -940,6 +958,10 @@ export function applyToProjection(
  */
 export interface ProjectionReplayState {
   readonly projections: Map<ThreadId, OrchestrationV2ThreadProjection>;
+  readonly providerSessions: Map<
+    ProviderSessionId,
+    OrchestrationV2ThreadProjection["providerSessions"][number]
+  >;
   readonly providerSessionThreadIds: Map<ProviderSessionId, ReadonlySet<ThreadId>>;
   readonly providerThreadInstanceIds: Map<ProviderThreadId, ProviderInstanceId>;
 }
@@ -947,6 +969,7 @@ export interface ProjectionReplayState {
 function makeProjectionReplayState(): ProjectionReplayState {
   return {
     projections: new Map(),
+    providerSessions: new Map(),
     providerSessionThreadIds: new Map(),
     providerThreadInstanceIds: new Map(),
   };
@@ -974,6 +997,12 @@ function applyToProjectionReplayState(
     }
   }
   state.projections.set(event.threadId, next);
+  if (
+    event.type === "provider-session.attached" ||
+    (event.type === "provider-session.updated" && state.providerSessions.has(event.payload.id))
+  ) {
+    state.providerSessions.set(event.payload.id, event.payload);
+  }
 
   switch (event.type) {
     case "provider-thread.updated": {
@@ -1030,6 +1059,9 @@ function applyToProjectionReplayState(
       boundThreadIds.delete(event.threadId);
       if (boundThreadIds.size === 0) {
         state.providerSessionThreadIds.delete(event.payload.providerSessionId);
+        if (event.payload.reason === WORKSPACE_CHANGED_DETACH_REASON) {
+          state.providerSessions.delete(event.payload.providerSessionId);
+        }
       } else {
         state.providerSessionThreadIds.set(event.payload.providerSessionId, boundThreadIds);
       }
@@ -2246,7 +2278,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 updated_at,
                 payload_json
               )
-              VALUES (
+              SELECT
                 ${event.payload.id},
                 ${event.threadId},
                 ${event.payload.providerInstanceId},
@@ -2256,7 +2288,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${event.payload.model},
                 ${stringField(payload, "updatedAt")},
                 ${payloadJson}
-              )
+              WHERE ${event.type === "provider-session.attached" ? 1 : 0} = 1
+                OR EXISTS (
+                  SELECT 1 FROM orchestration_v2_projection_provider_sessions
+                  WHERE provider_session_id = ${event.payload.id}
+                )
               ON CONFLICT(provider_session_id)
               DO UPDATE SET
                 thread_id = excluded.thread_id,
@@ -2285,6 +2321,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               WHERE provider_session_id = ${event.payload.providerSessionId}
                 AND thread_id = ${event.threadId}
             `;
+              // An explicit handoff revokes the old runtime location; queue promotion retains it.
+              if (event.payload.reason === WORKSPACE_CHANGED_DETACH_REASON) {
+                yield* sql`
+                DELETE FROM orchestration_v2_projection_provider_sessions
+                WHERE provider_session_id = ${event.payload.providerSessionId}
+                  AND NOT EXISTS (
+                    SELECT 1 FROM orchestration_v2_projection_provider_session_bindings
+                    WHERE provider_session_id = ${event.payload.providerSessionId}
+                  )
+              `;
+              }
               break;
             }
             case "provider-thread.updated": {
@@ -4879,6 +4926,35 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
         .pipe(Effect.mapError(controlReadError(threadId)));
 
+    const getProviderSession: ProjectionStoreV2Shape["getProviderSession"] = Effect.fn(
+      "ProjectionStore.getProviderSession",
+    )(
+      function* (_threadId, providerSessionId) {
+        const rows = yield* sql<PayloadRow>`
+          SELECT payload_json FROM orchestration_v2_projection_provider_sessions
+          WHERE provider_session_id = ${providerSessionId}
+        `;
+        return rows[0] === undefined
+          ? undefined
+          : yield* decodeProviderSessionPayload(rows[0].payload_json);
+      },
+      (effect, threadId) => effect.pipe(Effect.mapError(controlReadError(threadId))),
+    );
+
+    const isProviderSessionShared: ProjectionStoreV2Shape["isProviderSessionShared"] = (
+      threadId,
+      providerSessionId,
+    ) =>
+      sql<{ readonly shared: number }>`
+        SELECT EXISTS (
+          SELECT 1 FROM orchestration_v2_projection_provider_session_bindings
+          WHERE provider_session_id = ${providerSessionId} AND thread_id <> ${threadId}
+        ) AS shared
+      `.pipe(
+        Effect.map((rows) => rows[0]?.shared === 1),
+        Effect.mapError(controlReadError(threadId)),
+      );
+
     const getRuntimeResponseContext: ProjectionStoreV2Shape["getRuntimeResponseContext"] = (
       threadId,
       requestId,
@@ -5184,6 +5260,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.map((rows) => rows[0]?.count ?? 0),
         Effect.mapError(controlReadError(threadId)),
       );
+
+    const hasSiblingThreadWithWorktreePath: ProjectionStoreV2Shape["hasSiblingThreadWithWorktreePath"] =
+      (input) =>
+        sql<{ readonly thread_id: string }>`
+          SELECT thread_id FROM orchestration_v2_projection_threads
+          WHERE project_id = ${input.projectId}
+            AND thread_id != ${input.threadId}
+            AND deleted_at IS NULL
+            AND archived_at IS NULL
+            AND json_extract(payload_json, '$.worktreePath') = ${input.worktreePath}
+          LIMIT 1
+        `.pipe(
+          Effect.map((rows) => rows.length > 0),
+          Effect.mapError(controlReadError(input.threadId)),
+        );
     const getNextTurnItemOrdinal: ProjectionStoreV2Shape["getNextTurnItemOrdinal"] = (threadId) =>
       sql<{ ordinal: number | null }>`SELECT MAX(ordinal) AS ordinal
         FROM orchestration_v2_projection_turn_items WHERE thread_id = ${threadId}`.pipe(
@@ -6495,6 +6586,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getRuntimeRecoveryProjection,
       getRunningTurnContext,
       getThreadProviderContext,
+      getProviderSession,
+      isProviderSessionShared,
       getRuntimeResponseContext,
       getCheckpointContext,
       getCheckpointCaptureContext,
@@ -6505,6 +6598,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       hasUnpairedRunInterruptRequest,
       isNodeStored,
       getMessageCount,
+      hasSiblingThreadWithWorktreePath,
       getNextTurnItemOrdinal,
       getTurnItem,
       getThreadRecords,
@@ -6538,6 +6632,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           const result = yield* Ref.modify(replayState, (existing) => {
             const next: ProjectionReplayState = {
               projections: new Map(existing.projections),
+              providerSessions: new Map(existing.providerSessions),
               providerSessionThreadIds: new Map(existing.providerSessionThreadIds),
               providerThreadInstanceIds: new Map(existing.providerThreadInstanceIds),
             };
@@ -6792,6 +6887,19 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
         Ref.get(replayState).pipe(
           Effect.map((state) => state.projections.get(threadId)?.messages.length ?? 0),
         ),
+      hasSiblingThreadWithWorktreePath: (input) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) =>
+            [...state.projections.values()].some(
+              ({ thread }) =>
+                thread.id !== input.threadId &&
+                thread.projectId === input.projectId &&
+                thread.worktreePath === input.worktreePath &&
+                thread.deletedAt === null &&
+                thread.archivedAt === null,
+            ),
+          ),
+        ),
       getNextTurnItemOrdinal: (threadId) =>
         Ref.get(replayState).pipe(
           Effect.map(
@@ -6919,6 +7027,18 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           };
         },
       ),
+      getProviderSession: (_threadId, providerSessionId) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) => state.providerSessions.get(providerSessionId)),
+        ),
+      isProviderSessionShared: (threadId, providerSessionId) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) =>
+            [...(state.providerSessionThreadIds.get(providerSessionId) ?? [])].some(
+              (boundThreadId) => boundThreadId !== threadId,
+            ),
+          ),
+        ),
       getThreadProviderContext: Effect.fn("ProjectionStore.getThreadProviderContext")(
         function* (threadId, targetInstanceId) {
           const projection = (yield* Ref.get(replayState)).projections.get(threadId);

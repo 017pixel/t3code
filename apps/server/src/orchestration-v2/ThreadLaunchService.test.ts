@@ -31,6 +31,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -145,12 +146,22 @@ function makeHarness(options: HarnessOptions = {}) {
     Layer.provide(layerReceipts),
   );
   const layerOutbox = EffectOutbox.layer.pipe(Layer.provide(layerDatabase));
+  // Model the checkout for tests that create a generated temporary branch.
+  let liveBranch = "t3/abcd1234";
   const createWorktree = vi.fn(
-    options.createWorktree ??
-      ((input) =>
-        Effect.succeed({
-          worktree: { path: "/repo-worktrees/feature", refName: input.newRefName, headSha: "abc" },
-        } as never)),
+    (...args: Parameters<GitWorkflow.GitWorkflowService["Service"]["createWorktree"]>) => {
+      const input = args[0];
+      liveBranch = input.newRefName ?? liveBranch;
+      return options.createWorktree
+        ? options.createWorktree(...args)
+        : Effect.succeed({
+            worktree: {
+              path: "/repo-worktrees/feature",
+              refName: input.newRefName,
+              headSha: "abc",
+            },
+          } as never);
+    },
   );
   const renameBranch = vi.fn(
     options.renameBranch ?? ((input) => Effect.succeed({ branch: input.newBranch })),
@@ -194,6 +205,16 @@ function makeHarness(options: HarnessOptions = {}) {
     Layer.mock(GitWorkflow.GitWorkflowService)({
       createWorktree,
       renameBranch,
+      localStatus: () =>
+        Effect.sync(() => ({
+          isRepo: true,
+          hasPrimaryRemote: true,
+          isDefaultRef: false,
+          refName: liveBranch,
+          hasWorkingTreeChanges: false,
+          workingTree: { files: [], insertions: 0, deletions: 0 },
+        })),
+      invalidateLocalStatus: () => Effect.void,
       fetchWorktreeBaseCommit:
         options.fetchWorktreeBaseCommit ??
         (() => Effect.succeed({ commitSha: "remote-main-sha", remoteRefName: "origin/main" })),
@@ -1105,6 +1126,56 @@ it.effect.each(["stable", "upstream/release"])(
         ),
       ),
     ),
+);
+
+it.effect("preserves an observed agent branch switch during background naming", () =>
+  Effect.gen(function* () {
+    const namingStarted = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+    const continueNaming = yield* Deferred.make<void>();
+    let cachedBranch = "t3/abcd1234";
+    const harness = makeHarness({
+      generateBranchName: () =>
+        Effect.withFiber((fiber) => Deferred.succeed(namingStarted, fiber)).pipe(
+          Effect.andThen(Deferred.await(continueNaming)),
+          Effect.as({ branch: "generated-branch" }),
+        ),
+      git: {
+        invalidateLocalStatus: () =>
+          Effect.sync(() => {
+            cachedBranch = "feature/agent-chosen";
+          }),
+        localStatus: () =>
+          Effect.sync(() => ({
+            isRepo: true,
+            hasPrimaryRemote: true,
+            isDefaultRef: false,
+            refName: cachedBranch,
+            hasWorkingTreeChanges: false,
+            workingTree: { files: [], insertions: 0, deletions: 0 },
+          })),
+      },
+    });
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const launched = yield* launches.launch(
+        launchInput({
+          command: "command:launch:agent-switch",
+          thread: "thread:launch:agent-switch",
+          message: "Build the feature",
+          workspace: { type: "worktree", baseRef: "main", branch: "t3/abcd1234" },
+        }),
+      );
+      const naming = yield* Deferred.await(namingStarted);
+      yield* Deferred.succeed(continueNaming, undefined);
+      assert.isTrue(Exit.isSuccess(yield* Fiber.await(naming)));
+      assert.equal(harness.renameBranch.mock.calls.length, 0);
+      assert.equal(
+        (yield* threads.getThreadProjection(launched.threadId)).thread.branch,
+        "t3/abcd1234",
+      );
+    }).pipe(Effect.provide(harness.layer));
+  }),
 );
 
 it.effect("shows the fetch diagnosis when preparing a worktree from origin fails", () => {

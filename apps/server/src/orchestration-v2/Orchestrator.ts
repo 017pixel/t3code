@@ -114,6 +114,7 @@ import {
   emptyProjection,
   threadShellFromProjection,
   ProjectionStoreV2,
+  WORKSPACE_CHANGED_DETACH_REASON,
   type ProjectionRecordField,
   type ProjectionTimelinePage,
   type ProjectionTimelinePageOptions,
@@ -2743,6 +2744,67 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: `Thread ${command.threadId} branch changed before the metadata update could be applied.`,
       });
     }
+    if (command.type === "thread.metadata.update" && command.expectedActiveRunId !== undefined) {
+      const current = yield* projectionStore
+        .getThreadShell(command.threadId)
+        .pipe(mapDispatchError(command));
+      let pendingSuccessor = false;
+      if (command.finalizedRunId !== undefined) {
+        const { runs } = yield* projectionStore
+          .getThreadRecords(command.threadId, ["runs"])
+          .pipe(mapDispatchError(command));
+        const active = runs.find((run) => run.id === current?.activeRunId);
+        const finalized = runs.find((run) => run.id === command.finalizedRunId);
+        // The capture effect still owns the thread's effect lane. Promotion can
+        // commit, but its provider-start effect cannot execute until capture returns.
+        pendingSuccessor =
+          active?.status === "starting" &&
+          active.startedAt === null &&
+          finalized?.checkpointId != null &&
+          (finalized.status === "completed" ||
+            finalized.status === "interrupted" ||
+            finalized.status === "cancelled") &&
+          latestExecutedRun(runs.filter((run) => run.status !== "starting"))?.id === finalized.id;
+      }
+      if (
+        (current?.activeRunId !== command.expectedActiveRunId ||
+          (command.finalizedRunId !== undefined &&
+            current?.activeRunId !== null &&
+            current?.activeRunId !== command.finalizedRunId)) &&
+        !pendingSuccessor
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} active run changed before the metadata update could be applied.`,
+        });
+      }
+    }
+    let metadataBranchOverride: string | null | undefined = undefined;
+    if (command.type === "thread.metadata.update" && command.requireExclusiveWorktree === true) {
+      const targetWorktreePath =
+        command.worktreePath !== undefined ? command.worktreePath : thread.worktreePath;
+      const exclusive =
+        targetWorktreePath !== null &&
+        !(yield* projectionStore
+          .hasSiblingThreadWithWorktreePath({
+            threadId: command.threadId,
+            projectId: thread.projectId,
+            worktreePath: targetWorktreePath,
+          })
+          .pipe(mapDispatchError(command)));
+      if (!exclusive) {
+        if (command.worktreePath !== undefined) {
+          metadataBranchOverride = null;
+        } else {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Thread ${command.threadId}'s worktree is shared with another thread; not adopting the checked-out branch.`,
+          });
+        }
+      }
+    }
     if (command.type === "thread.metadata.update" && command.expectedEmpty === true) {
       const records = yield* projectionStore
         .getThreadRecords(command.threadId, ["runs"])
@@ -3205,7 +3267,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     Date.parse(thread.limitRecovery.resetAt)
                 ? { snoozedUntil: null, snoozedAt: null, lastSnoozeWakeAt: now }
                 : {}),
-            ...(command.branch === undefined ? {} : { branch: command.branch }),
+            ...(metadataBranchOverride !== undefined
+              ? { branch: metadataBranchOverride }
+              : command.branch === undefined
+                ? {}
+                : { branch: command.branch }),
             ...(command.worktreePath === undefined ? {} : { worktreePath: command.worktreePath }),
             ...(command.linkedPullRequest === undefined
               ? {}
@@ -3553,6 +3619,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       payload: updatedThread,
     });
 
+    if (
+      command.type === "thread.metadata.update" &&
+      command.finalizedRunId !== undefined &&
+      command.worktreePath !== undefined &&
+      command.worktreePath !== thread.worktreePath
+    ) {
+      const { checkpointScopes } = yield* projectionStore
+        .getThreadRecords(command.threadId, ["checkpointScopes"])
+        .pipe(mapDispatchError(command));
+      const scope = checkpointScopes.find((candidate) => candidate.kind === "root_run");
+      if (scope !== undefined) {
+        const resolved = yield* runtimePolicy
+          .resolve({ thread: updatedThread, modelSelection: updatedThread.modelSelection })
+          .pipe(mapDispatchError(command));
+        // Capture is durable before location-follow. Refresh the shared root
+        // scope now so an already-promoted successor uses the destination.
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "checkpoint-scope.created",
+          threadId: command.threadId,
+          providerInstanceId: updatedThread.providerInstanceId,
+          occurredAt: now,
+          payload: { ...scope, cwd: resolved.cwd ?? command.worktreePath ?? process.cwd() },
+        });
+      }
+    }
+
     if (command.type === "thread.metadata.update" && command.regenerateTitle === true) {
       yield* Ref.update(effects, (existing) => [
         ...existing,
@@ -3671,7 +3766,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ? (providerContext?.providerSessions ?? []).map((session) => session.id)
         : command.type === "thread.metadata.update" &&
             command.worktreePath !== undefined &&
-            command.worktreePath !== thread.worktreePath
+            command.worktreePath !== thread.worktreePath &&
+            command.preserveProviderSession !== true
           ? (providerContext?.providerSessions ?? []).map((session) => session.id)
           : command.type === "thread.runtime-mode.set"
             ? (providerContext?.providerSessions ?? [])
@@ -3710,7 +3806,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     : command.type === "thread.settle"
                       ? "Thread settled."
                       : command.type === "thread.metadata.update"
-                        ? "Workspace changed."
+                        ? WORKSPACE_CHANGED_DETACH_REASON
                         : command.type === "thread.runtime-mode.set"
                           ? "Runtime mode changed."
                           : "Provider or model selection changed.",
@@ -3729,7 +3825,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     : command.type === "thread.settle"
                       ? "Thread settled."
                       : command.type === "thread.metadata.update"
-                        ? "Workspace changed."
+                        ? WORKSPACE_CHANGED_DETACH_REASON
                         : command.type === "thread.runtime-mode.set"
                           ? "Runtime mode changed."
                           : "Provider or model selection changed.",

@@ -1,4 +1,5 @@
 import { assert, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CheckpointScopeId,
   RunId,
@@ -8,12 +9,19 @@ import {
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
+import * as ProjectService from "../project/ProjectService.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
+import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as CheckpointCapture from "./CheckpointCaptureService.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as RunFinalization from "./RunFinalizationService.ts";
+import * as ThreadManagementService from "./ThreadManagementService.ts";
+
+const unusedProjectService = Layer.mock(ProjectService.ProjectService)({
+  getById: () => Effect.die("not exercised by this scenario"),
+});
 
 it.effect("completes finalization when the post-checkpoint workspace refresh fails", () => {
   const threadId = ThreadId.make("thread_refresh_failure");
@@ -46,7 +54,7 @@ it.effect("completes finalization when the post-checkpoint workspace refresh fai
                 cause: new Error("Git command timed out"),
               });
             }),
-          refreshAfterTurn: () => Effect.void,
+          followWorktreeMove: () => Effect.void,
         }),
       ),
     ),
@@ -125,9 +133,16 @@ it.effect.each(
             Effect.succeed({
               id: threadId,
               branch: scenario.branch,
+              worktreePath: null,
               activeRunId: scenario.activeRun === null ? null : RunId.make(scenario.activeRun),
             } as OrchestrationV2ThreadShell),
         }),
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          dispatch: () => Effect.die("not exercised by this scenario"),
+        }),
+        unusedProjectService,
+        Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({}),
+        NodeServices.layer,
       ),
     ),
   );

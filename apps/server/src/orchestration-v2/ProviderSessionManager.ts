@@ -199,6 +199,8 @@ interface LiveSessionEntry {
   readonly mcpCredentialIdByThread: ReadonlyMap<ThreadId, string>;
   readonly supportsMultipleProviderThreads: boolean;
   readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
+  // Runtime updates must survive attach, turn start, and release.
+  readonly providerSession: Ref.Ref<OrchestrationV2ProviderSession>;
   readonly exposedRuntime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly eventSubscribers: Ref.Ref<
     ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
@@ -613,7 +615,7 @@ export const layerWithOptions = (
       }) {
         const now = yield* DateTime.now;
         const payload: OrchestrationV2ProviderSession = {
-          ...input.entry.runtime.providerSession,
+          ...(yield* Ref.get(input.entry.providerSession)),
           status: releaseStatusFor(input.reason),
           updatedAt: now,
           lastError:
@@ -1396,7 +1398,7 @@ export const layerWithOptions = (
                     runtime: entry.runtime,
                     threadIds: [input.threadId],
                     type: "provider-session.attached",
-                    payload: entry.runtime.providerSession,
+                    payload: yield* Ref.get(entry.providerSession),
                   }),
                 );
               }
@@ -1717,6 +1719,7 @@ export const layerWithOptions = (
         eventSubscribers: Ref.Ref<
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
         >,
+        providerSession: Ref.Ref<OrchestrationV2ProviderSession>,
       ): ProviderAdapter.ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
         const subscribeEvents = makeEventSubscription(eventSubscribers);
@@ -1732,6 +1735,9 @@ export const layerWithOptions = (
           });
         return {
           ...runtime,
+          get providerSession() {
+            return Ref.getUnsafe(providerSession);
+          },
           subscribeEvents,
           events: Stream.unwrap(
             subscribeEvents.pipe(Effect.map((subscription) => subscription.events)),
@@ -1908,6 +1914,7 @@ export const layerWithOptions = (
           if (current?.runtime !== entry.runtime) {
             return;
           }
+          yield* Ref.set(entry.providerSession, event.providerSession);
           yield* writeProviderSessionEvents({
             runtime: entry.runtime,
             threadIds: current.attachedThreadIds,
@@ -2218,7 +2225,8 @@ export const layerWithOptions = (
               const eventSubscribers = yield* Ref.make<
                 ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
               >(new Map());
-              const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
+              const providerSession = yield* Ref.make(runtime.providerSession);
+              const exposedRuntime = decorateRuntime(runtime, eventSubscribers, providerSession);
               const now = yield* Clock.currentTimeMillis;
               const entry: LiveSessionEntry = {
                 attachedThreadIds: new Set([input.threadId]),
@@ -2231,6 +2239,7 @@ export const layerWithOptions = (
                   runtime.providerSession.capabilities.sessions
                     .supportsMultipleProviderThreadsPerSession,
                 runtime,
+                providerSession,
                 exposedRuntime,
                 eventSubscribers,
                 requestEventPermit: yield* Semaphore.make(1),
