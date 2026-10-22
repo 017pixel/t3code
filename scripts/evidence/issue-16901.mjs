@@ -1,5 +1,5 @@
-import http from "node:http";
-import { execFileSync } from "node:child_process";
+import * as NodeHttp from "node:http";
+import * as NodeChildProcess from "node:child_process";
 
 // Standalone fixture: run from either revision, keeping app state isolated in .t3/desktop.
 const port = Number(process.env.FIXTURE_PORT ?? 14807);
@@ -25,7 +25,7 @@ pdf += `xref\n0 6\n0000000000 65535 f \n${offsets
   .slice(1)
   .map((n) => String(n).padStart(10, "0") + " 00000 n \n")
   .join("")}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
-const server = http.createServer((req, res) => {
+const server = NodeHttp.createServer((req, res) => {
   console.log(JSON.stringify({ event: "request", path: req.url, at: new Date().toISOString() }));
   if (req.url === "/release") {
     for (const response of gates) response.end(html("/gate"));
@@ -51,7 +51,7 @@ server.listen(port, "127.0.0.1", () =>
   console.log(
     JSON.stringify({
       event: "ready",
-      sha: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+      sha: NodeChildProcess.execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
       url: `http://127.0.0.1:${port}/A`,
       scenarios: ["late-attach", "native-hidden", "idle-capture", "stream-states"],
       state: ".t3/desktop",
