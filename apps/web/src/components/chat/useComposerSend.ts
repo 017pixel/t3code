@@ -25,6 +25,7 @@ import {
   type ThreadId,
   ProviderInteractionMode,
   RuntimeMode,
+  composerMessageContext,
 } from "@t3tools/contracts";
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
@@ -674,6 +675,7 @@ export function useComposerSend(input: ComposerSendInput) {
           previewAnnotations: composerPreviewAnnotations,
           threadContexts: composerThreadContexts,
         }),
+        authoredPrompt: promptForSend,
         interactionMode: followUp.interactionMode,
       });
       if (!followUpSent) {
@@ -795,20 +797,21 @@ export function useComposerSend(input: ComposerSendInput) {
     // Records bind attachments by the id each side knows: the local id for the optimistic
     // row, the upload id (or local id on the data-URL path) on the wire; the server
     // rebinds them to the persisted id.
-    const buildOutgoingMessageContext = (attachmentIds: ReadonlyArray<string>) =>
-      buildMessageContext({
-        terminalContexts: composerTerminalContextsSnapshot,
-        reviewComments: composerReviewCommentsSnapshot,
-        previewAnnotations: composerPreviewAnnotationsSnapshot,
-        threadContexts: composerThreadContextsSnapshot,
-        attachments: composerAttachmentsSnapshot.map((attachment, index) => ({
-          attachment,
-          attachmentId: attachmentIds[index] ?? attachment.id,
-        })),
+    const buildOutgoingMessageContext = (attachmentIds: ReadonlyArray<string>, text: string) =>
+      composerMessageContext({
+        context: buildMessageContext({
+          terminalContexts: composerTerminalContextsSnapshot,
+          reviewComments: composerReviewCommentsSnapshot,
+          previewAnnotations: composerPreviewAnnotationsSnapshot,
+          threadContexts: composerThreadContextsSnapshot,
+          attachments: composerAttachmentsSnapshot.map((attachment, index) => ({
+            attachment,
+            attachmentId: attachmentIds[index] ?? attachment.id,
+          })),
+        }),
+        text,
+        authoredPrompt: sendSnapshot.authoredPrompt,
       });
-    const outgoingMessageContext = buildOutgoingMessageContext(
-      composerAttachmentsSnapshot.map((attachment) => attachment.id),
-    );
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
     const outgoingMessageText = formatOutgoingPrompt({
@@ -818,6 +821,10 @@ export function useComposerSend(input: ComposerSendInput) {
       effort: ctxSelectedPromptEffort,
       text: messageTextForSend || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
     });
+    const outgoingMessageContext = buildOutgoingMessageContext(
+      composerAttachmentsSnapshot.map((attachment) => attachment.id),
+      outgoingMessageText,
+    );
     if (composerRef.current?.validateProviderInput(outgoingMessageText) === false) {
       return;
     }
@@ -1076,7 +1083,7 @@ export function useComposerSend(input: ComposerSendInput) {
         role: "user",
         text: outgoingMessageText,
         ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
-        ...(outgoingMessageContext !== undefined ? { context: outgoingMessageContext } : {}),
+        context: outgoingMessageContext,
         runId: null,
         createdAt: messageCreatedAt,
         updatedAt: messageCreatedAt,
@@ -1216,6 +1223,7 @@ export function useComposerSend(input: ComposerSendInput) {
               text: outgoingMessageText,
               context: buildOutgoingMessageContext(
                 boundAttachmentIds(turnAttachmentsResult.value, composerAttachmentsSnapshot),
+                outgoingMessageText,
               ),
               // Read at dispatch time: the upload and persistence awaits above can
               // span a server reconnect that changes it.

@@ -6,6 +6,7 @@ import {
   COMPOSER_CONTEXT_MAX_RECORDS,
   COMPOSER_CONTEXT_REVIEW_TEXT_MAX_CHARS,
   ComposerContextId,
+  composerMessageContext,
   type ComposerContextRecord,
   OrchestrationMessageContext,
   type PullRequestContextMetadata,
@@ -264,6 +265,6 @@ export function serializeComposerMessageForServer(
     ? ATTACHMENT_ONLY_BOOTSTRAP_PROMPT
     : composerText;
   return supportsInlineMessageContext
-    ? { text, ...(context ? { context } : {}) }
+    ? { text, context: composerMessageContext({ context, text, authoredPrompt: composerText }) }
     : { text: serializeLegacyContextMessage({ text, records: context?.records ?? [] }) };
 }

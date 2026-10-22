@@ -278,5 +278,24 @@ export const OrchestrationMessageContext = Schema.Struct({
         (records) => new Set(records.map((record) => record.contextId)).size === records.length,
       ),
     ),
+  /**
+   * The composer draft as the user typed it, so prompt recall never has to guess which part of the
+   * text the app added. `null` means the text is the draft; `""` means the app composed the text.
+   * Absent on messages from older clients.
+   */
+  authoredPrompt: Schema.optional(Schema.NullOr(Schema.String)),
 });
 export type OrchestrationMessageContext = typeof OrchestrationMessageContext.Type;
+
+/** Context for a composer send, recording the draft even when it carries no records. */
+export function composerMessageContext(input: {
+  readonly context: OrchestrationMessageContext | undefined;
+  readonly text: string;
+  readonly authoredPrompt: string;
+}): OrchestrationMessageContext {
+  return {
+    version: 1,
+    records: input.context?.records ?? [],
+    authoredPrompt: input.authoredPrompt === input.text ? null : input.authoredPrompt,
+  };
+}

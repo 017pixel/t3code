@@ -1,6 +1,7 @@
 import {
   type EnvironmentId,
   type ModelSelection,
+  type OrchestrationMessageContext,
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -19,7 +20,6 @@ import {
 } from "../../composerDraftStore";
 import type { ComposerHandleRef } from "../../composerHandleContext";
 import { releaseDraftAttachments } from "../../lib/attachmentUploadQueue";
-import type { buildMessageContext } from "../../lib/composerContextRecords";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { environmentServerConfigsAtom } from "../../state/server";
 import { threadEnvironment } from "../../state/threads";
@@ -110,7 +110,8 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
     readonly readFileBlockReason: () => string | null;
     readonly buildOutgoingMessageContext: (
       attachmentIds: ReadonlyArray<string>,
-    ) => ReturnType<typeof buildMessageContext>;
+      text: string,
+    ) => OrchestrationMessageContext;
     /** False once a newer send from this composer started. */
     readonly isCurrentSend: () => boolean;
   }) => {
@@ -126,9 +127,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
       const attachments = await attachmentsPromise;
       const fileBlockReason = readFileBlockReason();
       if (fileBlockReason !== null) throw new Error(fileBlockReason);
-      const context = buildOutgoingMessageContext(
-        boundAttachmentIds(attachments, attachmentsSnapshot),
-      );
+      const attachmentIds = boundAttachmentIds(attachments, attachmentsSnapshot);
       const title = deriveThreadTitleSeed({
         text: messageText,
         attachments: attachmentsSnapshot,
@@ -172,7 +171,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
                     attachments,
                     ...withMessageContext({
                       text: target.text,
-                      context,
+                      context: buildOutgoingMessageContext(attachmentIds, target.text),
                       supportsInlineMessageContext,
                     }),
                   },

@@ -1,18 +1,24 @@
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
+import type { OrchestrationMessageContext } from "@t3tools/contracts";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   collectComposerContextReferences,
 } from "@t3tools/shared/composerContextReferences";
 import { PLAN_IMPLEMENTATION_PROMPT_PREFIX } from "../../proposedPlan";
 
-const CLAUDE_ULTRATHINK_PREFIX = "Ultrathink:\n";
 const REVIEW_COMMENT_BLOCK_PATTERN = /<review_comment\b[^>]*>[\s\S]*?<\/review_comment>/g;
 const TRAILING_LEGACY_CONTEXT =
   /\n*<(terminal_context|element_context|preview_annotation)>\n([\s\S]*?)\n<\/\1>\s*$/;
 
-export type ComposerPromptHistoryMessage = Parameters<typeof resolveUserMessagePresentation>[0] & {
-  readonly id: string;
-};
+export type ComposerPromptHistoryMessage = Parameters<typeof resolveUserMessagePresentation>[0] &
+  RecallableMessage & {
+    readonly id: string;
+  };
+
+interface RecallableMessage {
+  readonly text: string;
+  readonly context?: OrchestrationMessageContext | undefined;
+}
 
 export interface ComposerPromptHistoryEntry {
   readonly id: string;
@@ -75,12 +81,13 @@ function stripInlineTerminalLabels(prompt: string, headers: ReadonlyArray<string
   return result;
 }
 
-export function recallableComposerPrompt(messageText: string): string {
-  let prompt = messageText.trim();
-  if (prompt.startsWith(CLAUDE_ULTRATHINK_PREFIX)) {
-    prompt = prompt.slice(CLAUDE_ULTRATHINK_PREFIX.length);
-  }
-
+/**
+ * Messages with structured context carry terminal, element, preview, and review context as records,
+ * so a block in their text is one the user typed. Only legacy wire messages appended generated
+ * blocks to the text, and for those the shape is the only provenance there is.
+ */
+function stripLegacyTrailingContext(messageText: string): string {
+  let prompt = messageText;
   while (prompt.length > 0) {
     const withoutReviewComments = stripTrailingReviewComments(prompt);
     if (withoutReviewComments !== prompt) {
@@ -103,7 +110,10 @@ export function recallableComposerPrompt(messageText: string): string {
     }
     break;
   }
+  return prompt;
+}
 
+function withoutContextReferences(prompt: string): string {
   // Recall is text-only: never create dangling chips without their backing records.
   for (const reference of collectComposerContextReferences(prompt).toReversed()) {
     let { start, end } = reference;
@@ -111,8 +121,24 @@ export function recallableComposerPrompt(messageText: string): string {
     else if (prompt[start - 1] === " ") start -= 1;
     prompt = prompt.slice(0, start) + prompt.slice(end);
   }
+  return prompt;
+}
 
-  const trimmed = prompt.trim();
+/**
+ * Messages recording their authored prompt recall it exactly. Older messages fall back to
+ * guessing from the text, which cannot tell a typed block or app-composed sentence from a
+ * generated one. A leading "Ultrathink:" is kept either way: sends never add it, so it was typed.
+ */
+export function recallableComposerPrompt(message: RecallableMessage): string {
+  const authoredPrompt = message.context?.authoredPrompt;
+  if (authoredPrompt !== undefined) {
+    const prompt = withoutContextReferences(authoredPrompt ?? message.text);
+    return prompt.trim().length === 0 ? "" : prompt;
+  }
+
+  let prompt = message.text.trim();
+  if (message.context === undefined) prompt = stripLegacyTrailingContext(prompt);
+  const trimmed = withoutContextReferences(prompt).trim();
   if (
     trimmed === ATTACHMENT_ONLY_BOOTSTRAP_PROMPT ||
     trimmed.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX)
@@ -130,7 +156,7 @@ export function buildComposerPromptHistoryEntries(
     if (message.role !== "user") continue;
     // Automations and other agents send user-role messages; recall only what the user typed.
     if (resolveUserMessagePresentation(message).attribution !== null) continue;
-    const prompt = recallableComposerPrompt(message.text);
+    const prompt = recallableComposerPrompt(message);
     if (prompt.length === 0) continue;
     const previous = entries[entries.length - 1];
     if (previous && previous.prompt === prompt) {

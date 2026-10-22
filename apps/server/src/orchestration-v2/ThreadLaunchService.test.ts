@@ -464,6 +464,36 @@ it.effect("runs a thread-bound automation on the provider the thread uses now", 
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerScheduledTasks)));
 });
 
+it.effect.each([
+  { name: "matches-text", authoredPrompt: null },
+  { name: "untrimmed", authoredPrompt: "  typed draft\n" },
+])(
+  "keeps the $name authored prompt on the projected first message for prompt recall",
+  ({ name, authoredPrompt }) => {
+    const harness = makeHarness({ runSetup: () => Effect.never });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const input = launchInput({
+        command: `command:authored:${name}`,
+        thread: `thread:authored:${name}`,
+        workspace: { type: "worktree", baseRef: "main" },
+      });
+      const context = { version: 1 as const, records: [], authoredPrompt };
+      const initialMessage = {
+        messageId: MessageId.make(`message:authored:${name}`),
+        text: "typed draft",
+        attachments: [],
+        context,
+      };
+      const launched = yield* launches.launch({ ...input, initialMessage });
+      const projection = yield* threads.getThreadProjection(launched.threadId);
+      const message = projection.messages.find((item) => item.id === initialMessage.messageId);
+      assert.deepStrictEqual(message?.context, context);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
 it.effect("retains automation and sender attribution while a message waits in the queue", () => {
   const harness = makeHarness({ runSetup: () => Effect.never });
   return Effect.gen(function* () {

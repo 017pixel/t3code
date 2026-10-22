@@ -272,14 +272,15 @@ describe("host context compatibility", () => {
   it("sends an image-only prompt as the attachment-only prompt and keeps the image", () => {
     const context: OrchestrationMessageContext = { version: 1, records: [image] };
     const reference = formatComposerContextReference(image);
+    // The recorded draft keeps prompt recall from offering the generated attachment-only prompt.
     expect(serializeComposerMessageForServer(reference, context, true)).toEqual({
       text: ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
-      context,
+      context: { ...context, authoredPrompt: reference },
     });
     const withProse = `${reference} what is this?`;
     expect(serializeComposerMessageForServer(withProse, context, true)).toEqual({
       text: withProse,
-      context,
+      context: { ...context, authoredPrompt: null },
     });
   });
 
@@ -374,7 +375,10 @@ describe("host context compatibility", () => {
     expect(message.text).toContain(review.text);
     expect(message.text).toContain(review.diff);
     expect(message.text).toContain(pr.pullRequest!.url);
-    expect(serializeComposerMessageForServer(text, context, true)).toEqual({ text, context });
+    expect(serializeComposerMessageForServer(text, context, true)).toEqual({
+      text,
+      context: { ...context, authoredPrompt: null },
+    });
     expect(context.records).toEqual([terminal, review, pr]);
   });
 });

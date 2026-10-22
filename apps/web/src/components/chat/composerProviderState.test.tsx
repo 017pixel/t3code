@@ -115,6 +115,28 @@ describe("getComposerProviderState", () => {
     });
   });
 
+  it("never selects a prompt-injected effort, so sends add no Ultrathink prefix of their own", () => {
+    // Prompt recall keeps a leading "Ultrathink:" because only the visible draft can carry it.
+    const state = getComposerProviderState({
+      provider: PROVIDER,
+      model: MODEL,
+      models: modelWith([
+        selectDescriptor(
+          "effort",
+          [
+            { id: "high", label: "High", isDefault: true },
+            { id: "ultrathink", label: "Ultrathink" },
+          ],
+          ["ultrathink"],
+        ),
+      ]),
+      modelOptions: selections(["effort", "ultrathink"]),
+      planModeEnabled: true,
+    });
+
+    expect(state.promptEffort).toBe("high");
+  });
+
   it("derives promptEffort from the first select descriptor and preserves all others for dispatch", () => {
     const state = getComposerProviderState({
       provider: PROVIDER,

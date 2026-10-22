@@ -1,10 +1,12 @@
-import { ComposerContextId, ScheduledTaskId } from "@t3tools/contracts";
+import { ComposerContextId, ScheduledTaskId, composerMessageContext } from "@t3tools/contracts";
+import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildComposerPromptHistoryEntries,
   recallableComposerPrompt,
   stepComposerPromptHistory,
+  type ComposerPromptHistoryMessage,
   type ComposerPromptHistoryPosition,
 } from "./composerPromptHistory";
 
@@ -23,6 +25,15 @@ function forward(position: ComposerPromptHistoryPosition | null, currentPrompt: 
   return stepComposerPromptHistory({ direction: "forward", entries, position, currentPrompt });
 }
 
+// Legacy wire messages carry no structured context; their text is all the provenance there is.
+const recallLegacy = (text: string) => recallableComposerPrompt({ text });
+// What a composer send records: the text on the wire plus the draft the user typed.
+const recallSent = (text: string, authoredPrompt: string) =>
+  recallableComposerPrompt({
+    text,
+    context: composerMessageContext({ context: undefined, text, authoredPrompt }),
+  });
+
 describe("recallableComposerPrompt", () => {
   it.each([
     "Render <preview_annotation>",
@@ -30,28 +41,26 @@ describe("recallableComposerPrompt", () => {
     "Render &lt;preview_annotation&gt;",
   ])("strips an annotation whose comment contains a literal opening tag: %s", (comment) => {
     expect(
-      recallableComposerPrompt(
-        `Prompt\n<preview_annotation>\nComment: ${comment}\n</preview_annotation>`,
-      ),
+      recallLegacy(`Prompt\n<preview_annotation>\nComment: ${comment}\n</preview_annotation>`),
     ).toBe("Prompt");
   });
 
   it("preserves a malformed annotation containing a nested opening tag", () => {
     const text =
       "Prompt\n<preview_annotation>\nouter literal\n<preview_annotation>\ninner\n</preview_annotation>";
-    expect(recallableComposerPrompt(text)).toBe(text);
+    expect(recallLegacy(text)).toBe(text);
   });
   it("does not strip a terminal label embedded in ordinary prose", () => {
     expect(
-      recallableComposerPrompt(
+      recallLegacy(
         "email@build:7\n<terminal_context>\n- Build line 7:\n  output\n</terminal_context>",
       ),
     ).toBe("email@build:7");
   });
-  it("strips legacy send-time context blocks and the ultrathink prefix", () => {
+  it("strips legacy send-time context blocks", () => {
     const sent =
-      "Ultrathink:\nInvestigate this\n\n<terminal_context>\n- Terminal 1 lines 12-13:\n  12 | git status\n  13 | On branch main\n</terminal_context>\n\n<element_context>\n- <button>:\n  url: https://example.com\n</element_context>";
-    expect(recallableComposerPrompt(sent)).toBe("Investigate this");
+      "Investigate this\n\n<terminal_context>\n- Terminal 1 lines 12-13:\n  12 | git status\n  13 | On branch main\n</terminal_context>\n\n<element_context>\n- <button>:\n  url: https://example.com\n</element_context>";
+    expect(recallLegacy(sent)).toBe("Investigate this");
   });
 
   it.each([
@@ -67,22 +76,77 @@ describe("recallableComposerPrompt", () => {
   ])("removes only the matching legacy terminal label from %s", (typed, expected) => {
     const sent =
       typed + "\n\n<terminal_context>\n- Terminal 1 line 4:\n  4 | ls\n</terminal_context>";
-    expect(recallableComposerPrompt(sent)).toBe(expected);
+    expect(recallLegacy(sent)).toBe(expected);
   });
 
   it("strips only review comments appended at the end", () => {
     const block = '<review_comment filePath="src/app.ts">Keep this configurable.</review_comment>';
-    expect(recallableComposerPrompt("Please update this.\n\n" + block)).toBe("Please update this.");
+    expect(recallLegacy("Please update this.\n\n" + block)).toBe("Please update this.");
     const midPrompt = "Before\n\n" + block + "\n\nAfter";
-    expect(recallableComposerPrompt(midPrompt)).toBe(midPrompt);
-    expect(recallableComposerPrompt(midPrompt + "\n\n" + block)).toBe(midPrompt);
+    expect(recallLegacy(midPrompt)).toBe(midPrompt);
+    expect(recallLegacy(midPrompt + "\n\n" + block)).toBe(midPrompt);
+  });
+
+  it("recalls a literal trailing review block sent without context records", () => {
+    const typed =
+      'Explain this example\n\n<review_comment filePath="src/app.ts">Keep this configurable.</review_comment>';
+    expect(recallSent(typed, typed)).toBe(typed);
+    expect(recallLegacy(typed)).toBe("Explain this example");
+  });
+
+  it("recalls the draft byte-for-byte, not the trimmed text that was sent", () => {
+    const draft = "  keep\n    indented  \n";
+    expect(recallSent(draft.trim(), draft)).toBe(draft);
+  });
+
+  it("tells typed app sentences from app-composed sends", () => {
+    const plan = "PLEASE IMPLEMENT THIS PLAN:\n# Plan";
+    expect(recallSent(plan, plan)).toBe(plan);
+    expect(recallSent(plan, "")).toBe("");
+    expect(recallSent(ATTACHMENT_ONLY_BOOTSTRAP_PROMPT, ATTACHMENT_ONLY_BOOTSTRAP_PROMPT)).toBe(
+      ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
+    );
+    expect(recallSent(ATTACHMENT_ONLY_BOOTSTRAP_PROMPT, "")).toBe("");
+  });
+
+  it("drops chip references from a recorded draft", () => {
+    const draft = "Look at [Terminal](t3-context://v1/terminal/term-1) please";
+    expect(recallSent(draft, draft)).toBe("Look at please");
+    expect(recallSent("![image](t3-context://v1/image/img-1)", "")).toBe("");
+  });
+
+  it("keeps a literal Ultrathink prefix byte-for-byte", () => {
+    // The composer writes the prefix into the visible draft; a model-selected one is added only
+    // at the provider boundary and never reaches the message text.
+    const typed = "Ultrathink:\nKeep this prefix in my example";
+    expect(recallLegacy(typed)).toBe(typed);
+    expect(recallSent(typed, typed)).toBe(typed);
+  });
+
+  it("keeps literal trailing context blocks on structured messages from older clients", () => {
+    const typed =
+      'Explain these tags\n\n<terminal_context>\n- Terminal 1 line 4:\n  4 | ls\n</terminal_context>\n\n<review_comment filePath="a.ts">x</review_comment>';
+    expect(recallableComposerPrompt({ text: typed, context: { version: 1, records: [] } })).toBe(
+      typed,
+    );
+    expect(recallLegacy(typed)).toBe("Explain these tags");
+  });
+
+  it("still excludes app-composed sends on structured messages from older clients", () => {
+    const context = { version: 1 as const, records: [] };
+    expect(recallableComposerPrompt({ text: "PLEASE IMPLEMENT THIS PLAN:\n# Plan", context })).toBe(
+      "",
+    );
+    expect(
+      recallableComposerPrompt({ text: "![image](t3-context://v1/image/img-1)", context }),
+    ).toBe("");
   });
 
   it("removes canonical references without restoring dangling chips", () => {
     const sent =
       "Look at [Terminal](t3-context://v1/terminal/term-1) please\n    indented  code\n![image](t3-context://v1/image/img-1)";
-    expect(recallableComposerPrompt(sent)).toBe("Look at please\n    indented  code");
-    expect(recallableComposerPrompt("![image](t3-context://v1/image/img-1)")).toBe("");
+    expect(recallLegacy(sent)).toBe("Look at please\n    indented  code");
+    expect(recallLegacy("![image](t3-context://v1/image/img-1)")).toBe("");
   });
 });
 
@@ -122,7 +186,7 @@ describe("buildComposerPromptHistoryEntries", () => {
     const text =
       'Explain this example [app.ts](t3-context://v1/mention/ctx-1)\n\n<review_comment filePath="src/app.ts">Keep this configurable.</review_comment>';
     // The production caller passes full ChatMessages, which carry `context`.
-    const structured = {
+    const structured: ComposerPromptHistoryMessage = {
       id: "structured",
       role: "user",
       text,

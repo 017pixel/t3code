@@ -4,6 +4,7 @@ import {
   type ModelSelection,
   type ProviderInteractionMode,
   type RuntimeMode,
+  composerMessageContext,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
@@ -107,11 +108,14 @@ export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
 
   return async function submitPlanFollowUp({
     text,
-    context,
+    context: records,
+    authoredPrompt,
     interactionMode: nextInteractionMode,
   }: {
     text: string;
     context?: ReturnType<typeof buildMessageContext>;
+    /** The composer draft; empty when the plan's implementation prompt is sent instead. */
+    authoredPrompt: string;
     interactionMode: "default" | "plan";
   }) {
     if (
@@ -145,6 +149,11 @@ export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
       effort: sendCtx.selectedPromptEffort,
       text: trimmed,
     });
+    const context = composerMessageContext({
+      context: records,
+      text: outgoingMessageText,
+      authoredPrompt,
+    });
 
     sendInFlightRef.current = true;
     beginLocalDispatch({ preparingWorktree: false });
@@ -161,7 +170,7 @@ export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
         id: messageIdForSend,
         role: "user",
         text: outgoingMessageText,
-        ...(context ? { context } : {}),
+        context,
         runId: null,
         createdAt: messageCreatedAt,
         updatedAt: messageCreatedAt,
@@ -193,7 +202,7 @@ export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
             messageId: messageIdForSend,
             role: "user",
             text: outgoingMessageText,
-            ...(context ? { context } : {}),
+            context,
             attachments: [],
           },
           modelSelection: sendCtx.selectedModelSelection,
@@ -333,6 +342,11 @@ export function useImplementPlanInNewThread(input: ImplementPlanInNewThreadInput
             messageId: newMessageId(),
             role: "user",
             text: outgoingImplementationPrompt,
+            context: composerMessageContext({
+              context: undefined,
+              text: outgoingImplementationPrompt,
+              authoredPrompt: "",
+            }),
             attachments: [],
           },
           modelSelection: nextThreadModelSelection,

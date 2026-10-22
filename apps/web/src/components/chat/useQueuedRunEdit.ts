@@ -10,6 +10,7 @@ import {
   type ScopedThreadRef,
   type ThreadContextRecord,
   type ThreadId,
+  composerMessageContext,
 } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
@@ -126,25 +127,30 @@ async function submitQueuedRunEdit(input: {
           attachmentId: uploads[editing.existingAttachments.length + index]?.id ?? attachment.id,
         })),
       })?.records ?? [];
+    const text = editText.length === 0 ? ATTACHMENT_ONLY_BOOTSTRAP_PROMPT : editText;
     const result = await input.editQueuedRun({
       environmentId,
       input: {
         threadId: editing.threadId,
         runId: editing.runId,
-        text: editText.length === 0 ? ATTACHMENT_ONLY_BOOTSTRAP_PROMPT : editText,
+        text,
         edit: {
           messageId: editing.messageId,
           attachments: uploads,
-          context: {
-            version: 1,
-            records: [
-              ...new Map(
-                [...keptRecords, ...newRecords].map(
-                  (record) => [record.contextId, record] as const,
-                ),
-              ).values(),
-            ],
-          },
+          context: composerMessageContext({
+            context: {
+              version: 1,
+              records: [
+                ...new Map(
+                  [...keptRecords, ...newRecords].map(
+                    (record) => [record.contextId, record] as const,
+                  ),
+                ).values(),
+              ],
+            },
+            text,
+            authoredPrompt: content.prompt,
+          }),
         },
       },
     });
