@@ -52,17 +52,19 @@ def main():
     project = root / "project"
     (project / ".codex").mkdir(parents=True)
     server = root / "mcp.py"
-    server.write_text(MCP_SERVER)
+    server.write_text(MCP_SERVER, encoding="utf-8")
     (project / ".codex" / "config.toml").write_text(
         '[mcp_servers.issue15140]\ncommand = "python3"\n'
-        f"args = [{json.dumps(str(server))}]\n"
+        f"args = [{json.dumps(str(server), ensure_ascii=False)}]\n",
+        encoding="utf-8",
     )
     for trust in ("untrusted", "trusted"):
         home = root / f"codex-home-{trust}"
         home.mkdir(mode=0o700)
         (home / "config.toml").write_text(
-            f"[projects.{json.dumps(str(project))}]\ntrust_level = \"trusted\"\n"
-            if trust == "trusted" else ""
+            f"[projects.{json.dumps(str(project), ensure_ascii=False)}]\ntrust_level = \"trusted\"\n"
+            if trust == "trusted" else "",
+            encoding="utf-8",
         )
     print(f"Created credential-free local MCP fixture: {root}")
     print("Project: project/; provider homes: codex-home-untrusted/, codex-home-trusted/")
