@@ -1468,6 +1468,35 @@ export const layer: Layer.Layer<
                 const latestItemOrdinal = yield* Ref.get(latestTurnItemOrdinal);
                 const openSubagents = yield* Ref.get(openRunOwnedSubagents);
                 const rootProviderTurn = yield* Ref.get(latestRootProviderTurn);
+                // Marking the turn failed hides it from the running-turn interrupt
+                // on detach, so stop the native turn now. Adapters only stop this
+                // exact turn, which keeps a newer attempt safe; a lost process
+                // must not hold up the terminal write.
+                if (
+                  rootProviderTurn !== null &&
+                  !isTerminalProviderTurnStatus(rootProviderTurn.status)
+                ) {
+                  yield* input.session
+                    .interruptTurn({
+                      providerThread,
+                      providerTurnId: rootProviderTurn.id,
+                    })
+                    .pipe(
+                      Effect.timeout("5 seconds"),
+                      Effect.catchCause((interruptCause) =>
+                        Cause.hasInterruptsOnly(interruptCause)
+                          ? Effect.failCause(interruptCause)
+                          : Effect.logWarning(
+                              "orchestration V2 failed run provider turn interrupt failed",
+                              {
+                                runId: input.run.id,
+                                providerTurnId: rootProviderTurn.id,
+                                cause: interruptCause,
+                              },
+                            ),
+                      ),
+                    );
+                }
                 let nextRetryWarningAt = completedAt;
                 yield* writeFinalRunEvents({
                   run: input.run,

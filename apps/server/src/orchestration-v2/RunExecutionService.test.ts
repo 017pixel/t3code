@@ -2505,9 +2505,12 @@ it.effect("fails the run when its event stream ends without a root terminal", ()
 it.effect("ends the root provider turn when event ingestion fails the run", () =>
   Effect.gen(function* () {
     const ids = backgroundScenarioIds("ingestion-failure:provider-turn");
+    const interrupted = yield* Ref.make<ReadonlyArray<ProviderTurnId>>([]);
     const { finalEvents } = yield* captureRootRunTermination({
       key: "ingestion-failure:provider-turn",
       shouldFinalizeRun: () => Effect.succeed(true),
+      interruptTurn: (request) =>
+        Ref.update(interrupted, (current) => [...current, request.providerTurnId]),
       events: () =>
         Stream.make({
           type: "provider_turn.updated",
@@ -2549,9 +2552,15 @@ it.effect("ends the root provider turn when event ingestion fails the run", () =
           ): event is Extract<OrchestrationV2DomainEvent, { type: "provider-turn.updated" }> =>
             event.type === "provider-turn.updated" && event.payload.id === ids.rootProviderTurnId,
         )?.payload.status,
+        interrupted: yield* Ref.get(interrupted),
       },
-      { run: "failed", root: "failed", providerTurn: "failed" },
-      "failure finalization ended the run and root but left their provider turn running",
+      {
+        run: "failed",
+        root: "failed",
+        providerTurn: "failed",
+        interrupted: [ids.rootProviderTurnId],
+      },
+      "failure finalization must end the run, root, and provider turn, and stop the native turn",
     );
   }),
 );
@@ -2618,6 +2627,7 @@ function captureRootRunTermination(input: {
     ProviderAdapter.ProviderAdapterV2Error
   >;
   readonly startTurn?: ProviderAdapter.ProviderAdapterV2SessionRuntime["startTurn"];
+  readonly interruptTurn?: ProviderAdapter.ProviderAdapterV2SessionRuntime["interruptTurn"];
   readonly onStartFailure?: (
     error: RunExecutionService.RunExecutionServiceV2Error,
   ) => Effect.Effect<void>;
@@ -2758,6 +2768,7 @@ function captureRootRunTermination(input: {
             ),
           }),
           startTurn: input.startTurn ?? (() => Effect.void),
+          interruptTurn: input.interruptTurn ?? (() => Effect.void),
         } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
         run: {
           id: ids.runId,
