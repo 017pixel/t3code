@@ -345,6 +345,27 @@ function useBrowsePathInput(environment: EnvironmentOption | null, pinnedDirecto
     return committed;
   };
 
+  // `~` expands on the host, so ask its browser for the absolute directory
+  // before comparing the path with registered project roots.
+  const resolveHomePath = async (path: string): Promise<string> => {
+    if (
+      !/^~(?:[\\/]|$)/.test(path) ||
+      !environment ||
+      !readEnvironmentScope(environment.environmentId, AuthFilesystemReadScope) ||
+      !canPreloadBrowsePath(environmentRuntime?.connectionState)
+    ) {
+      return path;
+    }
+    const browsePath = getFilesystemBrowsePath(path, environment.platform);
+    const result = await loadBrowsePath({
+      environmentId: environment.environmentId,
+      input: { partialPath: browsePath.directoryPath },
+    });
+    return AsyncResult.isSuccess(result) && result.value
+      ? getCloneDestinationPath(result.value.parentPath, browsePath.filterQuery)
+      : path;
+  };
+
   useEffect(() => {
     if (environmentId !== null && environmentId !== previousEnvironmentIdRef.current) {
       previousEnvironmentIdRef.current = environmentId;
@@ -364,7 +385,7 @@ function useBrowsePathInput(environment: EnvironmentOption | null, pinnedDirecto
     [browseNavigation],
   );
 
-  return { isBrowseNavigating, pathInput, setPathInput, navigateToBrowsePath };
+  return { isBrowseNavigating, pathInput, setPathInput, navigateToBrowsePath, resolveHomePath };
 }
 
 function useEnvironmentOptions(): ReadonlyArray<EnvironmentOption> {
@@ -673,12 +694,39 @@ async function draftWithPrompt(
   return draftId;
 }
 
+function useOpenExistingProject(environment: EnvironmentOption | null) {
+  const navigation = useNavigation();
+  const projects = useProjects();
+
+  return async (path: string, prompt?: string | null): Promise<boolean> => {
+    if (!environment) return false;
+    const existing = findExistingAddProject({
+      projects,
+      environmentId: environment.environmentId,
+      path,
+    });
+    if (!existing) return false;
+    openNewTaskDraft(navigation, {
+      environmentId: existing.environmentId,
+      projectId: existing.id,
+      title: existing.title,
+      ...(prompt
+        ? await draftWithPrompt(existing.environmentId, existing.id, prompt).then(
+            (draftId) => ({ draftId }),
+            () => ({}),
+          )
+        : {}),
+    });
+    return true;
+  };
+}
+
 function useCreateProject(environment: EnvironmentOption | null) {
   const navigation = useNavigation();
   const createProject = useAtomCommand(projectEnvironment.create, { reportFailure: false });
-  const projects = useProjects();
+  const openExistingProject = useOpenExistingProject(environment);
 
-  return async (workspaceRoot: string) => {
+  return async (workspaceRoot: string, lookupPath = workspaceRoot) => {
     if (
       !environment ||
       !canCreateProjectInEnvironment(environment.connectionState) ||
@@ -691,30 +739,7 @@ function useCreateProject(environment: EnvironmentOption | null) {
       return;
     }
 
-    const existing = findExistingAddProject({
-      projects,
-      environmentId: environment.environmentId,
-      path: workspaceRoot,
-    });
-    if (existing) {
-      Dialog.alert("Project already exists", existing.title);
-      navigation.dispatch(
-        CommonActions.reset({
-          index: 0,
-          routes: [
-            {
-              name: "NewTaskDraft",
-              params: {
-                environmentId: existing.environmentId,
-                projectId: existing.id,
-                title: existing.title,
-              },
-            },
-          ],
-        }),
-      );
-      return;
-    }
+    if (await openExistingProject(lookupPath)) return;
 
     const projectId = ProjectId.make(uuidv4());
     const command = buildProjectCreateCommand({
@@ -1209,7 +1234,7 @@ export function AddProjectLocalFolderScreen(props: { readonly environmentId?: st
     AuthOrchestrationOperateScope,
   );
   const createProject = useCreateProject(environment);
-  const { isBrowseNavigating, navigateToBrowsePath, pathInput, setPathInput } =
+  const { isBrowseNavigating, navigateToBrowsePath, pathInput, resolveHomePath, setPathInput } =
     useBrowsePathInput(environment);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1228,7 +1253,7 @@ export function AddProjectLocalFolderScreen(props: { readonly environmentId?: st
     }
 
     setIsSubmitting(true);
-    const result = await createProject(resolved.path);
+    const result = await createProject(resolved.path, await resolveHomePath(resolved.path));
     if (result && AsyncResult.isFailure(result)) {
       setError(errorMessage(Cause.squash(result.cause)));
     }
@@ -1289,14 +1314,13 @@ export function AddProjectDestinationScreen(props: {
   );
   const canCloneProject = canWriteSourceControl && canCreateProject;
   const createProject = useCreateProject(environment);
+  const openExistingProject = useOpenExistingProject(environment);
   const remoteUrl = stringParam(props.remoteUrl);
   const repositoryTitle = stringParam(props.repositoryTitle);
   const prompt = stringParam(props.prompt);
   const repositoryName = stringParam(props.repositoryName)?.trim() ?? "";
-  const { isBrowseNavigating, navigateToBrowsePath, pathInput, setPathInput } = useBrowsePathInput(
-    environment,
-    repositoryName,
-  );
+  const { isBrowseNavigating, navigateToBrowsePath, pathInput, resolveHomePath, setPathInput } =
+    useBrowsePathInput(environment, repositoryName);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1323,6 +1347,10 @@ export function AddProjectDestinationScreen(props: {
     }
 
     setIsSubmitting(true);
+    if (await openExistingProject(await resolveHomePath(resolved.path), prompt)) {
+      setIsSubmitting(false);
+      return;
+    }
     if (environment.supportsCloneTracking) {
       const projectId = ProjectId.make(uuidv4());
       const title = inferProjectTitleFromPath(resolved.path);
