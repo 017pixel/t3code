@@ -3749,6 +3749,26 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  // The SDK puts no deadline on the interrupt control request.
+  it.effect("a steer is still sent when the command interrupt is never answered", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const interruptStarted = yield* Deferred.make<void>();
+        const harness = yield* makeWakeHarnessWithOptions({
+          interrupt: Deferred.succeed(interruptStarted, undefined).pipe(
+            Effect.andThen(Effect.never),
+          ),
+        });
+        const { steer } = yield* steerDuringRunningBash(harness, "steer-interrupt-unanswered");
+        const steering = yield* steer.pipe(Effect.forkScoped);
+        yield* Deferred.await(interruptStarted);
+        yield* TestClock.adjust("5 seconds");
+        yield* Fiber.join(steering);
+        assert.equal(harness.offeredMessages[1]?.priority, "now");
+      }).pipe(Effect.provide(steerTestLayer)),
+    ),
+  );
+
   it.effect("announces usage-limit pauses once per window and again on a new turn", () =>
     Effect.gen(function* () {
       const harness = yield* makeWakeHarness;

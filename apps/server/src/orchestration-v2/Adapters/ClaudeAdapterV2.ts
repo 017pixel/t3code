@@ -313,6 +313,9 @@ const WORKFLOW_MEMBER_TRANSCRIPT_FLUSH_MS = 500;
 // A steer waits at most this long, from its request, for its foreground
 // subagents to move to the background before it is sent.
 const BACKGROUND_MOVE_TIMEOUT_MS = 5_000;
+// A steer waits at most this long for the CLI to answer the interrupt of a
+// running command before it is sent anyway.
+const CLAUDE_STEER_INTERRUPT_TIMEOUT = "5 seconds";
 
 const CLAUDE_GROUP_WATCH_SCRIPT = [
   "{ trap '' TERM; read -r _ <&3; kill -TERM 0; sleep 5; kill -KILL 0; } </dev/null >/dev/null 2>&1 &",
@@ -9948,9 +9951,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               [...currentTurn.toolCalls.values()].some((call) => call.toolName === "Bash") &&
               (yield* Ref.get(pendingRuntimeRequests)).size === 0
             ) {
-              // The CLI may have aborted before the request failed, and that
-              // result is swallowed, so the steer is still sent to continue.
+              // The CLI may have aborted before the request failed or timed out,
+              // and that result is swallowed, so the steer is still sent to continue.
               yield* existing.query.interrupt.pipe(
+                Effect.timeoutOrElse({
+                  duration: CLAUDE_STEER_INTERRUPT_TIMEOUT,
+                  orElse: () =>
+                    Effect.fail(
+                      queryRunnerError("Claude Code did not answer the interrupt.", "interrupt"),
+                    ),
+                }),
                 Effect.catch((cause) =>
                   Effect.logWarning("orchestration-v2.claude-steer-interrupt-failed", { cause }),
                 ),
