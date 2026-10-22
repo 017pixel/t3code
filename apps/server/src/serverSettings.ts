@@ -15,6 +15,8 @@ import {
   ServerSettings,
   ServerSettingsError,
   type ServerSettingsPatch,
+  globalIdleCompaction,
+  withIdleCompaction,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -117,6 +119,7 @@ const normalizeServerSettings = (
   encodeServerSettings(settings).pipe(
     Effect.flatMap(decodeServerSettings),
     Effect.map(foldProviderInstanceEnabledFlags),
+    Effect.map((next) => withIdleCompaction(next, globalIdleCompaction(next))),
     Effect.map((next) => ({ ...next, ...deriveLegacyProjectOverrides(next) })),
     Effect.mapError(
       (cause) =>
@@ -203,62 +206,59 @@ export class ServerSettingsService extends Context.Service<
   static readonly layerTest = (overrides: DeepPartial<ServerSettings> = {}) => layerTest(overrides);
 }
 
-const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
-  Effect.gen(function* () {
-    const { automaticGitFetchInterval, providerHealthRefreshInterval, ...overridesForMerge } =
-      overrides;
-    const merged = deepMerge(DEFAULT_SERVER_SETTINGS, overridesForMerge);
-    const initialSettings = yield* normalizeServerSettings({
-      ...merged,
-      ...(automaticGitFetchInterval !== undefined
-        ? { automaticGitFetchInterval: automaticGitFetchInterval as Duration.Duration }
-        : {}),
-      ...(providerHealthRefreshInterval !== undefined
-        ? { providerHealthRefreshInterval: providerHealthRefreshInterval as Duration.Duration }
-        : {}),
-    });
-    const currentSettingsRef = yield* Ref.make<ServerSettings>(initialSettings);
-    const writeSemaphore = yield* Semaphore.make(1);
-    const getSettings = Ref.get(currentSettingsRef).pipe(Effect.map(resolveTextGenerationProvider));
-
-    const updateTestSettings = (
-      update: (current: ServerSettings) => Effect.Effect<ServerSettings, ServerSettingsError>,
-    ): Effect.Effect<ServerSettings, ServerSettingsError> =>
-      writeSemaphore.withPermits(1)(
-        Ref.get(currentSettingsRef).pipe(
-          Effect.flatMap(update),
-          Effect.flatMap(normalizeServerSettings),
-          Effect.tap((nextSettings) => Ref.set(currentSettingsRef, nextSettings)),
-          Effect.map(resolveTextGenerationProvider),
-        ),
-      );
-
-    return {
-      start: Effect.void,
-      ready: Effect.void,
-      getSettings,
-      updateSettings: (patch) =>
-        updateTestSettings((currentSettings) =>
-          Effect.succeed(applyServerSettingsPatch(currentSettings, patch)),
-        ),
-      updateProviderInstance: (mutation, patch = {}) =>
-        updateTestSettings((currentSettings) =>
-          Effect.gen(function* () {
-            yield* ensureProviderInstanceMutationAllowed(
-              currentSettings,
-              mutation,
-              "test settings",
-            );
-            const patched = applyServerSettingsPatch(currentSettings, patch);
-            return applyProviderInstanceMutation(patched, mutation);
-          }),
-        ),
-      withSettingsSnapshot: (use) =>
-        writeSemaphore.withPermits(1)(getSettings.pipe(Effect.flatMap(use))),
-      streamChanges: Stream.empty,
-      subscribeChanges: Effect.succeed(Stream.empty),
-    } satisfies ServerSettingsService["Service"];
+const makeTest = Effect.fn("serverSettings.makeTest")(function* (
+  overrides: DeepPartial<ServerSettings> = {},
+) {
+  const { automaticGitFetchInterval, providerHealthRefreshInterval, ...overridesForMerge } =
+    overrides;
+  const merged = deepMerge(DEFAULT_SERVER_SETTINGS, overridesForMerge);
+  const initialSettings = yield* normalizeServerSettings({
+    ...merged,
+    ...(automaticGitFetchInterval !== undefined
+      ? { automaticGitFetchInterval: automaticGitFetchInterval as Duration.Duration }
+      : {}),
+    ...(providerHealthRefreshInterval !== undefined
+      ? { providerHealthRefreshInterval: providerHealthRefreshInterval as Duration.Duration }
+      : {}),
   });
+  const currentSettingsRef = yield* Ref.make<ServerSettings>(initialSettings);
+  const writeSemaphore = yield* Semaphore.make(1);
+  const getSettings = Ref.get(currentSettingsRef).pipe(Effect.map(resolveTextGenerationProvider));
+
+  const updateTestSettings = (
+    update: (current: ServerSettings) => Effect.Effect<ServerSettings, ServerSettingsError>,
+  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
+    writeSemaphore.withPermits(1)(
+      Ref.get(currentSettingsRef).pipe(
+        Effect.flatMap(update),
+        Effect.flatMap(normalizeServerSettings),
+        Effect.tap((nextSettings) => Ref.set(currentSettingsRef, nextSettings)),
+        Effect.map(resolveTextGenerationProvider),
+      ),
+    );
+
+  return {
+    start: Effect.void,
+    ready: Effect.void,
+    getSettings,
+    updateSettings: (patch) =>
+      updateTestSettings((currentSettings) =>
+        Effect.succeed(applyServerSettingsPatch(currentSettings, patch)),
+      ),
+    updateProviderInstance: (mutation, patch = {}) =>
+      updateTestSettings((currentSettings) =>
+        Effect.gen(function* () {
+          yield* ensureProviderInstanceMutationAllowed(currentSettings, mutation, "test settings");
+          const patched = applyServerSettingsPatch(currentSettings, patch);
+          return applyProviderInstanceMutation(patched, mutation);
+        }),
+      ),
+    withSettingsSnapshot: (use) =>
+      writeSemaphore.withPermits(1)(getSettings.pipe(Effect.flatMap(use))),
+    streamChanges: Stream.empty,
+    subscribeChanges: Effect.succeed(Stream.empty),
+  } satisfies ServerSettingsService["Service"];
+});
 
 export const layerTest = (overrides: DeepPartial<ServerSettings> = {}) =>
   Layer.effect(ServerSettingsService, makeTest(overrides));
@@ -625,8 +625,8 @@ const make = Effect.gen(function* () {
     ),
   );
 
-  const moveInlineSettingsSecrets = (settings: ServerSettings) =>
-    Effect.gen(function* () {
+  const moveInlineSettingsSecrets = Effect.fn("serverSettings.moveInlineSettingsSecrets")(
+    function* (settings: ServerSettings) {
       const pending: SettingsSecret[] = [];
       mapSettingsSecrets(settings, (secret) => {
         if (secret.kind === "field" && !secret.redacted && secret.value.length > 0) {
@@ -652,7 +652,8 @@ const make = Effect.gen(function* () {
       return mapSettingsSecrets(settings, (secret) =>
         moved.has(secret.secretName) ? { value: "", redacted: true } : secret,
       );
-    });
+    },
+  );
 
   const loadSettingsFromDisk = Effect.gen(function* () {
     let settings = DEFAULT_SERVER_SETTINGS;
@@ -687,6 +688,10 @@ const make = Effect.gen(function* () {
         settings = decoded.value;
       }
     }
+    // Settings saved by a server that kept the mode in `compactIdleThreads` move
+    // it to `idleCompaction`, so that switch goes to clients as a boolean. The
+    // defaults gain the field too, which tells clients this server reads modes.
+    settings = withIdleCompaction(settings, globalIdleCompaction(settings));
 
     // A file that failed to decode must stay on disk for the user to repair.
     const settingsFileTrusted = Option.isNone(parseFailure);
@@ -802,10 +807,8 @@ const make = Effect.gen(function* () {
     Effect.andThen(Cache.get(settingsCache, cacheKey)),
   );
 
-  const materializeSettingsSecrets = (
-    settings: ServerSettings,
-  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
-    Effect.gen(function* () {
+  const materializeSettingsSecrets = Effect.fn("serverSettings.materializeSettingsSecrets")(
+    function* (settings: ServerSettings): Effect.fn.Return<ServerSettings, ServerSettingsError> {
       const storedSecrets = new Map<string, string>();
       const pending = new Map<string, SettingsSecret>();
       mapSettingsSecrets(settings, (secret) => {
@@ -837,7 +840,8 @@ const make = Effect.gen(function* () {
             : secret.value,
         redacted: secret.sensitive && secret.kind === "environment" && secret.redacted,
       }));
-    });
+    },
+  );
 
   const materializeChanges = (changes: Stream.Stream<ServerSettings>) =>
     changes.pipe(
