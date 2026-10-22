@@ -2489,6 +2489,53 @@ it.effect("tells a reader shown a held detail when the refresh behind it finds a
   }),
 );
 
+it.effect("tells a held detail reader about a check change only when the refresh finds one", () =>
+  Effect.gen(function* () {
+    let status: "pending" | "success" = "pending";
+    const reference = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+    const service = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          // Hosts do not always move `updatedAt` when CI finishes.
+          getChangeRequest: () =>
+            Effect.sync(() => ({
+              ...hostedChangeRequest("body"),
+              checks: [{ name: "ci", status, description: null, url: null }],
+            })),
+        }),
+      ],
+    });
+    const nextNotice = <A>(then: Effect.Effect<A, unknown>) =>
+      service.subscribeRefreshes.pipe(
+        Stream.take(1),
+        Stream.mapEffect(() => then),
+        Stream.runHead,
+        Effect.timeoutOption("1 minute"),
+        Effect.forkChild({ startImmediately: true }),
+      );
+
+    yield* service.detail(reference);
+    yield* TestClock.adjust("61 seconds");
+    const quiet = yield* nextNotice(Effect.void);
+    yield* service.detail(reference);
+    yield* TestClock.adjust("1 minute");
+    assert.isTrue(Option.isNone(Option.flatten(yield* Fiber.join(quiet))));
+
+    status = "success";
+    yield* TestClock.adjust("1 second");
+    const reread = yield* nextNotice(service.detail(reference));
+    yield* service.detail(reference);
+    yield* TestClock.adjust("1 minute");
+    assert.deepStrictEqual(
+      Option.flatten(yield* Fiber.join(reread)).pipe(
+        Option.map((detail) => detail.checks.map((check) => check.status)),
+      ),
+      Option.some(["success"]),
+    );
+  }),
+);
+
 it.effect("keeps routed reads separate when the GitHub account changes", () =>
   Effect.gen(function* () {
     for (const operation of ["summary", "detail", "checks", "diff", "filesViewed"] as const) {
