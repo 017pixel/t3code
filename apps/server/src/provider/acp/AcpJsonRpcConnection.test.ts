@@ -1037,6 +1037,38 @@ describe("AcpSessionRuntime", () => {
     ),
   );
 
+  // Live clock: the replay-idle gap must elapse in real time against the mock agent process.
+  it.live("adopts config options from a session/load response that arrives after replay idle", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.make({
+        ...mockRuntimeOptions,
+        spawn: {
+          ...mockRuntimeOptions.spawn,
+          env: {
+            T3_ACP_DELAY_LOAD_SESSION_AFTER_REPLAY: "1",
+            T3_ACP_LOAD_SESSION_DELAY_MS: "500",
+          },
+        },
+        resumeSessionId: "mock-session-1",
+        sessionLoadReplayIdleGap: "100 millis",
+      });
+      const started = yield* runtime.start();
+      expect(started.sessionSetupResult._meta).toMatchObject({ t3SessionLoadReady: "replay_idle" });
+
+      yield* runtime.getEvents().pipe(
+        Stream.filter((event) => event._tag === "ConfigOptionsUpdated"),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.timeoutOption("5 seconds"),
+      );
+
+      expect((yield* runtime.getConfigOptions).map((option) => option.id)).toEqual([
+        "mode",
+        "model",
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("keeps active configuration after a candidate session load fails", () =>
     Effect.gen(function* () {
       const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;

@@ -142,6 +142,7 @@ function makeMockRuntime(input: {
     | ((runtimeOrdinal: number) => Readonly<Record<string, string>>);
   readonly protocolEvents?: Queue.Queue<EffectAcpProtocol.AcpProtocolLogEvent>;
   readonly cancelBehavior?: AcpSessionRuntime.AcpSessionRuntimeOptions["cancelBehavior"];
+  readonly sessionLoadReplayIdleGap?: Duration.Input;
   readonly ownDescendantProcessGroups?: boolean;
   readonly ownDetachedProcessGroup?: boolean;
   readonly processGroupPlatform?: NodeJS.Platform;
@@ -180,6 +181,9 @@ function makeMockRuntime(input: {
         AcpSessionRuntime.layer({
           ...runtimeInput,
           ...(input.cancelBehavior === undefined ? {} : { cancelBehavior: input.cancelBehavior }),
+          ...(input.sessionLoadReplayIdleGap === undefined
+            ? {}
+            : { sessionLoadReplayIdleGap: input.sessionLoadReplayIdleGap }),
           ...(input.ownDetachedProcessGroup === undefined
             ? {}
             : { ownDetachedProcessGroup: input.ownDetachedProcessGroup }),
@@ -2175,6 +2179,72 @@ describe("AcpAdapterV2", () => {
           }),
         );
       }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
+  it.live("enables model switching when session/load answers with a model after replay idle", () =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const path = yield* Path.Path;
+      const selfInvocation = yield* resolveSelfInvocation();
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      const lateConfigOptions = yield* Deferred.make<void>();
+      let acpRuntime: AcpSessionRuntime.AcpSessionRuntime["Service"] | undefined;
+      const instanceId = ProviderInstanceId.make("acp-test-late-session-load");
+      const adapter = yield* makeAcpAdapterV2({
+        instanceId,
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          makeRuntime: makeMockRuntime({
+            childProcessSpawner,
+            mockAgentPath,
+            environment: {
+              T3_ACP_DELAY_LOAD_SESSION_AFTER_REPLAY: "1",
+              T3_ACP_LOAD_SESSION_DELAY_MS: "500",
+            },
+            sessionLoadReplayIdleGap: "100 millis",
+            wrapRuntime: (runtime) => {
+              acpRuntime = runtime;
+              return {
+                ...runtime,
+                getEvents: () =>
+                  runtime
+                    .getEvents()
+                    .pipe(
+                      Stream.tap((event) =>
+                        event._tag === "ConfigOptionsUpdated"
+                          ? Deferred.succeed(lateConfigOptions, undefined)
+                          : Effect.void,
+                      ),
+                    ),
+              };
+            },
+          }),
+        },
+        selfInvocation,
+      });
+      const runtime = yield* adapter.openSession({
+        threadId: ThreadId.make("thread-acp-late-session-load"),
+        providerSessionId: ProviderSessionId.make("provider-session-acp-late-session-load"),
+        modelSelection: { instanceId, model: "default" },
+        runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        }),
+        initialNativeThreadId: "mock-session-1",
+      });
+
+      yield* Deferred.await(lateConfigOptions).pipe(Effect.timeoutOption("5 seconds"));
+      yield* acpRuntime!.drainEvents;
+
+      assert.isTrue(
+        runtime.providerSession.capabilities.sessions.supportsModelSwitchInSession,
+        "model switching stays disabled after the late session/load response offered a model",
+      );
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("preserves new-session fallback when an eager ACP session load is stale", () =>
