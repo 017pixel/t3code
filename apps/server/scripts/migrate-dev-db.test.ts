@@ -288,6 +288,66 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
     }),
   );
 
+  // An old V1 server on an empty pre-V2 source can create its first thread
+  // after the guard passes; the unfiltered copy would take it and prune drop it.
+  it.effect("refuses a legacy thread committed after the guard", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-race-" });
+      const destDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-race-dest-" });
+      const source = path.join(sourceDir, "userdata", "statev2.sqlite");
+      yield* fs.makeDirectory(path.dirname(source), { recursive: true });
+      yield* withDatabase(source, runMigrations({ toMigrationInclusive: 54 }));
+      const destination = yield* createFixtureSource(destDir);
+
+      // The first filesystem call after the guard is creating the destination
+      // state dir; the V1 server commits its thread there.
+      const commitLegacyThread = withDatabase(
+        source,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`INSERT INTO projection_projects
+            (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+            VALUES ('project-legacy', 'Legacy', '/tmp/legacy', '[]', '2026-08-01', '2026-08-01')`;
+          yield* sql`INSERT INTO projection_threads
+            (thread_id, project_id, title, model_selection_json, runtime_mode, created_at, updated_at)
+            VALUES ('thread-legacy', 'project-legacy', 'Legacy thread',
+              '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', '2026-08-01', '2026-08-01')`;
+        }),
+      );
+      const racingFs: FileSystem.FileSystem = {
+        ...fs,
+        makeDirectory: (directory, options) =>
+          directory === path.dirname(destination)
+            ? commitLegacyThread.pipe(
+                Effect.orDie,
+                Effect.andThen(fs.makeDirectory(directory, options)),
+              )
+            : fs.makeDirectory(directory, options),
+      };
+
+      yield* withDatabase(
+        destination,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql.unsafe("PRAGMA journal_mode = WAL").unprepared;
+          yield* sql`UPDATE projection_projects SET title = 'Edited' WHERE project_id = 'project-kept'`;
+          const databaseBefore = yield* fs.readFile(destination);
+          const walBefore = yield* fs.readFile(`${destination}-wal`);
+
+          const error = yield* runMigrateDevDb(
+            { baseDir: destDir, source, projects: 5, threadsPerProject: 10 },
+            { sharedHome: sourceDir },
+          ).pipe(Effect.provideService(FileSystem.FileSystem, racingFs), Effect.flip);
+          assert.equal(error._tag, "MigrateDevDbLegacySourceError");
+          assert.deepStrictEqual(yield* fs.readFile(destination), databaseBefore);
+          assert.deepStrictEqual(yield* fs.readFile(`${destination}-wal`), walBefore);
+        }),
+      );
+    }),
+  );
+
   it.effect("refuses while a dev server holds the destination", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
