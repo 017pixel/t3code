@@ -109,6 +109,7 @@ function GitOverviewSheetContent(props: GitOverviewSheetProps) {
   const gitStatusData = withThreadOpenPullRequest(
     gitStatus.data ?? null,
     selectedThread?.pullRequests ?? [],
+    selectedEnvironmentRuntime?.serverConfig?.environment.capabilities.threadPullRequests === true,
   );
 
   const currentBranchLabel = gitStatusData?.refName ?? selectedThread?.branch ?? "Detached HEAD";

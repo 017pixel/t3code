@@ -271,6 +271,7 @@ function ThreadRouteContent(
     selectedThreadDetailRef,
     selectedThreadProject,
     selectedEnvironmentConnection,
+    selectedEnvironmentRuntime,
   } = useThreadSelection();
   const canOperateThread = useEnvironmentScope(
     selectedThread?.environmentId ?? null,
@@ -715,6 +716,8 @@ function ThreadRouteContent(
     gitStatus: withThreadOpenPullRequest(
       gitStatus.data ?? null,
       selectedThread?.pullRequests ?? [],
+      selectedEnvironmentRuntime?.serverConfig?.environment.capabilities.threadPullRequests ===
+        true,
     ),
     gitOperationLabel: gitState.gitOperationLabel,
     canOpenTerminal:
