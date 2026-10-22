@@ -200,11 +200,13 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
         setCollapsedQuestionId(open ? null : activeQuestion.id);
       }}
     >
-      {/* Expanded, the trigger shrinks to its actions and the question rises beside them. */}
+      {/* Expanded, the trigger shrinks to its actions and the question rises beside them.
+          Its top margin carries the body down with it, so the first line gains room without losing centering. */}
       <CollapsibleTrigger
         render={<ComposerBanner.Row render={<button type="button" />} />}
         className={cn(
-          !isCollapsed && "relative z-10 ms-auto -mb-(--composer-banner-icon-column) flex w-fit",
+          !isCollapsed &&
+            "relative z-10 ms-auto mt-1 -mb-(--composer-banner-icon-column) flex w-fit",
         )}
         title={toggleLabel}
         aria-label={isCollapsed ? undefined : toggleLabel}
