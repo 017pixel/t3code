@@ -15,7 +15,7 @@ vi.mock(import("../ChatMarkdown"), async (importOriginal) => ({
 }));
 
 import { act, fakeTimers, render } from "../../../test/render";
-import { useComposerDraftStore } from "../../composerDraftStore";
+import { DraftId, useComposerDraftStore } from "../../composerDraftStore";
 import { makeThreadProjectionFixture } from "../../test-fixtures";
 import { usePendingThreadRequests } from "./usePendingThreadRequests";
 
@@ -79,10 +79,12 @@ function PendingRequestsProbe({
   environmentId,
   projection,
   loading = false,
+  composerDraftTarget,
 }: {
   environmentId: EnvironmentId;
   projection: OrchestrationV2ThreadProjection;
   loading?: boolean;
+  composerDraftTarget?: DraftId;
 }) {
   const promptRef = useRef("");
   const composerRef = useRef(null);
@@ -92,7 +94,7 @@ function PendingRequestsProbe({
     activeThread: projection.thread,
     serverProjection: loading ? null : projection,
     supportsQuestionAttachments: false,
-    composerDraftTarget: { environmentId, threadId: projection.thread.id },
+    composerDraftTarget: composerDraftTarget ?? { environmentId, threadId: projection.thread.id },
     setComposerDraftPrompt: (target, prompt) =>
       useComposerDraftStore.getState().setPrompt(target, prompt),
     promptRef,
@@ -243,4 +245,40 @@ it("does not return an answer to the thread draft once the question is resolved"
       .getState()
       .getComposerDraft({ environmentId, threadId: threadRef.threadId })?.prompt ?? "",
   ).toBe("");
+});
+
+it("keeps a cancelled question's typed answer when a queued-message edit is open and then cancelled", async () => {
+  using _timers = fakeTimers();
+  const environmentId = EnvironmentId.make("queued-edit-environment");
+  const projection = questionProjection(threadRef.threadId, ["first"]);
+  const answer = "Typed while a queued message was being edited.";
+  const threadTarget = { environmentId, threadId: threadRef.threadId };
+  // The composer shows the queued edit's temporary draft, not the thread's.
+  const editTarget = DraftId.make("queued-edit:test:run");
+  useComposerDraftStore.getState().setPrompt(editTarget, "Queued message text");
+  await using screen = await render(
+    <PendingRequestsProbe
+      environmentId={environmentId}
+      projection={projection}
+      composerDraftTarget={editTarget}
+    />,
+  );
+  await act(() => requests.onChangeActivePendingUserInputCustomAnswer("question-0", answer));
+  await screen.rerender(
+    <PendingRequestsProbe
+      environmentId={environmentId}
+      composerDraftTarget={editTarget}
+      projection={{
+        ...projection,
+        runtimeRequests: projection.runtimeRequests.map((request) => ({
+          ...request,
+          status: "cancelled",
+          resolvedAt: projection.updatedAt,
+        })),
+      }}
+    />,
+  );
+  // Cancelling the queued edit clears its temporary draft.
+  useComposerDraftStore.getState().clearComposerContent(editTarget);
+  expect(useComposerDraftStore.getState().getComposerDraft(threadTarget)?.prompt).toBe(answer);
 });

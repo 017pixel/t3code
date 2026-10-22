@@ -1,3 +1,4 @@
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import {
   AuthOrchestrationOperateScope,
@@ -220,11 +221,14 @@ export function usePendingThreadRequests(input: {
   );
   // A question that closes without an answer (Stop cancels it) never sent the
   // user's typed text, so it goes back to the thread draft instead of vanishing.
+  // The composer may be showing a temporary queued-message edit, so the text
+  // goes to the owning thread's own draft, which outlives that edit.
   const carryUnsentCustomAnswers = useStableCallback((threadId: ThreadId) => {
     if (serverProjection?.thread.id !== threadId) return;
     const drafts = usePendingUserInputAnswers.getState();
     const store = useComposerDraftStore.getState();
-    const currentPrompt = store.getComposerDraft(composerDraftTarget)?.prompt ?? "";
+    const threadDraftTarget = scopeThreadRef(environmentId, threadId);
+    const currentPrompt = store.getComposerDraft(threadDraftTarget)?.prompt ?? "";
     let nextPrompt = currentPrompt;
     const threadContexts: ThreadContextRecord[] = [];
     for (const request of serverProjection.runtimeRequests) {
@@ -252,8 +256,8 @@ export function usePendingThreadRequests(input: {
       }
     }
     if (nextPrompt === currentPrompt) return;
-    setComposerDraftPrompt(composerDraftTarget, nextPrompt);
-    store.addThreadContexts(composerDraftTarget, threadContexts, { appendReference: false });
+    setComposerDraftPrompt(threadDraftTarget, nextPrompt);
+    store.addThreadContexts(threadDraftTarget, threadContexts, { appendReference: false });
   });
   useEffect(() => {
     // A thread shell can arrive before its requests; missing detail is not resolution.
