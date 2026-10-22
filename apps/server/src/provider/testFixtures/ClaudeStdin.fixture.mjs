@@ -43,7 +43,11 @@ function record(text) {
   }
 }
 process.stdin.on("data", (chunk) => {
-  child.stdin.write(chunk);
+  // Stop reading while the child is behind, so a slow reader cannot grow our buffer unbounded.
+  if (!child.stdin.write(chunk)) {
+    process.stdin.pause();
+    child.stdin.once("drain", () => process.stdin.resume());
+  }
   record(decoder.write(chunk));
 });
 process.stdin.on("end", () => {
