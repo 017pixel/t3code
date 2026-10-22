@@ -1,18 +1,5 @@
-/**
- * Issues across the workspace's projects, read through whichever tracker each project resolves
- * to. The service owns resolution and permission; trackers own their APIs.
- *
- * Resolution: a git-host project resolves to the tracker of the same kind as its remote, with the
- * remote's host and `owner/repo` as the scope. A standalone tracker (Linear, Jira) will resolve
- * from a per-project binding in settings through the same `resolveProjectTracker` hook; only the
- * git-host path exists today.
- *
- * An issue whose scope is not any project's own can still be read through a project on the same
- * tracker and host — a frontend project reading a backend issue, or an external URL — but is
- * read-only: every write checks `writable` first.
- *
- * @module issue/IssueService
- */
+// References outside the project's canonical repository may be read on the same host,
+// but every write must pass through requireWritable.
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -45,6 +32,7 @@ import {
   type OrchestrationProjectShell,
   type ProjectId,
 } from "@t3tools/contracts";
+import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 import { parseIssueUrl } from "@t3tools/shared/issueUrl";
 import {
@@ -59,8 +47,14 @@ import * as IssueTrackerRegistry from "./IssueTrackerRegistry.ts";
 const DEFAULT_LIST_LIMIT = 50;
 const SCOPE_CONCURRENCY = 4;
 
+const interactive =
+  <I, A>(call: (input: I) => Effect.Effect<A, IssueError>) =>
+  (input: I) =>
+    call(input).pipe(Effect.provideService(SourceControlRateLimit.Interactive, true));
+
 /** One project's resolved tracker: which driver, where it is served from, and its container. */
-export interface ProjectTrackerBinding {
+interface ProjectTrackerBinding {
+  readonly canonicalKey: string;
   readonly tracker: IssueTrackerKind;
   readonly host: string;
   readonly scope: string;
@@ -98,9 +92,13 @@ export function resolveGitHostBinding(
       : sourceControlRepositorySelector(identity);
   const kind = identity?.provider;
   if (!identity || kind === undefined || kind === "unknown" || scope === null) return null;
+  const host = pullRequestHostOf(identity, SourceControlProviderKind.make(kind));
   return {
+    // Every repository of an Azure DevOps project shares its work items.
+    canonicalKey:
+      kind === "azure-devops" ? `${host}/${scope}`.toLowerCase() : identity.canonicalKey,
     tracker: IssueTrackerKind.make(kind),
-    host: pullRequestHostOf(identity, SourceControlProviderKind.make(kind)),
+    host,
     scope,
   };
 }
@@ -173,12 +171,11 @@ export class IssueService extends Context.Service<
   }
 >()("t3/issue/IssueService") {}
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const registry = yield* IssueTrackerRegistry.IssueTrackerRegistry;
   const projects = yield* ProjectService.ProjectService;
   const repositoryIdentities = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
 
-  /** Where a project's issues live. The one place a standalone tracker's binding will plug in. */
   const resolveProjectTracker = (
     project: OrchestrationProjectShell,
   ): Effect.Effect<ProjectTrackerBinding | null> =>
@@ -269,122 +266,123 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  const list: IssueService["Service"]["list"] = (input) =>
-    Effect.gen(function* () {
-      const { supported, unimplemented } = yield* listProjects(input);
-      const limit = input.limit ?? DEFAULT_LIST_LIMIT;
-      // Worktrees of one repository are separate projects; read each scope once.
-      const scopes = new Map<string, SupportedProject>();
-      for (const project of supported) {
-        const key = listCursorKey(project.host, project.scope);
-        if (!scopes.has(key)) scopes.set(key, project);
-      }
-      const continuing = input.cursors;
-      const viewers = new Map<string, string>();
-      const trackers = new Map<string, IssueTrackerSummary>();
-      const entries: IssueListEntry[] = [];
-      const errors: IssueListProjectError[] = [];
-      const nextCursors: Record<string, string> = {};
+  const list: IssueService["Service"]["list"] = Effect.fn("IssueService.list")(function* (input) {
+    const { supported, unimplemented } = yield* listProjects(input);
+    const limit = input.limit ?? DEFAULT_LIST_LIMIT;
+    // Worktrees of one repository are separate projects; read each scope once.
+    const scopes = new Map<string, SupportedProject>();
+    for (const project of supported) {
+      if (!scopes.has(project.canonicalKey)) scopes.set(project.canonicalKey, project);
+    }
+    const continuing = input.cursors;
+    const viewers = new Map<string, string>();
+    const trackers = new Map<string, IssueTrackerSummary>();
+    const entries: IssueListEntry[] = [];
+    const errors: IssueListProjectError[] = [];
+    const nextCursors: Record<string, string> = {};
 
-      const viewerFor = (project: SupportedProject) =>
-        Effect.suspend(() => {
-          const known = viewers.get(project.host);
-          return known === undefined
-            ? project.api
-                .getViewer({ cwd: project.project.workspaceRoot, host: project.host })
-                .pipe(Effect.tap((viewer) => Effect.sync(() => viewers.set(project.host, viewer))))
-            : Effect.succeed(known);
-        });
+    const viewerRequests = new Map<string, Effect.Effect<string, IssueTrackerError>>();
+    for (const project of scopes.values()) {
+      if (viewerRequests.has(project.host)) continue;
+      const request = yield* Effect.cached(
+        project.api
+          .getViewer({ cwd: project.project.workspaceRoot, host: project.host })
+          .pipe(Effect.tap((viewer) => Effect.sync(() => viewers.set(project.host, viewer)))),
+      );
+      viewerRequests.set(project.host, request);
+    }
 
-      // Every project counts, including worktrees of a scope read once below.
-      for (const project of supported) {
-        const existing = trackers.get(project.host);
-        trackers.set(
-          project.host,
-          existing === undefined
-            ? {
-                tracker: project.tracker,
-                host: project.host,
-                projectCount: 1,
-                capabilities: project.api.capabilities,
-                configured: true,
-                detail: null,
-              }
-            : { ...existing, projectCount: existing.projectCount + 1 },
-        );
-      }
-      const recordFailure = (project: SupportedProject, failure: IssueTrackerError) => {
-        const existing = trackers.get(project.host);
-        if (existing !== undefined && isTrackerUnusable(failure))
-          trackers.set(project.host, { ...existing, configured: false, detail: failure.detail });
-      };
-
-      yield* Effect.forEach(
-        scopes,
-        ([key, project]) =>
-          Effect.gen(function* () {
-            // A continuation names the scopes it wants; one not named has nothing to add.
-            if (continuing !== undefined && continuing[key] === undefined) return;
-            const cursor = continuing?.[key];
-            const page = yield* viewerFor(project).pipe(
-              Effect.flatMap((viewer) =>
-                project.api.listIssues({
-                  cwd: project.project.workspaceRoot,
-                  host: project.host,
-                  scope: project.scope,
-                  state: input.state,
-                  involvement: input.involvement ?? "all",
-                  viewer,
-                  limit,
-                  query: input.query,
-                  cursor,
-                }),
-              ),
-              Effect.result,
-            );
-            if (page._tag === "Failure") {
-              recordFailure(project, page.failure);
-              errors.push({
-                projectId: project.project.id,
-                projectTitle: project.project.title,
-                message: page.failure.detail,
-              });
-              return;
+    // Every project counts, including worktrees of a scope read once below.
+    for (const project of supported) {
+      const existing = trackers.get(project.host);
+      trackers.set(
+        project.host,
+        existing === undefined
+          ? {
+              tracker: project.tracker,
+              host: project.host,
+              projectCount: 1,
+              capabilities: project.api.capabilities,
+              configured: true,
+              detail: null,
             }
-            for (const item of page.success.items) {
-              entries.push({
-                ...item,
-                tracker: project.tracker,
+          : { ...existing, projectCount: existing.projectCount + 1 },
+      );
+    }
+    const recordFailure = (project: SupportedProject, failure: IssueTrackerError) => {
+      const existing = trackers.get(project.host);
+      if (existing !== undefined && isTrackerUnusable(failure))
+        trackers.set(project.host, { ...existing, configured: false, detail: failure.detail });
+    };
+
+    yield* Effect.forEach(
+      scopes.values(),
+      (project) =>
+        Effect.gen(function* () {
+          const key = listCursorKey(project.host, project.scope);
+          // A continuation names the scopes it wants; one not named has nothing to add.
+          if (continuing !== undefined && continuing[key] === undefined) return;
+          const cursor = continuing?.[key];
+          const page = yield* viewerRequests.get(project.host)!.pipe(
+            Effect.flatMap((viewer) =>
+              project.api.listIssues({
+                cwd: project.project.workspaceRoot,
                 host: project.host,
                 scope: project.scope,
-                projectId: project.project.id,
-                projectTitle: project.project.title,
-              });
-            }
-            if (page.success.nextCursor !== null) nextCursors[key] = page.success.nextCursor;
-          }),
-        { concurrency: SCOPE_CONCURRENCY, discard: true },
-      );
+                state: input.state,
+                involvement: input.involvement ?? "all",
+                viewer,
+                limit,
+                query: input.query,
+                cursor,
+              }),
+            ),
+            Effect.result,
+          );
+          if (page._tag === "Failure") {
+            if (cursor !== undefined) nextCursors[key] = cursor;
+            recordFailure(project, page.failure);
+            errors.push({
+              projectId: project.project.id,
+              projectTitle: project.project.title,
+              message: page.failure.detail,
+            });
+            return;
+          }
+          for (const item of page.success.items) {
+            entries.push({
+              ...item,
+              tracker: project.tracker,
+              host: project.host,
+              scope: project.scope,
+              projectId: project.project.id,
+              projectTitle: project.project.title,
+            });
+          }
+          if (page.success.nextCursor !== null) nextCursors[key] = page.success.nextCursor;
+        }),
+      { concurrency: SCOPE_CONCURRENCY, discard: true },
+    );
 
-      for (const [host, { tracker, projectCount }] of unimplemented) {
-        trackers.set(host, {
-          tracker,
-          host,
-          projectCount,
-          capabilities: null,
-          configured: false,
-          detail: "Issues cannot be browsed for this host yet.",
-        });
-      }
-      entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-      return {
-        viewers: Object.fromEntries(viewers),
-        trackers: [...trackers.values()],
-        entries,
-        errors,
-        nextCursors,
-      };
-    });
+    for (const [host, { tracker, projectCount }] of unimplemented) {
+      trackers.set(host, {
+        tracker,
+        host,
+        projectCount,
+        capabilities: null,
+        configured: false,
+        detail: "Issues cannot be browsed for this host yet.",
+      });
+    }
+    entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return {
+      viewers: Object.fromEntries(viewers),
+      trackers: [...trackers.values()],
+      entries,
+      errors,
+      nextCursors,
+    };
+  });
 
   const detail: IssueService["Service"]["detail"] = (input) =>
     requireProject(input).pipe(
@@ -611,12 +609,12 @@ export const make = Effect.gen(function* () {
     detail,
     comments,
     templates,
-    candidates,
-    create,
-    comment,
-    update,
-    setState,
-    react,
+    candidates: interactive(candidates),
+    create: interactive(create),
+    comment: interactive(comment),
+    update: interactive(update),
+    setState: interactive(setState),
+    react: interactive(react),
     resolveUrl,
   });
 });

@@ -20,18 +20,38 @@ import type {
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
 import type { TrackerIssueSummary } from "@t3tools/issue-tracker-core/server/IssueTracker";
 
-/**
- * The states Azure's stock processes treat as finished. A project may rename its own columns, so
- * anything not named here reads as open: an item wrongly shown as open is one the reader can
- * still close, while one wrongly shown as closed disappears from the list they were looking at.
- */
-const CLOSED_STATES: ReadonlySet<string> = new Set([
+/** Lowercased names of the states a project treats as finished, read by `closedStateNames`. */
+export type ClosedStates = ReadonlySet<string>;
+
+/** The finished states of Azure's stock processes, for a project whose types report none. */
+const STOCK_CLOSED_STATES: ClosedStates = new Set([
   "closed",
   "done",
   "removed",
   "resolved",
   "completed",
 ]);
+
+const FINISHED_CATEGORIES: ReadonlySet<string> = new Set(["Resolved", "Completed", "Removed"]);
+
+/**
+ * A project's finished states, from its work item types' state categories. Custom processes
+ * name their own columns, so the category, not the name, says whether one is finished.
+ */
+export function closedStateNames(
+  types: ReadonlyArray<{
+    readonly states?:
+      | ReadonlyArray<{ readonly name: string; readonly category: string }>
+      | undefined;
+  }>,
+): ClosedStates {
+  const names = types.flatMap((type) =>
+    (type.states ?? []).flatMap((state) =>
+      FINISHED_CATEGORIES.has(state.category) ? [state.name.toLowerCase()] : [],
+    ),
+  );
+  return names.length === 0 ? STOCK_CLOSED_STATES : new Set(names);
+}
 
 const Identity = Schema.Struct({
   displayName: Schema.optional(Schema.NullOr(Schema.String)),
@@ -103,9 +123,9 @@ function toActor(value: typeof IdentityValue.Type | undefined): IssueActor | nul
     : { login, name: trimmed(value.displayName), avatarUrl: trimmed(value.imageUrl) };
 }
 
-function toIssueState(name: string | null | undefined): IssueState {
+function toIssueState(name: string | null | undefined, closed: ClosedStates): IssueState {
   const state = trimmed(name) ?? "New";
-  return { category: CLOSED_STATES.has(state.toLowerCase()) ? "closed" : "open", name: state };
+  return { category: closed.has(state.toLowerCase()) ? "closed" : "open", name: state };
 }
 
 /** Azure keeps tags as one `; `-separated string, with no colour anywhere. */
@@ -123,7 +143,7 @@ export interface AzureDevOpsWorkItem extends TrackerIssueSummary {
 }
 
 /** Null for a row this cannot place: no title, no dates, or no project to build a link from. */
-function toWorkItem(raw: typeof WorkItem.Type): AzureDevOpsWorkItem | null {
+function toWorkItem(raw: typeof WorkItem.Type, closed: ClosedStates): AzureDevOpsWorkItem | null {
   const fields = raw.fields ?? {};
   const title = trimmed(fields["System.Title"]);
   const createdAt = trimmed(fields["System.CreatedDate"]);
@@ -140,7 +160,7 @@ function toWorkItem(raw: typeof WorkItem.Type): AzureDevOpsWorkItem | null {
     title,
     url,
     author: toActor(fields["System.CreatedBy"]),
-    state: toIssueState(fields["System.State"]),
+    state: toIssueState(fields["System.State"], closed),
     createdAt,
     updatedAt,
     closedAt: trimmed(fields["Microsoft.VSTS.Common.ClosedDate"]),
@@ -156,12 +176,13 @@ function toWorkItem(raw: typeof WorkItem.Type): AzureDevOpsWorkItem | null {
 /** A flat WIQL answer; a row this cannot place is skipped rather than failing the page. */
 export function decodeWorkItemsJson(
   raw: string,
+  closed: ClosedStates,
 ): Result.Result<ReadonlyArray<AzureDevOpsWorkItem>, DecodeFailure> {
   return Result.map(decodeUnknownList(raw.trim().length === 0 ? "[]" : raw), (rows) =>
     (rows ?? []).flatMap((entry) => {
       const item = decodeWorkItemEntry(entry);
       if (Exit.isFailure(item)) return [];
-      return toWorkItem(item.value) ?? [];
+      return toWorkItem(item.value, closed) ?? [];
     }),
   );
 }
@@ -169,8 +190,9 @@ export function decodeWorkItemsJson(
 /** Null where az answered with a work item this cannot place, which the caller reports as such. */
 export function decodeWorkItemJson(
   raw: string,
+  closed: ClosedStates,
 ): Result.Result<AzureDevOpsWorkItem | null, DecodeFailure> {
-  return Result.map(decodeWorkItem(raw), toWorkItem);
+  return Result.map(decodeWorkItem(raw), (item) => toWorkItem(item, closed));
 }
 
 /** Azure names comment reactions after its own icons; the six it has map onto the contract's. */
@@ -285,6 +307,7 @@ function identityLogin(value: unknown): string | null {
  */
 export function decodeUpdatesJson(
   raw: string,
+  closed: ClosedStates,
 ): Result.Result<ReadonlyArray<IssueEvent>, DecodeFailure> {
   return Result.map(decodeUpdatesPage(raw), (page) =>
     (page.value ?? []).flatMap((entry) => {
@@ -303,8 +326,8 @@ export function decodeUpdatesJson(
         });
       const state = fields["System.State"];
       if (typeof state?.oldValue === "string" && typeof state.newValue === "string") {
-        const was = toIssueState(state.oldValue);
-        const now = toIssueState(state.newValue);
+        const was = toIssueState(state.oldValue, closed);
+        const now = toIssueState(state.newValue, closed);
         add(
           was.category === now.category
             ? "state-changed"

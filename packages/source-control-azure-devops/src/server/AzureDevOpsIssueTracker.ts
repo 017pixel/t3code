@@ -28,6 +28,7 @@ import {
 import * as AzureDevOpsCli from "./AzureDevOpsCli.ts";
 import {
   azureDevOpsReactionType,
+  closedStateNames,
   decodeCommentsJson,
   decodeProfileJson,
   decodeUpdatesJson,
@@ -35,6 +36,7 @@ import {
   decodeWorkItemsJson,
   pullRequestNumberOf,
   type AzureDevOpsWorkItem,
+  type ClosedStates,
 } from "./azureDevOpsIssueJson.ts";
 import { decodePullRequestJson } from "./azureDevOpsPullRequestJson.ts";
 
@@ -114,7 +116,13 @@ const decodeWiql = Schema.decodeUnknownResult(
 const decodeTypes = Schema.decodeUnknownResult(
   Schema.Struct({
     value: Schema.Array(
-      Schema.Struct({ name: Schema.String, isDisabled: Schema.optional(Schema.Boolean) }),
+      Schema.Struct({
+        name: Schema.String,
+        isDisabled: Schema.optional(Schema.Boolean),
+        states: Schema.optional(
+          Schema.Array(Schema.Struct({ name: Schema.String, category: Schema.String })),
+        ),
+      }),
     ),
   }),
 );
@@ -174,8 +182,8 @@ function involvementClause(involvement: IssueInvolvement): string {
   }
 }
 
-function stateClause(state: "all" | "open" | "closed"): string {
-  const closed = "('Closed', 'Completed', 'Done', 'Removed', 'Resolved')";
+function stateClause(state: "all" | "open" | "closed", closedStates: ClosedStates): string {
+  const closed = `(${[...closedStates].map(quoted).join(", ")})`;
   switch (state) {
     case "open":
       return ` AND [System.State] NOT IN ${closed}`;
@@ -343,11 +351,28 @@ export const make: Effect.Effect<
       }),
     );
 
+  const workItemTypes = (input: {
+    readonly cwd: string;
+    readonly operation: string;
+    readonly organization: string;
+    readonly project: string;
+  }) =>
+    read({
+      cwd: input.cwd,
+      operation: input.operation,
+      args: invokeArgs({ ...input, resource: "workitemtypes" }),
+      decode: decodeAs(decodeTypes),
+    }).pipe(Effect.map((types) => types.value));
+
+  const closedStates = (input: Parameters<typeof workItemTypes>[0]) =>
+    workItemTypes(input).pipe(Effect.map(closedStateNames));
+
   const workItem = (input: {
     readonly cwd: string;
     readonly operation: string;
     readonly organization: string;
     readonly number: number;
+    readonly closed: ClosedStates;
   }): Effect.Effect<AzureDevOpsWorkItem, IssueTrackerError> =>
     read({
       cwd: input.cwd,
@@ -365,7 +390,7 @@ export const make: Effect.Effect<
         "--expand",
         "relations",
       ],
-      decode: decodeWorkItemJson,
+      decode: (raw) => decodeWorkItemJson(raw, input.closed),
     }).pipe(
       Effect.filterOrFail(
         (item) => item !== null,
@@ -547,6 +572,11 @@ export const make: Effect.Effect<
       const text = input.query?.trim() ?? "";
       return scoped("listIssues", input).pipe(
         Effect.flatMap((scope) =>
+          closedStates({ ...scope, cwd: input.cwd, operation: "listIssues" }).pipe(
+            Effect.map((closed) => ({ scope, closed })),
+          ),
+        ),
+        Effect.flatMap(({ scope, closed }) =>
           invokeWithBody({
             cwd: input.cwd,
             operation: "listIssues",
@@ -560,7 +590,7 @@ export const make: Effect.Effect<
             body: {
               query:
                 `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = ${quoted(scope.project)}` +
-                stateClause(input.state) +
+                stateClause(input.state, closed) +
                 involvementClause(input.involvement) +
                 (text.length === 0 ? "" : ` AND [System.Title] CONTAINS ${quoted(text)}`) +
                 (cursor === undefined
@@ -592,7 +622,7 @@ export const make: Effect.Effect<
                         `fields=${LIST_FIELDS.join(",")}`,
                       ],
                     }),
-                    decode: decodeWorkItemsJson,
+                    decode: (raw) => decodeWorkItemsJson(raw, closed),
                   }).pipe(
                     Effect.map((items) => {
                       const last = items.at(-1);
@@ -614,8 +644,13 @@ export const make: Effect.Effect<
     getIssue: (input) =>
       target("getIssue", input).pipe(
         Effect.flatMap((scope) =>
-          workItem({ ...scope, cwd: input.cwd, operation: "getIssue" }).pipe(
-            Effect.flatMap((item) =>
+          closedStates({ ...scope, cwd: input.cwd, operation: "getIssue" }).pipe(
+            Effect.flatMap((closed) =>
+              workItem({ ...scope, cwd: input.cwd, operation: "getIssue", closed }).pipe(
+                Effect.map((item) => ({ item, closed })),
+              ),
+            ),
+            Effect.flatMap(({ item, closed }) =>
               Effect.all(
                 [
                   comments({ ...scope, cwd: input.cwd, operation: "getIssue" }),
@@ -628,7 +663,7 @@ export const make: Effect.Effect<
                       route: [`id=${scope.number}`],
                       query: [`$top=${PAGE_SIZE}`],
                     }),
-                    decode: decodeUpdatesJson,
+                    decode: (raw) => decodeUpdatesJson(raw, closed),
                   }),
                   linkedPullRequests({ cwd: input.cwd, organization: scope.organization, item }),
                 ],
@@ -657,25 +692,18 @@ export const make: Effect.Effect<
         ),
       ),
 
-    getViewerPermissions: () => Effect.succeed(VIEWER_PERMISSIONS),
-
     create: (input) =>
       scoped("create", input).pipe(
         Effect.flatMap((scope) =>
-          read({
-            cwd: input.cwd,
-            operation: "create",
-            args: invokeArgs({ ...scope, resource: "workitemtypes" }),
-            decode: decodeAs(decodeTypes),
-          }).pipe(
+          workItemTypes({ ...scope, cwd: input.cwd, operation: "create" }).pipe(
             Effect.flatMap((types) => {
-              const names = types.value.flatMap((type) => (type.isDisabled ? [] : [type.name]));
+              const names = types.flatMap((type) => (type.isDisabled ? [] : [type.name]));
               const type = CREATE_TYPES.find((name) => names.includes(name)) ?? names[0];
               return type === undefined
                 ? Effect.fail(refused("create", "The project offers no work item type to file."))
-                : Effect.succeed(type);
+                : Effect.succeed({ type, closed: closedStateNames(types) });
             }),
-            Effect.flatMap((type) =>
+            Effect.flatMap(({ type, closed }) =>
               read({
                 cwd: input.cwd,
                 operation: "create",
@@ -699,7 +727,7 @@ export const make: Effect.Effect<
                     ...(input.assignees.length === 0 ? {} : { assignees: input.assignees }),
                   }),
                 ],
-                decode: decodeWorkItemJson,
+                decode: (raw) => decodeWorkItemJson(raw, closed),
               }),
             ),
             Effect.filterOrFail(

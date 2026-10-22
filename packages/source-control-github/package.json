@@ -11,9 +11,9 @@
       "types": "./src/server/driver.ts",
       "import": "./src/server/driver.ts"
     },
-    "./server/GitHubApi": {
-      "types": "./src/server/GitHubApi.ts",
-      "import": "./src/server/GitHubApi.ts"
+    "./server/GitHubRest": {
+      "types": "./src/server/GitHubRest.ts",
+      "import": "./src/server/GitHubRest.ts"
     },
     "./server/gitHubAuthStatus": {
       "types": "./src/server/gitHubAuthStatus.ts",
@@ -31,17 +31,9 @@
       "types": "./src/server/GitHubCredentials.ts",
       "import": "./src/server/GitHubCredentials.ts"
     },
-    "./server/GitHubIssueTracker": {
-      "types": "./src/server/GitHubIssueTracker.ts",
-      "import": "./src/server/GitHubIssueTracker.ts"
-    },
-    "./server/gitHubIssueJson": {
-      "types": "./src/server/gitHubIssueJson.ts",
-      "import": "./src/server/gitHubIssueJson.ts"
-    },
-    "./server/githubGraphQl": {
-      "types": "./src/server/githubGraphQl.ts",
-      "import": "./src/server/githubGraphQl.ts"
+    "./server/GitHubRequestPolicy": {
+      "types": "./src/server/GitHubRequestPolicy.ts",
+      "import": "./src/server/GitHubRequestPolicy.ts"
     },
     "./server/GitHubPullRequestApi": {
       "types": "./src/server/GitHubPullRequestApi.ts",
@@ -79,14 +71,19 @@
       "types": "./src/server/githubStackRebase.ts",
       "import": "./src/server/githubStackRebase.ts"
     },
+    "./server/GitHubIssueTracker": {
+      "types": "./src/server/GitHubIssueTracker.ts",
+      "import": "./src/server/GitHubIssueTracker.ts"
+    },
     "./server/issueTrackerDriver": {
       "types": "./src/server/issueTrackerDriver.ts",
       "import": "./src/server/issueTrackerDriver.ts"
     }
   },
   "scripts": {
-    "typecheck": "tsc-rs --noEmit",
-    "test": "vp test run --config ../../vite.config.ts --dir ."
+    "typecheck": "tsc --noEmit",
+    "test": "vp test run --config ../../vite.config.ts --dir .",
+    "generate": "graphqlgen"
   },
   "dependencies": {
     "@t3tools/contracts": "workspace:*",
@@ -94,9 +91,11 @@
     "@t3tools/provider-core": "workspace:*",
     "@t3tools/shared": "workspace:*",
     "@t3tools/source-control-core": "workspace:*",
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "yaml": "catalog:"
   },
   "devDependencies": {
+    "@effect/graphql-generator": "catalog:",
     "@effect/platform-node": "catalog:",
     "@effect/vitest": "catalog:",
     "@t3tools/source-control-testing": "workspace:*",
