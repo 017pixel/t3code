@@ -213,10 +213,9 @@ it.effect.each(
         Result.isFailure(outcome),
         "retry the instance switch after the active turn finishes",
       );
-      assert.instanceOf(outcome.failure, Orchestrator.OrchestratorDispatchError);
-      const reason = String(outcome.failure.cause);
-      assert.match(reason, /(?:active|running).*turn|turn.*(?:active|running)/i);
-      assert.match(reason, /(?:retry|try again|wait|finish|complete)/i);
+      assert.instanceOf(outcome.failure, Orchestrator.OrchestratorProviderSelectionBusyError);
+      assert.match(outcome.failure.message, /active turn/i);
+      assert.match(outcome.failure.message, /retry/i);
     } else {
       assert.ok(Result.isSuccess(outcome));
       assert.deepEqual(after.thread.modelSelection, target);

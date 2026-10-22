@@ -240,6 +240,15 @@ export class OrchestratorThreadAboveModeLimitError extends Schema.TaggedError<Or
   }
 }
 
+export class OrchestratorProviderSelectionBusyError extends Schema.TaggedError<OrchestratorProviderSelectionBusyError>()(
+  "OrchestratorProviderSelectionBusyError",
+  { commandId: CommandId, threadId: ThreadId },
+) {
+  override get message(): string {
+    return `Thread ${this.threadId} has an active turn. Wait for it to finish, then retry the provider selection change.`;
+  }
+}
+
 export class OrchestratorCommandPreviouslyRejectedError extends Schema.TaggedError<OrchestratorCommandPreviouslyRejectedError>()(
   "OrchestratorCommandPreviouslyRejectedError",
   {
@@ -288,6 +297,7 @@ export const OrchestratorV2Error = Schema.Union([
   OrchestratorCommandIdConflictError,
   OrchestratorSubagentThreadReadOnlyError,
   OrchestratorThreadAboveModeLimitError,
+  OrchestratorProviderSelectionBusyError,
 ]);
 export type OrchestratorV2Error = typeof OrchestratorV2Error.Type;
 
@@ -2958,11 +2968,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 turnItemTypes: [],
               });
               if (projection.runs.some(isBlockingRun)) {
-                return yield* new OrchestratorDispatchError({
+                return yield* new OrchestratorProviderSelectionBusyError({
                   commandId: command.commandId,
-                  commandType: command.type,
-                  cause:
-                    "Wait for the active turn to finish, then retry the provider selection change.",
+                  threadId: command.threadId,
                 });
               }
             }
