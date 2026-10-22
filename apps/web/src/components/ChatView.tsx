@@ -57,7 +57,6 @@ import {
   type ChatFileAttachment,
   isProviderNativeSubagentThread,
   type EnvironmentId,
-  type IssueTrackerKind,
   type MessageId,
   type ModelSelection,
   type PreviewAnnotationPayload,
