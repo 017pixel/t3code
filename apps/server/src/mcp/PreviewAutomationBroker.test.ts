@@ -331,7 +331,8 @@ it.effect("names the click target that matched nothing when the server browser t
           ok: false,
           error: {
             _tag: "PreviewAutomationTimeoutError",
-            message: "locator.click: Timeout 15000ms exceeded.",
+            message:
+              'No element matched ".definitely-no-such-t3-target". Take a fresh snapshot and use its locator.',
           },
         }),
       ).pipe(Effect.forkScoped);
