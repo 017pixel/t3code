@@ -399,7 +399,7 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
     );
 
     it.effect.skipIf(!symlinksSupported)(
-      "reconciles regular shadow WAL and SHM sidecars of a linked SQLite database as one family",
+      "leaves regular shadow WAL and SHM sidecars of a linked SQLite database in place",
       () =>
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
@@ -425,17 +425,53 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
 
           yield* materializeCodexShadowHome(layout);
 
-          const familyLinks = yield* Effect.forEach(
-            ["logs_2.sqlite", "logs_2.sqlite-wal", "logs_2.sqlite-shm"],
-            (name) => isSymlink(path.join(shadowHome, name)),
+          // Folding a WAL into another home's database needs SQLite, so the existing topology is
+          // kept byte for byte instead of being migrated.
+          expect(yield* fileSystem.readLink(path.join(shadowHome, "logs_2.sqlite"))).toBe(
+            path.join(sharedHome, "logs_2.sqlite"),
           );
-          expect(new Set(familyLinks).size).toBe(1);
-          expect(yield* fileSystem.readFileString(path.join(sharedHome, "logs_2.sqlite-wal"))).toBe(
-            "shared logs_2.sqlite-wal",
+          for (const suffix of ["-wal", "-shm"]) {
+            const name = `logs_2.sqlite${suffix}`;
+            expect(yield* isSymlink(path.join(shadowHome, name))).toBe(false);
+            expect(yield* fileSystem.readFileString(path.join(shadowHome, name))).toBe(
+              `shadow ${name}`,
+            );
+            expect(yield* fileSystem.readFileString(path.join(sharedHome, name))).toBe(
+              `shared ${name}`,
+            );
+          }
+        }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "never links shared sidecars next to a shadow-local SQLite database",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const sharedHome = yield* makeTempDir("t3code-codex-shared-");
+          const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+          const shadowHome = path.join(shadowRoot, "shadow");
+          for (const name of ["queue_1.sqlite", "queue_1.sqlite-wal", "queue_1.sqlite-shm"]) {
+            yield* writeTextFile(path.join(sharedHome, name), `shared ${name}`);
+          }
+          // A sidecar whose base the shared home does not have must not be linked either, or a
+          // database the shadow home creates later would journal into the shared file.
+          yield* writeTextFile(path.join(sharedHome, "orphan.sqlite-wal"), "shared orphan wal");
+          yield* writeTextFile(path.join(shadowHome, "queue_1.sqlite"), "shadow queue db");
+          const layout = yield* resolveCodexHomeLayout(
+            decodeCodexSettings({ homePath: sharedHome, shadowHomePath: shadowHome }),
           );
-          expect(yield* readRegularFileContents([shadowRoot])).toContain(
-            "shadow logs_2.sqlite-wal",
+
+          yield* materializeCodexShadowHome(layout);
+
+          expect(yield* fileSystem.readFileString(path.join(shadowHome, "queue_1.sqlite"))).toBe(
+            "shadow queue db",
           );
+          for (const name of ["queue_1.sqlite-wal", "queue_1.sqlite-shm", "orphan.sqlite-wal"]) {
+            expect(yield* fileSystem.exists(path.join(shadowHome, name))).toBe(false);
+            expect(yield* isSymlink(path.join(shadowHome, name))).toBe(false);
+          }
         }),
     );
   });
