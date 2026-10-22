@@ -79,8 +79,8 @@ function accountLabel(account: LimitAccount): string {
 }
 
 /**
- * Hub accounts with an email get the two-letter chip; every other account gets
- * the provider glyph, so no account is left without a mark.
+ * Same precedence as `AccountName`: a named account gets the provider glyph with its
+ * initials badge, an email-only account the two-letter chip, anything else the bare glyph.
  */
 function AccountAvatar({
   account,
@@ -89,7 +89,7 @@ function AccountAvatar({
   readonly account: LimitAccount;
   readonly className?: string;
 }) {
-  if (account.email && !account.redeem) return <AccountChip email={account.email} />;
+  if (!account.displayName && account.email) return <AccountChip email={account.email} />;
   return (
     <ProviderInstanceIcon
       driverKind={account.driver}
@@ -459,8 +459,10 @@ function LegendRow({
           <AccountAvatar account={account} />
         </span>
       </span>
-      {/* The mark already carries an email account's initials, so the label is its provider. */}
-      <span className="min-w-0 truncate font-medium text-foreground">{accountLabel(account)}</span>
+      {/* An unnamed account's mark is already its whole identity. */}
+      {account.displayName ? (
+        <span className="min-w-0 truncate font-medium text-foreground">{account.displayName}</span>
+      ) : null}
       <span className="shrink-0 font-semibold text-foreground tabular-nums">{remaining}%</span>
       <span className="ms-auto flex shrink-0 items-center gap-1.5 text-2xs text-muted-foreground tabular-nums">
         {resetsIn?.replace("resets in ", "↻ ") ?? ""}
