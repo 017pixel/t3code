@@ -6516,6 +6516,215 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  const scheduleWakeupFrames = (input: {
+    readonly toolUseId: string;
+    readonly uuids: readonly [string, string];
+    readonly toolInput: Record<string, unknown>;
+    readonly scheduledFor: number;
+  }) => [
+    claudeSdkFrame({
+      type: "assistant",
+      message: {
+        model: "claude-sonnet-4-6",
+        id: `msg_${input.toolUseId}`,
+        type: "message",
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: input.toolUseId, name: "ScheduleWakeup", input: input.toolInput },
+        ],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+      parent_tool_use_id: null,
+      uuid: input.uuids[0],
+      session_id: WAKE_NATIVE_SESSION,
+    }),
+    claudeSdkFrame({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: input.toolUseId, content: "Scheduled." }],
+      },
+      parent_tool_use_id: null,
+      uuid: input.uuids[1],
+      session_id: WAKE_NATIVE_SESSION,
+      tool_use_result: {
+        scheduledFor: input.scheduledFor,
+        clampedDelaySeconds: 60,
+        wasClamped: false,
+      },
+    }),
+  ];
+
+  const startScheduleWakeupTurn = Effect.fnUntraced(function* (
+    harness: Effect.Success<typeof makeWakeHarness>,
+  ) {
+    const now = yield* DateTime.now;
+    yield* harness.runtime.startTurn(
+      makeClaudeTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now,
+        attemptId: RunAttemptId.make("attempt-claude-schedule-wakeup-1"),
+        text: "Wake up in a minute.",
+        attachments: [],
+      }),
+    );
+    for (const frame of scheduleWakeupFrames({
+      toolUseId: "toolu_schedule_wakeup_1",
+      uuids: ["00000000-0000-4000-8000-000000002101", "00000000-0000-4000-8000-000000002102"],
+      toolInput: { delaySeconds: 60, prompt: "say WOKE", reason: "wake", noop: false },
+      scheduledFor: DateTime.toEpochMillis(now) + 60_000,
+    })) {
+      yield* Queue.offer(harness.sdkMessages, frame);
+    }
+    yield* Queue.offer(
+      harness.sdkMessages,
+      makeResultFrame({ uuid: "00000000-0000-4000-8000-000000002103", result: "Scheduled." }),
+    );
+    yield* harness.awaitTerminal(1);
+  });
+
+  const publishedRoster = (harness: Effect.Success<typeof makeWakeHarness>) =>
+    providerThreadRosterEvents(harness.events).at(-1)?.providerThread.pendingBackgroundTasks ?? [];
+
+  it.effect.each([false, true])(
+    "a fired ScheduleWakeup holds completion only while its wake turn reschedules (rescheduled=%s)",
+    (rescheduled) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          yield* startScheduleWakeupTurn(harness);
+          assert.isTrue(backgroundWorkHoldsCompletion(publishedRoster(harness)));
+          assert.isTrue(
+            yield* harness.hasPendingBackgroundWork,
+            "a wakeup past the idle timeout must keep the session from being released",
+          );
+
+          yield* TestClock.adjust("60 seconds");
+          yield* harness.offerAndWait(wakeTurnInit);
+          yield* harness.awaitContinuation(1);
+          const now = yield* DateTime.now;
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-schedule-wakeup-2"),
+              text: "say WOKE",
+              attachments: [],
+              providerTurnOrdinal: 2,
+              messageCreatedBy: "agent",
+              messageCreationSource: "provider",
+            }),
+          );
+          if (rescheduled) {
+            for (const frame of scheduleWakeupFrames({
+              toolUseId: "toolu_schedule_wakeup_2",
+              uuids: [
+                "00000000-0000-4000-8000-000000002201",
+                "00000000-0000-4000-8000-000000002202",
+              ],
+              toolInput: { delaySeconds: 60, prompt: "say WOKE", reason: "loop", noop: false },
+              scheduledFor: DateTime.toEpochMillis(now) + 60_000,
+            })) {
+              yield* harness.offerAndWait(frame);
+            }
+          }
+          yield* harness.offerAndWait(
+            makeAssistantTextFrame({ uuid: "00000000-0000-4000-8000-000000002203", text: "WOKE" }),
+          );
+          yield* harness.offerAndWait(
+            makeResultFrame({ uuid: "00000000-0000-4000-8000-000000002204", result: "WOKE" }),
+          );
+          yield* harness.awaitTerminal(2);
+          assert.equal(harness.terminalEvents()[1]?.status, "completed");
+          assert.equal(backgroundWorkHoldsCompletion(publishedRoster(harness)), rescheduled);
+          assert.equal(yield* harness.hasPendingBackgroundWork, rescheduled);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect("ScheduleWakeup stop:true releases the pending wakeup's hold", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-schedule-wakeup-stop"),
+            text: "Schedule a wakeup, then cancel it.",
+            attachments: [],
+          }),
+        );
+        const frames = [
+          ...scheduleWakeupFrames({
+            toolUseId: "toolu_schedule_wakeup_set",
+            uuids: ["00000000-0000-4000-8000-000000002301", "00000000-0000-4000-8000-000000002302"],
+            toolInput: { delaySeconds: 60, prompt: "say WOKE", reason: "wake", noop: false },
+            scheduledFor: DateTime.toEpochMillis(now) + 60_000,
+          }),
+          ...scheduleWakeupFrames({
+            toolUseId: "toolu_schedule_wakeup_stop",
+            uuids: ["00000000-0000-4000-8000-000000002303", "00000000-0000-4000-8000-000000002304"],
+            toolInput: { stop: true },
+            scheduledFor: 0,
+          }),
+          makeResultFrame({ uuid: "00000000-0000-4000-8000-000000002305", result: "Cancelled." }),
+        ];
+        for (const frame of frames) yield* Queue.offer(harness.sdkMessages, frame);
+        yield* harness.awaitTerminal(1);
+        assert.isFalse(backgroundWorkHoldsCompletion(publishedRoster(harness)));
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("Stop on a thread waiting for a ScheduleWakeup closes Claude and drops the hold", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let closes = 0;
+        const harness = yield* makeWakeHarnessWithOptions({
+          close: (sdkMessages) =>
+            Effect.sync(() => {
+              closes++;
+            }).pipe(Effect.andThen(Queue.shutdown(sdkMessages))),
+        });
+        yield* startScheduleWakeupTurn(harness);
+        const settledThread = providerThreadRosterEvents(harness.events).at(-1)?.providerThread;
+        assert.isTrue(backgroundWorkHoldsCompletion(settledThread?.pendingBackgroundTasks ?? []));
+        // The wakeup alone must not refuse a model or mode change.
+        assert.isFalse(yield* harness.runtime.hasPendingBackgroundWorkForThread!(settledThread!));
+
+        yield* harness.runtime.interruptTurn({
+          providerThread: settledThread ?? harness.providerThread,
+          providerTurnId: harness.terminalEvents()[0]!.providerTurnId,
+          requestRuntimeRestart: true,
+        });
+
+        assert.equal(closes, 1, "the wakeup lives in the CLI process, so Stop must close it");
+        yield* harness.until(() => publishedRoster(harness).length === 0);
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect("stops background work after the turn settled", () =>
     Effect.scoped(
       Effect.gen(function* () {
