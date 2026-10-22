@@ -16,6 +16,10 @@ globalThis.fetch = async (...args) => {
   const url = new URL(String(args[0]?.url ?? args[0]));
   if (url.origin !== "https://git.cafe" || !url.pathname.startsWith("/api/"))
     return original(...args);
+  // Only reads are staged; anything else must fail loudly rather than fake success or reach GitCafe.
+  const method = String(args[1]?.method ?? args[0]?.method ?? "GET").toUpperCase();
+  if (method !== "GET")
+    throw new Error(`Unexpected GitCafe fixture request: ${method} ${url.pathname}`);
   const stage = NodeFS.readFileSync(NodePath.join(stateDir, "stage"), "utf8").trim();
   const changed = stage === "title" || stage === "success";
   const { changedTitle, changedUpdatedAt, ...pull } = fixture;
@@ -72,7 +76,7 @@ globalThis.fetch = async (...args) => {
     data = page;
   else if (pathname === `${base}/filter-options`)
     data = { actors: [{ actorId: "act_fixture", handle: "juliusmarminge" }] };
-  else return original(...args);
+  else throw new Error(`Unhandled GitCafe fixture request: ${method} ${pathname}`);
   log({ stage, path: pathname, updatedAt: pull.updatedAt, title: pull.title });
   return new Response(JSON.stringify(data), {
     status: 200,
