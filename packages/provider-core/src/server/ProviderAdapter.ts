@@ -590,6 +590,12 @@ export interface ProviderAdapterV2SessionRuntime {
    * thread keeps showing Waiting.
    */
   readonly backgroundTasksEndWithProcess?: true;
+  /**
+   * Set when the provider can resume a saved child after the turn that resumed
+   * it ended, so a completed run keeps an idle subscription for that child
+   * until a newer root turn on its thread or the session ends.
+   */
+  readonly resumesChildrenAfterRootTurn?: true;
   readonly getModelContextWindow?: (
     modelSelection: ModelSelection,
     cwd?: string | null,

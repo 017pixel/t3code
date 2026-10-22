@@ -1616,13 +1616,16 @@ it.effect("ingests new member threads of an owned child after the root turn term
 );
 
 it.effect.each([
-  ["child", false],
-  ["nested child", true],
+  ["child reopened before", false, "early", true],
+  ["nested child reopened before", true, "early", true],
+  ["child reopened after", false, "late", true],
+  ["nested child reopened after", true, "late", true],
+  ["child reopened after, without provider support,", false, "late", false],
 ] as const)(
-  "ingests a %s resumed after a restart whose turn starts after the root turn ends",
-  ([, nested]) =>
+  "ingests a %s the root turn ends until a newer root turn",
+  ([, nested, reopen, resumesChildrenAfterRootTurn]) =>
     Effect.gen(function* () {
-      const key = `run-execution-restored-child-${nested ? "nested" : "direct"}`;
+      const key = `run-execution-restored-child-${nested ? "nested" : "direct"}-${reopen}-${resumesChildrenAfterRootTurn}`;
       const threadId = ThreadId.make(`thread:${key}`);
       const runId = RunId.make(`run:${key}`);
       const attemptId = RunAttemptId.make(`attempt:${key}`);
@@ -1673,25 +1676,26 @@ it.effect.each([
               status,
             },
           }) as ProviderAdapter.ProviderAdapterV2Event;
-        const message = {
-          type: "message.updated",
-          driver,
-          message: {
-            id: MessageId.make(`message:${key}:${name}`),
-            threadId: childThreadId,
-            runId: null,
-            role: "assistant",
-            text: `${name} after restart`,
-            streaming: false,
-          },
-        } as ProviderAdapter.ProviderAdapterV2Event;
+        const message = (suffix = "") =>
+          ({
+            type: "message.updated",
+            driver,
+            message: {
+              id: MessageId.make(`message:${key}:${name}${suffix}`),
+              threadId: childThreadId,
+              runId: null,
+              role: "assistant",
+              text: `${name} after restart`,
+              streaming: false,
+            },
+          }) as ProviderAdapter.ProviderAdapterV2Event;
         return { childThreadId, task, turn, message };
       };
       const middle = child("middle", threadId, runId);
       const leaf = child("leaf", middle.childThreadId, null);
       const resumed = nested ? leaf : middle;
       const events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event> = [
-        middle.task("running"),
+        ...(reopen === "early" ? [middle.task("running")] : []),
         {
           type: "turn.terminal",
           driver,
@@ -1702,15 +1706,30 @@ it.effect.each([
           failure: null,
           threadDisposition: "reusable",
         },
+        ...(reopen === "late" ? [middle.task("running")] : []),
         middle.turn("running"),
         ...(nested ? [leaf.task("running"), leaf.turn("running")] : []),
-        resumed.message,
+        resumed.message(),
         ...(nested ? [leaf.turn("completed"), leaf.task("completed")] : []),
         middle.turn("completed"),
         middle.task("completed"),
+        // Settled again: activity that does not reopen the child is not this run's.
+        resumed.message(":stray"),
+        {
+          type: "provider_turn.updated",
+          driver,
+          threadId,
+          providerTurn: {
+            id: ProviderTurnId.make(`provider-turn:${key}:next`),
+            providerThreadId,
+            runAttemptId: RunAttemptId.make(`attempt:${key}:next`),
+            status: "running",
+          },
+        } as ProviderAdapter.ProviderAdapterV2Event,
       ];
       const ingested: Array<string> = [];
       const released = yield* Deferred.make<void>();
+      const consumed = yield* Deferred.make<void>();
       const layerTest = RunExecutionService.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
@@ -1746,11 +1765,16 @@ it.effect.each([
           appThread: { id: threadId } as OrchestrationV2AppThread,
           providerSessionId: ProviderSessionId.make(`session:${key}`),
           session: {
-            // Runs when ingestion drains the events or stops early.
+            // The session stays open, so only ingestion stopping releases it.
             events: Stream.fromIterable(events).pipe(
+              Stream.concat(
+                Stream.fromEffect(Deferred.succeed(consumed, undefined)).pipe(Stream.drain),
+              ),
+              Stream.concat(Stream.never),
               Stream.ensuring(Deferred.succeed(released, undefined)),
             ),
             startTurn: () => Effect.void,
+            ...(resumesChildrenAfterRootTurn ? { resumesChildrenAfterRootTurn } : {}),
           } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
           run: { id: runId, threadId, ordinal: 1, providerInstanceId } as OrchestrationV2Run,
           rootNode: { id: NodeId.make(`node:${key}`) } as OrchestrationV2ExecutionNode,
@@ -1784,10 +1808,17 @@ it.effect.each([
             },
           },
         });
-        yield* Deferred.await(released);
+        const stopped = yield* Effect.raceFirst(
+          Deferred.await(released).pipe(Effect.as(true)),
+          Deferred.await(consumed).pipe(Effect.as(false)),
+        );
+        assert.isTrue(stopped, "ingestion must stop instead of waiting on the open session");
       }).pipe(Effect.provide(layerTest));
 
-      assert.deepEqual(ingested, [resumed.childThreadId]);
+      assert.deepEqual(
+        ingested,
+        reopen === "late" && !resumesChildrenAfterRootTurn ? [] : [resumed.childThreadId],
+      );
     }),
 );
 
