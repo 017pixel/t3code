@@ -2792,12 +2792,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             worktreePath: targetWorktreePath,
           })
           .pipe(mapDispatchError(command))) &&
-        // Another project rooted at this checkout shares it with that project's threads.
-        Option.isNone(
-          yield* projects
-            .findActiveByWorkspaceRoot(targetWorktreePath)
-            .pipe(mapDispatchError(command)),
-        );
+        // A project rooted at or inside this checkout shares it with that project's threads.
+        !(yield* projects.list().pipe(mapDispatchError(command))).some((project) => {
+          const relative = path.relative(targetWorktreePath, project.workspaceRoot);
+          return (
+            relative === "" ||
+            (relative !== ".." &&
+              !relative.startsWith(`..${path.sep}`) &&
+              !path.isAbsolute(relative))
+          );
+        });
       if (!exclusive) {
         if (command.worktreePath !== undefined) {
           metadataBranchOverride = null;

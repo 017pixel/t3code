@@ -2416,9 +2416,19 @@ it.effect("emits run_interrupt_result when hard-stop finalizes the active attemp
       ["run_interrupt_result"],
     );
     assert.deepEqual(observed, ["run:interrupted", "pull-requests-refreshed"]);
+    // Finalization follows the session this run used, even if promotion replaces it.
     assert.deepEqual(
-      committedEffects.map((effect) => effect.request.type),
-      ["checkpoint.capture"],
+      committedEffects.map((effect) => ({
+        type: effect.request.type,
+        providerSessionId:
+          effect.request.type === "checkpoint.capture" ? effect.request.providerSessionId : null,
+      })),
+      [
+        {
+          type: "checkpoint.capture",
+          providerSessionId: ProviderSessionId.make("session:hard-stop"),
+        },
+      ],
     );
   }),
 );
@@ -2868,6 +2878,7 @@ function captureRootRunTermination(input: {
         providerThread: {
           id: ids.providerThreadId,
           driver,
+          providerSessionId: ProviderSessionId.make(`session:${input.key}`),
         } as OrchestrationV2ProviderThread,
         attempt: {
           id: ids.attemptId,

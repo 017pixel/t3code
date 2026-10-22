@@ -2537,11 +2537,11 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         assert.instanceOf(staleRun, Orchestrator.OrchestratorDispatchError);
         assert.equal((yield* orchestrator.getThreadProjection(threadId)).thread.branch, "feature");
       }
-      // A checkout that is another project's root keeps the move but not the branch.
+      // A checkout holding another project's root keeps the move but not the branch.
       yield* seedProject({
         projectId: ProjectId.make("follow-guards-rooted-project"),
         title: "Rooted",
-        workspaceRoot: "/repo/rooted",
+        workspaceRoot: "/repo/rooted/src",
         defaultModelSelection: null,
         createdAt: "2026-09-17T00:00:00.000Z",
       });
