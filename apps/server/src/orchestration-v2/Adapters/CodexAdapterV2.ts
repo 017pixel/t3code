@@ -1383,11 +1383,14 @@ const decodeCodexResumeMetadata = Schema.decodeUnknownEffect(
 
 // Only the fields the review check reads, so hook metadata that newer or
 // older Codex versions add or lack cannot block thread start. A missing
-// trustStatus predates hook review.
+// trustStatus or errors list predates hook review.
 const decodeCodexHooksList = Schema.decodeUnknownEffect(
   Schema.Struct({
     data: Schema.Array(
       Schema.Struct({
+        errors: Schema.optional(
+          Schema.Array(Schema.Struct({ message: Schema.String, path: Schema.String })),
+        ),
         hooks: Schema.Array(
           Schema.Struct({
             enabled: Schema.Boolean,
@@ -1875,6 +1878,21 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   isCodexHooksListUnsupported(error) ? Effect.succeed(null) : Effect.fail(error),
               }),
             );
+          const where = cwd === null ? "" : ` in ${cwd}`;
+          const homePath = settings.homePath;
+          const home = homePath ? ` with CODEX_HOME=${homePath}` : "";
+          // Codex lists no hooks for a config layer it cannot load, so an empty
+          // list cannot prove that none need review.
+          const discoveryErrors = listed?.data.flatMap((entry) => entry.errors ?? []) ?? [];
+          if (discoveryErrors.length > 0) {
+            const details = discoveryErrors
+              .map((error) => `${error.path}: ${error.message}`)
+              .join("; ");
+            return yield* Effect.fail(
+              `Codex could not load its hook configuration (${details}), so T3 Code cannot check whether a hook needs review. ` +
+                `Fix the configuration, confirm \`codex\`${where}${home} starts cleanly, then try again.`,
+            );
+          }
           const pending =
             listed?.data.flatMap((entry) =>
               entry.hooks.filter(
@@ -1886,9 +1904,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           if (pending.length === 0) return;
           const one = pending.length === 1;
           const sources = [...new Set(pending.map((hook) => hook.sourcePath))].join(", ");
-          const where = cwd === null ? "" : ` in ${cwd}`;
-          const homePath = settings.homePath;
-          const home = homePath ? ` with CODEX_HOME=${homePath}` : "";
           return yield* Effect.fail(
             `Codex will not run ${one ? "an enabled hook" : `${pending.length} enabled hooks`} until ${one ? "it is" : "they are"} reviewed (${sources}). ` +
               `Open \`codex\`${where}${home}, enter \`/hooks\` to review or disable ${one ? "it" : "them"}, then try again.`,

@@ -940,6 +940,40 @@ describe("CodexAdapterV2 session initialize", () => {
       }).pipe(Effect.scoped, Effect.provide(hooksTestLayer)),
   );
 
+  // regression: #5024 Codex lists no hooks when discovery fails (for example an
+  // invalid config value T3's thread config later overrides), so an empty list
+  // alone cannot prove that no hook needs review.
+  it.effect("refuses to start a thread while Codex cannot discover hooks", () =>
+    Effect.gen(function* () {
+      const session = yield* openHooksSession(
+        "hooks-discovery-errors",
+        Effect.succeed({
+          data: [
+            {
+              cwd: "/workspace",
+              errors: [
+                {
+                  path: "/tmp/codex-home/config.toml",
+                  message: 'invalid type: string "soon", expected u64',
+                },
+              ],
+              warnings: [],
+              hooks: [],
+            },
+          ],
+        }),
+      );
+
+      const failed = yield* session.ensureThread("thread-hooks-discovery-errors").pipe(Effect.flip);
+
+      assert.equal(failed._tag, "ProviderAdapterEnsureThreadError");
+      const message = String(failed.cause);
+      assert.include(message, "/tmp/codex-home/config.toml");
+      assert.include(message, "expected u64");
+      assert.notInclude(session.requests(), "thread/start");
+    }).pipe(Effect.scoped, Effect.provide(hooksTestLayer)),
+  );
+
   it.effect.each([
     {
       name: "reviewed, managed, and disabled hooks",
@@ -958,6 +992,10 @@ describe("CodexAdapterV2 session initialize", () => {
     {
       name: "a Codex version that lists hooks without review",
       hooksList: listedHooks([{ enabled: true, sourcePath: "/tmp/codex-home/hooks.json" }]),
+    },
+    {
+      name: "a Codex version that lists hooks without discovery errors",
+      hooksList: Effect.succeed({ data: [{ hooks: [codexHook({})] }] }),
     },
     {
       name: "a Codex version without hooks/list (method not found)",
