@@ -157,8 +157,8 @@ const make = Effect.gen(function* () {
 
   const worker = yield* makeDrainableWorker(refreshThread);
 
-  const link: ThreadIssueService["Service"]["link"] = (input) =>
-    Effect.gen(function* () {
+  const link: ThreadIssueService["Service"]["link"] = Effect.fn("ThreadIssueService.link")(
+    function* (input) {
       const thread = yield* shellOf(input.threadId);
       if (thread?.issues?.some((existing) => threadIssueKeysEqual(existing, input.ref))) {
         return { alreadyLinked: true };
@@ -177,10 +177,11 @@ const make = Effect.gen(function* () {
       });
       yield* worker.enqueue({ threadId: input.threadId, staleOnly: true });
       return { alreadyLinked: false };
-    });
+    },
+  );
 
-  const unlink: ThreadIssueService["Service"]["unlink"] = (input) =>
-    Effect.gen(function* () {
+  const unlink: ThreadIssueService["Service"]["unlink"] = Effect.fn("ThreadIssueService.unlink")(
+    function* (input) {
       const thread = yield* shellOf(input.threadId);
       if (!thread?.issues?.some((existing) => threadIssueKeysEqual(existing, input.key))) {
         return { wasLinked: false };
@@ -195,7 +196,8 @@ const make = Effect.gen(function* () {
         key: input.key.key,
       });
       return { wasLinked: true };
-    });
+    },
+  );
 
   const refresh: ThreadIssueService["Service"]["refresh"] = (threadId, options) =>
     worker.enqueue({ threadId, staleOnly: options?.staleOnly ?? false });

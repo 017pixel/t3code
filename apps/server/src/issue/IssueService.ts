@@ -603,8 +603,8 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const resolveUrl: IssueService["Service"]["resolveUrl"] = (url, preferredProjectId) =>
-    Effect.gen(function* () {
+  const resolveUrl: IssueService["Service"]["resolveUrl"] = Effect.fn("IssueService.resolveUrl")(
+    function* (url, preferredProjectId) {
       const parsed = parseIssueUrl(url);
       if (parsed === null) {
         return yield* new IssueOperationError({
@@ -632,7 +632,8 @@ const make = Effect.gen(function* () {
         key: parsed.key,
         writable: own !== undefined,
       };
-    });
+    },
+  );
 
   return IssueService.of({
     list,

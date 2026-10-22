@@ -2,7 +2,7 @@ import type { EnvironmentId, IssueRef, ScopedThreadRef } from "@t3tools/contract
 import { pullRequestHostOf, SourceControlProviderKind } from "@t3tools/contracts";
 import { parseIssueUrl, type IssueLink } from "@t3tools/shared/issueUrl";
 import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
-import { type MouseEvent, useCallback } from "react";
+import type { MouseEvent } from "react";
 
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 
@@ -79,33 +79,30 @@ export function useOpenIssueLink(
 ) => boolean {
   const allProjects = useProjects();
   const serverConfigs = useServerConfigs();
-  return useCallback(
-    (event, targetUrl, targetEnvironmentId) => {
-      if (event.metaKey || event.ctrlKey) return false;
-      const resolvedPanelRef = panelRef ?? threadRef;
-      const environmentId = resolvedPanelRef?.environmentId ?? targetEnvironmentId;
-      if (resolvedPanelRef === undefined || environmentId === undefined) return false;
-      if (serverConfigs.get(environmentId)?.environment.capabilities.issues !== true) return false;
-      const parsed = parseIssueUrl(targetUrl);
-      if (parsed === null) return false;
-      const target = resolveIssueLinkTarget(
-        allProjects.filter((project) => project.environmentId === environmentId),
-        parsed,
-      );
-      if (target === null) return false;
-      event.preventDefault();
-      event.stopPropagation();
-      useRightPanelStore.getState().openIssue(resolvedPanelRef, {
-        ...(resolvedPanelRef.environmentId === environmentId ? {} : { environmentId }),
-        projectId: target.ref.projectId,
-        tracker: target.ref.tracker,
-        ...(target.ref.host === undefined ? {} : { host: target.ref.host }),
-        scope: target.ref.scope,
-        key: target.ref.key,
-        url: targetUrl,
-      });
-      return true;
-    },
-    [allProjects, panelRef, serverConfigs, threadRef],
-  );
+  return (event, targetUrl, targetEnvironmentId) => {
+    if (event.metaKey || event.ctrlKey) return false;
+    const resolvedPanelRef = panelRef ?? threadRef;
+    const environmentId = resolvedPanelRef?.environmentId ?? targetEnvironmentId;
+    if (resolvedPanelRef === undefined || environmentId === undefined) return false;
+    if (serverConfigs.get(environmentId)?.environment.capabilities.issues !== true) return false;
+    const parsed = parseIssueUrl(targetUrl);
+    if (parsed === null) return false;
+    const target = resolveIssueLinkTarget(
+      allProjects.filter((project) => project.environmentId === environmentId),
+      parsed,
+    );
+    if (target === null) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    useRightPanelStore.getState().openIssue(resolvedPanelRef, {
+      ...(resolvedPanelRef.environmentId === environmentId ? {} : { environmentId }),
+      projectId: target.ref.projectId,
+      tracker: target.ref.tracker,
+      ...(target.ref.host === undefined ? {} : { host: target.ref.host }),
+      scope: target.ref.scope,
+      key: target.ref.key,
+      url: targetUrl,
+    });
+    return true;
+  };
 }
