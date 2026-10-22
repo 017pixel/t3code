@@ -19,6 +19,7 @@ p.add_argument('--template', type=Path)
 p.add_argument('--home', type=Path)
 p.add_argument('--color', choices=['red', 'green', 'blue'])
 p.add_argument('--atomic', action='store_true')
+p.add_argument('--resource-path', default='/tmp/issue-13138-fixture/outside/square.png', help='Read resource used when seeding')
 p.add_argument('--path', type=Path, default=Path('/tmp/issue-13138-fixture/outside/square.png'))
 a = p.parse_args()
 if a.color:
@@ -44,7 +45,7 @@ else:
         db.execute(sql)
     for row in src.execute('SELECT * FROM effect_sql_migrations'):
         db.execute('INSERT INTO effect_sql_migrations VALUES (' + ','.join('?' for _ in row) + ')', row)
-    f = json.loads((Path(__file__).parent / 'fixtures/read-image-cache.json').read_text())
+    f = json.loads((Path(__file__).parent / 'fixtures/read-image-cache.json').read_text().replace('/tmp/issue-13138-fixture/outside/square.png', a.resource_path))
     def put(table, values):
         db.execute(f'INSERT INTO {table} (' + ','.join(values) + ') VALUES (' + ','.join('?' for _ in values) + ')', list(values.values()))
     put('projection_projects', f['project'])
@@ -57,7 +58,7 @@ else:
     for item in f['items']:
         put('orchestration_v2_projection_turn_items', {'turn_item_id': item['id'], 'thread_id': item['threadId'], 'run_id': item['runId'], 'node_id': item['nodeId'], 'ordinal': item['ordinal'], 'type': item['type'], 'status': item['status'], 'updated_at': item['updatedAt'], 'payload_json': json.dumps(item)})
         if item['type'] == 'assistant_message':
-            put('orchestration_v2_projection_messages', {'message_id': item['messageId'], 'thread_id': item['threadId'], 'run_id': item['runId'], 'node_id': item['nodeId'], 'role': 'assistant', 'streaming': 0, 'created_at': item['startedAt'], 'updated_at': item['updatedAt'], 'payload_json': json.dumps({'id': item['messageId'], 'threadId': item['threadId'], 'runId': item['runId'], 'nodeId': item['nodeId'], 'role': 'assistant', 'text': item['text'], 'attachments': [], 'streaming': False, 'createdAt': item['startedAt'], 'updatedAt': item['updatedAt']})})
+            put('orchestration_v2_projection_messages', {'message_id': item['messageId'], 'thread_id': item['threadId'], 'run_id': item['runId'], 'node_id': item['nodeId'], 'role': 'assistant', 'streaming': 0, 'created_at': item['startedAt'], 'updated_at': item['updatedAt'], 'payload_json': json.dumps({'createdBy': 'agent', 'creationSource': 'provider', 'id': item['messageId'], 'threadId': item['threadId'], 'runId': item['runId'], 'nodeId': item['nodeId'], 'role': 'assistant', 'text': item['text'], 'attachments': [], 'streaming': False, 'createdAt': item['startedAt'], 'updatedAt': item['updatedAt']})})
     for (sql,) in src.execute("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND type='index'"):
         db.execute(sql)
     db.commit()
