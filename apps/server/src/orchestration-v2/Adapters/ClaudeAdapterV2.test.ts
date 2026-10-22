@@ -3632,7 +3632,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           },
         });
         assert.equal(harness.offeredMessages[1]?.priority, "now");
-        assert.isNotEmpty(releases, "steer left the running Bash command blocking the turn");
+        assert.deepEqual(
+          releases,
+          ["interrupt"],
+          "steer left the running Bash command blocking the turn",
+        );
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),

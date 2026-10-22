@@ -9935,6 +9935,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               next.add(turnInput.providerTurnId);
               return next;
             });
+            // Priority "now" does not stop a foreground command (#15720), so a
+            // root tool call still running is interrupted first, as Esc would.
+            // Its aborted_tools result ends only this segment of the steered turn.
+            if (currentTurn.toolCalls.size > 0) {
+              yield* existing.query.interrupt;
+            }
             yield* existing.query.offer(userMessage);
           },
           (effect, turnInput) =>

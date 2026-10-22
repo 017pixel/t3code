@@ -169,7 +169,11 @@ it.effect.each(deliveries)(
                 setPermissionMode: () => Effect.void,
                 backgroundTasks: () => Effect.succeed(false),
                 stopTask: () => Effect.void,
-                interrupt: Effect.die("automatic delivery must never interrupt"),
+                // A steer interrupts the running Bash command as Esc would (#15720).
+                interrupt:
+                  delivery === "user steering" || delivery === "promoted queued message"
+                    ? Effect.sync(() => batchAbort.abort({ kind: "interrupt" }))
+                    : Effect.die("automatic delivery must never interrupt"),
                 close: Effect.void,
               }),
             forkSession: () => Effect.die("unused"),
@@ -408,7 +412,7 @@ it.effect.each(deliveries)(
               event.payload.id === parent.id &&
               event.payload.status === "waiting",
           );
-          yield* Queue.offer(sdkMessages, toolResult("build", false));
+          yield* Queue.offer(sdkMessages, toolResult("build", batchAbort.signal.aborted));
           for (const id of statusIds)
             yield* Queue.offer(sdkMessages, toolResult(id, batchAbort.signal.aborted));
           if (explicitSteer) yield* Queue.offer(sdkMessages, result("aborted", true));
