@@ -1386,6 +1386,119 @@ describe("OrchestratorMcpService provider resolution", () => {
     }),
   );
 
+  it.effect("rejects explicit delegation to an OpenCode model hidden in Provider settings", () =>
+    Effect.gen(function* () {
+      const opencodeInstanceId = ProviderInstanceId.make("opencode");
+      const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
+      const task = {
+        id: taskId,
+        threadId: parentThreadId,
+        runId: parentRunId,
+        parentNodeId,
+        origin: "app_owned",
+        createdBy: "agent",
+        driver: ProviderDriverKind.make("opencode"),
+        providerInstanceId: opencodeInstanceId,
+        providerThreadId: null,
+        childThreadId,
+        nativeTaskRef: null,
+        prompt: "Summarize the diff.",
+        title: null,
+        model: "opencode-go/deepseek-v4-pro",
+        status: "running",
+        result: null,
+        startedAt: null,
+        completedAt: null,
+      };
+      let delegated = false;
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          hasReceipt: () => Effect.succeed(false),
+          getThreadRecords: (threadId) =>
+            Effect.succeed(
+              threadId === parentThreadId
+                ? parentProjection(delegated ? [task] : [])
+                : childProjection,
+            ),
+          dispatch: (command) =>
+            Ref.update(dispatched, (commands) => [...commands, command]).pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  delegated = true;
+                }),
+              ),
+              Effect.as({
+                sequence: 1,
+                storedEvents: [
+                  {
+                    sequence: 1,
+                    commandId: null,
+                    event: { type: "subagent.updated", payload: task },
+                  },
+                ],
+              } as never),
+            ),
+        }),
+        providerRegistryLayer([
+          providerSnapshot({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            model: "gpt-5.4",
+          }),
+          {
+            ...providerSnapshot({
+              instanceId: opencodeInstanceId,
+              driver: ProviderDriverKind.make("opencode"),
+              model: "opencode-go/deepseek-v4-pro",
+            }),
+            models: ["opencode-go/deepseek-v4-pro", "opencode-go/deepseek-v4.1-flash"].map(
+              (slug) => ({ slug, name: slug, isCustom: false, capabilities: null }),
+            ),
+          },
+        ]),
+        adapterRegistryLayer([codexInstanceId, opencodeInstanceId]),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        ServerSettings.layerTest({
+          providerModelPreferences: {
+            [opencodeInstanceId]: {
+              hiddenModels: ["opencode-go/deepseek-v4-pro"],
+              modelOrder: [],
+            },
+          },
+        }),
+      );
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const result = yield* service
+          .delegateTask(scope, {
+            task: "Summarize the diff.",
+            target: {
+              providerInstanceId: opencodeInstanceId,
+              model: "opencode-go/deepseek-v4-pro",
+            },
+            mode: "async",
+            clientRequestId: "delegate-hidden-model-1",
+          })
+          .pipe(
+            Effect.match({
+              onSuccess: () => "accepted",
+              onFailure: (error) => error.code,
+            }),
+          );
+        assert.equal(
+          result,
+          "model_unavailable",
+          "Delegation must reject a model hidden in Provider settings before starting a child task.",
+        );
+        assert.deepEqual(yield* Ref.get(dispatched), []);
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
   it.effect("driver-only delegation skips an instance the project turned off", () =>
     Effect.gen(function* () {
       const altInstanceId = ProviderInstanceId.make("codex-alt");
