@@ -371,7 +371,7 @@ function normalizeEntries(input: {
         [once, encodeURIComponent(placeholder)] as const,
       ];
     }),
-    [input.workspace, "<workspace>"],
+    ...(input.workspace.length <= 1 ? [] : [[input.workspace, "<workspace>"] as const]),
     ...(input.home.length <= 1 ? [] : [[input.home, HOME_PLACEHOLDER] as const]),
   ];
   // Kiro's message and backend request ids, numbered in first-seen order.
