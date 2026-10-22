@@ -24,7 +24,7 @@ import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "rea
 
 import { useComposerDraftStore } from "../../composerDraftStore";
 import { releaseProjectDraftUploads } from "../../lib/composerDraftUploads";
-import { updateClientSettings, useClientSettings } from "../../hooks/useSettings";
+import { persistClientSettingsUpdate, useClientSettings } from "../../hooks/useSettings";
 import { readLocalApi } from "../../localApi";
 import { deriveProjectGroupingOverrideKey } from "../../logicalProject";
 import {
@@ -78,19 +78,23 @@ function isGroupingSelection(value: unknown): value is SidebarProjectGroupingMod
 function CheckoutGroupingSelect({ member }: { member: SidebarProjectGroupMember }) {
   const overrideKey = deriveProjectGroupingOverrideKey(member);
   const globalMode = useClientSettings((settings) => settings.sidebarProjectGroupingMode);
-  const overrides = useClientSettings((settings) => settings.sidebarProjectGroupingOverrides);
-  const selection = overrides?.[overrideKey] ?? "inherit";
+  const selection = useClientSettings(
+    (settings) => settings.sidebarProjectGroupingOverrides?.[overrideKey] ?? "inherit",
+  );
   return (
     <Select
       value={selection}
       onValueChange={(value) => {
         if (!isGroupingSelection(value)) return;
-        void updateClientSettings({
+        persistClientSettingsUpdate((current) => ({
+          ...current,
           sidebarProjectGroupingOverrides: withProjectGroupingOverride(
-            overrides,
+            current.sidebarProjectGroupingOverrides,
             overrideKey,
             value,
           ),
+        })).catch((error) => {
+          console.error("Failed to save checkout grouping rule", error);
         });
       }}
     >
@@ -444,7 +448,7 @@ function ProjectDetail({
   // rule here so "Keep separate" can be undone.
   const checkoutControls = (member: SidebarProjectGroupMember) => (
     <div className="flex items-center gap-2">
-      <div className="w-56">
+      <div className="w-48 sm:w-72">
         <CheckoutGroupingSelect member={member} />
       </div>
       {hasMultipleCheckouts ? (
@@ -462,6 +466,10 @@ function ProjectDetail({
   );
   const checkoutChoices = (
     <SettingsSection title="Checkouts">
+      <p className="px-3 py-2.5 text-xs text-muted-foreground sm:px-4">
+        Grouping rule decides how each checkout joins project groups in the sidebar. Changing it can
+        move a checkout to a different project.
+      </p>
       {Array.from(checkoutsByEnvironment, ([environmentId, members]) => {
         if (checkoutsByEnvironment.size === 1) {
           return members.map((member) => (
