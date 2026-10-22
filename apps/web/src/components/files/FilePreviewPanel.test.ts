@@ -1,5 +1,6 @@
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { ProjectReadFileError } from "@t3tools/contracts";
+import { splitMarkdownFrontmatter } from "@t3tools/shared/markdownFrontmatter";
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -75,6 +76,16 @@ describe("setMarkdownTaskChecked", () => {
   it("leaves the document unchanged for a stale or invalid marker offset", () => {
     expect(setMarkdownTaskChecked(markdown, 0, true)).toBe(markdown);
     expect(setMarkdownTaskChecked(markdown, 200, true)).toBe(markdown);
+  });
+
+  // regression: #23704 the preview hides frontmatter, so the toggle offset is short of the file
+  it("checks a task in the file when the preview offset skips frontmatter", () => {
+    const source = "---\ntitle: Tasks\n---\n- [ ] Ship\n";
+    const preview = splitMarkdownFrontmatter(source);
+    const markerOffset = preview.bodyOffset + preview.body.indexOf("[");
+    expect(setMarkdownTaskChecked(source, markerOffset, true)).toBe(
+      "---\ntitle: Tasks\n---\n- [x] Ship\n",
+    );
   });
 });
 

@@ -6,6 +6,7 @@ import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import * as AsyncResult from "effect/reactivity/AsyncResult";
 import * as Cause from "effect/Cause";
 import { filePreviewKind, FILE_TEXT_PREVIEW_MAX_BYTES } from "@t3tools/shared/filePreview";
+import { splitMarkdownFrontmatter } from "@t3tools/shared/markdownFrontmatter";
 import { ChevronRightIcon, DownloadIcon, Trash2Icon, WrapTextIcon, XIcon } from "lucide-react";
 import { Check, Code2, Copy, Eye, Table2 } from "lucide";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
@@ -214,7 +215,11 @@ export function AttachmentFilePreview(props: {
       <DelimitedTablePreview name={props.name} text={content.text} delimiter={delimiter} />
     ) : kind === "markdown" && rendered ? (
       <ScrollArea className="min-h-0 flex-1">
-        <ChatMarkdown text={content.text} cwd={undefined} className="mx-auto max-w-4xl px-6 py-5" />
+        <ChatMarkdown
+          text={splitMarkdownFrontmatter(content.text).body}
+          cwd={undefined}
+          className="mx-auto max-w-4xl px-6 py-5"
+        />
       </ScrollArea>
     ) : (
       <ReadOnlySourcePreview name={props.name} text={content.text} />

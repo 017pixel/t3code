@@ -447,6 +447,10 @@
       "types": "./src/codexMarkdownDirectives.ts",
       "import": "./src/codexMarkdownDirectives.ts"
     },
+    "./markdownFrontmatter": {
+      "types": "./src/markdownFrontmatter.ts",
+      "import": "./src/markdownFrontmatter.ts"
+    },
     "./markdownGithubAlerts": {
       "types": "./src/markdownGithubAlerts.ts",
       "import": "./src/markdownGithubAlerts.ts"
