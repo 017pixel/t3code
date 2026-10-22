@@ -2,7 +2,8 @@ import json, sqlite3, sys, pathlib, subprocess
 root=pathlib.Path(sys.argv[1]).resolve()
 if root == (pathlib.Path.home()/".t3").resolve():
  raise ValueError("Refusing the live ~/.t3 home")
-assert root.name == "repro" and root.parent.name == ".t3"
+if not (root.name == "repro" and root.parent.name == ".t3"):
+ raise ValueError("Fixture home must be a .t3/repro directory")
 workspace=root/"workspace"
 workspace.mkdir(exist_ok=True)
 def git(*args): subprocess.run(["git","-C",str(workspace),*args],check=True,capture_output=True)
