@@ -959,6 +959,67 @@ effectIt.effect.each(["cleanup-first", "startup-first"])(
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+// regression: #12341 a turn start overlapping a checkpoint restore wrote into the checkout
+// The filesystem is synchronous so the turn start either reaches the provider or parks on the
+// lease before the restore is released; realPath models the symlink alias.
+effectIt.effect.each([
+  {
+    overlap: "a project-root thread during a restore of the project checkout",
+    restorePath: "/tmp/native-account-project",
+    worktreePath: undefined,
+    realPaths: {},
+  },
+  {
+    overlap: "a symlink alias of the restoring checkout",
+    restorePath: "/tmp/restore-overlap/link",
+    worktreePath: "/tmp/restore-overlap/checkout",
+    realPaths: { "/tmp/restore-overlap/link": "/tmp/restore-overlap/checkout" },
+  },
+  {
+    overlap: "a directory inside the restoring checkout",
+    restorePath: "/tmp/restore-overlap/checkout",
+    worktreePath: "/tmp/restore-overlap/checkout/packages/app",
+    realPaths: {},
+  },
+] as const)(
+  "does not start provider work in $overlap until the restore finishes",
+  ({ restorePath, worktreePath, realPaths }) =>
+    Effect.gen(function* () {
+      const order: Array<string> = [];
+      const releaseRestore = yield* Deferred.make<void>();
+      const restoreEntered = yield* Deferred.make<void>();
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        ...(worktreePath === undefined ? {} : { worktreePath }),
+        fileSystem: FileSystem.makeNoop({
+          exists: () => Effect.succeed(true),
+          realPath: (candidate) =>
+            Effect.succeed((realPaths as Record<string, string>)[candidate] ?? candidate),
+        }),
+        failReadsAfterRunning: true,
+      });
+      const open = harness.open.getMockImplementation()!;
+      harness.open.mockImplementation(() =>
+        Effect.sync(() => order.push("provider session opened")).pipe(Effect.andThen(open())),
+      );
+      // The same lease CheckpointRollbackServiceV2.execute holds around its
+      // isolation check, provider rollback, and git restore of `restorePath`.
+      const restore = yield* withWorkspaceLease(
+        restorePath,
+        Deferred.succeed(restoreEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseRestore)),
+          Effect.andThen(Effect.sync(() => order.push("checkpoint files restored"))),
+        ),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(restoreEntered);
+      const startup = yield* harness.start.pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.succeed(releaseRestore, undefined);
+      yield* Fiber.join(restore);
+      yield* Fiber.join(startup);
+      expect(order).toEqual(["checkpoint files restored", "provider session opened"]);
+    }),
+);
+
 effectIt.effect("reads current startup state after waiting for the workspace lease", () =>
   Effect.gen(function* () {
     const worktreePath = "/tmp/provider-start-fresh-state";
