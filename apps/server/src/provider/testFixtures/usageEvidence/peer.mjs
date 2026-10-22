@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-import fs from "node:fs";
-import http from "node:http";
-import readline from "node:readline";
-const data = JSON.parse(fs.readFileSync(new URL("./data.json", import.meta.url)));
+import * as NodeFS from "node:fs";
+import * as NodeHttp from "node:http";
+import * as NodeReadline from "node:readline";
+const data = JSON.parse(NodeFS.readFileSync(new URL("./data.json", import.meta.url)));
 const control = () =>
   JSON.parse(
-    fs.readFileSync(
+    NodeFS.readFileSync(
       process.env.T3_USAGE_EVIDENCE_CONTROL || "/tmp/issue-11873-evidence/control.json",
     ),
   );
@@ -17,36 +17,34 @@ const limits = (used) => ({
   credits: null,
 });
 if (process.argv.includes("--source")) {
-  http
-    .createServer(async (req, res) => {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      res.setHeader("content-type", "application/json");
-      if (req.url.endsWith("/auth-files")) return res.end(JSON.stringify({ files: data.accounts }));
-      const q = JSON.parse(body || "{}");
-      const result = q.url?.endsWith("/rate-limit-reset-credits")
-        ? { credits: [] }
-        : {
-            plan_type: "plus",
-            rate_limit: {
-              primary_window: {
-                used_percent: q.auth_index === "a" ? 12 : 38,
-                reset_at: 1792684800,
-                limit_window_seconds: 18000,
-              },
-              secondary_window: {
-                used_percent: 38,
-                reset_at: 1793275200,
-                limit_window_seconds: 604800,
-              },
+  NodeHttp.createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    res.setHeader("content-type", "application/json");
+    if (req.url.endsWith("/auth-files")) return res.end(JSON.stringify({ files: data.accounts }));
+    const q = JSON.parse(body || "{}");
+    const result = q.url?.endsWith("/rate-limit-reset-credits")
+      ? { credits: [] }
+      : {
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: q.auth_index === "a" ? 12 : 38,
+              reset_at: 1792684800,
+              limit_window_seconds: 18000,
             },
-          };
-      res.end(JSON.stringify({ status_code: 200, body: JSON.stringify(result) }));
-    })
-    .listen(18317, "127.0.0.1");
+            secondary_window: {
+              used_percent: 38,
+              reset_at: 1793275200,
+              limit_window_seconds: 604800,
+            },
+          },
+        };
+    res.end(JSON.stringify({ status_code: 200, body: JSON.stringify(result) }));
+  }).listen(18317, "127.0.0.1");
 } else if (process.argv.includes("--version")) console.log("codex-cli 0.163.0");
 else {
-  readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  NodeReadline.createInterface({ input: process.stdin }).on("line", (line) => {
     const q = JSON.parse(line);
     if (q.id === undefined) return;
     const c = control();
@@ -91,7 +89,7 @@ else {
             rateLimitsByLimitId: null,
             rateLimitResetCredits: null,
           };
-        fs.appendFileSync(
+        NodeFS.appendFileSync(
           (process.env.T3_USAGE_EVIDENCE_CONTROL || "/tmp/issue-11873-evidence/control.json") +
             ".milestones",
           JSON.stringify({
