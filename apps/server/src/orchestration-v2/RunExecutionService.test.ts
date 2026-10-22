@@ -11,6 +11,7 @@ import {
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2ProviderTurn,
   type OrchestrationV2Run,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2Subagent,
@@ -2588,48 +2589,88 @@ it.effect.each(["failure", "defect", "interrupt-failure", "ownership-lost"] as c
     }),
 );
 
-it.effect.each(["completed", "failed"] as const)(
-  "keeps a %s root provider turn when ingestion fails before its turn ends",
-  (status) =>
+it.effect.each([
+  { status: "completed", failure: "later-stream" },
+  { status: "failed", failure: "later-stream" },
+  { status: "completed", failure: "terminal-ingest" },
+] as const)(
+  "keeps a $status root provider turn durable after a $failure failure",
+  ({ status, failure }) =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;
+      const terminalAt = DateTime.subtract(now, { seconds: 1 });
+      const key = `terminal-snapshot:${status}:${failure}`;
+      const durableTurns = yield* Ref.make<
+        ReadonlyMap<ProviderTurnId, OrchestrationV2ProviderTurn>
+      >(new Map());
+      const persist = (turn: OrchestrationV2ProviderTurn) =>
+        Ref.update(durableTurns, (current) => new Map(current).set(turn.id, turn));
       const interrupts = yield* Ref.make<
         ReadonlyArray<ProviderAdapter.ProviderAdapterV2InterruptInput>
       >([]);
+      const ids = backgroundScenarioIds(key);
+      const rootTurn = (
+        turnStatus: OrchestrationV2ProviderTurn["status"],
+        completedAt: DateTime.Utc | null,
+      ) => ({
+        type: "provider_turn.updated" as const,
+        driver,
+        providerTurn: {
+          id: ids.rootProviderTurnId,
+          providerThreadId: ids.providerThreadId,
+          nodeId: ids.rootNodeId,
+          runAttemptId: ids.attemptId,
+          nativeTurnRef: null,
+          ordinal: 1,
+          status: turnStatus,
+          startedAt: terminalAt,
+          completedAt,
+        },
+      });
       const { observed, finalEvents } = yield* captureRootRunTermination({
-        key: `terminal-snapshot:${status}`,
+        key,
         shouldFinalizeRun: () => Effect.succeed(true),
-        events: (ids) =>
-          Stream.make({
-            type: "provider_turn.updated" as const,
-            driver,
-            providerTurn: {
-              id: ids.rootProviderTurnId,
-              providerThreadId: ids.providerThreadId,
-              nodeId: ids.rootNodeId,
-              runAttemptId: ids.attemptId,
-              nativeTurnRef: null,
-              ordinal: 1,
-              status,
-              startedAt: now,
-              completedAt: now,
-            },
-          }),
-        ingestNormalized: () =>
-          Effect.fail(
-            new ProviderEventIngestor.ProviderEventPublishError({
-              providerSessionId: ProviderSessionId.make(`session:terminal-snapshot:${status}`),
-              eventCount: 1,
-              cause: new Error("SQLITE_FULL: database or disk is full"),
-            }),
+        events: () =>
+          Stream.make(rootTurn("running", null), rootTurn(status, terminalAt)).pipe(
+            Stream.concat(
+              failure === "later-stream"
+                ? Stream.fail(
+                    new ProviderAdapter.ProviderAdapterEventStreamError({
+                      driver,
+                      providerSessionId: ProviderSessionId.make(`session:${key}`),
+                      cause: "provider process exited",
+                    }),
+                  )
+                : Stream.empty,
+            ),
           ),
+        ingestNormalized: ({ event }) =>
+          event.type !== "provider_turn.updated"
+            ? Effect.succeed([])
+            : failure === "terminal-ingest" && event.providerTurn.status !== "running"
+              ? Effect.fail(
+                  new ProviderEventIngestor.ProviderEventPublishError({
+                    providerSessionId: ProviderSessionId.make(`session:${key}`),
+                    eventCount: 1,
+                    cause: new Error("SQLITE_FULL: database or disk is full"),
+                  }),
+                )
+              : persist(event.providerTurn).pipe(Effect.as([])),
         interruptTurn: (input) => Ref.update(interrupts, (current) => [...current, input]),
+        beforeTerminalWrite: (request) =>
+          Effect.forEach(request.events, (event) =>
+            event.type === "provider-turn.updated" ? persist(event.payload) : Effect.void,
+          ).pipe(Effect.as(true)),
       });
       const calls = yield* Ref.get(interrupts);
       assert.equal(calls.length, 1);
       assert.isTrue(calls[0]?.requestRuntimeRestart);
       assert.deepEqual(observed, ["run:failed", "pull-requests-refreshed"]);
-      assert.isUndefined(finalEvents.find((event) => event.type === "provider-turn.updated"));
+      assert.isTrue(finalEvents.some((event) => event.type === "run.updated"));
+      const durable = (yield* Ref.get(durableTurns)).get(ids.rootProviderTurnId);
+      assert.equal(durable?.status, status);
+      assert.isTrue(durable?.completedAt !== null && durable?.completedAt !== undefined);
+      assert.equal(DateTime.toEpochMillis(durable.completedAt), DateTime.toEpochMillis(terminalAt));
     }),
 );
 

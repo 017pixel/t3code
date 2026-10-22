@@ -756,7 +756,7 @@ export const layer: Layer.Layer<
                     nodeId: input.rootNode.id,
                     providerInstanceId: input.run.providerInstanceId,
                     occurredAt: completedAt,
-                    payload: { ...input.abandonedProviderTurn, completedAt },
+                    payload: input.abandonedProviderTurn,
                   },
                 ]),
             ...(finalizedAttempt === null
@@ -1484,12 +1484,14 @@ export const layer: Layer.Layer<
                                 { runId: input.run.id, cause: interruptCause },
                               ).pipe(Effect.as("failed" as const)),
                           ),
-                          // A terminal snapshot is the provider's own outcome; only repair active turns.
+                          // The snapshot is cached before it is published, so it may not be
+                          // stored. Replay a terminal snapshot as-is; only active turns end here.
                           Effect.map((status) =>
-                            rootProviderTurn === null ||
-                            isTerminalProviderTurnStatus(rootProviderTurn.status)
+                            rootProviderTurn === null
                               ? null
-                              : { ...rootProviderTurn, status },
+                              : isTerminalProviderTurnStatus(rootProviderTurn.status)
+                                ? rootProviderTurn
+                                : { ...rootProviderTurn, status, completedAt },
                           ),
                         )
                     : null;
