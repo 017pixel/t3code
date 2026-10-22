@@ -29,7 +29,10 @@ vi.mock("electron", () => ({
 vi.mock("@clerk/electron/preload", () => ({ exposeClerkBridge: vi.fn() }));
 
 it("polling topology reads do not block the renderer on synchronous IPC each time", async () => {
-  vi.stubGlobal("window", { localStorage: { getItem: () => null, setItem: () => {} } });
+  vi.stubGlobal("window", {
+    addEventListener: () => {},
+    localStorage: { getItem: () => null, setItem: () => {} },
+  });
   await import("./preload.ts");
   const bridge = exposed.get("desktopBridge") as DesktopBridge;
   sendSync.mockClear();
@@ -51,7 +54,10 @@ it("polling topology reads do not block the renderer on synchronous IPC each tim
 });
 
 it("an async topology refresh replaces the bootstraps later reads return", async () => {
-  vi.stubGlobal("window", { localStorage: { getItem: () => null, setItem: () => {} } });
+  vi.stubGlobal("window", {
+    addEventListener: () => {},
+    localStorage: { getItem: () => null, setItem: () => {} },
+  });
   await import("./preload.ts");
   const bridge = exposed.get("desktopBridge") as DesktopBridge;
   const wsl = {
