@@ -1381,6 +1381,34 @@ const decodeCodexResumeMetadata = Schema.decodeUnknownEffect(
   Schema.Struct({ thread: Schema.Struct({ id: Schema.String, updatedAt: Schema.Number }) }),
 );
 
+// Only the fields the review check reads, so hook metadata that newer or
+// older Codex versions add or lack cannot block thread start. A missing
+// trustStatus predates hook review.
+const decodeCodexHooksList = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    data: Schema.Array(
+      Schema.Struct({
+        hooks: Schema.Array(
+          Schema.Struct({
+            enabled: Schema.Boolean,
+            trustStatus: Schema.optional(Schema.String),
+            sourcePath: Schema.String,
+          }),
+        ),
+      }),
+    ),
+  }),
+);
+
+// Codex rejects methods it does not know as an invalid request naming the
+// method, not as JSON-RPC method-not-found.
+function isCodexHooksListUnsupported(error: CodexErrors.CodexAppServerRequestError): boolean {
+  return (
+    error.code === -32601 ||
+    (error.code === -32600 && error.errorMessage.includes("unknown variant `hooks/list`"))
+  );
+}
+
 const CodexChildSelection = Schema.Struct({
   thread: Schema.Struct({ id: Schema.String }),
   model: Schema.NullOr(Schema.String),
@@ -1831,19 +1859,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           }),
         );
         // Codex silently skips enabled hooks that are untrusted or modified since
-        // review, so running anyway would drop the user's hooks without a trace.
-        // Checked before every thread start, resume, and turn because hooks can
-        // change while the session is open.
+        // review, so starting a new thread anyway would drop the user's hooks
+        // without a trace.
         const requireReviewedHooks = Effect.fn("CodexAdapterV2.requireReviewedHooks")(function* (
           cwd: string | null,
         ) {
-          const listed = yield* client
+          const listed = yield* client.raw
             .request("hooks/list", cwd === null ? {} : { cwds: [cwd] })
             .pipe(
+              Effect.flatMap(decodeCodexHooksList),
               Effect.catchTags({
                 // Codex versions without hooks/list have no hook review to bypass.
                 CodexAppServerRequestError: (error) =>
-                  error.code === -32601 ? Effect.succeed(null) : Effect.fail(error),
+                  isCodexHooksListUnsupported(error) ? Effect.succeed(null) : Effect.fail(error),
               }),
             );
           const pending =
@@ -1862,7 +1890,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           const home = homePath ? ` with CODEX_HOME=${homePath}` : "";
           return yield* Effect.fail(
             `Codex will not run ${one ? "an enabled hook" : `${pending.length} enabled hooks`} until ${one ? "it is" : "they are"} reviewed (${sources}). ` +
-              `Run \`codex /hooks\`${where}${home} to review or disable ${one ? "it" : "them"}, then try again.`,
+              `Open \`codex\`${where}${home}, enter \`/hooks\` to review or disable ${one ? "it" : "them"}, then try again.`,
           );
         });
         const now = yield* DateTime.now;
@@ -6390,7 +6418,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             codexInput: ReadonlyArray<CodexSchema.V2TurnStartParams__UserInput>,
           ) {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
-            yield* requireReviewedHooks(turnInput.runtimePolicy.cwd);
             const mcpSession = yield* mcpSessions.read(turnInput.threadId);
             const turnStartParams = yield* buildCodexTurnStartParams({
               nativeThreadId: threadId,
@@ -6726,7 +6753,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 }),
               });
               const response = yield* ensureInitialized.pipe(
-                Effect.andThen(requireReviewedHooks(threadInput.runtimePolicy?.cwd ?? session.cwd)),
                 Effect.andThen(
                   resume.pipe(
                     Effect.catchTags({

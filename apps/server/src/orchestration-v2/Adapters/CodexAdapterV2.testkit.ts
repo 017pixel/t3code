@@ -82,17 +82,18 @@ export function withCodexReplayChildMetadata(
   };
 }
 
-// Recorded transcripts predate the adapter's hook review check, which asks
-// before every thread start, resume, and turn.
+// Recorded transcripts predate the adapter's hook review check before a new
+// thread starts.
 export function withCodexReplayReviewedHooks(
   client: CodexClient.CodexAppServerClient["Service"],
 ): CodexClient.CodexAppServerClient["Service"] {
   return {
     ...client,
-    request: (method, params) =>
-      method === "hooks/list"
-        ? Effect.succeed({ data: [] } as never)
-        : client.request(method, params),
+    raw: {
+      ...client.raw,
+      request: (method, params) =>
+        method === "hooks/list" ? Effect.succeed({ data: [] }) : client.raw.request(method, params),
+    },
   };
 }
 

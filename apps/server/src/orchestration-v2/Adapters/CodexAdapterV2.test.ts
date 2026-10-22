@@ -676,14 +676,12 @@ describe("CodexAdapterV2 session initialize", () => {
   const openReplaySession = (
     transcript: CodexReplay.CodexAppServerReplayTranscript,
     beforeEmitInbound?: CodexReplay.CodexAppServerReplayDriver["beforeEmitInbound"],
-    hooksList: CodexSchema.V2HooksListResponse = { data: [] },
+    hooksList: Effect.Effect<unknown, CodexError.CodexAppServerError> = Effect.succeed({
+      data: [],
+    }),
   ) =>
     Effect.gen(function* () {
       const requests: string[] = [];
-      let hooksListResponse: Effect.Effect<
-        CodexSchema.V2HooksListResponse,
-        CodexError.CodexAppServerError
-      > = Effect.succeed(hooksList);
       const driver = yield* CodexReplay.makeReplayDriver(
         transcript,
         beforeEmitInbound === undefined ? {} : { beforeEmitInbound },
@@ -703,17 +701,22 @@ describe("CodexAdapterV2 session initialize", () => {
                 (client) =>
                   ({
                     ...client,
+                    raw: {
+                      ...client.raw,
+                      request: (method, params) =>
+                        Effect.sync(() => requests.push(method)).pipe(
+                          Effect.andThen(
+                            method === "hooks/list"
+                              ? hooksList
+                              : client.raw.request(method, params),
+                          ),
+                        ),
+                    },
                     request: (method, params) =>
                       Effect.sync(() => {
                         requests.push(method);
                         if (method === "initialize") initializeRequests++;
-                      }).pipe(
-                        Effect.andThen(
-                          method === "hooks/list"
-                            ? (hooksListResponse as never)
-                            : client.request(method, params),
-                        ),
-                      ),
+                      }).pipe(Effect.andThen(client.request(method, params))),
                   }) satisfies CodexClient.CodexAppServerClient["Service"],
               ),
               Effect.mapError(
@@ -744,23 +747,6 @@ describe("CodexAdapterV2 session initialize", () => {
             modelSelection: CODEX_TEST_MODEL_SELECTION,
             runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
           }),
-        startTurn: (threadId: string, providerThread: OrchestrationV2ProviderThread) =>
-          Effect.flatMap(DateTime.now, (now) =>
-            runtime.startTurn(
-              makeCodexTestTurnInput({
-                threadId: ThreadId.make(threadId),
-                providerThread,
-                now,
-                attemptId: RunAttemptId.make(`attempt-${transcript.scenario}`),
-                text: "hello",
-              }),
-            ),
-          ),
-        respondToHooksList: (
-          response: Effect.Effect<CodexSchema.V2HooksListResponse, CodexError.CodexAppServerError>,
-        ) => {
-          hooksListResponse = response;
-        },
         initializeRequests: () => initializeRequests,
         requests: () => requests,
       };
@@ -816,43 +802,49 @@ describe("CodexAdapterV2 session initialize", () => {
     ),
   );
 
-  // regression: #5024 Codex skips hooks that need review, so starting anyway
-  // silently drops the user's SessionStart and UserPromptSubmit hooks.
+  const codexHook = (overrides: Record<string, unknown>) => ({
+    handlerType: "command",
+    command: "touch /tmp/hook-fired",
+    currentHash: "hash",
+    displayOrder: 0,
+    enabled: true,
+    eventName: "userPromptSubmit",
+    isManaged: false,
+    key: "user:userPromptSubmit:0",
+    source: "user",
+    sourcePath: "/tmp/codex-home/hooks.json",
+    timeoutSec: 60,
+    trustStatus: "trusted",
+    ...overrides,
+  });
+  const listedHooks = (hooks: ReadonlyArray<unknown>) =>
+    Effect.succeed({ data: [{ cwd: "/workspace", errors: [], warnings: [], hooks }] });
+  const hooksListError = (code: number, errorMessage: string) =>
+    Effect.fail(new CodexError.CodexAppServerRequestError({ code, errorMessage }));
+  const openHooksSession = (
+    scenario: string,
+    hooksList: Effect.Effect<unknown, CodexError.CodexAppServerError>,
+  ) =>
+    openReplaySession(
+      makeCodexReplayTranscript({ scenario, entries: replayPreamble(scenario).slice(0, 5) }),
+      undefined,
+      hooksList,
+    );
+  const hooksTestLayer = Layer.mergeAll(
+    IdAllocator.layer,
+    McpProviderSessions.layer,
+    NodeServices.layer,
+  );
+
+  // regression: #5024 Codex skips hooks that need review, so starting a new
+  // thread anyway silently drops the user's SessionStart and UserPromptSubmit hooks.
   it.effect.each(["untrusted", "modified"] as const)(
     "refuses to start a thread while an enabled hook is %s",
     (trustStatus) =>
       Effect.gen(function* () {
-        const session = yield* openReplaySession(
-          makeCodexReplayTranscript({
-            scenario: `hooks-${trustStatus}`,
-            entries: replayPreamble(`hooks-${trustStatus}`).slice(0, 5),
-          }),
-          undefined,
-          {
-            data: [
-              {
-                cwd: "/workspace",
-                errors: [],
-                warnings: [],
-                hooks: [
-                  {
-                    handlerType: "command",
-                    command: "touch /tmp/hook-fired",
-                    currentHash: "hash",
-                    displayOrder: 0,
-                    enabled: true,
-                    eventName: "userPromptSubmit",
-                    isManaged: false,
-                    key: "user:userPromptSubmit:0",
-                    source: "user",
-                    sourcePath: "/tmp/codex-home/hooks.json",
-                    timeoutSec: 60,
-                    trustStatus,
-                  },
-                ],
-              },
-            ],
-          },
+        const session = yield* openHooksSession(
+          `hooks-${trustStatus}`,
+          listedHooks([codexHook({ trustStatus })]),
         );
 
         const result = yield* session
@@ -862,97 +854,75 @@ describe("CodexAdapterV2 session initialize", () => {
         assert.equal(result._tag, "Failure");
         if (result._tag === "Failure") {
           assert.equal(result.failure._tag, "ProviderAdapterEnsureThreadError");
-          assert.include(String(result.failure.cause), "codex /hooks");
+          const message = String(result.failure.cause);
+          assert.include(message, "`/hooks`");
+          assert.notInclude(message, "codex /hooks");
         }
         assert.include(session.requests(), "hooks/list");
         assert.notInclude(session.requests(), "thread/start");
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(hooksTestLayer)),
   );
 
-  const codexHook = (
-    trustStatus: CodexSchema.V2HooksListResponse__HookTrustStatus,
-    enabled = true,
-  ): CodexSchema.V2HooksListResponse["data"][number]["hooks"][number] => ({
-    handlerType: "command",
-    command: "touch /tmp/hook-fired",
-    currentHash: "hash",
-    displayOrder: 0,
-    enabled,
-    eventName: "userPromptSubmit",
-    isManaged: trustStatus === "managed",
-    key: `user:userPromptSubmit:${trustStatus}:${enabled}`,
-    source: "user",
-    sourcePath: "/tmp/codex-home/hooks.json",
-    timeoutSec: 60,
-    trustStatus,
-  });
-
-  it.effect("refuses a later turn once a hook changes after the thread started", () =>
-    Effect.gen(function* () {
-      const hooksAt = (hooks: ReadonlyArray<ReturnType<typeof codexHook>>) =>
-        Effect.succeed({ data: [{ cwd: "/workspace", errors: [], warnings: [], hooks }] });
-      const session = yield* openReplaySession(
-        makeCodexReplayTranscript({
-          scenario: "hooks-later-turn",
-          entries: replayPreamble("hooks-later-turn").slice(0, 5),
-        }),
-      );
-      session.respondToHooksList(
-        hooksAt([codexHook("trusted"), codexHook("managed"), codexHook("untrusted", false)]),
-      );
-      const providerThread = yield* session.ensureThread("thread-hooks-later-turn");
-
-      session.respondToHooksList(hooksAt([codexHook("modified")]));
-      const result = yield* session
-        .startTurn("thread-hooks-later-turn", providerThread)
-        .pipe(Effect.result);
-
-      assert.equal(result._tag, "Failure");
-      if (result._tag === "Failure") {
-        assert.equal(result.failure._tag, "ProviderAdapterTurnStartError");
-        assert.include(String(result.failure.cause), "codex /hooks");
-      }
-      assert.notInclude(session.requests(), "turn/start");
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+  it.effect.each([
+    {
+      name: "reviewed, managed, and disabled hooks",
+      hooksList: listedHooks([
+        codexHook({}),
+        codexHook({ trustStatus: "managed", isManaged: true }),
+        codexHook({ trustStatus: "untrusted", enabled: false }),
+      ]),
+    },
+    {
+      name: "hook metadata this adapter does not read",
+      hooksList: listedHooks([
+        codexHook({ eventName: "futureEvent", source: "futureSource", handlerType: "future" }),
+      ]),
+    },
+    {
+      name: "a Codex version that lists hooks without review",
+      hooksList: listedHooks([{ enabled: true, sourcePath: "/tmp/codex-home/hooks.json" }]),
+    },
+    {
+      name: "a Codex version without hooks/list (method not found)",
+      hooksList: hooksListError(-32601, "Method not found"),
+    },
+    {
+      name: "a Codex version without hooks/list (unknown variant)",
+      hooksList: hooksListError(
+        -32600,
+        "Invalid request: unknown variant `hooks/list`, expected one of `initialize`, `thread/start`",
       ),
-    ),
+    },
+  ])("starts a thread with $name", ({ name, hooksList }) =>
+    Effect.gen(function* () {
+      const scenario = `hooks-start-${name.replaceAll(/\W+/g, "-")}`;
+      const session = yield* openHooksSession(scenario, hooksList);
+
+      const providerThread = yield* session.ensureThread(`thread-${scenario}`);
+
+      assert.equal(providerThread.nativeThreadRef?.nativeId, scenario);
+    }).pipe(Effect.scoped, Effect.provide(hooksTestLayer)),
   );
 
-  it.effect("starts on Codex without hooks/list but surfaces other hook listing failures", () =>
+  it.effect.each([
+    {
+      name: "an unrelated invalid request",
+      code: -32600,
+      errorMessage: "Invalid request: bad cwd",
+    },
+    { name: "an internal error", code: -32603, errorMessage: "hooks/list failed" },
+  ])("refuses to start a thread when hooks/list fails with $name", ({ code, errorMessage }) =>
     Effect.gen(function* () {
-      const session = yield* openReplaySession(
-        makeCodexReplayTranscript({
-          scenario: "hooks-unsupported",
-          entries: replayPreamble("hooks-unsupported").slice(0, 5),
-        }),
+      const session = yield* openHooksSession(
+        `hooks-error-${-code}`,
+        hooksListError(code, errorMessage),
       );
-      const hooksListError = (code: number) =>
-        Effect.fail(
-          new CodexError.CodexAppServerRequestError({ code, errorMessage: "hooks/list failed" }),
-        );
 
-      session.respondToHooksList(hooksListError(-32603));
-      const failed = yield* session.ensureThread("thread-hooks-broken").pipe(Effect.flip);
+      const failed = yield* session.ensureThread(`thread-hooks-error-${-code}`).pipe(Effect.flip);
+
       assert.equal(failed._tag, "ProviderAdapterEnsureThreadError");
       assert.notInclude(session.requests(), "thread/start");
-
-      session.respondToHooksList(hooksListError(-32601));
-      const providerThread = yield* session.ensureThread("thread-hooks-unsupported");
-      assert.equal(providerThread.nativeThreadRef?.nativeId, "hooks-unsupported");
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(hooksTestLayer)),
   );
 
   // regression: #16260 one-shot initializers raced; a failed handshake must be retried
