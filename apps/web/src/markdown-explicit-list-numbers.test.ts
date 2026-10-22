@@ -30,6 +30,13 @@ describe("remarkExplicitListNumbers", () => {
     ]);
   });
 
+  it("auto-numbers lists that repeat one number, as CommonMark shorthand", () => {
+    expect(orderedItemValues("1. a\n1. b\n1. c\n\nnext\n\n0. a\n0. b")).toEqual([
+      [undefined, undefined, undefined],
+      [undefined, undefined],
+    ]);
+  });
+
   it("leaves lists recovered from over-indented list text numbered as CommonMark does", () => {
     expect(orderedItemValues("-       first block\n\n        1. one\n        5. five")).toEqual([
       [undefined, undefined],
