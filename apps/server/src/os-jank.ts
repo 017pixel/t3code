@@ -10,6 +10,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import type * as Scope from "effect/Scope";
 import * as NodeOS from "node:os";
 
 function logPathHydrationWarning(message: string, error?: unknown): void {
@@ -18,7 +19,8 @@ function logPathHydrationWarning(message: string, error?: unknown): void {
   );
 }
 
-function hydratePosixPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): void {
+/** Returns whether a login shell answered with a PATH. */
+function hydratePosixPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): boolean {
   let shellEnvironment: Partial<Record<string, string>> = {};
   for (const shell of listLoginShellCandidates(platform, env.SHELL)) {
     try {
@@ -47,6 +49,7 @@ function hydratePosixPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): vo
   if (!env.JAVA_HOME && shellEnvironment.JAVA_HOME) {
     env.JAVA_HOME = shellEnvironment.JAVA_HOME;
   }
+  return shellPath !== undefined && shellPath.length > 0;
 }
 
 export function hydratePosixHome(
@@ -61,9 +64,11 @@ export function hydratePosixHome(
   }
 }
 
+const PATH_HYDRATION_RETRY_DELAY = "30 seconds";
+
 export const fixPath = Effect.fn("fixPath")(function* (options?: {
   readonly shellEnvironmentPrepared?: boolean | undefined;
-}): Effect.fn.Return<void, never, FileSystem.FileSystem | Path.Path> {
+}): Effect.fn.Return<void, never, FileSystem.FileSystem | Path.Path | Scope.Scope> {
   const platform = yield* HostProcess.Platform;
   const env = yield* HostProcess.Environment;
 
@@ -100,13 +105,19 @@ export const fixPath = Effect.fn("fixPath")(function* (options?: {
     ),
   );
   if (options?.shellEnvironmentPrepared === true) return;
-  yield* Effect.sync(() => hydratePosixPath(env, platform)).pipe(
+  const hydrate = Effect.sync(() => hydratePosixPath(env, platform)).pipe(
     Effect.catchDefect((defect) =>
       Effect.sync(() => {
         logPathHydrationWarning("Failed to hydrate PATH from the user environment.", defect);
+        return false;
       }),
     ),
   );
+  if (yield* hydrate) return;
+  // A profile that is slow only while the machine boots (network mounts,
+  // first-run plugin managers) would otherwise leave PATH unhydrated for the
+  // whole server lifetime. Ask once more after startup settles.
+  yield* Effect.forkScoped(Effect.sleep(PATH_HYDRATION_RETRY_DELAY).pipe(Effect.andThen(hydrate)));
 });
 
 export const expandHomePath = Effect.fn(function* (input: string) {
