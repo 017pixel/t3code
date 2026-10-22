@@ -8,7 +8,8 @@ import json, sqlite3, sys
 from pathlib import Path
 p=Path(__file__).resolve().parent
 home=Path(sys.argv[1]).resolve()
-if '.t3/evidence' not in str(home):
+# Whole components after symlink resolution: rejects `.t3/evidence-existing` and aliases.
+if ('.t3','evidence') not in zip(home.parts,home.parts[1:]):
     raise SystemExit('Expected isolated worktree .t3/evidence home')
 c=sqlite3.connect(home/'userdata/statev2.sqlite')
 def insert(table, **values):
