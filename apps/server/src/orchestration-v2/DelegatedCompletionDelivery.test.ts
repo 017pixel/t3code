@@ -14,8 +14,10 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   ProviderThreadId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -3037,6 +3039,77 @@ it.layer(layerSteeredTaskTest)("steered delegated follow-ups", (it) => {
         );
         assert.lengthOf(transfers, 1);
         assert.equal(result.resultContextTransferId, transfers[0]!.id);
+      }),
+  );
+
+  it.effect.each(["delegated", "monitor"] as const)(
+    "reports an approval pending in the joined run to the promoted task (%s)",
+    (owner) =>
+      Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const sink = yield* EventSink.EventSinkV2;
+        const seeded = yield* seedSteeredTasks(`steered-approval-${owner}`, {
+          monitor: owner === "monitor",
+        });
+        const nodeId = NodeId.make(`steered-approval-${owner}:node`);
+        const requestId = RuntimeRequestId.make(`steered-approval-${owner}:request`);
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`${nodeId}:seed`),
+              type: "node.updated",
+              threadId: seeded.childThreadId,
+              runId: seeded.steeredRun.id,
+              nodeId,
+              occurredAt: seeded.now,
+              payload: {
+                id: nodeId,
+                threadId: seeded.childThreadId,
+                runId: seeded.steeredRun.id,
+                rootNodeId: nodeId,
+                parentNodeId: null,
+                kind: "root_turn",
+                status: "running",
+                countsForRun: true,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: null,
+                runtimeRequestId: null,
+                checkpointScopeId: null,
+                startedAt: seeded.now,
+                completedAt: null,
+              },
+            },
+            {
+              id: EventId.make(`${requestId}:seed`),
+              type: "runtime-request.updated",
+              threadId: seeded.childThreadId,
+              runId: seeded.steeredRun.id,
+              nodeId,
+              occurredAt: seeded.now,
+              payload: {
+                id: requestId,
+                nodeId,
+                providerTurnId: null,
+                nativeRequestRef: null,
+                kind: "command",
+                status: "pending",
+                responseCapability: {
+                  type: "live",
+                  providerSessionId: ProviderSessionId.make(`steered-approval-${owner}`),
+                },
+                createdAt: seeded.now,
+                resolvedAt: null,
+              },
+            },
+          ],
+        });
+        const result = yield* service.taskStatus(seeded.scope, seeded.promotedTaskId);
+        assert.deepEqual(result.pendingApproval, {
+          requestId,
+          kind: "command",
+          runId: seeded.steeredRun.id,
+        });
       }),
   );
 
