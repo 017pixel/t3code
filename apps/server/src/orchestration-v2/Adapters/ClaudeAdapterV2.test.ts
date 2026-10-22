@@ -3061,7 +3061,13 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   );
 
   // regression: #15708 Stop must not silently drop a steer Claude queued behind a foreground task
-  it.effect("warns that a steer Claude never read before Stop was not delivered", () =>
+  it.effect.each([
+    {
+      readBeforeStop: false,
+      title: "warns that a steer Claude never read before Stop was not delivered",
+    },
+    { readBeforeStop: true, title: "does not warn about a steer Claude read before Stop" },
+  ])("$title", ({ readBeforeStop }) =>
     Effect.gen(function* () {
       const harness = yield* makeWakeHarnessWithOptions({
         close: (sdkMessages) => Queue.shutdown(sdkMessages),
@@ -3131,6 +3137,26 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           attachments: [],
         },
       });
+      if (readBeforeStop) {
+        const steerUuid = harness.offeredMessages.at(-1)?.uuid;
+        assert.isDefined(steerUuid);
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "assistant",
+            uuid: "00000000-0000-4000-8000-000000015703",
+            session_id: WAKE_NATIVE_SESSION,
+            parent_tool_use_id: null,
+            user_message_uuids: [steerUuid],
+            message: {
+              id: "msg_unread_steer_reply",
+              type: "message",
+              role: "assistant",
+              model: "claude-sonnet-4-6",
+              content: [{ type: "text", text: "Noted." }],
+            },
+          }),
+        );
+      }
       const noticesBefore = harness.events.length;
       yield* harness.runtime.interruptTurn({
         providerThread: harness.providerThread,
@@ -3148,6 +3174,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       const undelivered = notices.find((message) =>
         /not (been )?delivered|never (reached|delivered)/i.test(message ?? ""),
       );
+      if (readBeforeStop) {
+        assert.isUndefined(undelivered);
+        return;
+      }
       assert.isDefined(
         undelivered,
         `expected an undelivered-steer notice, got ${JSON.stringify(notices)}`,
