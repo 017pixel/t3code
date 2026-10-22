@@ -6730,6 +6730,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   }),
                 ),
               ),
+              // With workspace-write permissions, thread/start can trust a new
+              // project, which only then exposes its project hooks for review.
+              Effect.tap((response) =>
+                requireReviewedHooks(threadInput.runtimePolicy.cwd).pipe(
+                  Effect.onError(() =>
+                    client
+                      .request("thread/unsubscribe", { threadId: response.thread.id })
+                      .pipe(Effect.ignore),
+                  ),
+                ),
+              ),
               Effect.map((response): OrchestrationV2ProviderThread =>
                 providerThreadFromCodexThread({
                   appThreadId: threadInput.threadId,

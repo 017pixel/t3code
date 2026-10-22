@@ -974,6 +974,44 @@ describe("CodexAdapterV2 session initialize", () => {
     }).pipe(Effect.scoped, Effect.provide(hooksTestLayer)),
   );
 
+  // regression: #5024 with workspace-write permissions, Codex trusts a new
+  // project during thread/start, which only then exposes its unreviewed hooks.
+  it.effect("releases a new thread whose start exposed hooks that need review", () =>
+    Effect.gen(function* () {
+      const scenario = "hooks-trusted-by-start";
+      const hookLists = [listedHooks([]), listedHooks([codexHook({ trustStatus: "untrusted" })])];
+      const session = yield* openReplaySession(
+        makeCodexReplayTranscript({
+          scenario,
+          entries: [
+            ...replayPreamble(scenario).slice(0, 5),
+            {
+              type: "expect_outbound",
+              label: "thread/unsubscribe",
+              frame: { id: 3, method: "thread/unsubscribe", params: { threadId: scenario } },
+            },
+            {
+              type: "emit_inbound",
+              label: "thread/unsubscribe",
+              frame: { id: 3, result: { status: "unsubscribed" } },
+            },
+          ],
+        }),
+        undefined,
+        Effect.suspend(() => hookLists.shift() ?? listedHooks([])),
+      );
+
+      const failed = yield* session.ensureThread(`thread-${scenario}`).pipe(Effect.flip);
+
+      assert.equal(failed._tag, "ProviderAdapterEnsureThreadError");
+      assert.include(String(failed.cause), "`/hooks`");
+      assert.deepEqual(
+        session.requests().filter((method) => method !== "initialize"),
+        ["hooks/list", "thread/start", "hooks/list", "thread/unsubscribe"],
+      );
+    }).pipe(Effect.scoped, Effect.provide(hooksTestLayer)),
+  );
+
   it.effect.each([
     {
       name: "reviewed, managed, and disabled hooks",
