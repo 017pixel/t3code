@@ -157,19 +157,30 @@ export function installSyntheticEvents() {
       });
       return { prevented: e.defaultPrevented };
     };
-    const activeEnvironmentId = (d) => {
-      const [, route, id] = location.pathname.split("/");
+    const activeDraftTarget = (d) => {
+      const route = location.pathname.match(/^\/([^/]+)\/([^/]+)\/?$/);
+      if (!route) throw new Error("Cannot resolve the active draft route");
+      const [, first, second] = route;
+      const routeId = decodeURIComponent(first);
+      const targetId = decodeURIComponent(second);
+      if (!routeId.trim() || !targetId.trim()) {
+        throw new Error("Cannot resolve the active draft route");
+      }
       const environmentId =
-        route === "draft"
-          ? d.useComposerDraftStore.getState().getDraftSession(decodeURIComponent(id))
-              ?.environmentId
-          : route;
+        routeId === "draft"
+          ? d.useComposerDraftStore.getState().getDraftSession(targetId)?.environmentId
+          : routeId;
       if (!environmentId) throw new Error("Cannot resolve the active draft environment");
-      return environmentId;
+      return {
+        environmentId,
+        key: d.composerTargetKey(
+          routeId === "draft" ? targetId : { environmentId, threadId: targetId },
+        ),
+      };
     };
     window.__reset = async () => {
       const d = await import("/src/composerDraftStore.ts");
-      d.clearComposerDraftsEnvironment(activeEnvironmentId(d));
+      d.clearComposerDraftsEnvironment(activeDraftTarget(d).environmentId);
       document.querySelector("[role=textbox][contenteditable=true]")?.focus();
     };
     window.__state = async () => {
@@ -191,20 +202,14 @@ export function installSyntheticEvents() {
       }
       const d = await import("/src/composerDraftStore.ts"),
         u = await import("/src/lib/attachmentUploadQueue.ts");
-      const environmentId = activeEnvironmentId(d);
-      const threadKeyPrefix = d.composerTargetKey({ environmentId, threadId: "" });
+      const { key } = activeDraftTarget(d);
       return new Promise((resolve) => {
         let unsubscribeDraft = () => {};
         let unsubscribeUpload = () => {};
         const check = () => {
           const state = d.useComposerDraftStore.getState();
-          const files = Object.entries(state.draftsByThreadKey)
-            .filter(
-              ([key]) =>
-                key.startsWith(threadKeyPrefix) ||
-                state.getDraftSession(key)?.environmentId === environmentId,
-            )
-            .flatMap(([, draft]) => [...(draft.files ?? []), ...(draft.images ?? [])]);
+          const draft = state.draftsByThreadKey[key];
+          const files = [...(draft?.files ?? []), ...(draft?.images ?? [])];
           const s = u.useAttachmentUploadStore.getState().uploadsByImageId;
           if (
             files.length >= expectedCount &&
