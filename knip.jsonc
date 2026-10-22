@@ -30,7 +30,8 @@
       ],
       "ignoreDependencies": ["esbuild"],
       // The `t3` npm package's files: copied into the package, never imported.
-      "ignore": ["npm-launcher/**"],
+      // The Read cache fixture is pasted into a dev browser, never imported.
+      "ignore": ["npm-launcher/**", "fixtures/read-cache-web-states.js"],
     },
     "apps/server": {
       // Vite+ pack entries and the launcher used by installed background services.

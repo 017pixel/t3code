@@ -38,6 +38,8 @@ else:
     assert '.t3/userdata' not in str(a.home.resolve()), 'Use a disposable evidence home'
     dest = a.home / 'userdata/statev2.sqlite'
     assert not dest.exists(), 'Refusing to replace an existing database'
+    # Escape the path for its place inside JSON strings; parse before creating dest.
+    f = json.loads((Path(__file__).parent / 'fixtures/read-image-cache.json').read_text().replace('/tmp/issue-13138-fixture/outside/square.png', json.dumps(a.resource_path)[1:-1]))
     dest.parent.mkdir(parents=True, exist_ok=True)
     src = sqlite3.connect(f'file:{a.template.resolve()}?mode=ro', uri=True)
     db = sqlite3.connect(dest)
@@ -45,7 +47,6 @@ else:
         db.execute(sql)
     for row in src.execute('SELECT * FROM effect_sql_migrations'):
         db.execute('INSERT INTO effect_sql_migrations VALUES (' + ','.join('?' for _ in row) + ')', row)
-    f = json.loads((Path(__file__).parent / 'fixtures/read-image-cache.json').read_text().replace('/tmp/issue-13138-fixture/outside/square.png', a.resource_path))
     def put(table, values):
         db.execute(f'INSERT INTO {table} (' + ','.join(values) + ') VALUES (' + ','.join('?' for _ in values) + ')', list(values.values()))
     put('projection_projects', f['project'])
