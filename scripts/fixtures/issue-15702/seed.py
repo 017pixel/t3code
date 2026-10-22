@@ -30,7 +30,7 @@ with con:
     if projection is None:
         raise SystemExit('Initialize the sandbox once and create a stopped thread before seeding')
     stamp = fixture['updatedAt']
-    con.execute("INSERT OR IGNORE INTO projection_projects (project_id,title,workspace_root,scripts_json,created_at,updated_at) VALUES (?,?,?,?,?,?)", (fixture['projectId'], 'Badge fixture', str(root), '[]', stamp, stamp))
+    con.execute("INSERT INTO projection_projects (project_id,title,workspace_root,scripts_json,created_at,updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET title=excluded.title,workspace_root=excluded.workspace_root,updated_at=excluded.updated_at", (fixture['projectId'], 'server', str(root / 'apps/server'), '[]', stamp, stamp))
     for thread in (fixture, settled):
         encoded = json.dumps(thread, separators=(',', ':'))
         row = dict(projection)
