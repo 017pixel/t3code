@@ -69,6 +69,26 @@ const release = (reservation: Reservation) =>
     Deferred.doneUnsafe(released, Effect.void);
   });
 
+// A worktree removed by storage cleanup is recreated inside the reserved
+// section, so resolve its nearest existing ancestor: a symlink alias above it
+// must still canonicalize the same on both sides. Walks at most the path depth.
+const canonicalize = (
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
+  target: string,
+): Effect.Effect<string> =>
+  fileSystem.realPath(target).pipe(
+    Effect.catchReason("PlatformError", "NotFound", () => {
+      const parent = path.dirname(target);
+      return parent === target
+        ? Effect.succeed(target)
+        : canonicalize(fileSystem, path, parent).pipe(
+            Effect.map((resolved) => path.join(resolved, path.basename(target))),
+          );
+    }),
+    Effect.orElseSucceed(() => target),
+  );
+
 const withReservation =
   (kind: Reservation["kind"]) =>
   <A, E, R>(
@@ -77,8 +97,7 @@ const withReservation =
     cwd: string,
     effect: Effect.Effect<A, E, R>,
   ): Effect.Effect<A, E, R> =>
-    fileSystem.realPath(cwd).pipe(
-      Effect.orElseSucceed(() => cwd),
+    canonicalize(fileSystem, path, cwd).pipe(
       Effect.flatMap((canonical) => {
         const reservation: Reservation = { cwd: canonical, kind };
         return reserve(path, reservation).pipe(

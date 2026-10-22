@@ -366,6 +366,8 @@ it.effect.each([{ restoreFiles: true }, { restoreFiles: false }])(
       const scopeId = CheckpointScopeId.make("rollback-reservation-scope");
       const release = Deferred.makeUnsafe<void>();
       const openEntered = Deferred.makeUnsafe<void>();
+      const restoreEntered = Deferred.makeUnsafe<void>();
+      const releaseRestore = Deferred.makeUnsafe<void>();
       const calls: string[] = [];
       const projection = {
         thread: {
@@ -403,7 +405,11 @@ it.effect.each([{ restoreFiles: true }, { restoreFiles: false }])(
             }),
             Layer.mock(GitWorkflow.GitWorkflowService)({}),
             Layer.mock(CheckpointService.CheckpointServiceV2)({
-              restore: () => Effect.sync(() => calls.push("files")),
+              restore: () =>
+                Deferred.succeed(restoreEntered, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseRestore)),
+                  Effect.andThen(Effect.sync(() => calls.push("files"))),
+                ),
             }),
             Layer.mock(EventSink.EventSinkV2)({ write: () => Effect.succeed([]) }),
             IdAllocator.layer,
@@ -439,22 +445,34 @@ it.effect.each([{ restoreFiles: true }, { restoreFiles: false }])(
         yield* Deferred.await(openEntered);
         // A synchronous realPath lets the forked start reach the reservation
         // before the next assertion, so "not entered" means "waiting".
-        const turnStart = yield* withTurnStartReservation(
+        const startTurn = withTurnStartReservation(
           FileSystem.makeNoop({ realPath: (target) => Effect.succeed(target) }),
           path,
           path.join(worktreePath, "packages", "app"),
           Effect.sync(() => calls.push("turn start")),
         ).pipe(Effect.forkChild({ startImmediately: true }));
+        const turnStart = yield* startTurn;
         if (restoreFiles) {
           assert.deepEqual(calls, []);
+          yield* Deferred.succeed(release, undefined);
+          // The reservation must still be held while files are being restored,
+          // not only while the provider rollback is in flight.
+          yield* Deferred.await(restoreEntered);
+          const duringRestore = yield* startTurn;
+          assert.deepEqual(calls, []);
+          yield* Deferred.succeed(releaseRestore, undefined);
+          yield* Fiber.join(duringRestore);
         } else {
           // Nothing is rewritten, so the turn start must not wait for the provider.
           yield* Fiber.join(turnStart);
+          yield* Deferred.succeed(release, undefined);
         }
-        yield* Deferred.succeed(release, undefined);
         yield* Fiber.join(rollback);
         yield* Fiber.join(turnStart);
-        assert.deepEqual(calls, restoreFiles ? ["files", "turn start"] : ["turn start"]);
+        assert.deepEqual(
+          calls,
+          restoreFiles ? ["files", "turn start", "turn start"] : ["turn start"],
+        );
       }).pipe(Effect.provide(testLayer));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

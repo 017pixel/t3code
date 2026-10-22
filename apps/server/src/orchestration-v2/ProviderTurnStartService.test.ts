@@ -964,29 +964,42 @@ effectIt.effect.each(["cleanup-first", "startup-first"])(
 
 // regression: #12341 a turn start overlapping a checkpoint restore wrote into the checkout
 // The filesystem is synchronous so the turn start either reaches the provider or parks on the
-// lease before the restore is released; realPath models the symlink alias.
+// lease before the restore is released; realPath models the symlink alias and missing worktrees.
 effectIt.effect.each([
   {
     overlap: "a project-root thread during a restore of the project checkout",
     restorePath: "/tmp/native-account-project",
     worktreePath: undefined,
     realPaths: {},
+    missing: [],
   },
   {
     overlap: "a symlink alias of the restoring checkout",
     restorePath: "/tmp/restore-overlap/link",
     worktreePath: "/tmp/restore-overlap/checkout",
     realPaths: { "/tmp/restore-overlap/link": "/tmp/restore-overlap/checkout" },
+    missing: [],
   },
   {
     overlap: "a directory inside the restoring checkout",
     restorePath: "/tmp/restore-overlap/checkout",
     worktreePath: "/tmp/restore-overlap/checkout/packages/app",
     realPaths: {},
+    missing: [],
+  },
+  {
+    overlap: "a not-yet-recreated worktree under a symlink alias of the restoring one",
+    restorePath: "/tmp/restore-overlap/link/missing-child",
+    worktreePath: "/tmp/restore-overlap/checkout/missing-child",
+    realPaths: { "/tmp/restore-overlap/link": "/tmp/restore-overlap/checkout" },
+    missing: [
+      "/tmp/restore-overlap/link/missing-child",
+      "/tmp/restore-overlap/checkout/missing-child",
+    ],
   },
 ] as const)(
   "does not start provider work in $overlap until the restore finishes",
-  ({ restorePath, worktreePath, realPaths }) =>
+  ({ restorePath, worktreePath, realPaths, missing }) =>
     Effect.gen(function* () {
       const order: Array<string> = [];
       const releaseRestore = yield* Deferred.make<void>();
@@ -994,7 +1007,16 @@ effectIt.effect.each([
       const fileSystem = FileSystem.makeNoop({
         exists: () => Effect.succeed(true),
         realPath: (candidate) =>
-          Effect.succeed((realPaths as Record<string, string>)[candidate] ?? candidate),
+          (missing as ReadonlyArray<string>).includes(candidate)
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: "NotFound",
+                  module: "FileSystem",
+                  method: "realPath",
+                  pathOrDescriptor: candidate,
+                }),
+              )
+            : Effect.succeed((realPaths as Record<string, string>)[candidate] ?? candidate),
       });
       const harness = makeLocalCommandHarness({
         text: "Continue",
