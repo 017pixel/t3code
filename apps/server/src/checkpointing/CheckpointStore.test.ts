@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -27,6 +28,43 @@ const layerVcsDriverTest = VcsDriverRegistry.layer.pipe(Layer.provide(layerVcsPr
 const layerCheckpointStoreTest = CheckpointStore.layer.pipe(
   Layer.provideMerge(layerVcsDriverTest),
   Layer.provideMerge(NodeServices.layer),
+);
+// A read may return fewer bytes than asked for. "short" returns at most 160 bytes per read, and
+// "stop" also ends the file after its first read, as a truncation racing the read would.
+let reflogReadFault: "short" | "stop" | "none" = "none";
+const layerShortReadFileSystem = Layer.effect(
+  FileSystem.FileSystem,
+  Effect.map(FileSystem.FileSystem, (fileSystem) =>
+    FileSystem.FileSystem.of({
+      ...fileSystem,
+      open: (path, options) =>
+        Effect.map(fileSystem.open(path, options), (file) => {
+          let reads = 0;
+          return new Proxy(file, {
+            get: (target, key) => {
+              if (key === "readAlloc") {
+                return (size: number) =>
+                  reflogReadFault === "stop" && reads++ > 0
+                    ? Effect.succeedNone
+                    : target.readAlloc(reflogReadFault === "none" ? size : Math.min(size, 160));
+              }
+              const value = Reflect.get(target, key, target);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+        }),
+    }),
+  ),
+).pipe(Layer.provide(NodeServices.layer));
+const layerShortReadCheckpointStore = Layer.fresh(CheckpointStore.layer).pipe(
+  Layer.provide(
+    Layer.fresh(VcsDriverRegistry.layer).pipe(
+      Layer.provide(layerVcsProcessTest),
+      Layer.provide(layerShortReadFileSystem),
+      Layer.provide(NodeServices.layer),
+    ),
+  ),
+  Layer.provide(NodeServices.layer),
 );
 const layerTest = layerCheckpointStoreTest.pipe(
   Layer.provideMerge(layerVcsProcessTest),
@@ -671,6 +709,173 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
           { path: "shared.txt", additions: 1, deletions: 1 },
         ]);
       }),
+    );
+
+    it.effect("follows a switch read from the reflog in short reads", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore.CheckpointStore.pipe(
+          Effect.provide(layerShortReadCheckpointStore),
+        );
+        reflogReadFault = "short";
+        const id = ThreadId.make("checkpoint-switch-short-read");
+        const [first, second, third] = [1, 2, 3].map((turn) =>
+          checkpointRefForThreadTurn(id, turn),
+        );
+        yield* writeTextFile(NodePath.join(tmp, "shared.txt"), "base\n");
+        yield* git(tmp, ["add", "."]);
+        yield* git(tmp, ["commit", "-m", "base"]);
+        yield* git(tmp, ["branch", "branch-b"]);
+        yield* git(tmp, ["checkout", "-b", "branch-a"]);
+        yield* writeTextFile(NodePath.join(tmp, "shared.txt"), "A content\n");
+        yield* git(tmp, ["commit", "-am", "branch A change"]);
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: first! });
+
+        yield* git(tmp, ["switch", "branch-b"]);
+        yield* writeTextFile(NodePath.join(tmp, "shared.txt"), "B edit\n");
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: second!,
+          previousCheckpointRef: first!,
+        });
+
+        yield* git(tmp, ["reset", "--hard", "HEAD"]);
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: third!,
+          previousCheckpointRef: second!,
+        });
+
+        const patch = (fromCheckpointRef: typeof first, toCheckpointRef: typeof first) =>
+          checkpointStore
+            .diffCheckpoints({
+              cwd: tmp,
+              fromCheckpointRef: fromCheckpointRef!,
+              toCheckpointRef: toCheckpointRef!,
+              ignoreWhitespace: false,
+            })
+            .pipe(
+              Effect.map((diff) =>
+                diff
+                  .split("\n")
+                  .filter((line) => /^[-+]/.test(line) && !/^(---|\+\+\+) /.test(line)),
+              ),
+            );
+        expect(yield* patch(first, second)).toEqual(["-base", "+B edit"]);
+        expect(yield* patch(second, third)).toEqual(["-B edit", "+base"]);
+      }),
+    );
+
+    it.effect("publishes no reflog cursor from a read that ends early", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore.CheckpointStore.pipe(
+          Effect.provide(layerShortReadCheckpointStore),
+        );
+        reflogReadFault = "none";
+        const id = ThreadId.make("checkpoint-switch-read-ends-early");
+        const [first, second, third] = [1, 2, 3].map((turn) =>
+          checkpointRefForThreadTurn(id, turn),
+        );
+        yield* writeTextFile(NodePath.join(tmp, "shared.txt"), "base\n");
+        yield* git(tmp, ["add", "."]);
+        yield* git(tmp, ["commit", "-m", "base"]);
+        yield* git(tmp, ["branch", "branch-b"]);
+        yield* git(tmp, ["checkout", "-b", "branch-a"]);
+        yield* writeTextFile(NodePath.join(tmp, "shared.txt"), "A content\n");
+        yield* git(tmp, ["commit", "-am", "branch A change"]);
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: first! });
+
+        yield* git(tmp, ["switch", "branch-b"]);
+        yield* writeTextFile(NodePath.join(tmp, "shared.txt"), "B edit\n");
+        reflogReadFault = "stop";
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: second!,
+          previousCheckpointRef: first!,
+        });
+
+        reflogReadFault = "none";
+        yield* git(tmp, ["reset", "--hard", "HEAD"]);
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: third!,
+          previousCheckpointRef: second!,
+        });
+
+        const patch = (fromCheckpointRef: typeof first, toCheckpointRef: typeof first) =>
+          checkpointStore
+            .diffCheckpoints({
+              cwd: tmp,
+              fromCheckpointRef: fromCheckpointRef!,
+              toCheckpointRef: toCheckpointRef!,
+              ignoreWhitespace: false,
+            })
+            .pipe(
+              Effect.map((diff) =>
+                diff
+                  .split("\n")
+                  .filter((line) => /^[-+]/.test(line) && !/^(---|\+\+\+) /.test(line)),
+              ),
+            );
+        expect(yield* patch(first, second)).toEqual(["-A content", "+B edit"]);
+        expect(yield* patch(second, third)).toEqual(["-B edit", "+base"]);
+      }),
+    );
+
+    // Linux stores any bytes as a file name, unlike macOS and Windows.
+    it.effect.skipIf(HostProcess.Platform.defaultValue() !== "linux")(
+      "keeps non-UTF-8 file names that a branch switch removes or replaces",
+      () =>
+        Effect.gen(function* () {
+          const tmp = yield* makeTmpDir();
+          yield* initRepoWithCommit(tmp);
+          const checkpointStore = yield* CheckpointStore.CheckpointStore;
+          const id = ThreadId.make("checkpoint-switch-non-utf8");
+          const refs = {
+            cwd: tmp,
+            fromCheckpointRef: checkpointRefForThreadTurn(id, 1),
+            toCheckpointRef: checkpointRefForThreadTurn(id, 2),
+          };
+          const rawPath = (name: string, byte: number) =>
+            Buffer.concat([Buffer.from(NodePath.join(tmp, name)), Buffer.from([byte])]);
+          yield* writeTextFile(NodePath.join(tmp, "shared.txt"), "base\n");
+          NodeFS.writeFileSync(rawPath("replaced-", 0xfe), "B bytes\n");
+          yield* git(tmp, ["add", "."]);
+          yield* git(tmp, ["commit", "-m", "base"]);
+          yield* git(tmp, ["branch", "branch-b"]);
+          yield* git(tmp, ["checkout", "-b", "branch-a"]);
+          NodeFS.writeFileSync(rawPath("replaced-", 0xfe), "A bytes\n");
+          NodeFS.writeFileSync(rawPath("removed-", 0xff), "A only\n");
+          yield* git(tmp, ["add", "."]);
+          yield* git(tmp, ["commit", "-m", "branch A non-UTF-8 names"]);
+          yield* checkpointStore.captureCheckpoint({
+            cwd: tmp,
+            checkpointRef: refs.fromCheckpointRef,
+          });
+
+          yield* git(tmp, ["switch", "branch-b"]);
+          yield* writeTextFile(NodePath.join(tmp, "shared.txt"), "B edit\n");
+          yield* checkpointStore.captureCheckpoint({
+            cwd: tmp,
+            checkpointRef: refs.toCheckpointRef,
+            previousCheckpointRef: refs.fromCheckpointRef,
+          });
+
+          const numstat = yield* checkpointStore.diffCheckpoints({
+            ...refs,
+            ignoreWhitespace: false,
+            format: "numstat",
+          });
+          const authoredPaths = yield* checkpointStore.listAuthoredPaths(refs);
+          expect(
+            parseTurnDiffFilesFromNumstat(numstat).filter(
+              (file) => !isGitImport(file, authoredPaths),
+            ),
+          ).toEqual([{ path: "shared.txt", additions: 1, deletions: 1 }]);
+        }),
     );
   });
 });

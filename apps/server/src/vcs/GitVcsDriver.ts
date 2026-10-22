@@ -552,20 +552,6 @@ function parseReflogLines(lines: string) {
     });
 }
 
-// `git diff-tree -r -z` writes ":<old mode> <new mode> <old oid> <new oid> <status>\0<path>\0"
-// per file. A deletion's zero mode makes `update-index --index-info` drop the path.
-function rawDiffToIndexInfo(raw: string): string {
-  const records = raw.split("\0");
-  let indexInfo = "";
-  for (let index = 0; index + 1 < records.length; index += 2) {
-    const fields = records[index]!.split(" ");
-    const path = records[index + 1]!;
-    if (fields.length !== 5 || path.length === 0) continue;
-    indexInfo += `${fields[1]} ${fields[3]}\t${path}\0`;
-  }
-  return indexInfo;
-}
-
 export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -876,7 +862,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     const reflogPath = path.resolve(physicalCwd, gitPath);
     if (!(yield* fileSystem.exists(reflogPath))) return null;
     const [cursorOffset = "", cursorHash = ""] = cursor.split(" ");
-    const { start, bytes } = yield* Effect.scoped(
+    const range = yield* Effect.scoped(
       Effect.gen(function* () {
         const file = yield* fileSystem.open(reflogPath);
         const size = Number((yield* file.stat).size);
@@ -886,12 +872,23 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           Math.min(Number(cursorOffset) || size, size) - REFLOG_LINE_MAX_BYTES,
         );
         yield* file.seek(BigInt(start), "start");
-        const bytes = size > start ? yield* file.readAlloc(size - start) : Option.none();
-        return { start, bytes: Option.getOrElse(bytes, () => new Uint8Array()) };
+        // A read can return fewer bytes than asked for. A range that ends early, such as one
+        // truncated mid-read, would publish a cursor behind moves a later checkpoint replays.
+        const chunks: Array<Uint8Array> = [];
+        let remaining = size - start;
+        while (remaining > 0) {
+          const chunk = yield* file.readAlloc(remaining);
+          if (Option.isNone(chunk) || chunk.value.length === 0) return null;
+          chunks.push(chunk.value);
+          remaining -= chunk.value.length;
+        }
+        return { start, bytes: NodeBuffer.Buffer.concat(chunks) };
       }),
     );
+    if (range === null) return null;
+    const { start, bytes } = range;
     // Latin-1 keeps string indexes equal to byte offsets.
-    const text = NodeBuffer.Buffer.from(bytes).toString("latin1");
+    const text = bytes.toString("latin1");
     const lineEndingAt = (end: number) =>
       end > 0 && text[end - 1] === "\n" && (start === 0 || text.lastIndexOf("\n", end - 2) !== -1)
         ? text.slice(text.lastIndexOf("\n", end - 2) + 1, end - 1)
@@ -1284,15 +1281,28 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
                   const changes = yield* execute({
                     operation,
                     cwd: input.cwd,
-                    args: ["diff-tree", "-r", "-z", "--no-renames", from, to],
+                    args: [
+                      "-c",
+                      "core.quotePath=true",
+                      "diff-tree",
+                      "-r",
+                      "--no-renames",
+                      from,
+                      to,
+                    ],
                     maxOutputBytes: VcsDriver.CHECKPOINT_DIFF_MAX_OUTPUT_BYTES,
                     outputMode: "error",
                   });
+                  // Git's quoted paths round-trip through index-info, including non-UTF-8 names,
+                  // and a deletion's zero mode drops the path.
                   yield* execute({
                     operation,
                     cwd: input.cwd,
-                    args: [...indexConfig, "update-index", "-z", "--index-info"],
-                    stdin: rawDiffToIndexInfo(changes.stdout),
+                    args: [...indexConfig, "update-index", "--index-info"],
+                    stdin: changes.stdout.replace(
+                      /^:[0-7]{6} ([0-7]{6}) [0-9a-f]+ ([0-9a-f]+) [A-Z]\t/gm,
+                      "$1 $2\t",
+                    ),
                     env: commitEnv,
                   });
                 }
