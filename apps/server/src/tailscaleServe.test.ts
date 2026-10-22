@@ -104,4 +104,19 @@ describe("TailscaleServe", () => {
       assert.isFalse(state.configured);
     }),
   );
+
+  it.effect("stops retrying on shutdown and leaves Serve alone if no attempt succeeded", () =>
+    Effect.gen(function* () {
+      const { state, scope } = yield* startTailscaleServe(Number.POSITIVE_INFINITY);
+      yield* TestClock.adjust("1 minute");
+      const attemptsBeforeShutdown = state.serveAttempts;
+
+      yield* Scope.close(scope, Exit.void);
+      yield* TestClock.adjust("1 hour");
+
+      assert.isAbove(attemptsBeforeShutdown, 1);
+      assert.equal(state.serveAttempts, attemptsBeforeShutdown);
+      assert.equal(state.disables, 0);
+    }),
+  );
 });
