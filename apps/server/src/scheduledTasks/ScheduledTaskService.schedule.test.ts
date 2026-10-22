@@ -281,6 +281,17 @@ it.effect("keeps one queued occurrence of a recurring task while its bound threa
       // Run now is an explicit request, so it still queues behind the held one.
       yield* service.runNow({ id: task.id });
       expect(yield* queuedOccurrences).toBe(2);
+
+      // Once the queued copies start, the next interval sends again.
+      yield* Ref.update(thread, (current) => ({
+        ...current,
+        runs: current.runs.map((run) =>
+          run.status === "queued" ? ({ ...run, status: "running" } as OrchestrationV2Run) : run,
+        ),
+      }));
+      yield* TestClock.adjust("61 seconds");
+      yield* Effect.flatten(Ref.get(runDueWork));
+      expect(yield* queuedOccurrences).toBe(1);
     }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(layerDependencies))));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
