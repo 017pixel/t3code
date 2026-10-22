@@ -471,9 +471,13 @@ it.effect("rescans with tools the login shell gained after the server started", 
     const loginShell = path.join(root, "loginsh");
     yield* fs.makeDirectory(fakebin, { recursive: true });
     yield* fs.writeFileString(path.join(home, ".profile"), "");
-    yield* fs.writeFileString(loginShell, `#!/bin/sh\nexec env HOME=${home} /bin/bash "$@"\n`, {
-      mode: 0o755,
-    });
+    // Stands in for `$SHELL -ilc <capture>`: sources only the fixture profile, so
+    // the host's own /etc/profile and rc files cannot change the result.
+    yield* fs.writeFileString(
+      loginShell,
+      `#!/bin/sh\nexport HOME=${home}\n. "$HOME/.profile"\nshift\nexec /bin/sh -c "$1"\n`,
+      { mode: 0o755 },
+    );
 
     process.env.SHELL = loginShell;
     yield* fixPath();
