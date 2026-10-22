@@ -29,7 +29,7 @@ const files: Record<string, string> = {
 
 function panel(relativePath: string) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: 400 }}>
+    <div className="flex h-[400px] flex-col">
       <FilePreviewPanel
         environmentId={environmentId}
         cwd={cwd}
@@ -55,6 +55,10 @@ function panel(relativePath: string) {
   );
 }
 
+function setup() {
+  readFile.mockReset();
+}
+
 function viewport(container: HTMLElement) {
   const element = Array.from(
     container.querySelectorAll<HTMLElement>('[data-slot="scroll-area-viewport"]'),
@@ -66,6 +70,7 @@ function viewport(container: HTMLElement) {
 describe("rendered markdown file preview", () => {
   // regression: #22300 switching file tabs reset the rendered markdown scroll to the top
   it("keeps each file's scroll position across file tab switches", async () => {
+    setup();
     localStorage.setItem("t3code.renderMarkdown", "true");
     localStorage.setItem("t3code.fileExplorerOpen", "false");
     readFile.mockImplementation((_environmentId, _cwd, relativePath: string) => ({
