@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - CLI integration exercises Node HTTP and filesystem boundaries.
+import * as NodeChildProcess from "node:child_process";
 import * as NodeHttp from "node:http";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -513,5 +514,56 @@ describe("auth session list", () => {
       assert.isDefined(cliView);
       assert.isTrue(cliView?.connected);
     }).pipe(Effect.scoped, Effect.provide(layerCliRuntime)),
+  );
+
+  it.effect("lists sessions as disconnected when the recorded server process is gone", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-cli-auth-stale-test-"));
+      const config = yield* resolveCliAuthConfig({ baseDir: Option.some(baseDir) }, Option.none());
+      // A runtime file a crashed server left behind: its process has exited.
+      const exited = NodeChildProcess.spawnSync(process.execPath, ["-e", ""]);
+      assert.strictEqual(exited.status, 0);
+      yield* persistServerRuntimeState({
+        path: config.serverRuntimeStatePath,
+        state: {
+          ...baseState,
+          pid: exited.pid,
+          origin: "http://127.0.0.1:1",
+        },
+      });
+      const issued = JSON.parse(
+        yield* captureStdout(runCli(["auth", "session", "issue", "--base-dir", baseDir, "--json"])),
+      ) as { readonly sessionId: string };
+
+      const listed = JSON.parse(
+        yield* captureStdout(runCli(["auth", "session", "list", "--base-dir", baseDir, "--json"])),
+      ) as ReadonlyArray<{ readonly sessionId: string; readonly connected: boolean }>;
+
+      assert.isFalse(listed.find((entry) => entry.sessionId === issued.sessionId)?.connected);
+    }).pipe(Effect.provide(layerCliRuntime)),
+  );
+
+  it.effect("explains on stderr when the running server cannot be reached", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-auth-unreachable-test-"),
+      );
+      const config = yield* resolveCliAuthConfig({ baseDir: Option.some(baseDir) }, Option.none());
+      yield* persistServerRuntimeState({
+        path: config.serverRuntimeStatePath,
+        state: { ...baseState, pid: process.pid, origin: "http://127.0.0.1:1" },
+      });
+
+      const stderr = yield* provideCliTestLayers(
+        Effect.gen(function* () {
+          yield* Effect.flip(runCli(["auth", "session", "list", "--base-dir", baseDir, "--json"]));
+          return yield* TestConsole.errorLines;
+        }),
+      );
+
+      expect(stderr).toContain(
+        "Could not ask the T3 Code server at http://127.0.0.1:1 which sessions are connected.",
+      );
+    }).pipe(Effect.provide(layerCliRuntime)),
   );
 });

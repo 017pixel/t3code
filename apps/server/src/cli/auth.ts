@@ -25,7 +25,7 @@ import {
   formatSessionList,
 } from "../cliAuthFormat.ts";
 import * as ServerConfig from "../config.ts";
-import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
+import { isProcessAlive, readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { authScopesFlag } from "./authScopes.ts";
 import {
   authLocationFlags,
@@ -45,21 +45,27 @@ export class AuthServerUnreachableError extends Schema.TaggedError<AuthServerUnr
 }
 
 const LIVE_SERVER_TIMEOUT = Duration.seconds(10);
+// Bounds how long the session outlives a CLI killed before it can revoke it.
+const LIVE_SERVER_SESSION_TTL = Duration.minutes(1);
 
 /**
  * Only the running server knows which sessions hold an open WebSocket, so ask
  * it with a short-lived session that is revoked before the list is read.
- * With no running server, nothing can be connected.
+ * With no running server, including a runtime file left by a crash, nothing
+ * can be connected.
  */
 const connectedSessionIds = Effect.fn("auth.connectedSessionIds")(function* (
   environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"],
 ) {
   const config = yield* ServerConfig.ServerConfig;
   const runtimeState = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
-  if (Option.isNone(runtimeState)) return new Set<AuthSessionId>();
+  if (Option.isNone(runtimeState) || !isProcessAlive(runtimeState.value.pid)) {
+    return new Set<AuthSessionId>();
+  }
   const origin = runtimeState.value.origin;
   const clients = yield* Effect.acquireUseRelease(
     environmentAuth.issueSession({
+      ttl: LIVE_SERVER_SESSION_TTL,
       scopes: [AuthAccessReadScope],
       subject: "auth-cli",
       label: "t3 auth cli",
@@ -255,7 +261,10 @@ const sessionListCommand = Command.make("list", {
       flags,
       (environmentAuth) =>
         Effect.gen(function* () {
-          const connected = yield* connectedSessionIds(environmentAuth);
+          const connected = yield* connectedSessionIds(environmentAuth).pipe(
+            // Runtime.errorReported is off, so this line is the whole report.
+            Effect.tapError((error) => Console.error(error.message)),
+          );
           const sessions = yield* environmentAuth.listSessions();
           yield* Console.log(
             formatSessionList(
