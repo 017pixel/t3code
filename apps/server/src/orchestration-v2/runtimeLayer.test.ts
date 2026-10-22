@@ -6188,6 +6188,41 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       }
     }),
   );
+
+  it.effect("does not freshly arm a usage-limit failure whose reset passed long ago (#21716)", () =>
+    Effect.sync(() => {
+      const failedAt = DateTime.makeUnsafe("2026-10-17T10:00:00.000Z");
+      const resetAt = "2026-10-17T11:00:00.000Z";
+      const nowMs = Date.parse("2026-10-22T09:50:00.000Z");
+      const runId = RunId.make("run:stale-limit");
+      const failed: ProjectionStore.ProjectionLimitRecoveryCandidate = {
+        id: ThreadId.make("thread:stale-limit"),
+        status: "failed",
+        lastErrorClass: "usage_limit",
+        latestRunId: runId,
+        usageLimitResetAt: resetAt,
+        archivedAt: null,
+        settledOverride: null,
+        pendingRuntimeRequest: null,
+        latestRunCompletedAt: failedAt,
+        updatedAt: failedAt,
+        limitRecovery: null,
+        snoozedUntil: null,
+      };
+      // A recovery armed while the window was current still resumes once overdue.
+      const armed = limitRecoveryCommand(
+        { ...failed, limitRecovery: { runId, resetAt, autoResume: true, snooze: false } },
+        true,
+        nowMs,
+      );
+      assert.equal(armed?.type, "message.dispatch");
+      // A fresh failure whose reset is still ahead still arms automatically.
+      const fresh = limitRecoveryCommand(failed, true, Date.parse("2026-10-17T10:00:01.000Z"));
+      assert.equal(fresh?.type, "thread.metadata.update");
+      // Days later, the never-armed failure must not be armed and then resumed.
+      assert.isNull(limitRecoveryCommand(failed, true, nowMs));
+    }),
+  );
 });
 
 const queueResumeDisabledInstanceProjectId = ProjectId.make(
