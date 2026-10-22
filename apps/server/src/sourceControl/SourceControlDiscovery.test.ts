@@ -33,6 +33,7 @@ import * as SourceControlDiscovery from "./SourceControlDiscovery.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import * as ServerSourceControlHost from "./ServerSourceControlHost.ts";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
+import { fixPath } from "../os-jank.ts";
 
 const layerSourceControlProviderRegistryTest = (input: {
   readonly bitbucket: Partial<BitbucketApi.BitbucketApi["Service"]>;
@@ -444,4 +445,90 @@ it.effect(
         ),
       ),
     ),
+);
+
+it.effect("rescans with tools the login shell gained after the server started", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-discovery-login-shell-" });
+    const home = path.join(root, "home");
+    const fakebin = path.join(home, "fakebin");
+    const loginShell = path.join(root, "loginsh");
+    yield* fs.makeDirectory(fakebin, { recursive: true });
+    yield* fs.writeFileString(path.join(home, ".profile"), "");
+    yield* fs.writeFileString(loginShell, `#!/bin/sh\nexec env HOME=${home} /bin/bash "$@"\n`, {
+      mode: 0o755,
+    });
+
+    const originalShell = process.env.SHELL;
+    const originalPath = process.env.PATH;
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        process.env.SHELL = loginShell;
+      }),
+      () =>
+        Effect.sync(() => {
+          for (const [name, value] of [
+            ["SHELL", originalShell],
+            ["PATH", originalPath],
+          ] as const) {
+            if (value === undefined) delete process.env[name];
+            else process.env[name] = value;
+          }
+        }),
+    );
+    yield* fixPath();
+
+    // The user installs a tool after launch; their login shell now finds it.
+    yield* fs.writeFileString(path.join(fakebin, "jj"), "#!/bin/sh\necho 'jj 0.99.0-test'\n", {
+      mode: 0o755,
+    });
+    yield* fs.writeFileString(path.join(home, ".profile"), 'export PATH="$HOME/fakebin:$PATH"\n');
+
+    const discovery = yield* SourceControlDiscovery.SourceControlDiscovery;
+    const jj = (yield* discovery.discover).versionControlSystems.find((item) => item.kind === "jj");
+
+    assert.deepStrictEqual(
+      { status: jj?.status, version: jj?.version },
+      { status: "available", version: Option.some("jj 0.99.0-test") },
+      "a rescan after the login shell gained a tool should find it",
+    );
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(
+      SourceControlDiscovery.layer.pipe(
+        Layer.provide(
+          ServerConfig.layerTest(process.cwd(), {
+            prefix: "t3-source-control-login-shell-discovery-",
+          }),
+        ),
+        Layer.provide(VcsProcess.layer),
+        Layer.provide(
+          layerSourceControlProviderRegistryTest({
+            process: {
+              run: (input) =>
+                Effect.fail(
+                  new VcsProcessSpawnError({
+                    operation: input.operation,
+                    command: input.command,
+                    cwd: input.cwd,
+                    cause: new Error(`${input.command} not found`),
+                  }),
+                ),
+            },
+            bitbucket: {
+              probeAuth: Effect.succeed({
+                status: "unauthenticated",
+                account: Option.none(),
+                host: Option.none(),
+                detail: Option.none(),
+              }),
+            },
+          }),
+        ),
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    ),
+  ),
 );
