@@ -5557,8 +5557,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             "running" | "completed" | "failed" | "cancelled"
           >;
           readonly reopen?: boolean;
-          // A resume while the root is idle has no run of its own to adopt it.
-          readonly keepRun?: boolean;
           readonly nativeOutcome?: Extract<
             SDKMessage,
             { readonly type: "system"; readonly subtype: "task_notification" }
@@ -5681,7 +5679,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             }),
             status: input.status,
             ...(input.reopen === true &&
-            input.keepRun !== true &&
             input.status === "running" &&
             existingSubagent !== undefined
               ? { runId: input.context.input.runId }
@@ -7116,31 +7113,41 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             message.type === "system" &&
             message.subtype === "task_started" &&
             (yield* Ref.get(sessionSubagentsByTaskId)).has(message.task_id);
+          // A completed subagent that Claude resumes on its own (under its launch
+          // call, unlike SendMessage) has no live run left to show it while the
+          // root is idle; only a continuation does.
+          let isResumedSubagentTaskStarted = false;
           if (
             isKnownSubagentTaskStarted &&
             message.type === "system" &&
             message.subtype === "task_started"
           ) {
             const now = yield* DateTime.now;
-            yield* Ref.update(sessionSubagentsByTaskId, (current) => {
-              const registered = current.get(message.task_id);
-              if (registered === undefined || registered.task.status === "running") {
-                return current;
-              }
-              const { progress: _staleProgress, ...priorTask } = registered.task;
-              return new Map(current).set(message.task_id, {
-                ...registered,
-                confirmedOutcome: undefined,
-                task: {
-                  ...priorTask,
-                  status: "running",
-                  result: null,
-                  startedAt: now,
-                  completedAt: null,
-                  updatedAt: now,
-                },
-              });
-            });
+            isResumedSubagentTaskStarted = yield* Ref.modify(
+              sessionSubagentsByTaskId,
+              (current) => {
+                const registered = current.get(message.task_id);
+                if (registered === undefined || registered.task.status === "running") {
+                  return [false, current] as const;
+                }
+                const { progress: _staleProgress, ...priorTask } = registered.task;
+                return [
+                  registered.runToolUseId === message.tool_use_id,
+                  new Map(current).set(message.task_id, {
+                    ...registered,
+                    confirmedOutcome: undefined,
+                    task: {
+                      ...priorTask,
+                      status: "running",
+                      result: null,
+                      startedAt: now,
+                      completedAt: null,
+                      updatedAt: now,
+                    },
+                  }),
+                ] as const;
+              },
+            );
           }
           const isWakeTurnStart = isClaudeTurnStartMessage(message);
           const isWakeEvidence =
@@ -7216,6 +7223,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             parentToolUseIdFromSdkMessage(message) === null;
           if (
             !isPendingSubagentNotification &&
+            !isResumedSubagentTaskStarted &&
             !isNativeOpaqueWakeFrame &&
             !isWakeTurnStart &&
             message.type !== "result"
@@ -7534,34 +7542,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             (yield* Ref.get(activeTurn)) ??
             (yield* settledTurnForSubagentFrame(liveQuery.nativeThreadId, message));
           if (context === null) {
-            // A completed subagent that Claude resumes on its own re-emits
-            // task_started under its launch call. Buffered, it would wait for a
-            // wake turn that never comes, and hold every frame behind it.
-            if (
-              message.type === "system" &&
-              message.subtype === "task_started" &&
-              !isClaudeNonSubagentTask(message) &&
-              message.tool_use_id !== undefined
-            ) {
-              const registered = (yield* Ref.get(sessionSubagentsByTaskId)).get(message.task_id);
-              const settled = settledTurnByNativeThread.get(liveQuery.nativeThreadId);
-              if (
-                registered !== undefined &&
-                settled !== undefined &&
-                registered.task.status !== "running" &&
-                registered.runToolUseId === message.tool_use_id
-              ) {
-                yield* updateClaudeSubagentNode({
-                  context: settled,
-                  taskId: message.task_id,
-                  toolUseId: message.tool_use_id,
-                  status: "running",
-                  reopen: true,
-                  keepRun: true,
-                });
-                return;
-              }
-            }
             yield* applyWorkflowProgressWithoutTurn(message);
             // task_notification must buffer wake evidence while still tracked
             // on the roster; clearing first would drop the wake pin.
@@ -9715,7 +9695,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   yield* handleSdkMessage({ query: querySession.query, message: lastResult });
                   return;
                 }
-                if (hasOpaqueTaskNotification && !context.nativeWakeStarted) {
+                // Only a notification makes Claude wake the root; a subagent
+                // resuming on its own does not, and must not hold the root busy.
+                const canWakeRoot = drained.some(
+                  (entry) =>
+                    (entry.type === "system" && entry.subtype === "task_notification") ||
+                    isClaudeRootTurnFrame(entry),
+                );
+                if ((hasOpaqueTaskNotification || !canWakeRoot) && !context.nativeWakeStarted) {
                   const completedAt = yield* DateTime.now;
                   yield* finalizeActiveTurn({ context, status: "completed", completedAt });
                 } else if (!context.nativeWakeStarted) {

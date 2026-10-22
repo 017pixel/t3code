@@ -8365,17 +8365,50 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   );
 
   // Claude reports a background subagent `completed` when its turn ends while
-  // its own background shell still runs, then resumes it with a new
-  // task_started for the same task and launch tool_use_id while the root is
-  // idle. That start is the only signal it is running again.
+  // its own background shell still runs. When that shell finishes, Claude
+  // resumes the subagent with a new task_started for the same task and launch
+  // tool_use_id while the root is idle. Frame order mirrors a live capture.
   it.effect("reopens a completed background subagent that resumes while the root is idle", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const TASK_ID = "task-self-resume";
-        const TOOL_USE_ID = "toolu-self-resume";
-        const RESUMED_BASH = "toolu-self-resume-bash";
+        const TASK_ID = "ae3f32459af762a5f";
+        const LAUNCH = "toolu_01LcidmwEK1Y6GC6LpX3kvxX";
+        const OWN_SHELL = "toolu_01QAahgijM2KRBBSkWxnui4g";
+        const RESUMED_BASH = "toolu_01CkA1juicPNCtQrqKL8h6Rz";
         const harness = yield* makeWakeHarness;
         const now = yield* DateTime.now;
+        let sequence = 0;
+        const system = (frame: object) =>
+          claudeSdkFrame({
+            type: "system",
+            ...frame,
+            uuid: `00000000-0000-4000-8000-0000000162${String(++sequence).padStart(2, "0")}`,
+            session_id: WAKE_NATIVE_SESSION,
+          });
+        const agentEntry = (runId: string) => ({
+          task_id: TASK_ID,
+          run_id: runId,
+          task_type: "local_agent",
+          subagent_type: "general-purpose",
+          description: "Audit recent commits",
+        });
+        const shellEntry = (taskId: string) => ({
+          task_id: taskId,
+          run_id: `run-${taskId}`,
+          task_type: "local_bash",
+          description: "Sleep",
+          parent_task_id: TASK_ID,
+        });
+        const roster = (tasks: ReadonlyArray<object>) =>
+          system({ subtype: "background_tasks_changed", tasks });
+        const shellStarted = (taskId: string, toolUseId: string) =>
+          system({
+            subtype: "task_started",
+            task_id: taskId,
+            tool_use_id: toolUseId,
+            task_type: "local_bash",
+            description: "Sleep",
+          });
         const startTurn = (ordinal: number, continuation: boolean) =>
           harness.runtime.startTurn(
             makeClaudeTestTurnInput({
@@ -8394,95 +8427,132 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 : {}),
             }),
           );
-        const latestSubagent = () =>
-          harness.events.findLast(
-            (event): event is Extract<typeof event, { type: "subagent.updated" }> =>
-              event.type === "subagent.updated",
-          )?.subagent;
+        const subagentUpdates = () =>
+          harness.events.flatMap((event) =>
+            event.type === "subagent.updated" ? [event.subagent] : [],
+          );
 
         yield* startTurn(1, false);
-        yield* harness.offerAndWait(
+        for (const frame of [
+          roster([agentEntry("run-1")]),
           makeSubagentTaskStartedFrame({
             taskId: TASK_ID,
-            toolUseId: TOOL_USE_ID,
+            toolUseId: LAUNCH,
             uuid: "00000000-0000-4000-8000-000000016101",
           }),
-        );
-        yield* harness.offerAndWait(
           makeResultFrame({ uuid: "00000000-0000-4000-8000-000000016102", result: "LAUNCHED" }),
-        );
+        ]) {
+          yield* harness.offerAndWait(frame);
+        }
         yield* Queue.take(harness.terminalReceipts);
 
-        // The interim completion wakes the parent, which answers and goes idle.
-        yield* harness.offerAndWait(
+        // The subagent starts its own background shell, ends its turn, and
+        // Claude reports it completed; the parent wakes, answers, goes idle.
+        for (const frame of [
+          ...makeSubagentAssistantFrames({
+            parentToolUseId: LAUNCH,
+            uuid: "00000000-0000-4000-8000-000000016103",
+            bashToolUseId: OWN_SHELL,
+          }),
+          roster([agentEntry("run-1"), shellEntry("b455x9pq5")]),
+          shellStarted("b455x9pq5", OWN_SHELL),
+          makeSubagentToolResultFrame({
+            parentToolUseId: LAUNCH,
+            uuid: "00000000-0000-4000-8000-000000016104",
+            toolUseId: OWN_SHELL,
+          }),
           makeSubagentNotificationFrame({
             taskId: TASK_ID,
-            toolUseId: TOOL_USE_ID,
+            toolUseId: LAUNCH,
             summary: "WAITING",
-            uuid: "00000000-0000-4000-8000-000000016103",
+            uuid: "00000000-0000-4000-8000-000000016105",
           }),
-        );
+          roster([shellEntry("b455x9pq5")]),
+          wakeTurnInit,
+        ]) {
+          yield* harness.offerAndWait(frame);
+        }
         yield* Queue.take(harness.continuationReceipts);
         yield* startTurn(2, true);
         yield* harness.offerAndWait(
-          makeResultFrame({ uuid: "00000000-0000-4000-8000-000000016104", result: "Noted." }),
+          makeResultFrame({ uuid: "00000000-0000-4000-8000-000000016106", result: "Noted." }),
         );
         yield* Queue.take(harness.terminalReceipts);
-        assert.equal(latestSubagent()?.status, "completed");
-        const threadUpdates = () =>
-          harness.events.filter((event) => event.type === "provider_thread.updated").length;
-        const threadUpdatesBeforeResume = threadUpdates();
 
-        // The subagent's own shell finishes and Claude resumes it.
-        yield* harness.offerAndWait(
+        // Its shell finishes and Claude resumes it under a new native run.
+        for (const frame of [
+          system({
+            subtype: "task_notification",
+            task_id: "b455x9pq5",
+            tool_use_id: OWN_SHELL,
+            status: "completed",
+            summary: "Background command completed (exit code 0)",
+            output_file: "/tmp/b455x9pq5.output",
+          }),
+          roster([]),
+          roster([agentEntry("run-2")]),
           makeSubagentTaskStartedFrame({
             taskId: TASK_ID,
-            toolUseId: TOOL_USE_ID,
-            uuid: "00000000-0000-4000-8000-000000016105",
+            toolUseId: LAUNCH,
+            uuid: "00000000-0000-4000-8000-000000016107",
           }),
-        );
-        for (const frame of makeSubagentAssistantFrames({
-          parentToolUseId: TOOL_USE_ID,
-          uuid: "00000000-0000-4000-8000-000000016106",
-          text: "Resuming.",
-          bashToolUseId: RESUMED_BASH,
-        })) {
+        ]) {
           yield* harness.offerAndWait(frame);
         }
-        // An empty roster emits a thread update even while idle; events are
-        // ordered, so once it is recorded every earlier event is too.
-        const barrier = claudeSdkFrame({
-          type: "system",
-          subtype: "background_tasks_changed",
-          tasks: [],
-          uuid: "00000000-0000-4000-8000-000000016108",
-          session_id: WAKE_NATIVE_SESSION,
-        });
-        yield* harness.offerAndWait(barrier);
-        yield* harness.until(() => threadUpdates() > threadUpdatesBeforeResume);
+        // Events reach the app only through a run, and the launching run ended
+        // with the interim completion.
+        assert.equal(harness.continuationRequests.length, 2);
 
-        const resumed = latestSubagent();
+        yield* Queue.take(harness.continuationReceipts);
+        yield* startTurn(3, true);
+        // Claude does not wake the root for this, so the root must not stay busy.
+        assert.equal((yield* Queue.take(harness.terminalReceipts)).status, "completed");
+        yield* startTurn(4, false);
+        yield* harness.offerAndWait(
+          makeResultFrame({ uuid: "00000000-0000-4000-8000-000000016110", result: "PONG" }),
+        );
+        assert.equal((yield* Queue.take(harness.terminalReceipts)).status, "completed");
+        for (const frame of [
+          ...makeSubagentAssistantFrames({
+            parentToolUseId: LAUNCH,
+            uuid: "00000000-0000-4000-8000-000000016108",
+            bashToolUseId: RESUMED_BASH,
+          }),
+          shellStarted("beyhxkdpc", RESUMED_BASH),
+          roster([agentEntry("run-2"), shellEntry("beyhxkdpc")]),
+        ]) {
+          yield* harness.offerAndWait(frame);
+        }
+        // Events are ordered: once this roster is recorded, so is every earlier event.
+        yield* harness.until(() =>
+          harness.events.some(
+            (event) =>
+              event.type === "provider_thread.updated" &&
+              event.providerThread.pendingBackgroundTasks?.some(
+                (task) => task.taskId === "beyhxkdpc",
+              ) === true,
+          ),
+        );
+        const resumed = subagentUpdates().at(-1);
         assert.equal(resumed?.status, "running");
         assert.isNull(resumed?.completedAt);
+        assert.equal(resumed?.runId, "run-attempt-claude-self-resume-3");
         const routing = subagentRouting(harness.events, [RESUMED_BASH]);
         assert.deepEqual(
           [...(routing.toolThreadIds.get(RESUMED_BASH) ?? [])],
           [routing.childThreadId],
         );
-        assert.equal(harness.continuationRequests.length, 1);
-        assert.equal(resumed?.runId, "run-attempt-claude-self-resume-1");
 
         yield* harness.offerAndWait(
           makeSubagentNotificationFrame({
             taskId: TASK_ID,
-            toolUseId: TOOL_USE_ID,
+            toolUseId: LAUNCH,
             summary: "DONE",
-            uuid: "00000000-0000-4000-8000-000000016107",
+            uuid: "00000000-0000-4000-8000-000000016109",
           }),
         );
-        yield* Queue.take(harness.continuationReceipts);
-        yield* harness.until(() => latestSubagent()?.result === "DONE");
-        assert.equal(latestSubagent()?.status, "completed");
+        yield* harness.until(() => subagentUpdates().at(-1)?.result === "DONE");
+        assert.equal(subagentUpdates().at(-1)?.status, "completed");
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
