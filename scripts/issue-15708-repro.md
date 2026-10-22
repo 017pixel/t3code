@@ -18,7 +18,7 @@ Wait for the provider protocol log's `system` / `task_started` frame with `is_ba
 
 Then click Stop while the foreground tool is running. Before the fix the thread silently loses the steer. After the fix a system notice quotes the steer, says delivery could not be confirmed, and asks for resend; it does not claim that Claude remembers it. Record the complete interaction, including the task-start milestone and Stop, and inspect the notice in web and native mobile (including expanded detail).
 
-No-Stop control: repeat in a fresh thread, allow the endpoint to release, then ask for the codeword. Expect recall and no delivery warning. For a faster control, replace 600000 with a shorter hold and keep curl's timeout longer than the hold.
+No-Stop control: restart the endpoint with `30000` in place of `600000` so it releases well before curl's 600-second `--max-time`; with equal timeouts curl can expire first and the control stops testing a clean release. Repeat in a fresh thread, allow the endpoint to release, then ask for the codeword. Expect recall and no delivery warning.
 
 Consumed-then-Stop control: ask Claude to run a short held curl, acknowledge the codeword, then run a second long held curl. Steer during the first curl, release it, wait for the acknowledgement and second foreground `task_started`, then Stop. Expect no unconfirmed-delivery warning for the acknowledged steer. Correlate its UUID with an assistant/stream/result prompt-UUID echo; a user echo alone is insufficient evidence.
 

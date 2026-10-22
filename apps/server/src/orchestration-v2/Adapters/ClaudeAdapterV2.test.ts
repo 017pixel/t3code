@@ -3071,6 +3071,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       title: "warns that a steer Claude never read before Stop was not delivered",
     },
     { readBy: "assistant", title: "does not warn about a steer Claude read before Stop" },
+    { readBy: "stream", title: "does not warn about a steer a stream event echoed before Stop" },
     {
       readBy: "result",
       title: "does not warn about a steer only a steering result echoed before Stop",
@@ -3155,6 +3156,18 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             result: "",
             terminalReason: "aborted_tools",
             userMessageUuids: [steerUuid],
+          }),
+        );
+      }
+      if (readBy === "stream") {
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "stream_event",
+            event: { type: "message_start", message: { id: "msg_unread_steer_stream" } },
+            parent_tool_use_id: null,
+            user_message_uuids: [steerUuid],
+            session_id: WAKE_NATIVE_SESSION,
+            uuid: "00000000-0000-4000-8000-000000015705",
           }),
         );
       }
