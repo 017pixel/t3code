@@ -775,6 +775,44 @@ describe("EnvironmentSupervisor", () => {
     }),
   );
 
+  it.effect("keeps a live session through one slow foreground probe that later answers", () =>
+    Effect.gen(function* () {
+      const probeCalls = yield* Ref.make(0);
+      const firstProbeStarted = yield* Deferred.make<void>();
+      const secondProbeAnswered = yield* Deferred.make<void>();
+      const harness = yield* makeHarness({
+        probe: () =>
+          Ref.updateAndGet(probeCalls, (count) => count + 1).pipe(
+            Effect.flatMap((call) =>
+              call === 1
+                ? Deferred.succeed(firstProbeStarted, undefined).pipe(Effect.andThen(Effect.never))
+                : Deferred.succeed(secondProbeAnswered, undefined),
+            ),
+          ),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(
+        supervisor.state,
+        (state) => state.phase === "connected" && state.generation === 1,
+      );
+      yield* harness.wake("application-active");
+      yield* Deferred.await(firstProbeStarted);
+      // A busy server misses the foreground probe deadline once; the socket
+      // never closed.
+      yield* TestClock.adjust("18 seconds");
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+      yield* harness.wake("application-active");
+      yield* Deferred.await(secondProbeAnswered);
+
+      expect(yield* Ref.get(harness.releaseCount)).toBe(0);
+      expect(yield* Ref.get(harness.sessionCount)).toBe(1);
+      expect((yield* SubscriptionRef.get(supervisor.state)).generation).toBe(1);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect("does not churn a healthy session when credentials change", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness();
