@@ -132,7 +132,7 @@ const release = async (phase: string) => {
 await release("entry");
 
 const pairOutput = cli(NodePath.join(wt, "apps/server/src/bin.ts"), ["pair", "--base-dir", home]);
-// oxlint-disable-next-line no-control-regex -- strips ANSI color codes from the pair CLI output
+// oxlint-disable-next-line no-control-regex -- strips ANSI colour codes from the pair CLI output
 const pairUrl = pairOutput.replace(/\x1b\[[0-9;]*m/g, "").match(/https?:\/\/\S*\/pair\S*/)?.[0];
 if (!pairUrl) throw new Error("no pair URL");
 
