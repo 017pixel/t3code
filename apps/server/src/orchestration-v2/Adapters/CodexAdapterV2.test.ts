@@ -173,6 +173,25 @@ describe("CodexAdapterV2 runtime policy", () => {
     }),
   );
 
+  it.effect("lets an explicit sandbox policy override the user's permissions profile", () =>
+    Effect.gen(function* () {
+      const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+        nativeThreadId: "native-sandbox-override",
+        codexInput: [{ type: "text", text: "test" }],
+        runtimePolicy: {
+          runtimeMode: "auto",
+          interactionMode: "default",
+          cwd: null,
+          sandboxPolicy: { type: "workspaceWrite", networkAccess: true },
+        },
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        permissionProfile: { id: "env-protected", sandboxType: "workspaceWrite" },
+      });
+      assert.deepEqual(params.sandboxPolicy, { type: "workspaceWrite", networkAccess: true });
+      assert.isUndefined(params.permissions);
+    }),
+  );
+
   it.effect("sends MCP app model context as untrusted Codex context", () =>
     Effect.gen(function* () {
       const policy = { runtimeMode: "full-access", interactionMode: "default", cwd: null } as const;
@@ -909,6 +928,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   (client) =>
                     ({
                       ...client,
+                      raw: {
+                        ...client.raw,
+                        request: (method, params) =>
+                          onRequest(method, params).pipe(
+                            Effect.andThen(client.raw.request(method, params)),
+                          ),
+                      },
                       request: (method, params) =>
                         onRequest(method, params).pipe(
                           Effect.andThen(client.request(method, params)),
