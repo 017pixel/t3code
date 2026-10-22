@@ -3,7 +3,9 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import type * as Scope from "effect/Scope";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 
@@ -204,6 +206,37 @@ describe("Cursor skills", () => {
         expect(yield* probeCursorSkills(workspace, { HOME: userHome })).toEqual(expected);
       }),
     ));
+
+  it("stops a scan of a huge file tree instead of statting every file", async () => {
+    const root = "/workspace/.cursor/skills";
+    let stats = 0;
+    const fileSystem = FileSystem.layerNoop({
+      realPath: (path) => Effect.succeed(path),
+      readDirectory: (path) =>
+        path === root
+          ? Effect.succeed(Array.from({ length: 200_000 }, (_, index) => `file-${index}`))
+          : Effect.succeed([]),
+      stat: (path) => {
+        if (path === root) return Effect.succeed({ type: "Directory" } as FileSystem.File.Info);
+        if (path.startsWith(`${root}/file-`)) {
+          stats += 1;
+          return Effect.succeed({ type: "File" } as FileSystem.File.Info);
+        }
+        return Effect.fail(
+          PlatformError.systemError({ _tag: "NotFound", module: "FileSystem", method: "stat" }),
+        );
+      },
+    });
+
+    const result = await probeCursorSkills("/workspace", { HOME: "/home" }).pipe(
+      Effect.result,
+      Effect.provide(Layer.mergeAll(fileSystem, Path.layer)),
+      Effect.runPromise,
+    );
+
+    expect(result._tag).toBe("Failure");
+    expect(stats).toBeLessThanOrEqual(100_000);
+  });
 
   it.skipIf(!symlinksSupported)(
     "treats a symlinked skill outside the root as a package boundary",
