@@ -31,6 +31,7 @@ import {
   antigravitySubagentOutput,
   classifyAntigravitySubagentToolCall,
   extractAntigravityUserInputQuestion,
+  isAntigravityOpenCommand,
   makeAntigravityUserInputResponse,
   normalizeAntigravityToolCall,
 } from "../../provider/acp/AntigravityProtocol.ts";
@@ -162,6 +163,16 @@ export function makeAntigravityAcpAdapterFlavor(
     // without the replay and is what the official client does.
     preferResumeSession: true,
     subagentsIdleOnTurnCompletion: true,
+    // Antigravity answers end_turn while commands it started keep running.
+    // They hold the turn open, and Stop kills the process group to end them.
+    extractBackgroundTaskId: (toolCall) =>
+      isAntigravityOpenCommand(toolCall) ||
+      (toolCall.kind === "execute" &&
+        (toolCall.status === "completed" || toolCall.status === "failed"))
+        ? toolCall.toolCallId
+        : undefined,
+    deferFinalizeForBackgroundWork: true,
+    terminateRuntimeProcessGroupOnInterrupt: true,
     ...(options.onSessionEvent === undefined ? {} : { onSessionEvent: options.onSessionEvent }),
     applyModelSelection: Effect.fn("AntigravityAdapterV2.applyModelSelection")(function* ({
       runtime,
