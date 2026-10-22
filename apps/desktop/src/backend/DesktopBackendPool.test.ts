@@ -1,10 +1,13 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -20,18 +23,53 @@ import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopBackendPool from "./DesktopBackendPool.ts";
 import type { DesktopBackendStartConfig } from "./DesktopBackendManager.ts";
 
-function layerPool(labelRef: Ref.Ref<string>): Layer.Layer<DesktopBackendPool.DesktopBackendPool> {
+const primaryConfig: DesktopBackendStartConfig = {
+  executablePath: "/electron",
+  args: [],
+  entryPath: "/server/bin.mjs",
+  cwd: "/server",
+  env: {},
+  bootstrap: {
+    mode: "desktop",
+    noBrowser: true,
+    port: 3773,
+    t3Home: "/tmp/t3",
+    host: "127.0.0.1",
+    desktopBootstrapToken: "token",
+    tailscaleServeEnabled: false,
+    tailscaleServePort: 443,
+  },
+  bootstrapDelivery: "fd3",
+  extendEnv: true,
+  httpBaseUrl: new URL("http://127.0.0.1:3773"),
+  captureOutput: false,
+  preflightFailure: Option.none(),
+};
+
+interface LayerPoolOptions {
+  readonly resolvePrimary?: DesktopBackendConfiguration.DesktopBackendConfiguration["Service"]["resolvePrimary"];
+  readonly spawner?: ChildProcessSpawner.ChildProcessSpawner["Service"];
+  readonly httpClient?: HttpClient.HttpClient;
+  readonly errorBoxes?: Array<{ readonly title: string; readonly content: string }>;
+}
+
+function layerPool(
+  labelRef: Ref.Ref<string>,
+  options: LayerPoolOptions = {},
+): Layer.Layer<DesktopBackendPool.DesktopBackendPool> {
+  const errorBoxes = options.errorBoxes;
   return DesktopBackendPool.layer.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
-        FileSystem.layerNoop({}),
+        FileSystem.layerNoop({ exists: () => Effect.succeed(true) }),
         Layer.succeed(
           ChildProcessSpawner.ChildProcessSpawner,
-          ChildProcessSpawner.make(() => Effect.die("unexpected child process spawn")),
+          options.spawner ??
+            ChildProcessSpawner.make(() => Effect.die("unexpected child process spawn")),
         ),
         Layer.succeed(
           HttpClient.HttpClient,
-          HttpClient.make(() => Effect.die("unexpected HTTP request")),
+          options.httpClient ?? HttpClient.make(() => Effect.die("unexpected HTTP request")),
         ),
         Layer.succeed(DesktopObservability.DesktopBackendOutputLogFactory, {
           forInstance: () =>
@@ -56,14 +94,22 @@ function layerPool(labelRef: Ref.Ref<string>): Layer.Layer<DesktopBackendPool.De
         }),
         DesktopBrowserHost.layer,
         Layer.succeed(DesktopBackendConfiguration.DesktopBackendConfiguration, {
-          resolvePrimary: Effect.die("unexpected primary config resolve"),
+          resolvePrimary: options.resolvePrimary ?? Effect.die("unexpected primary config resolve"),
           resolvePrimaryLabel: Ref.get(labelRef),
           resolveWsl: () => Effect.die("unexpected WSL config resolve"),
           currentBootstrapToken: Effect.die("unexpected bootstrap token read"),
         } satisfies DesktopBackendConfiguration.DesktopBackendConfiguration["Service"]),
         DesktopAppSettings.layerTest(),
         DesktopWslEnvironment.layerTest(),
-        ElectronDialog.layer,
+        errorBoxes === undefined
+          ? ElectronDialog.layer
+          : Layer.succeed(ElectronDialog.ElectronDialog, {
+              ...ElectronDialog.make,
+              showErrorBox: (title, content) =>
+                Effect.sync(() => {
+                  errorBoxes.push({ title, content });
+                }),
+            }),
         ElectronApp.layer,
         Layer.succeed(DesktopWindow.DesktopWindow, {
           createMain: Effect.die("unexpected window create"),
@@ -133,4 +179,53 @@ describe("DesktopBackendPool", () => {
       }).pipe(Effect.provide(layerPool(Ref.makeUnsafe("Windows")))),
     ),
   );
+
+  it.effect("shows a visible error when the primary backend crashes before it is ready", () => {
+    const errorBoxes: Array<{ readonly title: string; readonly content: string }> = [];
+    let spawnCount = 0;
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pool = yield* DesktopBackendPool.DesktopBackendPool;
+        const primary = yield* pool.primary;
+        yield* primary.start;
+        yield* TestClock.adjust(Duration.minutes(1));
+
+        assert.isAbove(spawnCount, 1);
+        assert.isFalse((yield* primary.snapshot).ready);
+        // The renderer is served by this backend, so only a native dialog can
+        // tell the user why the window stays blank.
+        assert.equal(errorBoxes.length, 1);
+        assert.include(errorBoxes[0]!.content, "code=1");
+      }).pipe(
+        Effect.provide(
+          Layer.merge(
+            layerPool(Ref.makeUnsafe("Windows"), {
+              resolvePrimary: Effect.succeed(primaryConfig),
+              spawner: ChildProcessSpawner.make(() =>
+                Effect.sync(() => {
+                  spawnCount += 1;
+                  return ChildProcessSpawner.makeHandle({
+                    pid: ChildProcessSpawner.ProcessId(123),
+                    stdout: Stream.empty,
+                    stderr: Stream.empty,
+                    all: Stream.empty,
+                    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
+                    isRunning: Effect.succeed(false),
+                    kill: () => Effect.void,
+                    stdin: Sink.drain,
+                    getInputFd: () => Sink.drain,
+                    getOutputFd: () => Stream.empty,
+                    unref: Effect.succeed(Effect.void),
+                  });
+                }),
+              ),
+              httpClient: HttpClient.make(() => Effect.never),
+              errorBoxes,
+            }),
+            TestClock.layer(),
+          ),
+        ),
+      ),
+    );
+  });
 });
