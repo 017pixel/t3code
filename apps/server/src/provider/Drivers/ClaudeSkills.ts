@@ -444,7 +444,8 @@ const discoverPluginSkillRoots = Effect.fn("discoverPluginSkillRoots")(function*
       .pipe(Effect.orElseSucceed(() => true));
     if (isSkill) continue;
     const manifest = yield* readPluginManifest(pluginPath);
-    if (manifest?.name === undefined) continue;
+    // Native rejects namespaced plugin names; mention filtering below catches the other cases.
+    if (manifest?.name === undefined || manifest.name.includes(":")) continue;
     const prefix = manifest.name;
     if (!(enabledPlugins.get(`${prefix}@skills-dir`) ?? manifest.defaultEnabled !== false)) {
       continue;

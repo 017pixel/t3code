@@ -156,6 +156,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
         ["empty", "{}"],
         ["malformed", "{"],
         ["invalid-default", '{"name":"invalid-default","defaultEnabled":"no"}'],
+        ["colon", '{"name":"a:b"}'],
         ["rootskill", '{"name":"rootskill"}'],
       ] as const) {
         const wrapper = path.join(skillsDir, folder);
