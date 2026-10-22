@@ -23,14 +23,17 @@ with c:
  for thread,title in [(populated,'DNG original file delivery'),(empty,'Empty attachment demo')]:
   payload=dict(id=thread,projectId=project,title=title,createdBy='user',creationSource='web',providerInstanceId='codex',modelSelection=dict(instanceId='codex',model='gpt-6.1-sol'),runtimeMode='full-access',interactionMode='default',branch=None,worktreePath=None,pullRequests=[],activeProviderThreadId=None,lineage=dict(parentThreadId=None,relationshipToParent=None,rootThreadId=thread),forkedFrom=None,createdAt=ts,updatedAt=ts,archivedAt=None,settledOverride=None,settledAt=None,snoozedUntil=None,snoozedAt=None,lastVisitedAt=ts,deletedAt=None)
   c.execute('insert into orchestration_v2_projection_threads(thread_id,project_id,title,default_provider,runtime_mode,interaction_mode,created_at,updated_at,payload_json,provider_instance_id) values(?,?,?,?,?,?,?,?,?,?)',(thread,project,title,'codex','full-access','default',ts,ts,json.dumps(payload),'codex'))
+ run='dng-evidence-run'
+ payload=dict(id=run,threadId=populated,ordinal=1,providerInstanceId='codex',modelSelection=dict(instanceId='codex',model='gpt-6.1-sol'),providerThreadId=None,userMessageId='dng-evidence-message-0',rootNodeId=None,activeAttemptId=None,status='completed',requestedAt=ts,startedAt=ts,completedAt=ts,checkpointId=None,contextHandoffId=None)
+ c.execute('insert into orchestration_v2_projection_runs values(?,?,?,?,?,?,?,?,?,?)',(run,populated,1,'codex',None,'completed',ts,ts,json.dumps(payload),'codex'))
  for i,(role,text) in enumerate([('user','Please keep the original camera file unchanged when I attach it.'),('assistant','Ready. Attach the DNG as a file. Its original bytes should remain unchanged.')]):
   mid=f'dng-evidence-message-{i}'
-  payload=dict(id=mid,threadId=populated,runId=None,nodeId=None,role=role,text=text,attachments=[],streaming=False,createdAt=ts,updatedAt=ts,createdBy='user' if role=='user' else 'agent',creationSource='web' if role=='user' else 'provider')
-  c.execute('insert into orchestration_v2_projection_messages values(?,?,?,?,?,?,?,?,?)',(mid,populated,None,None,role,0,ts,ts,json.dumps(payload)))
-  item=dict(id=f'dng-evidence-item-{i}',threadId=populated,runId=None,nodeId=None,providerThreadId=None,providerTurnId=None,nativeItemRef=None,parentItemId=None,ordinal=i,status='completed',title=None,startedAt=ts,completedAt=ts,updatedAt=ts,type='user_message' if role=='user' else 'assistant_message',messageId=mid,text=text,attachments=[])
+  payload=dict(id=mid,threadId=populated,runId=run,nodeId=None,role=role,text=text,attachments=[],streaming=False,createdAt=ts,updatedAt=ts,createdBy='user' if role=='user' else 'agent',creationSource='web' if role=='user' else 'provider')
+  c.execute('insert into orchestration_v2_projection_messages values(?,?,?,?,?,?,?,?,?)',(mid,populated,run,None,role,0,ts,ts,json.dumps(payload)))
+  item=dict(id=f'dng-evidence-item-{i}',threadId=populated,runId=run,nodeId=None,providerThreadId=None,providerTurnId=None,nativeItemRef=None,parentItemId=None,ordinal=i,status='completed',title=None,startedAt=ts,completedAt=ts,updatedAt=ts,type='user_message' if role=='user' else 'assistant_message',messageId=mid,text=text,attachments=[])
   if role=='user': item.update(createdBy='user',creationSource='web',inputIntent='turn_start')
   else: item['streaming']=False
-  c.execute('insert into orchestration_v2_projection_turn_items values(?,?,?,?,?,?,?,?,?,?,?,?)',(item['id'],populated,None,None,None,None,None,i,item['type'],'completed',ts,json.dumps(item)))
+  c.execute('insert into orchestration_v2_projection_turn_items values(?,?,?,?,?,?,?,?,?,?,?,?)',(item['id'],populated,run,None,None,None,None,i,item['type'],'completed',ts,json.dumps(item)))
 rows={t:c.execute('select * from '+t+' order by 1').fetchall() for t in ['projection_projects','orchestration_v2_projection_threads','orchestration_v2_projection_messages','orchestration_v2_projection_runs','orchestration_v2_projection_runtime_requests','orchestration_v2_projection_turn_items']}
 print(json.dumps(dict(seedHash=hashlib.sha256(json.dumps(rows,sort_keys=True).encode()).hexdigest(),threads=[populated,empty],environment=(root/'.t3/userdata/environment-id').read_text().strip())))
 pathlib.Path('/tmp/dng-evidence-workspace').mkdir(exist_ok=True)
