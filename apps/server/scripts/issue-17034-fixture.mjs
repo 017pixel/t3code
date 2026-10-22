@@ -88,8 +88,7 @@ async function assertStopped(ports) {
   }
   for (const home of [
     NodePath.join(root, ".t3"),
-    ...fs
-      .readdirSync("/tmp")
+    ...NodeFS.readdirSync("/tmp")
       .filter((name) => name.startsWith("t3-issue-17034-"))
       .map((name) => NodePath.join("/tmp", name)),
   ]) {

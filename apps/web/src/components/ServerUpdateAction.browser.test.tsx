@@ -40,13 +40,13 @@ vi.mock(import("~/hooks/useSettings"), async (original) => ({
 }));
 vi.mock(import("~/state/session"), async (original) => {
   const actual = await original();
+  const { environmentAtomList } = await import("~/state/environmentAtomList");
+  const sessionStateAtom = ((environmentId: EnvironmentId) =>
+    testState.sessionAtoms.get(environmentId) ?? testState.sessionAtom) as never;
   return {
     ...actual,
-    environmentSession: {
-      ...actual.environmentSession,
-      sessionStateAtom: ((environmentId: EnvironmentId) =>
-        testState.sessionAtoms.get(environmentId) ?? testState.sessionAtom) as never,
-    },
+    environmentSession: { ...actual.environmentSession, sessionStateAtom },
+    environmentSessionStatesAtom: environmentAtomList("test-session-states", sessionStateAtom),
   };
 });
 vi.mock(import("~/state/use-atom-command"), async (original) => ({
@@ -294,6 +294,11 @@ describe("ServerUpdatesAction", () => {
       ...testState.toast.mock.calls.map((call) => JSON.stringify(call)),
       explanation(screen),
     ];
-    expect(notices).toContainEqual(expect.stringMatching(/Office.*pair|pair.*Office/is));
+    expect(
+      notices.some(
+        (notice) =>
+          notice.toLowerCase().includes("office") && notice.toLowerCase().includes("pair"),
+      ),
+    ).toBe(true);
   });
 });

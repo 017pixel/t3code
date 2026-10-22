@@ -4,8 +4,9 @@ import {
   type AuthSessionState,
   sessionGrantsScope,
 } from "@t3tools/contracts";
-import { type AsyncResult, Atom } from "effect/reactivity";
-import { environmentSession } from "~/state/session";
+import type { AsyncResult } from "effect/reactivity";
+import { environmentIdsKey } from "~/state/environmentAtomList";
+import { environmentSession, environmentSessionStatesAtom } from "~/state/session";
 import {
   EnvironmentId,
   type ServerInstallation,
@@ -167,20 +168,6 @@ export function useServerUpdate() {
   };
 }
 
-const updateDeniedIdsAtom = Atom.family((environmentIds: string) =>
-  Atom.make((get) =>
-    environmentIds
-      .split("\n")
-      .filter(
-        (id) =>
-          id !== "" &&
-          isUpdatePermissionDenied(
-            get(environmentSession.sessionStateAtom(EnvironmentId.make(id))),
-          ),
-      ),
-  ).pipe(Atom.withLabel(`server-update-denied:${environmentIds}`)),
-);
-
 export function ServerUpdatesAction({
   targets,
   label = "Update all",
@@ -198,11 +185,11 @@ export function ServerUpdatesAction({
       target.selfUpdate !== null &&
       (target.selfUpdate !== "desktop-managed" || target.desktopAppUpdate),
   );
-  const deniedIds = new Set(
-    useAtomValue(updateDeniedIdsAtom(eligible.map((target) => target.environmentId).join("\n"))),
+  const sessionStates = useAtomValue(
+    environmentSessionStatesAtom(environmentIdsKey(eligible.map((target) => target.environmentId))),
   );
-  const permitted = eligible.filter((target) => !deniedIds.has(target.environmentId));
-  const denied = eligible.filter((target) => deniedIds.has(target.environmentId));
+  const permitted = eligible.filter((_, index) => !isUpdatePermissionDenied(sessionStates[index]!));
+  const denied = eligible.filter((_, index) => isUpdatePermissionDenied(sessionStates[index]!));
   const descriptionId = useId();
   const handleUpdate = async () => {
     if (pending.current) return;
