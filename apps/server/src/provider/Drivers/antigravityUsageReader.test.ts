@@ -251,6 +251,38 @@ describe("readAntigravityUsage", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("pairs id-less Antigravity copies whose model names are written differently", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const dir = yield* tempDir;
+      const usage = [...protoNumber(1, 9999), ...protoNumber(2, 100), ...protoNumber(3, 40)];
+      yield* seedDatabase(path.join(dir, "unmapped-model.db"), (db) =>
+        Effect.gen(function* () {
+          yield* createTables(db);
+          yield* db.run("INSERT INTO steps VALUES (?, ?)", [
+            0,
+            new Uint8Array([
+              ...protoBytes(9, usage),
+              ...protoBytes(24, protoText(12, "gemini-3.8-flash-high")),
+            ]),
+          ]);
+          yield* db.run("INSERT INTO gen_metadata VALUES (?, ?)", [
+            0,
+            new Uint8Array(
+              protoBytes(1, [...protoBytes(4, usage), ...protoText(19, "Gemini 3.8 Flash (High)")]),
+            ),
+          ]);
+        }),
+      );
+      const result = yield* readAntigravityUsage(dir, 0);
+      assert.deepStrictEqual(result.errors, []);
+      assert.deepStrictEqual(
+        records(result).map((record) => record.model),
+        ["gemini-3.8-flash-high"],
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("uses the matching Antigravity generation model for each model-less step", () =>
     Effect.gen(function* () {
       const path = yield* Path.Path;

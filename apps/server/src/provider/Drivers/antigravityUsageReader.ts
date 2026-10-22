@@ -143,6 +143,7 @@ function metadata(bytes: Uint8Array, step: boolean): Metadata {
   const main = usage === undefined ? undefined : fields(usage.slice());
   const usages = main === undefined ? [] : [main];
   const mainIds = main === undefined ? [] : usageIds(main);
+  let retryModelId = 0;
   for (const retry of data.get(step ? 28 : 17) ?? []) {
     if (!(retry instanceof Uint8Array)) throw new Error("Invalid retry metadata");
     const retryUsage = bytesAt(fields(retry), 2);
@@ -154,8 +155,9 @@ function metadata(bytes: Uint8Array, step: boolean): Metadata {
       counters(parsed) === counters(main) &&
       usageIds(parsed).every((id) => mainIds.includes(id))
     ) {
-      // The retry copy can be the only one that names the model.
-      if (numberAt(main, 1) === 0 && numberAt(parsed, 1) !== 0) main.set(1, parsed.get(1)!);
+      // The retry copy can be the only one that names the model. Field 1 stays untouched because
+      // usageCandidates pairs a step with its generation copy by it.
+      if (numberAt(main, 1) === 0) retryModelId ||= numberAt(parsed, 1);
       continue;
     }
     usages.push(parsed);
@@ -163,7 +165,7 @@ function metadata(bytes: Uint8Array, step: boolean): Metadata {
   return {
     model: modelName(
       textAt(model, step ? 12 : 19) || textAt(model, step ? 8 : 21),
-      numberAt(model, step ? 1 : 3),
+      retryModelId || numberAt(model, step ? 1 : 3),
     ),
     timestampMs: step
       ? (timestamp(nested(data, 8)) ?? timestamp(nested(data, 1)))
@@ -283,9 +285,6 @@ const readDatabase = Effect.fn("readDatabase")(function* (
   }).pipe(sql.withTransaction);
 });
 
-const compatibleModels = (left: string, right: string) =>
-  left === right || left === "antigravity-unknown" || right === "antigravity-unknown";
-
 function usageCandidates(
   sessionId: string,
   generations: ReadonlyArray<{ idx: number; entry: Metadata }>,
@@ -295,8 +294,8 @@ function usageCandidates(
 ): UsageCandidate[] {
   const records: UsageCandidate[] = [];
   // Antigravity stores an id-less call on both its step and its generation. Steps and generations
-  // run in the same order, so the nth step usage with given counters pairs with the nth generation
-  // usage with the same counters, and two real calls with equal counters both survive.
+  // run in the same order, so the nth step usage with given counters and model id pairs with the nth
+  // generation usage with the same ones, and two real calls with equal counters both survive.
   const unpairedSteps = new Map<string, { indices: number[]; next: number }>();
   const generationModels = new Map(generations.map(({ idx, entry }) => [idx, entry.model]));
   for (const [source, entries] of [
@@ -340,19 +339,13 @@ function usageCandidates(
           dedupeKey: keys[0] ?? `antigravity:${sessionId}:${source}:${index}:${usageIndex}`,
         };
         if (keys.length === 0) {
-          const key = counters(usage);
+          const key = `${counters(usage)}:${numberAt(usage, 1)}`;
           const pending = unpairedSteps.get(key);
           if (source === "step") {
             if (pending === undefined)
               unpairedSteps.set(key, { indices: [records.length], next: 0 });
             else pending.indices.push(records.length);
-          } else if (
-            pending !== undefined &&
-            pending.next < pending.indices.length &&
-            compatibleModels(records[pending.indices[pending.next]!]!.record.model, record.model)
-          ) {
-            // A step with another model is a different call; it stays queued for a later
-            // generation rather than being skipped, so neither call is ever dropped.
+          } else if (pending !== undefined && pending.next < pending.indices.length) {
             const paired = records[pending.indices[pending.next++]!]!;
             if (
               timestampQuality > paired.timestampQuality ||
