@@ -1339,6 +1339,12 @@ export const layer: Layer.Layer<
                   activeBackgroundTurnItems,
                   (current) => new Set([...current].filter((id) => !detached.itemIds.has(id))),
                 );
+                // Routing now rejects the moved thread's snapshots, so none would clear its entry.
+                for (const providerThreadId of pendingBackgroundWork.keys()) {
+                  if (!routing.ownedProviderThreadIds.has(providerThreadId)) {
+                    pendingBackgroundWork.delete(providerThreadId);
+                  }
+                }
               }
               return { event, accepted };
             }),

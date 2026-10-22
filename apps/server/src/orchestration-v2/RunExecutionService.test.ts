@@ -1919,6 +1919,90 @@ it.effect.each([null, "run:nested-sdk"] as const)(
     }),
 );
 
+it.effect.each([false, true])(
+  "drops a transferred child's pending snapshot (independent sibling pending=%s)",
+  (siblingPending) =>
+    Effect.gen(function* () {
+      const consumed = yield* Deferred.make<void>();
+      const result = yield* Effect.raceFirst(
+        runBackgroundItemScenario(
+          "child-transfer-pending",
+          (ids) => {
+            const childProviderThreadId = ProviderThreadId.make(
+              "provider-thread:child-transfer-pending:child",
+            );
+            const siblingThreadId = ThreadId.make("thread:child-transfer-pending:sibling");
+            const snapshot = (
+              providerThreadId: ProviderThreadId,
+              appThreadId: ThreadId,
+              pendingBackgroundWork: boolean,
+            ) => ({
+              type: "provider_thread.updated" as const,
+              driver,
+              providerThread: {
+                id: providerThreadId,
+                appThreadId,
+                status: "idle",
+              } as OrchestrationV2ProviderThread,
+              pendingBackgroundWork,
+            });
+            const running = subagentEvent(ids, "running");
+            if (running.type !== "subagent.updated") throw new Error("Missing subagent");
+            const linked = {
+              ...running,
+              subagent: {
+                ...running.subagent,
+                origin: "provider_native" as const,
+                childThreadId: ids.childThreadId,
+                providerThreadId: childProviderThreadId,
+              },
+            };
+            const sibling = siblingPending
+              ? [
+                  {
+                    ...childThreadCreatedEvent(ids),
+                    appThread: {
+                      id: siblingThreadId,
+                      lineage: {
+                        parentThreadId: ids.threadId,
+                        relationshipToParent: "subagent",
+                        rootThreadId: ids.threadId,
+                      },
+                    },
+                  } as ProviderAdapter.ProviderAdapterV2Event,
+                  snapshot(
+                    ProviderThreadId.make("provider-thread:child-transfer-pending:sibling"),
+                    siblingThreadId,
+                    true,
+                  ),
+                ]
+              : [];
+            return [
+              childThreadCreatedEvent(ids),
+              linked,
+              snapshot(childProviderThreadId, ids.childThreadId, true),
+              ...sibling,
+              rootTerminalEvent(ids, "completed"),
+              { ...linked, subagent: { ...linked.subagent, runId: RunId.make("run:replacement") } },
+              snapshot(childProviderThreadId, ids.childThreadId, false),
+            ];
+          },
+          {
+            keepEventStreamOpen: true,
+            hasPendingBackgroundWorkForThread: () => Effect.succeed(false),
+            onEventsConsumed: Deferred.succeed(consumed, undefined).pipe(Effect.asVoid),
+          },
+        ).pipe(Effect.map(Option.some)),
+        Deferred.await(consumed).pipe(Effect.as(Option.none())),
+      );
+      assert.strictEqual(
+        Option.isSome(result),
+        !siblingPending,
+        "only the sibling's pending work may keep the prior subscription open",
+      );
+    }),
+);
+
 it.effect("does not pin ingestion on background items when the root turn is interrupted", () =>
   Effect.gen(function* () {
     const observed = yield* runBackgroundItemScenario("bg-interrupted", (ids) => [
