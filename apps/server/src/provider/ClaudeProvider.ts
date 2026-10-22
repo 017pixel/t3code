@@ -47,6 +47,9 @@ import {
 } from "./claudeUsageLimits.ts";
 import {
   BUNDLED_CLAUDE_MODEL_CATALOG,
+  CLAUDE_EFFORT_LEVELS,
+  capClaudeCatalogEffort,
+  type ClaudeEffortLevel,
   type ClaudeModelCatalog,
   formatClaudeVersionUpgradeMessage,
   resolveClaudeModelsForVersion,
@@ -266,7 +269,21 @@ export type ClaudeCapabilitiesProbe = {
    */
   readonly usage?: Pick<SDKControlGetUsageResponse, "rate_limits_available" | "rate_limits">;
   readonly usageCheckedAt?: string;
+  /** settings.json `maxEffortLevel`; Claude Code clamps every higher effort to it. */
+  readonly maxEffortLevel?: ClaudeEffortLevel;
 };
+
+// `getSettings` exists at runtime but is missing from the SDK's `Query` type, and older CLIs
+// reject the control request.
+type ClaudeSettingsQuery = {
+  readonly getSettings?: () => Promise<{
+    readonly effective?: { readonly maxEffortLevel?: unknown };
+  }>;
+};
+
+function parseClaudeMaxEffortLevel(value: unknown): ClaudeEffortLevel | undefined {
+  return CLAUDE_EFFORT_LEVELS.find((level) => level === value);
+}
 
 function parseClaudeInitializationCommands(
   commands: ReadonlyArray<ClaudeSlashCommand> | undefined,
@@ -386,18 +403,38 @@ const probeClaudeCapabilities = (
         // Usage has its own deadline so a slow optional request cannot discard initialization.
         // Only the rate limits are read, so skip the local transcript scan that fills
         // `behaviors`: with a few GB of transcripts it outlasts the deadline.
+        // The effort cap shares that deadline, concurrently, so a CLI that never answers
+        // `get_settings` costs no extra wait.
         const usageCheckedAt = DateTime.formatIso(yield* DateTime.now);
-        const usageResult = includeUsage
-          ? yield* Effect.tryPromise(() =>
-              q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }),
-            ).pipe(Effect.timeout(DEFAULT_TIMEOUT_MS), Effect.result)
-          : undefined;
+        const { getSettings } = q as ClaudeSettingsQuery;
+        const [usageResult, settingsResult] = yield* Effect.all(
+          [
+            includeUsage
+              ? Effect.tryPromise(() =>
+                  q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({
+                    skipBehaviors: true,
+                  }),
+                ).pipe(Effect.timeout(DEFAULT_TIMEOUT_MS), Effect.result)
+              : Effect.succeed(undefined),
+            getSettings
+              ? Effect.tryPromise(() => getSettings.call(q)).pipe(
+                  Effect.timeout(DEFAULT_TIMEOUT_MS),
+                  Effect.result,
+                )
+              : Effect.succeed(undefined),
+          ],
+          { concurrency: "unbounded" },
+        );
         const usage =
           usageResult && Result.isSuccess(usageResult)
             ? {
                 rate_limits_available: usageResult.success.rate_limits_available,
                 rate_limits: usageResult.success.rate_limits,
               }
+            : undefined;
+        const maxEffortLevel =
+          settingsResult && Result.isSuccess(settingsResult)
+            ? parseClaudeMaxEffortLevel(settingsResult.success.effective?.maxEffortLevel)
             : undefined;
         const account = init.account as
           | {
@@ -416,6 +453,7 @@ const probeClaudeCapabilities = (
           apiProvider: account?.apiProvider,
           slashCommands: parseClaudeInitializationCommands(init.commands),
           ...(usage ? { usage, usageCheckedAt } : {}),
+          ...(maxEffortLevel ? { maxEffortLevel } : {}),
         } satisfies ClaudeCapabilitiesProbe;
       }),
     ),
@@ -582,11 +620,6 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
-  const models = providerModelsFromSettings(
-    resolveClaudeModelsForVersion(modelCatalog, parsedVersion),
-    claudeSettings.customModels,
-    DEFAULT_CLAUDE_MODEL_CAPABILITIES,
-  );
   const updateRequiredModels = resolveClaudeUpdateRequiredModels(modelCatalog, parsedVersion);
   const versionUpgradeMessage = formatClaudeVersionUpgradeMessage(modelCatalog, parsedVersion);
 
@@ -597,6 +630,15 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     probeResult && Result.isSuccess(probeResult) ? probeResult.success : undefined;
   const probeFailure =
     probeResult && Result.isFailure(probeResult) ? probeResult.failure : undefined;
+  const models = capClaudeCatalogEffort(
+    modelCatalog,
+    providerModelsFromSettings(
+      resolveClaudeModelsForVersion(modelCatalog, parsedVersion),
+      claudeSettings.customModels,
+      DEFAULT_CLAUDE_MODEL_CAPABILITIES,
+    ),
+    capabilities?.maxEffortLevel,
+  );
   const skills = yield* discoverClaudeSkills(claudeSettings, cwd, resolvedEnvironment);
   const slashCommands = [COMPACT_SLASH_COMMAND, ...(capabilities?.slashCommands ?? [])];
   const dedupedSlashCommands = dedupeSlashCommands(slashCommands);

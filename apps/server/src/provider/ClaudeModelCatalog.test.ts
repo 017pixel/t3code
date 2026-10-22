@@ -3,6 +3,8 @@ import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 
 import { resolveProviderCatalog, type ModelManifestData } from "./ModelManifest.ts";
 import {
+  capClaudeCatalogEffort,
+  type ClaudeModelCatalog,
   formatClaudeVersionUpgradeMessage,
   normalizeClaudeCatalogEffort,
   resolveClaudeCatalogApiModelId,
@@ -221,5 +223,46 @@ describe("Claude model catalog", () => {
       resolveClaudeModelsForVersion(catalog, "3.2.0").map((model) => model.slug),
       ["claude-synthetic-next", "claude-custom-tuned"],
     );
+  });
+
+  it("falls back to the highest level under the cap when the default is above it", () => {
+    const model = {
+      slug: "claude-synthetic-next",
+      name: "Claude Synthetic Next",
+      isCustom: false,
+      capabilities: {
+        optionDescriptors: [
+          {
+            id: "effort",
+            label: "Reasoning",
+            type: "select" as const,
+            options: [
+              { id: "medium", label: "Medium" },
+              { id: "high", label: "High" },
+              { id: "xhigh", label: "Extra High", isDefault: true },
+              { id: "ultracode", label: "Ultracode" },
+              { id: "ultrathink", label: "Ultrathink" },
+            ],
+          },
+        ],
+      },
+    };
+    const catalog: ClaudeModelCatalog = {
+      models: [
+        {
+          model,
+          runtime: { effortMap: { ultracode: "xhigh", ultrathink: null } },
+          compatibility: {},
+        },
+      ],
+    };
+
+    const [capped] = capClaudeCatalogEffort(catalog, [model], "high");
+    const effort = capped?.capabilities?.optionDescriptors?.[0];
+    assert.deepStrictEqual(effort?.type === "select" ? effort.options : undefined, [
+      { id: "medium", label: "Medium" },
+      { id: "high", label: "High", isDefault: true },
+      { id: "ultrathink", label: "Ultrathink" },
+    ]);
   });
 });

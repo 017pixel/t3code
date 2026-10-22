@@ -28,7 +28,6 @@ import {
   ServerSettings,
   ServerSettingsError,
   ServerProvider,
-  type ServerProviderSlashCommand,
   type ServerSettings as ContractServerSettings,
 } from "@t3tools/contracts";
 import { HttpClient, HttpClientResponse } from "effect/http";
@@ -38,7 +37,7 @@ import { createModelCapabilities } from "@t3tools/shared/model";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
 import { checkCodexProviderStatus, type CodexAppServerProviderSnapshot } from "./CodexProvider.ts";
-import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
+import { type ClaudeCapabilitiesProbe, checkClaudeProviderStatus } from "./ClaudeProvider.ts";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as AntigravityInstallation from "./AntigravityInstallation.ts";
 import * as ModelManifest from "./ModelManifest.ts";
@@ -158,17 +157,7 @@ function booleanDescriptor(id: string, label: string) {
   };
 }
 
-type TestClaudeCapabilities = {
-  readonly email: string | undefined;
-  readonly subscriptionType: string | undefined;
-  readonly tokenSource: string | undefined;
-  readonly apiKeySource: string | undefined;
-  readonly apiProvider: string | undefined;
-  readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
-  readonly maxEffortLevel?: string;
-};
-
-function claudeCapabilities(overrides: Partial<TestClaudeCapabilities> = {}) {
+function claudeCapabilities(overrides: Partial<ClaudeCapabilitiesProbe> = {}) {
   return () =>
     Effect.succeed({
       email: undefined,

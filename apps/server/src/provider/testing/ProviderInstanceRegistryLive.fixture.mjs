@@ -68,6 +68,24 @@ lines.on("line", (line) => {
     );
     return;
   }
+  if (message.request?.subtype === "get_settings") {
+    process.stdout.write(
+      JSON.stringify({
+        type: "control_response",
+        response: {
+          subtype: "success",
+          request_id: message.request_id,
+          response: {
+            effective: process.env.T3_CLAUDE_MAX_EFFORT_LEVEL
+              ? { maxEffortLevel: process.env.T3_CLAUDE_MAX_EFFORT_LEVEL }
+              : {},
+            sources: [],
+          },
+        },
+      }) + "\n",
+    );
+    return;
+  }
   if (message.request?.subtype !== "initialize") return;
   process.stdout.write(
     JSON.stringify({

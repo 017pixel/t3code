@@ -300,6 +300,43 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.live("reads Claude's maxEffortLevel cap from the CLI's effective settings", () =>
+    Effect.gen(function* () {
+      if (yield* HostProcess.isWindows) return;
+
+      const fixtures = yield* makeTildeProviderFixtures();
+      const claudeId = ProviderInstanceId.make("claude_effort_cap");
+      const { registry } = yield* makeProviderInstanceRegistry<ClaudeDriverEnv>({
+        drivers: [ClaudeDriver],
+        configMap: {
+          [claudeId]: {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            enabled: true,
+            environment: [{ name: "T3_CLAUDE_MAX_EFFORT_LEVEL", value: "high", sensitive: false }],
+            config: makeClaudeConfig({
+              enabled: true,
+              binaryPath: fixtures.claudeBinaryPath,
+              homePath: fixtures.claudeHomePath,
+            }),
+          },
+        },
+      });
+      const claude = yield* registry.getInstance(claudeId);
+
+      const snapshot = yield* claude!.snapshot.refresh;
+      const effortOptions = snapshot.models.flatMap((model) =>
+        (model.capabilities?.optionDescriptors ?? []).flatMap((descriptor) =>
+          descriptor.id === "effort" && descriptor.type === "select"
+            ? descriptor.options.map((option) => option.id)
+            : [],
+        ),
+      );
+      expect(effortOptions).toContain("high");
+      expect(effortOptions).not.toContain("xhigh");
+      expect(effortOptions).not.toContain("max");
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("scopes Claude's one-probe fallback to the logged-in organization", () =>
     Effect.gen(function* () {
       if (yield* HostProcess.isWindows) return;

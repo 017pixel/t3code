@@ -204,6 +204,74 @@ export function formatClaudeVersionUpgradeMessage(
   return `Claude Code ${versionLabel} is too old for ${unavailable.model.name}. Upgrade to v${unavailable.compatibility.minVersion} or newer to access it.`;
 }
 
+/** Claude Code's effort levels, lowest first. */
+export const CLAUDE_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type ClaudeEffortLevel = (typeof CLAUDE_EFFORT_LEVELS)[number];
+
+function claudeEffortRank(level: string | undefined): number {
+  return CLAUDE_EFFORT_LEVELS.indexOf(level as ClaudeEffortLevel);
+}
+
+/**
+ * Claude Code clamps every effort above settings.json `maxEffortLevel` to it, so offering a
+ * higher level would show an effort the turn never runs. A level is judged by its own name, as
+ * the user reads it, even where `effortMap` remaps it; other values (Ultracode) by the level they
+ * map to, and values that map to none (prompt-injected Ultrathink) stay. A dropped default falls
+ * back to the highest remaining plain level, which is what the CLI would run.
+ */
+export function capClaudeCatalogEffort(
+  catalog: ClaudeModelCatalog,
+  models: ReadonlyArray<ServerProviderModel>,
+  maxEffortLevel: ClaudeEffortLevel | undefined,
+): ReadonlyArray<ServerProviderModel> {
+  const capRank = claudeEffortRank(maxEffortLevel);
+  if (capRank < 0) return models;
+  return models.map((model) => {
+    if (!model.capabilities?.optionDescriptors) return model;
+    return {
+      ...model,
+      capabilities: {
+        ...model.capabilities,
+        optionDescriptors: model.capabilities.optionDescriptors.map((descriptor) => {
+          if (descriptor.id !== "effort" || descriptor.type !== "select") return descriptor;
+          const options = descriptor.options.filter((option) => {
+            const rank = claudeEffortRank(option.id);
+            return (
+              (rank >= 0
+                ? rank
+                : claudeEffortRank(normalizeClaudeCatalogEffort(catalog, option.id, model.slug))) <=
+              capRank
+            );
+          });
+          if (options.length === descriptor.options.length) return descriptor;
+          const { currentValue, ...rest } = descriptor;
+          const keepsCurrentValue =
+            currentValue !== undefined && options.some((option) => option.id === currentValue);
+          const droppedDefault =
+            descriptor.options.some((option) => option.isDefault) &&
+            !options.some((option) => option.isDefault);
+          const fallbackDefault = droppedDefault
+            ? options.reduce<string | undefined>(
+                (best, option) =>
+                  claudeEffortRank(option.id) > claudeEffortRank(best) ? option.id : best,
+                undefined,
+              )
+            : undefined;
+          return {
+            ...rest,
+            ...(keepsCurrentValue ? { currentValue } : {}),
+            options: fallbackDefault
+              ? options.map((option) =>
+                  option.id === fallbackDefault ? { ...option, isDefault: true } : option,
+                )
+              : options,
+          };
+        }),
+      },
+    };
+  });
+}
+
 export function resolveClaudeCatalogEffort(
   catalog: ClaudeModelCatalog,
   model: string | null | undefined,
@@ -211,7 +279,7 @@ export function resolveClaudeCatalogEffort(
 ): string | undefined {
   if (!resolveClaudeCatalogModel(catalog, model)) {
     const effort = raw?.trim();
-    return effort && ["low", "medium", "high", "xhigh", "max"].includes(effort)
+    return effort && (CLAUDE_EFFORT_LEVELS as ReadonlyArray<string>).includes(effort)
       ? effort
       : undefined;
   }
