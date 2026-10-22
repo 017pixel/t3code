@@ -15,6 +15,7 @@ vi.mock(import("../ChatMarkdown"), async (importOriginal) => ({
 }));
 
 import { act, fakeTimers, render } from "../../../test/render";
+import { useComposerDraftStore } from "../../composerDraftStore";
 import { makeThreadProjectionFixture } from "../../test-fixtures";
 import { usePendingThreadRequests } from "./usePendingThreadRequests";
 
@@ -92,7 +93,8 @@ function PendingRequestsProbe({
     serverProjection: loading ? null : projection,
     supportsQuestionAttachments: false,
     composerDraftTarget: { environmentId, threadId: projection.thread.id },
-    setComposerDraftPrompt: () => {},
+    setComposerDraftPrompt: (target, prompt) =>
+      useComposerDraftStore.getState().setPrompt(target, prompt),
     promptRef,
     composerRef,
     setThreadError: () => {},
@@ -180,4 +182,36 @@ it("isolates drafts by environment, thread and request and discards only resolve
       index === 0 ? undefined : `Answer ${index}`,
     );
   }
+});
+
+it("keeps a typed answer in the thread draft when the question is cancelled by Stop", async () => {
+  using _timers = fakeTimers();
+  const environmentId = EnvironmentId.make("stop-environment");
+  const projection = questionProjection(threadRef.threadId, ["first"]);
+  const answer = "Purple please. This typed question answer must survive Stop.";
+  await using screen = await render(
+    <PendingRequestsProbe environmentId={environmentId} projection={projection} />,
+  );
+  await act(() => requests.onChangeActivePendingUserInputCustomAnswer("question-0", answer));
+  expect(requests.activePendingDraftAnswers["question-0"]?.customAnswer).toBe(answer);
+
+  // Stop interrupts the turn, which cancels its open question without an answer.
+  await screen.rerender(
+    <PendingRequestsProbe
+      environmentId={environmentId}
+      projection={{
+        ...projection,
+        runtimeRequests: projection.runtimeRequests.map((request) => ({
+          ...request,
+          status: "cancelled",
+          resolvedAt: projection.updatedAt,
+        })),
+      }}
+    />,
+  );
+  expect(requests.activePendingUserInput).toBeNull();
+  const draft = useComposerDraftStore
+    .getState()
+    .getComposerDraft({ environmentId, threadId: threadRef.threadId });
+  expect(draft?.prompt ?? "").toContain(answer);
 });
