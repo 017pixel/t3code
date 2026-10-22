@@ -59,9 +59,12 @@ function AccountMark({ account, size }: { readonly account: LimitAccount; readon
 // Same gap-and-tick as the Limits rows: two clipped copies of the segment leave a see-through gap.
 function PaceGap({
   timeLeft,
+  overlay,
   children,
 }: {
   readonly timeLeft: number | null;
+  // Unsplit by the gap and painted under the tick, so a mark never hides the pace.
+  readonly overlay?: ReactNode;
   readonly children: ReactNode;
 }) {
   const [width, setWidth] = useState(0);
@@ -93,6 +96,7 @@ function PaceGap({
               </View>
             </View>
           ))}
+      {overlay}
       {tickX !== null ? (
         <View
           className="absolute top-0.5 bottom-0.5 w-0.5 rounded-full bg-foreground"
@@ -219,7 +223,14 @@ function PoolWindowCard({
               onPress={() => openAccount(account)}
               className="h-7 min-w-0 flex-1 rounded-md"
             >
-              <PaceGap timeLeft={timeLeft}>
+              <PaceGap
+                timeLeft={timeLeft}
+                overlay={
+                  <View className="absolute inset-0 items-center justify-center overflow-hidden rounded-md">
+                    <AccountMark account={account} size={16} />
+                  </View>
+                }
+              >
                 <View className="absolute inset-0 rounded-md bg-subtle" />
                 <View className="absolute inset-0 overflow-hidden rounded-md">
                   <AccountSegment
@@ -229,12 +240,6 @@ function PoolWindowCard({
                   />
                 </View>
               </PaceGap>
-              <View
-                pointerEvents="none"
-                className="absolute inset-0 items-center justify-center overflow-hidden rounded-md"
-              >
-                <AccountMark account={account} size={16} />
-              </View>
             </Pressable>
           );
         })}

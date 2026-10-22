@@ -378,6 +378,13 @@ function SegmentTriggers({
             ) : null}
           </div>
         </div>
+        <span
+          aria-hidden
+          className="absolute inset-0 isolate flex items-center justify-center overflow-hidden rounded-md @2xl/pool:hidden"
+        >
+          <AccountAvatar account={account} />
+        </span>
+        {/* After the mark so a narrow segment's mark never hides the pace. */}
         {paceMark ? (
           <span
             aria-hidden
@@ -385,12 +392,6 @@ function SegmentTriggers({
             style={paceMark.tick}
           />
         ) : null}
-        <span
-          aria-hidden
-          className="absolute inset-0 isolate flex items-center justify-center overflow-hidden rounded-md @2xl/pool:hidden"
-        >
-          <AccountAvatar account={account} />
-        </span>
         <div className="relative hidden h-full min-w-0 items-center gap-1.5 overflow-hidden rounded-md px-2 text-xs @2xl/pool:flex">
           {showAccountName ? (
             <AccountName
@@ -440,6 +441,7 @@ function LegendRow({
   const remaining = remainingPercent(window);
   const resetsIn = formatResetsIn(window, now);
   const credits = account.limits.resetCredits?.availableCount ?? 0;
+  const name = account.displayName || (account.email ? null : accountLabel(account));
   return (
     <PopoverTrigger
       handle={popover}
@@ -459,10 +461,8 @@ function LegendRow({
           <AccountAvatar account={account} />
         </span>
       </span>
-      {/* An unnamed account's mark is already its whole identity. */}
-      {account.displayName ? (
-        <span className="min-w-0 truncate font-medium text-foreground">{account.displayName}</span>
-      ) : null}
+      {/* An email account's chip already names it; a bare provider glyph does not. */}
+      {name ? <span className="min-w-0 truncate font-medium text-foreground">{name}</span> : null}
       <span className="shrink-0 font-semibold text-foreground tabular-nums">{remaining}%</span>
       <span className="ms-auto flex shrink-0 items-center gap-1.5 text-2xs text-muted-foreground tabular-nums">
         {resetsIn?.replace("resets in ", "↻ ") ?? ""}
