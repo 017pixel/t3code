@@ -249,3 +249,25 @@ it("closes a thread's in-app toast once the route opens that thread", async () =
   await app.render();
   expect(state.closeToast).toHaveBeenCalledWith("toast-1");
 });
+
+it("closes outstanding in-app toasts when in-app notifications are disabled", async () => {
+  await using app = setup();
+  state.mode = "off";
+  state.inApp = true;
+  setParams({ environmentId: "two", threadId: "other" });
+  focused = true;
+  state.toast.mockReturnValue("toast-1");
+  await app.render();
+  state.shells.set(
+    "one",
+    shell({
+      latestTurn: { turnId: "turn", state: "completed", completedAt: "2026-09-13T07:01:00Z" },
+    }),
+  );
+  await app.render();
+  expect(state.toast).toHaveBeenCalledTimes(1);
+
+  state.inApp = false;
+  await app.render();
+  expect(state.closeToast).toHaveBeenCalledWith("toast-1");
+});
