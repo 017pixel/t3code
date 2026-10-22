@@ -5025,7 +5025,9 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             var cycleEnvironmentIDs: Set<String> = []
             var cycleNeedsFastRefresh = false
             var environments: [Environment] = []
-            var failureBackoffs: [String: Duration] = [:]
+            // Measured from when each failure was answered, not from ticks,
+            // because a tick can be pulled earlier or land mid-load.
+            var retryDeadlines: [String: ContinuousClock.Instant] = [:]
             defer {
                 tickTask?.cancel()
                 loadTasks.values.forEach { $0.cancel() }
@@ -5042,7 +5044,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                     } catch {
                         return
                     }
-                    eventSink.yield(.tick(id: id, elapsed: interval))
+                    eventSink.yield(.tick(id: id))
                 }
             }
 
@@ -5058,7 +5060,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                     return
                 }
                 switch event {
-                case let .tick(id, elapsedInterval):
+                case let .tick(id):
                     guard id == tickID else { continue }
                     tickTask = nil
                     let loadGenerations = self.environmentLoadGenerations
@@ -5089,14 +5091,12 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                         continue
                     }
                     let passiveIDs = Set(passiveEnvironments.map(\.id))
-                    failureBackoffs = failureBackoffs.reduce(into: [:]) { result, entry in
-                        guard passiveIDs.contains(entry.key) else { return }
-                        result[entry.key] = max(.zero, entry.value - elapsedInterval)
-                    }
+                    retryDeadlines = retryDeadlines.filter { passiveIDs.contains($0.key) }
+                    let tickInstant = now()
                     // A load still running from an earlier tick keeps its
                     // place; it is neither restarted nor waited for.
                     let refreshableEnvironments = passiveEnvironments.filter {
-                        failureBackoffs[$0.id, default: .zero] <= .zero && loadTasks[$0.id] == nil
+                        (retryDeadlines[$0.id] ?? tickInstant) <= tickInstant && loadTasks[$0.id] == nil
                     }
                     guard !refreshableEnvironments.isEmpty else {
                         scheduleTick(after: fastInterval)
@@ -5125,11 +5125,11 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                         if load.credentialRejected {
                             // Only re-pairing changes this. Re-pairing replaces
                             // the runtime client and restarts this loop.
-                            failureBackoffs[load.environment.id] = .seconds(24 * 60 * 60)
+                            retryDeadlines[load.environment.id] = now() + .seconds(24 * 60 * 60)
                         } else if load.shell == nil {
-                            failureBackoffs[load.environment.id] = failureInterval
+                            retryDeadlines[load.environment.id] = now() + failureInterval
                         } else {
-                            failureBackoffs[load.environment.id] = nil
+                            retryDeadlines[load.environment.id] = nil
                         }
                     }
                     self.reconcileEnvironmentLoads(loads, savedEnvironments: environments)
@@ -8982,7 +8982,7 @@ private struct CachedAttachmentURL {
 }
 
 private enum AggregateRefreshEvent: Sendable {
-    case tick(id: Int, elapsed: Duration)
+    case tick(id: Int)
     case loaded(environmentID: String, loads: [EnvironmentShellLoad])
 }
 

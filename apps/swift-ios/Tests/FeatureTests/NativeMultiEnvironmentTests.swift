@@ -1843,13 +1843,85 @@ struct NativePassiveThreadRefreshTests {
         await fixture.client.disconnect()
     }
 
-    @Test("A failed passive environment backs off without slowing an active peer")
-    func failedPassiveEnvironmentBacksOffWithoutSlowingActivePeer() async throws {
+    @Test(
+        "A failure answered mid-wait backs off from when it failed",
+        .timeLimit(.minutes(1))
+    )
+    func failureAnsweredMidWaitBacksOffFromWhenItFailed() async throws {
         let refreshSleep = ControllableAggregateRefreshSleep()
+        let refreshClock = ManualAggregateRefreshClock()
         let fixture = try await NativeMultiEnvironmentTests.makeFixture(
             includeThirdEnvironment: true,
             aggregateRefreshSleep: {
                 try await refreshSleep.sleep(for: $0)
+            },
+            aggregateRefreshNow: {
+                refreshClock.now()
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        _ = try await fixture.client.initialSnapshot()
+        let initialShellReads = await fixture.transport.shellReadCount(host: "three.example")
+        var events = fixture.client.events().makeAsyncIterator()
+
+        _ = await refreshSleep.waitUntilRequested(count: 1)
+        await fixture.transport.holdNextShellRead(host: "three.example")
+        refreshClock.advance(by: .seconds(5))
+        await refreshSleep.resume()
+        await fixture.transport.waitForHeldShellRead()
+        // The unchanged peer answers first and schedules the idle refresh at 15s.
+        let idleCadence = await refreshSleep.waitUntilRequested(count: 2)
+        #expect(idleCadence == .seconds(10))
+
+        // The slow computer fails at 11s, so it is not due again until 31s.
+        refreshClock.advance(by: .seconds(6))
+        await fixture.transport.setReachable(false, host: "three.example")
+        await fixture.transport.failHeldShellRead(host: "three.example")
+        while let event = await events.next() {
+            if case let .snapshot(snapshot) = event,
+               snapshot.environments.first(where: { $0.id == "three" })?.connectionState == .disconnected {
+                break
+            }
+        }
+
+        // With every read failing, a tick is only scheduled once each
+        // environment it read has answered, so read counts are settled.
+        await fixture.transport.setReachable(false, host: "two.example")
+        refreshClock.advance(by: .seconds(4))
+        await refreshSleep.resume()
+        let afterPeerFailure = await refreshSleep.waitUntilRequested(count: 3)
+        #expect(afterPeerFailure == .seconds(10))
+
+        // Two ten-second waits have passed, but only fourteen seconds since the failure.
+        refreshClock.advance(by: .seconds(10))
+        await refreshSleep.resume()
+        let nothingDue = await refreshSleep.waitUntilRequested(count: 4)
+        #expect(nothingDue == .seconds(5))
+        #expect(await fixture.transport.shellReadCount(host: "three.example") == initialShellReads + 1)
+
+        refreshClock.advance(by: .seconds(5))
+        await refreshSleep.resume()
+        _ = await refreshSleep.waitUntilRequested(count: 5)
+        #expect(await fixture.transport.shellReadCount(host: "three.example") == initialShellReads + 1)
+
+        refreshClock.advance(by: .seconds(5))
+        await refreshSleep.resume()
+        _ = await refreshSleep.waitUntilRequested(count: 6)
+        #expect(await fixture.transport.shellReadCount(host: "three.example") == initialShellReads + 2)
+        await fixture.client.disconnect()
+    }
+
+    @Test("A failed passive environment backs off without slowing an active peer")
+    func failedPassiveEnvironmentBacksOffWithoutSlowingActivePeer() async throws {
+        let refreshSleep = ControllableAggregateRefreshSleep()
+        let refreshClock = ManualAggregateRefreshClock()
+        let fixture = try await NativeMultiEnvironmentTests.makeFixture(
+            includeThirdEnvironment: true,
+            aggregateRefreshSleep: {
+                try await refreshSleep.sleep(for: $0)
+            },
+            aggregateRefreshNow: {
+                refreshClock.now()
             }
         )
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
@@ -1873,6 +1945,7 @@ struct NativePassiveThreadRefreshTests {
         var events = fixture.client.events().makeAsyncIterator()
         let firstCadence = await refreshSleep.waitUntilRequested(count: 1)
         #expect(firstCadence == .seconds(5))
+        refreshClock.advance(by: firstCadence)
         await refreshSleep.resume()
         // The peer's answer alone can schedule the next refresh, so wait
         // until the offline read has reported back before counting reads.
@@ -1890,6 +1963,7 @@ struct NativePassiveThreadRefreshTests {
         #expect(await fixture.transport.shellReadCount(host: "two.example") == initialPeerReads + 1)
 
         for requestCount in 2...4 {
+            refreshClock.advance(by: .seconds(5))
             await refreshSleep.resume()
             let cadence = await refreshSleep.waitUntilRequested(count: requestCount + 1)
             #expect(cadence == .seconds(5))
@@ -1898,7 +1972,10 @@ struct NativePassiveThreadRefreshTests {
             #expect(await fixture.transport.shellReadCount(host: "two.example") == initialPeerReads + requestCount)
         }
 
+        // Twenty seconds after the failure, the offline computer is read again.
+        refreshClock.advance(by: .seconds(5))
         await refreshSleep.resume()
+        await fixture.transport.waitUntilFailedShellReads(host: "three.example", count: 2)
         _ = await refreshSleep.waitUntilRequested(count: 6)
         #expect(await fixture.transport.failedShellReadCount(host: "three.example") == 2)
         #expect(await fixture.transport.shellReadCount(host: "three.example") == initialShellReads + 2)
@@ -2228,6 +2305,11 @@ private actor MultiEnvironmentHTTPTransport: HTTPTransport {
     private var shellReadsEnabledHosts: Set<String>
     private var shellReadCounts: [String: Int] = [:]
     private var failedShellReadCounts: [String: Int] = [:]
+    private var failedShellReadWaiters: [(
+        host: String,
+        count: Int,
+        continuation: CheckedContinuation<Void, Never>
+    )] = []
     private var dispatched: [MultiEnvironmentDispatchRecord] = []
     private var hostsDroppingNextCreateReply = Set<String>()
     private var diffRequests: [(host: String, input: JSONValue)] = []
@@ -2285,6 +2367,22 @@ private actor MultiEnvironmentHTTPTransport: HTTPTransport {
         failedShellReadCounts[host, default: 0]
     }
 
+    func waitUntilFailedShellReads(host: String, count: Int) async {
+        if failedShellReadCounts[host, default: 0] >= count { return }
+        await withCheckedContinuation { failedShellReadWaiters.append((host, count, $0)) }
+    }
+
+    private func recordFailedShellRead(host: String) {
+        failedShellReadCounts[host, default: 0] += 1
+        let satisfied = failedShellReadWaiters.filter {
+            $0.host == host && failedShellReadCounts[host, default: 0] >= $0.count
+        }
+        failedShellReadWaiters.removeAll {
+            $0.host == host && failedShellReadCounts[host, default: 0] >= $0.count
+        }
+        satisfied.forEach { $0.continuation.resume() }
+    }
+
     func dropNextCreateReply(host: String) {
         hostsDroppingNextCreateReply.insert(host)
     }
@@ -2320,6 +2418,13 @@ private actor MultiEnvironmentHTTPTransport: HTTPTransport {
         held.continuation.resume(returning: held.response)
     }
 
+    func failHeldShellRead(host: String) {
+        guard let held = heldShellRead else { return }
+        heldShellRead = nil
+        recordFailedShellRead(host: host)
+        held.continuation.resume(throwing: URLError(.cannotConnectToHost))
+    }
+
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let host = request.url?.host ?? ""
         let path = request.url?.path ?? ""
@@ -2328,7 +2433,7 @@ private actor MultiEnvironmentHTTPTransport: HTTPTransport {
         }
         guard reachableHosts.contains(host) else {
             if path == "/api/orchestration/shell" {
-                failedShellReadCounts[host, default: 0] += 1
+                recordFailedShellRead(host: host)
             }
             throw URLError(.cannotConnectToHost)
         }
