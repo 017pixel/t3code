@@ -2668,9 +2668,10 @@ it.effect.each([
       assert.deepEqual(observed, ["run:failed", "pull-requests-refreshed"]);
       assert.isTrue(finalEvents.some((event) => event.type === "run.updated"));
       const durable = (yield* Ref.get(durableTurns)).get(ids.rootProviderTurnId);
-      assert.equal(durable?.status, status);
-      assert.isTrue(durable?.completedAt !== null && durable?.completedAt !== undefined);
-      assert.equal(DateTime.toEpochMillis(durable.completedAt), DateTime.toEpochMillis(terminalAt));
+      assert.deepEqual(
+        { status: durable?.status, completedAt: durable?.completedAt },
+        { status, completedAt: terminalAt },
+      );
     }),
 );
 
