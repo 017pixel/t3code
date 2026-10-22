@@ -25,8 +25,11 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import { HttpServer } from "effect/http";
+import * as NetAddress from "effect/net/NetAddress";
 
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
@@ -51,6 +54,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as ServerSettings from "../serverSettings.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
+import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -1606,6 +1610,158 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.equal(retryCommand.modelSelection.instanceId, codexInstanceId);
         }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
       }),
+  );
+
+  it.effect("replays a delegation retried under a credential reissued for the same thread", () =>
+    Effect.gen(function* () {
+      const otherParentThreadId = ThreadId.make("thread:mcp-providers-other-parent");
+      const tasksByCommandId = new Map<string, Record<string, unknown>>();
+      const delegatedCommandIds: Array<string> = [];
+      const tasksFor = (threadId: ThreadId) =>
+        Array.from(tasksByCommandId.values()).filter((task) => task.threadId === threadId);
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: (threadId) =>
+            Effect.sync(() => {
+              if (threadId !== parentThreadId && threadId !== otherParentThreadId) {
+                return childProjection;
+              }
+              const projection = parentProjection(tasksFor(threadId));
+              return {
+                ...projection,
+                thread: { ...projection.thread, id: threadId },
+              } as OrchestrationV2ThreadProjection;
+            }),
+          hasReceipt: (commandId) => Effect.sync(() => tasksByCommandId.has(commandId)),
+          isProviderInstanceEnabledForProject: () => Effect.succeed(true),
+          assertProviderInstanceEnabled: () => Effect.void,
+          // Mirrors command-receipt replay: a known command id returns the
+          // task it already created, a new one creates another.
+          dispatch: (command) =>
+            Effect.sync(() => {
+              const request = command as Extract<
+                OrchestrationV2ServerCommand,
+                { type: "delegated_task.request" }
+              >;
+              delegatedCommandIds.push(request.commandId);
+              const existing = tasksByCommandId.get(request.commandId);
+              const ordinal = tasksByCommandId.size + 1;
+              const task = existing ?? {
+                id: NodeId.make(`node:mcp-reissue-task-${ordinal}`),
+                threadId: request.parentThreadId,
+                runId: parentRunId,
+                parentNodeId,
+                origin: "app_owned",
+                createdBy: "agent",
+                driver: ProviderDriverKind.make("codex"),
+                providerInstanceId: codexInstanceId,
+                providerThreadId: null,
+                childThreadId: ThreadId.make(`thread:mcp-reissue-child-${ordinal}`),
+                nativeTaskRef: null,
+                prompt: request.task,
+                title: null,
+                model: "gpt-5.4",
+                status: "running",
+                result: null,
+                startedAt: null,
+                completedAt: null,
+              };
+              tasksByCommandId.set(request.commandId, task);
+              return {
+                sequence: 1,
+                storedEvents: [
+                  {
+                    sequence: 1,
+                    commandId: request.commandId,
+                    event: { type: "subagent.updated", payload: task },
+                  },
+                ],
+              } as never;
+            }),
+        }),
+        providerRegistryLayer([
+          providerSnapshot({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            model: "gpt-5.4",
+          }),
+        ]),
+        adapterRegistryLayer([codexInstanceId]),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        ServerSettings.layerTest(),
+      );
+
+      // A server restart builds a new registry, and the provider session
+      // reconnects with a freshly issued credential for the same thread.
+      const issueScope = (threadId: ThreadId) =>
+        Effect.gen(function* () {
+          const registry = yield* McpSessionRegistry.__testing.make().pipe(
+            Effect.provideService(
+              HttpServer.HttpServer,
+              HttpServer.HttpServer.of({
+                address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 43123),
+                serve: (() => Effect.void) as HttpServer.HttpServer["Service"]["serve"],
+              }),
+            ),
+            Effect.provideService(
+              ServerEnvironment.ServerEnvironment,
+              ServerEnvironment.ServerEnvironment.of({
+                getEnvironmentId: Effect.succeed(scope.environmentId),
+                getDescriptor: Effect.die("unused"),
+              }),
+            ),
+            Effect.provide(NodeServices.layer),
+          );
+          const issued = yield* registry.issue({
+            threadId,
+            providerInstanceId: codexInstanceId,
+          });
+          const resolved = yield* registry.resolve(
+            issued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+          );
+          assert.isDefined(resolved);
+          return resolved!;
+        });
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const delegate = (callerScope: McpInvocationScope, clientRequestId: string) =>
+          service.delegateTask(callerScope, {
+            task: "Reply with only PROBE_DONE. Do not use tools.",
+            target: { providerInstanceId: codexInstanceId, model: "gpt-5.4" },
+            mode: "async",
+            clientRequestId,
+          });
+
+        const beforeRestart = yield* issueScope(parentThreadId);
+        const first = yield* delegate(beforeRestart, "issue-16184-runtime-key");
+        const sameCredentialRetry = yield* delegate(beforeRestart, "issue-16184-runtime-key");
+        assert.equal(sameCredentialRetry.taskId, first.taskId);
+
+        const otherThread = yield* delegate(
+          yield* issueScope(otherParentThreadId),
+          "issue-16184-runtime-key",
+        );
+        assert.notEqual(otherThread.taskId, first.taskId);
+        assert.notEqual(otherThread.childThreadId, first.childThreadId);
+
+        const afterRestart = yield* issueScope(parentThreadId);
+        assert.notEqual(
+          afterRestart.thread.providerSessionId,
+          beforeRestart.thread.providerSessionId,
+        );
+        const newKey = yield* delegate(afterRestart, "issue-16184-runtime-key-2");
+        assert.notEqual(newKey.taskId, first.taskId);
+
+        const retryAfterRestart = yield* delegate(afterRestart, "issue-16184-runtime-key");
+        assert.equal(delegatedCommandIds[4], delegatedCommandIds[0]);
+        assert.equal(retryAfterRestart.taskId, first.taskId);
+        assert.equal(retryAfterRestart.childThreadId, first.childThreadId);
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
   );
 
   it.live.each([
