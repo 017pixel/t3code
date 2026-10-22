@@ -3,8 +3,8 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
-// Creates repository data only. Register its saved refs through the app's fixture
-// mechanism with the server stopped; this script never opens a T3 database.
+// Creates repository data only. seed-app.mjs registers its saved refs and stopped
+// visual thread in an initialized isolated home, with that server stopped.
 const { values } = NodeUtil.parseArgs({
   options: {
     directory: { type: "string" },
