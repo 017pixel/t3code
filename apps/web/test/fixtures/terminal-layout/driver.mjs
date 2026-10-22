@@ -26,12 +26,14 @@ export async function createDriver(
   const decode = (result) =>
     result.structuredContent ??
     JSON.parse(result.content.find((item) => item.type === "text").text);
+  // Watch before the action that starts a shell, so fast prompts cannot race the watcher.
+  const arm = async () => {
+    await milestones?.return();
+    milestones = NodeFSP.watch("/tmp/t3-terminal-evidence");
+    pendingMilestones = milestones.next();
+  };
   const call = async (name, args = {}) => {
-    if (name === "press" && args.key === "Enter") {
-      await milestones?.return();
-      milestones = NodeFSP.watch("/tmp/t3-terminal-evidence");
-      pendingMilestones = milestones.next();
-    }
+    if (name === "press" && args.key === "Enter") await arm();
     const result = await callPreview(name, { ...args, tabId });
     events.push({ run, ms: Date.now() - started, op: name, args, isError: !!result.isError });
     if (result.isError) throw new Error(JSON.stringify(result));
@@ -41,8 +43,9 @@ export async function createDriver(
   const driver = {
     call,
     evaluate,
+    arm,
     ready: async (pane) => {
-      // The watcher starts before Enter, so fast shell prompts cannot race it.
+      if (!milestones) throw new Error(`Terminal readiness for ${pane} was not armed`);
       for (;;) {
         const event = await pendingMilestones;
         if (event.done) throw new Error("Terminal readiness watcher ended");

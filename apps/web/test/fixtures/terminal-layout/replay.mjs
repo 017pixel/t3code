@@ -11,6 +11,7 @@ export async function replay(driver, { mode, width, shellPath, threadRef, thread
   );
   const press = (key, modifiers) => call("press", { key, modifiers });
   const click = (locator) => call("click", { locator });
+  const quotedShellPath = `'${shellPath.replaceAll("'", "'\\''")}'`;
   const command = async (text) => {
     await press("c", ["Control"]);
     await call("type", { locator: `${surface} textarea:focus`, text });
@@ -18,7 +19,7 @@ export async function replay(driver, { mode, width, shellPath, threadRef, thread
   };
   const seed = async (pane, index) => {
     await click(`${surface} canvas >> nth=${index}`);
-    await command(`bash ${shellPath} ${pane}`);
+    await command(`bash ${quotedShellPath} ${pane}`);
     await driver.ready(pane);
   };
   const reset = async () => {
@@ -117,6 +118,7 @@ export async function replay(driver, { mode, width, shellPath, threadRef, thread
     await click(session(1));
     await close();
     await click('button[aria-label="Toggle thread details panel"]:visible');
+    await driver.arm();
     await click(
       'button[aria-label="Run Evidence deterministic terminal with deliberately long label"]',
     );
