@@ -17,9 +17,11 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as CheckpointService from "./CheckpointService.ts";
@@ -585,4 +587,84 @@ it.effect.each(["confirmed", "unconfirmed", "failed"] as const)(
         outcome === "confirmed" ? ["stop-child", "settle-child"] : ["stop-child"],
       );
     }),
+);
+
+it.effect("a provider that never answers turn starts does not hold every worker", () =>
+  Effect.gen(function* () {
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const startEffect = (name: string): EffectOutbox.OrchestrationEffectV2 => ({
+      id: `effect:${name}`,
+      commandId: CommandId.make(`command:${name}`),
+      threadId: ThreadId.make(`thread:${name}`),
+      request: { type: "provider-turn.start", runId: RunId.make(`run:${name}`) },
+      status: "running",
+      attemptCount: 1,
+      availableAt: now,
+      leaseOwner: "worker",
+      leaseExpiresAt: now,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      lastError: null,
+    });
+    const wedged = ["codex-1", "codex-2", "codex-3", "codex-4"].map(startEffect);
+    const claude = startEffect("claude");
+    const pending = yield* Ref.make([...wedged, claude]);
+    const wedgedStarts = yield* Ref.make(0);
+    const allWorkersWedged = yield* Deferred.make<void>();
+    const claudeStarted = yield* Deferred.make<void>();
+    const layerOutbox = Layer.mock(EffectOutbox.EffectOutboxV2)({
+      awaitAvailable: Effect.never,
+      nextClaimableAt: Effect.succeedNone,
+      claimNext: () => Ref.modify(pending, ([next, ...rest]) => [Option.fromNullishOr(next), rest]),
+      get: (effectId) =>
+        Effect.succeed(Option.fromNullishOr([...wedged, claude].find((e) => e.id === effectId))),
+      awaitCancellation: () => Effect.never,
+      clearCancellation: () => Effect.void,
+      succeed: () => Effect.succeed(true),
+      retry: () => Effect.succeed(true),
+      fail: () => Effect.succeed(true),
+    });
+    const layerExecutor = Layer.succeed(
+      EffectWorker.OrchestrationEffectExecutorV2,
+      EffectWorker.OrchestrationEffectExecutorV2.of({
+        // The shared Codex app-server stays alive but never answers thread/start.
+        execute: (effect) =>
+          effect.id === claude.id
+            ? Deferred.succeed(claudeStarted, undefined)
+            : Ref.updateAndGet(wedgedStarts, (count) => count + 1).pipe(
+                Effect.flatMap((count) =>
+                  count === wedged.length
+                    ? Deferred.succeed(allWorkersWedged, undefined)
+                    : Effect.void,
+                ),
+                Effect.andThen(Effect.never),
+              ),
+      }),
+    );
+    const layerWorker = EffectWorker.layerWithOptions().pipe(
+      Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
+    );
+
+    yield* Effect.gen(function* () {
+      yield* EffectWorker.runDaemon.pipe(Effect.forkScoped);
+      yield* Deferred.await(allWorkersWedged);
+
+      // Observed provider-turn.start latency tops out near 33s and leases last
+      // 30s; fifteen minutes is far past any deadline that could free a slot.
+      const outcome = yield* Deferred.await(claudeStarted).pipe(
+        Effect.as("started" as const),
+        Effect.timeoutOrElse({ duration: "15 minutes", orElse: () => Effect.succeed("stalled") }),
+        Effect.forkScoped,
+      );
+      yield* TestClock.adjust("15 minutes");
+
+      assert.equal(
+        yield* Fiber.join(outcome),
+        "started",
+        "four never-resolving Codex provider-turn.start effects still hold all four effect " +
+          "workers after 15 minutes, so the Claude provider-turn.start never runs",
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerWorker));
+  }),
 );
