@@ -1484,8 +1484,12 @@ export const layer: Layer.Layer<
                                 { runId: input.run.id, cause: interruptCause },
                               ).pipe(Effect.as("failed" as const)),
                           ),
+                          // A terminal snapshot is the provider's own outcome; only repair active turns.
                           Effect.map((status) =>
-                            rootProviderTurn === null ? null : { ...rootProviderTurn, status },
+                            rootProviderTurn === null ||
+                            isTerminalProviderTurnStatus(rootProviderTurn.status)
+                              ? null
+                              : { ...rootProviderTurn, status },
                           ),
                         )
                     : null;

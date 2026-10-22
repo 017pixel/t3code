@@ -2588,6 +2588,51 @@ it.effect.each(["failure", "defect", "interrupt-failure", "ownership-lost"] as c
     }),
 );
 
+it.effect.each(["completed", "failed"] as const)(
+  "keeps a %s root provider turn when ingestion fails before its turn ends",
+  (status) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const interrupts = yield* Ref.make<
+        ReadonlyArray<ProviderAdapter.ProviderAdapterV2InterruptInput>
+      >([]);
+      const { observed, finalEvents } = yield* captureRootRunTermination({
+        key: `terminal-snapshot:${status}`,
+        shouldFinalizeRun: () => Effect.succeed(true),
+        events: (ids) =>
+          Stream.make({
+            type: "provider_turn.updated" as const,
+            driver,
+            providerTurn: {
+              id: ids.rootProviderTurnId,
+              providerThreadId: ids.providerThreadId,
+              nodeId: ids.rootNodeId,
+              runAttemptId: ids.attemptId,
+              nativeTurnRef: null,
+              ordinal: 1,
+              status,
+              startedAt: now,
+              completedAt: now,
+            },
+          }),
+        ingestNormalized: () =>
+          Effect.fail(
+            new ProviderEventIngestor.ProviderEventPublishError({
+              providerSessionId: ProviderSessionId.make(`session:terminal-snapshot:${status}`),
+              eventCount: 1,
+              cause: new Error("SQLITE_FULL: database or disk is full"),
+            }),
+          ),
+        interruptTurn: (input) => Ref.update(interrupts, (current) => [...current, input]),
+      });
+      const calls = yield* Ref.get(interrupts);
+      assert.equal(calls.length, 1);
+      assert.isTrue(calls[0]?.requestRuntimeRestart);
+      assert.deepEqual(observed, ["run:failed", "pull-requests-refreshed"]);
+      assert.isUndefined(finalEvents.find((event) => event.type === "provider-turn.updated"));
+    }),
+);
+
 it.effect("does not interrupt an ended provider when its terminal write fails", () =>
   Effect.gen(function* () {
     const interrupts = yield* Ref.make(0);
