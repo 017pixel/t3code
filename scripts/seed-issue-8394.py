@@ -9,9 +9,11 @@ After offline reseeding, clear only the browser's thread/shell projection caches
 """
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
+import tempfile
 
 path = Path(sys.argv[1]).resolve()
 if '.t3/userdata/statev2.sqlite' not in str(path) or path == Path.home() / '.t3/userdata/statev2.sqlite':
@@ -28,9 +30,9 @@ source = next((r for r in fixture['orchestration_v2_projection_messages'] if r['
 item = next((r for r in fixture['orchestration_v2_projection_turn_items'] if r['type'] == 'user_message'), None)
 if source is None or item is None or json.loads(item['payload_json'])['messageId'] != source['message_id']:
     raise SystemExit('Synthetic source templates missing or inconsistent')
-backup_dir = Path('/tmp/issue-8394-evidence')
-backup_dir.mkdir(parents=True, exist_ok=True)
-backup_path = backup_dir / ('seed-backup-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f') + '.sqlite')
+# mkstemp creates the backup 0600 beside the isolated database, not in shared /tmp.
+fd, backup_path = tempfile.mkstemp(prefix='seed-backup-', suffix='.sqlite', dir=path.parent)
+os.close(fd)
 with sqlite3.connect(backup_path) as backup:
     c.backup(backup)
 with c:
@@ -111,6 +113,7 @@ with c:
         ir.update(turn_item_id=iid, type='reasoning', ordinal=ip['ordinal'], payload_json=json.dumps(ip))
         keys = list(ir)
         c.execute('insert or replace into orchestration_v2_projection_turn_items ('+','.join(keys)+') values ('+','.join('?' for _ in keys)+')', list(ir.values()))
+Path('/tmp/issue-8394-evidence').mkdir(parents=True, exist_ok=True)
 Path('/tmp/issue-8394-evidence/fixture.md').write_text('1. test\n5. test\n8. test\n15. test\n\n<ol start="3"><li>first</li><li value="100">second</li><li>third</li></ol>\n')
 print('Backup:', backup_path)
 print('Thread:', source['thread_id'])
