@@ -9,9 +9,9 @@ import {
 import { Button } from "./ui/button";
 import { CalendarIcon } from "lucide-react";
 import { Calendar } from "./ui/calendar";
-import { weekStartsOn } from "../timestampFormat";
+import { usePrimarySettings } from "../hooks/useSettings";
+import { resolveHour12, weekStartsOn } from "../timestampFormat";
 import { Popover, PopoverTrigger, PopoverPopup } from "./ui/popover";
-import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Toggle, ToggleGroup } from "./ui/toggle-group";
 import { Select, SelectTrigger, SelectValue, SelectPopup, SelectItem } from "./ui/select";
@@ -110,7 +110,7 @@ function CustomSnoozeDialog() {
               </ToggleGroup>
               <div className="flex flex-col gap-4">
                 {mode === "date" ? (
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="grid grid-cols-1 gap-3">
                     <div className="flex min-w-0 flex-col gap-1.5">
                       <Label htmlFor={`${id}-date`}>Date</Label>
                       <Popover open={calendarOpen} onOpenChange={setCalendarOpen}>
@@ -147,21 +147,14 @@ function CustomSnoozeDialog() {
                         </PopoverPopup>
                       </Popover>
                     </div>
-                    <Label className="flex min-w-0 flex-col items-stretch" htmlFor={`${id}-time`}>
-                      Time
-                      <Input
-                        nativeInput
-                        id={`${id}-time`}
-                        className="h-9 sm:h-8"
-                        type="time"
-                        required
-                        value={time}
-                        onChange={(event) => {
-                          setTime(event.target.value);
-                          setError(null);
-                        }}
-                      />
-                    </Label>
+                    <SnoozeTimeSelect
+                      id={id}
+                      time={time}
+                      onChange={(next) => {
+                        setTime(next);
+                        setError(null);
+                      }}
+                    />
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -222,5 +215,88 @@ function CustomSnoozeDialog() {
         </form>
       </DialogPopup>
     </Dialog>
+  );
+}
+
+const pad = (value: number) => String(value).padStart(2, "0");
+const HOURS_24 = Array.from({ length: 24 }, (_, hour) => pad(hour));
+const HOURS_12 = ["12", ...Array.from({ length: 11 }, (_, hour) => pad(hour + 1))];
+const MINUTES = Array.from({ length: 60 }, (_, minute) => pad(minute));
+
+// A native time input renders in the browser's locale, ignoring the Time format setting.
+function SnoozeTimeSelect(props: {
+  readonly id: string;
+  readonly time: string;
+  readonly onChange: (time: string) => void;
+}) {
+  const hour12 = usePrimarySettings((settings) => resolveHour12(settings.timestampFormat));
+  const hour = Number(props.time.slice(0, 2));
+  const minute = props.time.slice(3, 5);
+  const pm = hour >= 12;
+  const setHour = (next: number) => props.onChange(`${pad(next)}:${minute}`);
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <Label id={`${props.id}-time`} htmlFor={`${props.id}-hour`}>
+        Time
+      </Label>
+      <div
+        role="group"
+        aria-labelledby={`${props.id}-time`}
+        className={hour12 ? "grid grid-cols-3 gap-2" : "grid grid-cols-2 gap-2"}
+      >
+        <Select
+          value={hour12 ? pad(hour % 12 || 12) : pad(hour)}
+          onValueChange={(value) => {
+            if (value === null) return;
+            // 12 AM is hour 0 and 12 PM is hour 12.
+            setHour(hour12 ? (Number(value) % 12) + (pm ? 12 : 0) : Number(value));
+          }}
+        >
+          <SelectTrigger id={`${props.id}-hour`} aria-label="Hour" className="min-w-0">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectPopup>
+            {(hour12 ? HOURS_12 : HOURS_24).map((value) => (
+              <SelectItem key={value} value={value}>
+                {value}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+        <Select
+          value={minute}
+          onValueChange={(value) => {
+            if (value !== null) props.onChange(`${pad(hour)}:${value}`);
+          }}
+        >
+          <SelectTrigger aria-label="Minute" className="min-w-0">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectPopup>
+            {MINUTES.map((value) => (
+              <SelectItem key={value} value={value}>
+                {value}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+        {hour12 && (
+          <Select
+            value={pm ? "PM" : "AM"}
+            onValueChange={(value) => {
+              if (value !== null) setHour((hour % 12) + (value === "PM" ? 12 : 0));
+            }}
+          >
+            <SelectTrigger aria-label="AM or PM" className="min-w-0">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              <SelectItem value="AM">AM</SelectItem>
+              <SelectItem value="PM">PM</SelectItem>
+            </SelectPopup>
+          </Select>
+        )}
+      </div>
+    </div>
   );
 }
