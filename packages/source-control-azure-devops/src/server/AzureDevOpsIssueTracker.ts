@@ -657,8 +657,6 @@ export const make: Effect.Effect<
         ),
       ),
 
-    getViewerPermissions: () => Effect.succeed(VIEWER_PERMISSIONS),
-
     create: (input) =>
       scoped("create", input).pipe(
         Effect.flatMap((scope) =>
