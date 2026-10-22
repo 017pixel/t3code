@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - realpathSync.native resolves Windows 8.3 short names, which the Effect realPath does not.
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -3197,6 +3198,79 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           yield* fileSystem.exists(pathService.join(worktreePath, "shared", "SHARED.md")),
           true,
         );
+      }),
+    );
+
+    it.effect("reuses the source checkout's submodule objects in a new worktree", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+
+        // `file://` forces pack transport (a bare local path would hardlink),
+        // and GIT_TRACE_PACKFILE records every pack the destination receives.
+        const packTrace = pathService.join(yield* makeTmpDir("git-pack-trace-"), "received.pack");
+        const previousEnv = {
+          GIT_ALLOW_PROTOCOL: process.env.GIT_ALLOW_PROTOCOL,
+          GIT_TRACE_PACKFILE: process.env.GIT_TRACE_PACKFILE,
+        };
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            for (const [key, value] of Object.entries(previousEnv)) {
+              if (value === undefined) {
+                delete process.env[key];
+              } else {
+                process.env[key] = value;
+              }
+            }
+          }),
+        );
+        process.env.GIT_ALLOW_PROTOCOL = "file";
+
+        const blobBytes = 4 * 1024 * 1024;
+        const submoduleRepo = yield* makeTmpDir("git-submodule-");
+        yield* initRepoWithCommit(submoduleRepo);
+        yield* fileSystem.writeFile(
+          pathService.join(submoduleRepo, "blob.bin"),
+          NodeCrypto.randomBytes(blobBytes),
+        );
+        yield* git(submoduleRepo, ["add", "."]);
+        yield* git(submoduleRepo, ["commit", "-m", "blob"]);
+
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["submodule", "add", `file://${submoduleRepo}`, "shared"]);
+        yield* git(cwd, ["commit", "-m", "add submodule"]);
+        const gitlink = (yield* git(cwd, ["rev-parse", "HEAD:shared"])).trim();
+
+        process.env.GIT_TRACE_PACKFILE = packTrace;
+        const worktreePath = pathService.join(
+          yield* makeTmpDir("git-worktrees-"),
+          "reused-submodule-worktree",
+        );
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* driver.createWorktree({
+          cwd,
+          path: worktreePath,
+          refName: initialBranch,
+          newRefName: "feature/reused-submodules",
+        });
+        delete process.env.GIT_TRACE_PACKFILE;
+
+        const receivedBytes = (yield* fileSystem
+          .stat(packTrace)
+          .pipe(Effect.orElseSucceed(() => ({ size: 0n })))).size;
+        assert.isBelow(
+          Number(receivedBytes),
+          blobBytes / 4,
+          "the destination fetched submodule objects the source checkout already had",
+        );
+
+        const destinationSubmodule = pathService.join(worktreePath, "shared");
+        assert.equal((yield* git(destinationSubmodule, ["rev-parse", "HEAD"])).trim(), gitlink);
+        yield* fileSystem.remove(pathService.join(cwd, ".git", "modules", "shared"), {
+          recursive: true,
+        });
+        yield* git(destinationSubmodule, ["cat-file", "-e", "HEAD:blob.bin"]);
       }),
     );
 
