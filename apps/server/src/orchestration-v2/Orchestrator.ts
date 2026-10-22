@@ -402,7 +402,22 @@ function runsOfTask(
   runs: ReadonlyArray<OrchestrationV2Run>,
   run: OrchestrationV2Run,
 ): ReadonlyArray<OrchestrationV2Run> {
-  return runs.filter((candidate) => candidate.delegatedTaskId === run.delegatedTaskId);
+  if (run.delegatedTaskId !== undefined) {
+    return runs.filter((candidate) => candidate.delegatedTaskId === run.delegatedTaskId);
+  }
+  // Ownerless runs (a monitor turn a task joined) share no task id; only the
+  // run's own restart continuations can still change its result.
+  const chain = [run];
+  const seen = new Set([run.id]);
+  for (let index = 0; index < chain.length; index += 1) {
+    for (const candidate of runs) {
+      if (candidate.restartContinuationOfRunId === chain[index]!.id && !seen.has(candidate.id)) {
+        seen.add(candidate.id);
+        chain.push(candidate);
+      }
+    }
+  }
+  return chain;
 }
 
 /** Run ordinals can skip values: a queued run moves past newer runs when it starts. */
