@@ -44,9 +44,7 @@ settings.providerInstances.antigravity = {
 };
 NodeFS.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 console.log(`Configured isolated Antigravity fixture. Scenario file: ${scenario}`);
-console.log(
-  "Use pending for D; completed/failed for C. Start a new thread for each C/D scenario.",
-);
+console.log("Use pending for D; completed/failed for C. Start a new thread for each C/D scenario.");
 console.log(
   "For C, wait for completed assistant message + running command, then SIGTERM only the SECOND PID published in command-pids. The mock emits the terminal tool update on process exit.",
 );
