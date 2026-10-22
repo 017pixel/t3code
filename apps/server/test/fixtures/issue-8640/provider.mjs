@@ -1,6 +1,6 @@
-import fs from "node:fs";
-import path from "node:path";
-const fixture = JSON.parse(fs.readFileSync(new URL("./provider.json", import.meta.url)));
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+const fixture = JSON.parse(NodeFS.readFileSync(new URL("./provider.json", import.meta.url)));
 const stateDir = process.env.ISSUE_8640_STATE;
 if (!stateDir) throw new Error("ISSUE_8640_STATE must name the isolated fixture state directory");
 const original = globalThis.fetch;
@@ -8,15 +8,15 @@ const base = "/api/repos/pingdotgg/t3code";
 const pullPath = `${base}/pulls/23210`;
 const page = { items: [], next: null };
 const log = (value) =>
-  fs.appendFileSync(
-    path.join(stateDir, "provider.jsonl"),
+  NodeFS.appendFileSync(
+    NodePath.join(stateDir, "provider.jsonl"),
     JSON.stringify({ at: new Date().toISOString(), pid: process.pid, ...value }) + "\n",
   );
 globalThis.fetch = async (...args) => {
   const url = new URL(String(args[0]?.url ?? args[0]));
   if (url.origin !== "https://git.cafe" || !url.pathname.startsWith("/api/"))
     return original(...args);
-  const stage = fs.readFileSync(path.join(stateDir, "stage"), "utf8").trim();
+  const stage = NodeFS.readFileSync(NodePath.join(stateDir, "stage"), "utf8").trim();
   const changed = stage === "title" || stage === "success";
   const { changedTitle, changedUpdatedAt, ...pull } = fixture;
   if (changed) {
