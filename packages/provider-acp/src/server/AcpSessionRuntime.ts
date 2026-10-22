@@ -1320,6 +1320,10 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
       >;
     }>
   >(Option.none());
+  // Counts mode, config, and model writes sent to the agent. A late
+  // session/load response predates any write sent after the provisional
+  // start, even one whose reply is still pending.
+  const sessionWriteCountRef = yield* Ref.make(0);
 
   const ensureConnected = Effect.gen(function* () {
     const error = yield* Ref.get(terminationErrorRef);
@@ -1378,6 +1382,15 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
 
   const logRequest = (event: AcpSessionRequestLogEvent) =>
     options.requestLogger ? options.requestLogger(event) : Effect.void;
+
+  const runLoggedSessionWrite = <A>(
+    method: string,
+    payload: unknown,
+    effect: Effect.Effect<A, EffectAcpErrors.AcpError>,
+  ): Effect.Effect<A, EffectAcpErrors.AcpError> =>
+    Ref.update(sessionWriteCountRef, (count) => count + 1).pipe(
+      Effect.andThen(runLoggedRequest(method, payload, effect)),
+    );
 
   const runLoggedRequest = <A>(
     method: string,
@@ -1974,6 +1987,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
     const { payload, response: lateFiber } = late.value;
     const provisionalConfigOptions = yield* Ref.get(configOptionsRef);
     const provisionalModeState = yield* Ref.get(modeStateRef);
+    const provisionalWriteCount = yield* Ref.get(sessionWriteCountRef);
     const adoptLateResponse = Effect.fn("AcpSessionRuntime.adoptLateSessionLoad")(function* (
       response: EffectAcpSchema.LoadSessionResponse,
     ) {
@@ -1986,7 +2000,8 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
         startState.result !== started ||
         (yield* Ref.get(stoppingRef)) ||
         (yield* Ref.get(configOptionsRef)) !== provisionalConfigOptions ||
-        (yield* Ref.get(modeStateRef)) !== provisionalModeState
+        (yield* Ref.get(modeStateRef)) !== provisionalModeState ||
+        (yield* Ref.get(sessionWriteCountRef)) !== provisionalWriteCount
       ) {
         return;
       }
@@ -2185,7 +2200,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
                     configId,
                     value: String(value),
                   } satisfies EffectAcpSchema.SetSessionConfigOptionRequest);
-            return runLoggedRequest(
+            return runLoggedSessionWrite(
               "session/set_config_option",
               requestPayload,
               acp.agent.setSessionConfigOption(requestPayload),
@@ -2791,7 +2806,11 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
       if (modeConfigOption === undefined && modeState !== undefined) {
         const started = yield* getStartedState;
         const payload = { sessionId: started.sessionId, modeId };
-        yield* runLoggedRequest("session/set_mode", payload, acp.agent.setSessionMode(payload));
+        yield* runLoggedSessionWrite(
+          "session/set_mode",
+          payload,
+          acp.agent.setSessionMode(payload),
+        );
         yield* updateCurrentModeId(modeId);
         return {} satisfies EffectAcpSchema.SetSessionModeResponse;
       }
@@ -2812,7 +2831,11 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
             modelId,
             ...(meta === undefined ? {} : { _meta: meta }),
           };
-          return runLoggedRequest("session/set_model", payload, acp.agent.setSessionModel(payload));
+          return runLoggedSessionWrite(
+            "session/set_model",
+            payload,
+            acp.agent.setSessionModel(payload),
+          );
         }),
       ),
     setConfigOption,

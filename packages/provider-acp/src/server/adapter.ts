@@ -6914,10 +6914,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             ...capabilities,
             sessions: {
               ...capabilities.sessions,
-              supportsModelSwitchInSession: canSwitchModelInSession(
-                yield* runtime.getConfigOptions,
-                (yield* Ref.get(activeSessionSetup))?.sessionSetupResult.models,
-              ),
+              supportsModelSwitchInSession:
+                capabilities.sessions.supportsModelSwitchInSession ||
+                canSwitchModelInSession(
+                  yield* runtime.getConfigOptions,
+                  (yield* Ref.get(activeSessionSetup))?.sessionSetupResult.models,
+                ),
             },
           },
           createdAt,
