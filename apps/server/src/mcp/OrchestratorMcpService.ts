@@ -1811,8 +1811,9 @@ const make = Effect.gen(function* () {
 
   /**
    * Without a target the task keeps the inherited selection and mode as-is. With one, the
-   * resolved provider must be enabled for the task's project and offer the stored runtime mode,
-   * so the scheduler never holds a task it cannot launch.
+   * resolved provider must be enabled for the task's project and the runtime mode steps down to
+   * the broadest one it offers, so the scheduler never holds a task it cannot launch. Bound runs
+   * follow their thread's provider, so a target there would be silently ignored.
    */
   const resolveScheduledTaskTarget = Effect.fn("OrchestratorMcpService.resolveScheduledTaskTarget")(
     function* (input: {
@@ -1822,9 +1823,16 @@ const make = Effect.gen(function* () {
       >;
       readonly target: OrchestratorMcpTarget | undefined;
       readonly runtimeMode: RuntimeMode;
+      readonly bound: boolean;
     }) {
       if (input.target === undefined) {
         return { modelSelection: input.inherit.modelSelection, runtimeMode: input.runtimeMode };
+      }
+      if (input.bound) {
+        return yield* failure(
+          "invalid_request",
+          "A task bound to a thread runs with that thread's provider and model. Pass bindToCurrentThread: false to run it in fresh threads with this target.",
+        );
       }
       const target = yield* resolveTargetRechecking({
         inherit: input.inherit,
@@ -1875,6 +1883,7 @@ const make = Effect.gen(function* () {
         },
         target: input.target,
         runtimeMode: limits.runtimeMode,
+        bound: bindToCurrentThread,
       });
       const derivedTitle = input.prompt.split("\n")[0]?.trim() ?? "";
       const title =
@@ -1965,6 +1974,7 @@ const make = Effect.gen(function* () {
           inherit: existing,
           target: input.target,
           runtimeMode: existing.runtimeMode,
+          bound: threadId !== null,
         });
         const upsertInput: ScheduledTaskUpsertInput = {
           id: existing.id,

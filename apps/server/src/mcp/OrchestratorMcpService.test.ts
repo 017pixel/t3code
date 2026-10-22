@@ -1214,7 +1214,10 @@ describe("OrchestratorMcpService provider resolution", () => {
       lastRunError: null,
       runCount: 0,
     };
-    const service = (upserts: Ref.Ref<ReadonlyArray<ScheduledTaskUpsertInput>>) =>
+    const service = (
+      upserts: Ref.Ref<ReadonlyArray<ScheduledTaskUpsertInput>>,
+      enabledForProject = true,
+    ) =>
       layerOrchestratorService.pipe(
         Layer.provide(
           Layer.mergeAll(
@@ -1222,7 +1225,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             Layer.mock(ThreadManagementService.ThreadManagementService)({
               getThreadRecords: () =>
                 Effect.succeed(parentProjection([], { instanceId: claudeInstanceId, model: opus })),
-              isProviderInstanceEnabledForProject: () => Effect.succeed(true),
+              isProviderInstanceEnabledForProject: () => Effect.succeed(enabledForProject),
             }),
             ServerSettings.layerTest(),
             providerRegistryLayer([claude]),
@@ -1268,6 +1271,40 @@ describe("OrchestratorMcpService provider resolution", () => {
           ],
           "schedule_task dropped the effort option from its target",
         );
+      }),
+    );
+
+    const scheduleInput = {
+      prompt: "Do the nightly thing",
+      schedule: { type: "fixed_time", timeOfDay: "09:00" } as const,
+      target: xhighTarget,
+    };
+
+    it.effect("schedule_task rejects a target on a task bound to this thread", () =>
+      Effect.gen(function* () {
+        const upserts = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const error = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.flatMap((mcp) => mcp.scheduleTask(scope, scheduleInput).pipe(Effect.flip)),
+          Effect.provide(service(upserts)),
+        );
+        assert.equal(error.code, "invalid_request");
+        assert.deepEqual(yield* Ref.get(upserts), []);
+      }),
+    );
+
+    it.effect("schedule_task rejects a target provider disabled for the project", () =>
+      Effect.gen(function* () {
+        const upserts = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const error = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.flatMap((mcp) =>
+            mcp
+              .scheduleTask(scope, { ...scheduleInput, bindToCurrentThread: false })
+              .pipe(Effect.flip),
+          ),
+          Effect.provide(service(upserts, false)),
+        );
+        assert.equal(error.code, "invalid_request");
+        assert.deepEqual(yield* Ref.get(upserts), []);
       }),
     );
 
