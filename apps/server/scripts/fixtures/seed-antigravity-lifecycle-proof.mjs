@@ -66,7 +66,7 @@ settings.providerInstances.antigravity = {
   ...settings.providerInstances.antigravity,
   driver: "antigravity",
   enabled: true,
-  config: { ...settings.providerInstances.antigravity?.config, binaryPath: wrapper },
+  config: { ...settings.providerInstances.antigravity?.config, enabled: true, binaryPath: wrapper },
 };
 NodeFS.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 console.log(`Configured isolated Antigravity fixture. Scenario file: ${scenario}`);
