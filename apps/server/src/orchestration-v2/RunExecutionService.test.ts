@@ -1621,6 +1621,7 @@ it.effect.each([
   ["child reopened after", false, "late", true],
   ["nested child reopened after", true, "late", true],
   ["child reopened after, without provider support,", false, "late", false],
+  ["nested child reopened before, without provider support,", true, "early", false],
 ] as const)(
   "ingests a %s the root turn ends until a newer root turn",
   ([, nested, reopen, resumesChildrenAfterRootTurn]) =>
@@ -1817,7 +1818,9 @@ it.effect.each([
 
       assert.deepEqual(
         ingested,
-        reopen === "late" && !resumesChildrenAfterRootTurn ? [] : [resumed.childThreadId],
+        !resumesChildrenAfterRootTurn && (reopen === "late" || nested)
+          ? []
+          : [resumed.childThreadId],
       );
     }),
 );

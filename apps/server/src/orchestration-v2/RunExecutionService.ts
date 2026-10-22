@@ -458,8 +458,8 @@ export function routeProviderEvent(
       // can start that child's turn after the resuming root turn ended. A
       // nested one is runless and follows the owned child that resumed it.
       const adopted =
-        ((ownsRun(coordinator.runId) &&
-          (!state.rootTurnEnded || state.adoptsChildrenAfterRootTurn)) ||
+        (!state.rootTurnEnded || state.adoptsChildrenAfterRootTurn) &&
+        (ownsRun(coordinator.runId) ||
           (coordinator.runId === null && ownsChildThread(coordinator.threadId))) &&
         isOrchestrationV2WorkActive(coordinator.status) &&
         coordinator.origin === "provider_native" &&

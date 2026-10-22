@@ -2721,87 +2721,85 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         // A child spawned by an earlier session can be resumed by the parent
         // after a restart. Its saved launch identity, not the resuming tool
         // call, owns the child thread, task and turn item.
-        const restoreSubagentThread =
-          /* Provider events include streaming deltas; avoid a span for each update. */
-          Effect.fnUntraced(function* (nativeThreadId: string) {
-            const childThreadId = idAllocator.derive.threadFromProviderThread({
-              driver: CODEX_PROVIDER,
-              nativeThreadId,
-            });
-            // Each root reads only children in its own thread's lineage.
-            let rootContext: ActiveCodexTurnContext | undefined;
-            let saved: ProviderAdapter.ProviderAdapterV2SubagentThread | null = null;
-            for (const context of latestTurnContexts.values()) {
-              const read = context.subagent === null ? context.input.readSubagentThread : undefined;
-              if (read === undefined) continue;
-              saved = yield* read(childThreadId);
-              if (saved !== null) {
-                rootContext = context;
-                break;
-              }
-            }
-            const nativeItemId = saved?.subagent.nativeTaskRef?.nativeId;
-            if (
-              rootContext === undefined ||
-              saved === null ||
-              nativeItemId == null ||
-              saved.providerThread.nativeThreadRef?.nativeId !== nativeThreadId
-            )
-              return undefined;
-            const parentThreadId = saved.subagent.threadId;
-            // A nested child's parent resumed it, so that parent already had a
-            // turn in this session.
-            const parentNativeThreadId =
-              parentThreadId === rootContext.projectionThreadId
-                ? rootContext.providerThread.nativeThreadRef?.nativeId
-                : Array.from((yield* Ref.get(subagentThreads)).values()).find(
-                    (candidate) => candidate.childThreadId === parentThreadId,
-                  )?.providerThread.nativeThreadRef?.nativeId;
-            const parentContext =
-              parentNativeThreadId == null
-                ? undefined
-                : latestTurnContexts.get(parentNativeThreadId);
-            if (parentContext === undefined) return undefined;
-            const subagent: CodexSubagentThreadContext = {
-              parentContext,
-              providerThread: {
-                ...saved.providerThread,
-                providerSessionId: rootContext.providerThread.providerSessionId,
-              },
-              childThread: saved.childThread,
-              subagentNodeId: saved.subagent.id,
-              childRootNodeId: idAllocator.derive.nodeFromProviderItem({
-                driver: CODEX_PROVIDER,
-                nativeItemId: `${nativeItemId}:thread-root`,
-              }),
-              childThreadId,
-              nativeToolCallId: nativeItemId,
-              ordinal: 1,
-              nativeTurnIds: new Set<string>(),
-              restored: true,
-              startedAt: saved.subagent.startedAt ?? parentContext.startedAt,
-              turnItemId: saved.turnItem.id,
-              turnItemOrdinal: saved.turnItem.ordinal,
-              task: saved.subagent,
-            };
-            const registered = yield* Ref.modify(subagentThreads, (current) => {
-              const existing = current.get(nativeThreadId);
-              return existing === undefined
-                ? [subagent, new Map(current).set(nativeThreadId, subagent)]
-                : [existing, current];
-            });
-            if (registered === subagent) {
-              const latestOrdinal = saved.latestProviderTurnOrdinal;
-              // Continue after the saved turns so the resumed one reopens the task.
-              yield* Ref.update(nextProviderTurnOrdinals, (current) =>
-                new Map(current).set(
-                  String(subagent.providerThread.id),
-                  Math.max(current.get(String(subagent.providerThread.id)) ?? 0, latestOrdinal),
-                ),
-              );
-            }
-            return registered;
+        const restoreSubagentThread = Effect.fn("CodexAdapterV2.restoreSubagentThread")(function* (
+          nativeThreadId: string,
+        ) {
+          const childThreadId = idAllocator.derive.threadFromProviderThread({
+            driver: CODEX_PROVIDER,
+            nativeThreadId,
           });
+          // Each root reads only children in its own thread's lineage.
+          let rootContext: ActiveCodexTurnContext | undefined;
+          let saved: ProviderAdapter.ProviderAdapterV2SubagentThread | null = null;
+          for (const context of latestTurnContexts.values()) {
+            const read = context.subagent === null ? context.input.readSubagentThread : undefined;
+            if (read === undefined) continue;
+            saved = yield* read(childThreadId);
+            if (saved !== null) {
+              rootContext = context;
+              break;
+            }
+          }
+          const nativeItemId = saved?.subagent.nativeTaskRef?.nativeId;
+          if (
+            rootContext === undefined ||
+            saved === null ||
+            nativeItemId == null ||
+            saved.providerThread.nativeThreadRef?.nativeId !== nativeThreadId
+          )
+            return undefined;
+          const parentThreadId = saved.subagent.threadId;
+          // A nested child's parent resumed it, so that parent already had a
+          // turn in this session.
+          const parentNativeThreadId =
+            parentThreadId === rootContext.projectionThreadId
+              ? rootContext.providerThread.nativeThreadRef?.nativeId
+              : Array.from((yield* Ref.get(subagentThreads)).values()).find(
+                  (candidate) => candidate.childThreadId === parentThreadId,
+                )?.providerThread.nativeThreadRef?.nativeId;
+          const parentContext =
+            parentNativeThreadId == null ? undefined : latestTurnContexts.get(parentNativeThreadId);
+          if (parentContext === undefined) return undefined;
+          const subagent: CodexSubagentThreadContext = {
+            parentContext,
+            providerThread: {
+              ...saved.providerThread,
+              providerSessionId: rootContext.providerThread.providerSessionId,
+            },
+            childThread: saved.childThread,
+            subagentNodeId: saved.subagent.id,
+            childRootNodeId: idAllocator.derive.nodeFromProviderItem({
+              driver: CODEX_PROVIDER,
+              nativeItemId: `${nativeItemId}:thread-root`,
+            }),
+            childThreadId,
+            nativeToolCallId: nativeItemId,
+            ordinal: 1,
+            nativeTurnIds: new Set<string>(),
+            restored: true,
+            startedAt: saved.subagent.startedAt ?? parentContext.startedAt,
+            turnItemId: saved.turnItem.id,
+            turnItemOrdinal: saved.turnItem.ordinal,
+            task: saved.subagent,
+          };
+          const registered = yield* Ref.modify(subagentThreads, (current) => {
+            const existing = current.get(nativeThreadId);
+            return existing === undefined
+              ? [subagent, new Map(current).set(nativeThreadId, subagent)]
+              : [existing, current];
+          });
+          if (registered === subagent) {
+            const latestOrdinal = saved.latestProviderTurnOrdinal;
+            // Continue after the saved turns so the resumed one reopens the task.
+            yield* Ref.update(nextProviderTurnOrdinals, (current) =>
+              new Map(current).set(
+                String(subagent.providerThread.id),
+                Math.max(current.get(String(subagent.providerThread.id)) ?? 0, latestOrdinal),
+              ),
+            );
+          }
+          return registered;
+        });
 
         const rememberSubagentTurnStarted =
           /* Provider events include streaming deltas; avoid a span for each update. */
