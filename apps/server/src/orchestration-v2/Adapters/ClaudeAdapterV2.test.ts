@@ -6477,6 +6477,76 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect("forgets session crons when the next turn is interrupted before Stop", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarnessWithOptions({
+          close: (sdkMessages) => Queue.shutdown(sdkMessages),
+        });
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const now = yield* DateTime.now;
+        const turn = (ordinal: number, text: string) =>
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make(`attempt-claude-session-cron-interrupt:${ordinal}`),
+            text,
+            attachments: [],
+            providerTurnOrdinal: ordinal,
+          });
+
+        yield* harness.runtime.startTurn(turn(1, "At 12:20 append the date to a file."));
+        yield* Effect.promise(async () => {
+          const matchers = harness.getOpenedOptions()?.hooks?.Stop ?? [];
+          for (const hook of matchers.flatMap((matcher) => matcher.hooks)) {
+            await hook(
+              {
+                hook_event_name: "Stop",
+                session_id: WAKE_NATIVE_SESSION,
+                transcript_path: "/tmp/transcript.jsonl",
+                cwd: "/tmp",
+                stop_hook_active: false,
+                background_tasks: [],
+                session_crons: [
+                  {
+                    id: "4e805017",
+                    schedule: "20 12 22 10 *",
+                    recurring: false,
+                    prompt: "Append `date -u` to /tmp/cron.txt",
+                  },
+                ],
+              },
+              undefined,
+              { signal: new AbortController().signal },
+            );
+          }
+        });
+        yield* harness.offerAndWait(turnOneResult);
+        yield* harness.awaitTerminal(1);
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
+
+        // Stop closes the CLI that owns the crons, and the SDK Stop hook never reports them gone.
+        const second = turn(2, "Keep going.");
+        yield* harness.runtime.startTurn(second);
+        yield* harness.runtime.interruptTurn({
+          providerThread: harness.providerThread,
+          providerTurnId: idAllocator.derive.providerTurn({
+            driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+            nativeTurnId: `turn:${second.attemptId}`,
+          }),
+        });
+        yield* harness.awaitTerminal(2);
+        assert.equal(harness.terminalEvents()[1]?.status, "interrupted");
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect("stops background work after the turn settled", () =>
     Effect.scoped(
       Effect.gen(function* () {
