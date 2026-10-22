@@ -2858,14 +2858,19 @@ const seedSteeredTasks = Effect.fnUntraced(function* (
 });
 
 it.layer(layerSteeredTaskTest)("steered delegated follow-ups", (it) => {
-  it.effect.each(["completed", "failed"] as const)(
-    "shares the running turn outcome and delivers each task once (%s)",
-    (status) =>
+  it.effect.each([
+    { status: "completed", owner: "delegated" },
+    { status: "failed", owner: "delegated" },
+    { status: "completed", owner: "monitor" },
+  ] as const)(
+    "shares the running turn outcome and delivers each task once ($status, $owner)",
+    ({ status, owner }) =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-        const seeded = yield* seedSteeredTasks(`steered-${status}`, {
+        const seeded = yield* seedSteeredTasks(`steered-${status}-${owner}`, {
           queueHeld: status === "failed",
+          monitor: owner === "monitor",
         });
         yield* orchestrator.recoverDelegatedTask(seeded.childThreadId, seeded.promotedRun.id);
         yield* (yield* EventSink.EventSinkV2)
@@ -2899,26 +2904,28 @@ it.layer(layerSteeredTaskTest)("steered delegated follow-ups", (it) => {
         const sink = yield* EventSink.EventSinkV2;
         const unrelated = runEvent({
           threadId: seeded.childThreadId,
-          runId: RunId.make(`${status}:unrelated`),
+          runId: RunId.make(`${status}-${owner}:unrelated`),
           ordinal: 4,
           status: "cancelled",
           now: seeded.now,
         });
         yield* sink.writeWithEffects({
-          commandId: reconcileCommandId(`${status}:unrelated`),
+          commandId: reconcileCommandId(`${status}-${owner}:unrelated`),
           events: [
-            {
-              ...unrelated,
-              payload: {
-                ...unrelated.payload,
-                delegatedTaskId: NodeId.make(`${status}:unrelated`),
-              },
-            },
+            owner === "monitor"
+              ? unrelated
+              : {
+                  ...unrelated,
+                  payload: {
+                    ...unrelated.payload,
+                    delegatedTaskId: NodeId.make(`${status}:unrelated`),
+                  },
+                },
           ],
           effects: [
             {
               id: `effect:restart-continuation:${unrelated.runId}`,
-              commandId: reconcileCommandId(`${status}:unrelated`),
+              commandId: reconcileCommandId(`${status}-${owner}:unrelated`),
               threadId: seeded.childThreadId,
               request: { type: "provider-runtime.continue", sourceRunId: unrelated.runId },
             },
@@ -2929,6 +2936,10 @@ it.layer(layerSteeredTaskTest)("steered delegated follow-ups", (it) => {
         const shared = settled.contextTransfers.filter(
           (transfer) => transfer.sourcePoint.runId === seeded.steeredRun.id,
         );
+        assert.equal(
+          settled.subagents.find((task) => task.id === seeded.promotedTaskId)?.status,
+          status,
+        );
         assert.lengthOf(shared, 1);
         yield* orchestrator.recoverDelegatedTasks;
         yield* orchestrator.recoverDelegatedTasks;
@@ -2936,7 +2947,9 @@ it.layer(layerSteeredTaskTest)("steered delegated follow-ups", (it) => {
         assert.deepEqual(again.subagents, settled.subagents);
         assert.deepEqual(again.contextTransfers, settled.contextTransfers);
         assert.deepEqual(again.runs, settled.runs);
-        for (const id of [seeded.steeredTaskId, seeded.promotedTaskId]) {
+        for (const id of owner === "monitor"
+          ? [seeded.promotedTaskId]
+          : [seeded.steeredTaskId, seeded.promotedTaskId]) {
           const result = yield* service.taskStatus(seeded.scope, id);
           assert.equal(result.status, status);
           assert.equal(result.summary, "Shared result.");
