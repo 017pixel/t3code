@@ -13,7 +13,7 @@ scenario=sys.argv[1]
 if scenario not in ['S1','S2','S3','R1','R2','R3']: raise SystemExit('Unknown scenario')
 fixture=pathlib.Path(__file__).resolve().parent
 home=base/'usage-evidence-empty-home'
-control=pathlib.Path('/tmp/issue-11873-evidence/control.json')
+control=pathlib.Path('/tmp').resolve()/'issue-11873-evidence/control.json'
 milestones=control.with_suffix('.json.milestones')
 if home.is_symlink() or control.parent.resolve()!=control.parent or control.is_symlink() or milestones.is_symlink():
     raise SystemExit('Fixture home and control paths must not be symlinks')

@@ -4,9 +4,7 @@ import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 const data = JSON.parse(NodeFS.readFileSync(new URL("./data.json", import.meta.url)));
-const controlPath = NodePath.resolve(
-  process.env.T3_USAGE_EVIDENCE_CONTROL || "/tmp/issue-11873-evidence/control.json",
-);
+const controlPath = NodePath.join(NodeFS.realpathSync("/tmp"), "issue-11873-evidence/control.json");
 const assertControlDirectory = () => {
   const directory = NodePath.dirname(controlPath);
   const info = NodeFS.statSync(directory);
