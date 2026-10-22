@@ -40,6 +40,7 @@ const server = NodeHttp.createServer((req, res) => {
     },
     (r) => {
       res.writeHead(r.statusCode, r.headers);
+      r.on("error", () => res.destroy());
       r.pipe(res);
     },
   );
