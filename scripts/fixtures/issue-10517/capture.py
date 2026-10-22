@@ -24,6 +24,9 @@ p.add_argument(
     required=True,
 )
 p.add_argument("--revision", choices=["base", "head"], required=True)
+# Git refs the saved bundles were built from; the script cannot verify this.
+p.add_argument("--head-source", required=True)
+p.add_argument("--base-source", required=True)
 p.add_argument(
     "--action", choices=["copy", "click", "escape", "close", "none"], default="copy"
 )
@@ -32,6 +35,46 @@ p.add_argument("--xclip", default="xclip")
 a = p.parse_args()
 w = pathlib.Path(a.worktree).resolve()
 out = pathlib.Path(a.output).resolve()
+
+
+def on_signal(signum, frame):
+    if spawning:
+        pending.append(signum)
+    else:
+        raise SystemExit(128 + signum)
+
+
+# Turn SIGTERM/SIGHUP/SIGINT into SystemExit so finally restores the checkout.
+# Signals arriving mid-spawn are deferred until the child is tracked.
+spawning = False
+pending = []
+SIGNALS = [signal.SIGTERM, signal.SIGHUP, signal.SIGINT]
+for sig in SIGNALS:
+    signal.signal(sig, on_signal)
+
+
+def source(ref):
+    r = subprocess.run(
+        ["git", "-C", str(w), "rev-parse", "--verify", "--end-of-options"]
+        + [ref + "^{commit}"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise SystemExit(f"source ref {ref!r} is not a commit in {w}")
+    return {"ref": ref, "commit": r.stdout.strip()}
+
+
+sources = {"head": source(a.head_source), "base": source(a.base_source)}
+bundles = {
+    rev: (w / f".t3/evidence-{rev}/main.cjs").read_bytes() for rev in ["head", "base"]
+}
+entry = w / "apps/server/dist/bin.mjs"
+saved_entry = entry.with_suffix(".mjs.evidence-save")
+if saved_entry.exists():
+    raise SystemExit(f"{saved_entry} exists; restore it before capturing")
+if a.variant == "missing-entry" and not entry.exists():
+    raise SystemExit(f"{entry} is missing")
 if (out.parent / ".stop-captures").exists():
     raise SystemExit("capture stop marker present")
 out.mkdir(parents=True, exist_ok=False)
@@ -67,10 +110,7 @@ lock = open(w / ".t3/evidence-capture.lock", "w")
 fcntl.flock(lock, fcntl.LOCK_EX)
 main = w / "apps/desktop/dist-electron/main.cjs"
 original = main.read_bytes()
-base = w / ".t3/evidence-base/main.cjs"
 electron = w / "apps/desktop/node_modules/electron/dist/electron"
-entry = w / "apps/server/dist/bin.mjs"
-moved = False
 helper = out / "clipboard.cjs"
 helper.write_text(
     "const {app}=require('electron');const fs=require('fs');app.whenReady().then(()=>{fs.writeFileSync(process.env.CLIP_VERSION,JSON.stringify(process.versions));app.quit();});"
@@ -115,6 +155,19 @@ def stop(proc):
             proc.wait(timeout=3)
 
 
+def spawn(cmd, **kw):
+    global spawning
+    spawning = True
+    try:
+        proc = subprocess.Popen(cmd, **kw)
+        procs.append(proc)
+    finally:
+        spawning = False
+    if pending:
+        raise SystemExit(128 + pending[0])
+    return proc
+
+
 def windows():
     r = subprocess.run(
         ["xdotool", "search", "--name", "T3 Code's backend"],
@@ -125,18 +178,17 @@ def windows():
 
 
 try:
-    main.write_bytes(
-        base.read_bytes()
-        if a.revision == "base"
-        else (w / ".t3/evidence-head/main.cjs").read_bytes()
-    )
+    main.write_bytes(bundles[a.revision])
     if a.variant == "missing-entry":
-        entry.rename(entry.with_suffix(".mjs.evidence-save"))
-        moved = True
+        entry.rename(saved_entry)
     manifest = {
         "revision": a.revision,
-        "headSource": "ef5a77d2f16e5612a97e1e388afbcafe4f7c1422",
-        "baseSource": "52c2b38ea4",
+        "source": sources[a.revision],
+        "headSource": sources["head"],
+        "baseSource": sources["base"],
+        "bundleSha256": {
+            rev: hashlib.sha256(b).hexdigest() for rev, b in bundles.items()
+        },
         "variant": a.variant,
         "display": os.environ.get("DISPLAY"),
         "gtkTheme": os.environ.get("GTK_THEME"),
@@ -165,14 +217,13 @@ try:
     log = open(out / "app.log", "w")
     hl = open(out / "helper.log", "w")
     ff = open(out / "ffmpeg.log", "w")
-    clip = subprocess.Popen(
+    clip = spawn(
         [str(electron), str(helper), "--no-sandbox", "--disable-gpu"],
         env=env,
         stdout=hl,
         stderr=hl,
     )
-    procs.append(clip)
-    owner = subprocess.Popen(
+    owner = spawn(
         [a.xclip, "-selection", "clipboard", "-in", "-quiet"],
         stdin=subprocess.PIPE,
         stdout=hl,
@@ -180,8 +231,7 @@ try:
     )
     owner.stdin.write(b"ISSUE10517-SENTINEL")
     owner.stdin.close()
-    procs.append(owner)
-    rec = subprocess.Popen(
+    rec = spawn(
         [
             "ffmpeg",
             "-y",
@@ -208,8 +258,7 @@ try:
         stdout=ff,
         stderr=ff,
     )
-    app = subprocess.Popen(manifest["command"], env=env, stdout=log, stderr=log)
-    procs.append(app)
+    app = spawn(manifest["command"], env=env, stdout=log, stderr=log)
     (out / "pids.json").write_text(
         json.dumps(
             {
@@ -306,19 +355,15 @@ try:
     rec.send_signal(signal.SIGINT)
     rec.wait(timeout=15)
 finally:
-    for proc in reversed(procs):
-        stop(proc)
-    if "rec" in locals() and rec.poll() is None:
-        stop(rec)
-    main.write_bytes(original)
-    if moved:
-        entry.with_suffix(".mjs.evidence-save").rename(entry)
-
-    (out / "cleanup.json").write_text(
-        json.dumps(
-            {
-                str(proc.pid): proc.poll()
-                for proc in procs + ([rec] if "rec" in locals() else [])
-            }
+    for sig in SIGNALS:
+        signal.signal(sig, signal.SIG_IGN)
+    try:
+        for proc in reversed(procs):
+            stop(proc)
+    finally:
+        main.write_bytes(original)
+        if saved_entry.exists():
+            saved_entry.rename(entry)
+        (out / "cleanup.json").write_text(
+            json.dumps({str(proc.pid): proc.poll() for proc in procs})
         )
-    )
