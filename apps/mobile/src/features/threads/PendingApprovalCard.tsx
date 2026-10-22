@@ -1,12 +1,17 @@
 import { Button } from "../../components/ui/Button";
-import { approvalRequestLabel } from "@t3tools/client-runtime/state/thread-requests";
+import {
+  approvalRequestLabel,
+  FULL_ACCESS_OVERRIDE_QUESTION,
+  fullAccessOverrideExplanation,
+} from "@t3tools/client-runtime/state/thread-requests";
 import { approvalCommandDisplayText } from "@t3tools/client-runtime/work-log/command-label";
 import type {
   ProviderApprovalDecision,
   ProviderApprovalOption,
   RuntimeRequestId,
 } from "@t3tools/contracts";
-import { ScrollView, View } from "react-native";
+import { useState } from "react";
+import { Pressable, ScrollView, View } from "react-native";
 
 import { AppText as Text } from "../../components/ui/AppText";
 import type { PendingApproval } from "../../lib/threadActivity";
@@ -33,6 +38,7 @@ export function PendingApprovalCard(props: PendingApprovalCardProps) {
   const warning = options.find((option) => option.warning)?.warning;
   const canRespond = props.approval.responseCapability === "live";
   const disabled = !canRespond || props.respondingApprovalId === props.approval.requestId;
+  const [explanationOpen, setExplanationOpen] = useState(false);
   return (
     <View className="gap-2.5 rounded-[20px] border border-border bg-card-alt p-4">
       <Text className="font-t3-bold text-2xs uppercase tracking-[1.1px] text-foreground-secondary">
@@ -61,6 +67,27 @@ export function PendingApprovalCard(props: PendingApprovalCardProps) {
             {props.approval.detail}
           </Text>
         )
+      ) : null}
+      {props.approval.reason ? (
+        <Text className="font-sans text-xs leading-normal text-warning-foreground">
+          {props.approval.reason}
+        </Text>
+      ) : null}
+      {props.approval.fullAccessOverride ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded: explanationOpen }}
+          onPress={() => setExplanationOpen((open) => !open)}
+        >
+          <Text className="font-t3-bold text-xs text-foreground-secondary underline">
+            {FULL_ACCESS_OVERRIDE_QUESTION}
+          </Text>
+          {explanationOpen ? (
+            <Text className="mt-1 font-sans text-xs leading-normal text-foreground-muted">
+              {fullAccessOverrideExplanation(props.approval.fullAccessOverride)}
+            </Text>
+          ) : null}
+        </Pressable>
       ) : null}
       {!canRespond ? (
         <Text className="font-sans text-sm leading-5 text-foreground-muted">
