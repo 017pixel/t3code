@@ -377,23 +377,24 @@ it.layer(layerTest)("ProjectService", (it) => {
         NodeFS.mkdirSync(source);
         git(source, "init", "-b", "develop");
         git(source, "commit", "--allow-empty", "-m", "init");
-        const makeContainer = (name: string, coreBare: boolean) => {
+        const makeContainer = (name: string, coreBare: boolean, checkoutName: string) => {
           const root = NodePath.join(fixture, name);
           git(fixture, "clone", "--bare", source, NodePath.join(root, ".bare"));
           NodeFS.writeFileSync(NodePath.join(root, ".git"), "gitdir: ./.bare\n");
-          git(root, "worktree", "add", "develop", "develop");
-          git(root, "worktree", "add", "feature-x", "-b", "feature-x");
+          git(root, "worktree", "add", checkoutName, "develop");
           // With core.bare=false git treats the container itself as a checkout of HEAD, so the
           // bare metadata and every sibling worktree show up as changes.
           git(root, "config", "core.bare", String(coreBare));
           return root;
         };
 
-        for (const [name, coreBare] of [
-          ["bare-true", true],
-          ["bare-false", false],
+        for (const [name, coreBare, checkoutName] of [
+          ["bare-true", true, "develop"],
+          ["bare-false", false, "develop"],
+          ["bare-dotdot-true", true, "..develop"],
+          ["bare-dotdot-false", false, "..develop"],
         ] as const) {
-          const root = makeContainer(name, coreBare);
+          const root = makeContainer(name, coreBare, checkoutName);
           const rejected = yield* service
             .create({
               commandId: CommandId.make(`command:bare-root:${name}`),
@@ -405,7 +406,7 @@ it.layer(layerTest)("ProjectService", (it) => {
           assert.match(rejected.message, /worktree/i, `core.bare=${coreBare}`);
           assert.isTrue(Option.isNone(yield* service.getByWorkspaceRoot(root)));
 
-          const worktreeRoot = NodePath.join(root, "develop");
+          const worktreeRoot = NodePath.join(root, checkoutName);
           const worktree = yield* service.create({
             commandId: CommandId.make(`command:bare-root:${name}:develop`),
             projectId: ProjectId.make(`project:bare-root:${name}:develop`),

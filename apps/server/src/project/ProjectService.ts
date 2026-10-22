@@ -246,7 +246,12 @@ export const make = Effect.gen(function* () {
     function* (workspaceRoot: string) {
       const isInsideRoot = (candidate: string) => {
         const relative = path.relative(workspaceRoot, candidate);
-        return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+        return (
+          relative !== "" &&
+          relative !== ".." &&
+          !relative.startsWith(`..${path.sep}`) &&
+          !path.isAbsolute(relative)
+        );
       };
       const readGitdirFile = (file: string) =>
         fileSystem.readFileString(file).pipe(
