@@ -60,6 +60,15 @@ process.stdin.on("end", () => {
   child.stdin.end();
   record(decoder.end() + "\n");
 });
-child.on("exit", (code) => process.exit(code ?? 1));
-process.on("SIGTERM", () => child.kill("SIGTERM"));
-process.on("SIGINT", () => child.kill("SIGINT"));
+const forward = (signal) => child.kill(signal);
+process.on("SIGTERM", forward);
+process.on("SIGINT", forward);
+child.on("exit", (code, signal) => {
+  if (code !== null) process.exit(code);
+  // Mirror the child's signal death; drop our forwarders first so the self-signal is not caught.
+  process.off("SIGTERM", forward);
+  process.off("SIGINT", forward);
+  process.kill(process.pid, signal);
+  // Node ignores some signals (SIGPIPE), so still exit if the self-signal did not end us.
+  process.exit(1);
+});
