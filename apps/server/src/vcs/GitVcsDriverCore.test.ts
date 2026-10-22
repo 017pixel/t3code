@@ -3334,6 +3334,140 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         }),
     );
 
+    it.effect("skips a partial-clone source submodule instead of failing to borrow from it", () =>
+      Effect.gen(function* () {
+        const pathService = yield* Path.Path;
+
+        const previousAllowedProtocol = process.env.GIT_ALLOW_PROTOCOL;
+        process.env.GIT_ALLOW_PROTOCOL = "file";
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            if (previousAllowedProtocol === undefined) {
+              delete process.env.GIT_ALLOW_PROTOCOL;
+            } else {
+              process.env.GIT_ALLOW_PROTOCOL = previousAllowedProtocol;
+            }
+          }),
+        );
+
+        // An older blob the partial clone never fetches makes `--dissociate` fail to repack.
+        const submoduleRepo = yield* makeTmpDir("git-submodule-");
+        yield* initRepoWithCommit(submoduleRepo);
+        yield* writeTextFile(submoduleRepo, "README.md", "# changed\n");
+        yield* git(submoduleRepo, ["commit", "-am", "change"]);
+        yield* git(submoduleRepo, ["config", "uploadpack.allowFilter", "true"]);
+
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["submodule", "add", `file://${submoduleRepo}`, "shared"]);
+        yield* git(cwd, ["commit", "-m", "add submodule"]);
+        yield* git(cwd, ["submodule", "deinit", "-f", "shared"]);
+        yield* (yield* FileSystem.FileSystem).remove(
+          pathService.join(cwd, ".git", "modules", "shared"),
+          { recursive: true },
+        );
+        yield* git(cwd, ["submodule", "update", "--init", "--filter=blob:none"]);
+        assert.equal(
+          (yield* git(pathService.join(cwd, "shared"), [
+            "config",
+            "remote.origin.promisor",
+          ])).trim(),
+          "true",
+        );
+
+        const lines: Array<string> = [];
+        const worktreePath = pathService.join(yield* makeTmpDir("git-worktrees-"), "partial");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* driver.createWorktree(
+          {
+            cwd,
+            path: worktreePath,
+            refName: initialBranch,
+            newRefName: "feature/partial-submodule",
+          },
+          { progress: { onSubmoduleLine: (line) => Effect.sync(() => lines.push(line)) } },
+        );
+
+        assert.deepEqual(
+          lines.filter((line) => /fatal|failed/i.test(line)),
+          [],
+        );
+        assert.equal(
+          (yield* git(pathService.join(worktreePath, "shared"), ["rev-parse", "HEAD"])).trim(),
+          (yield* git(cwd, ["rev-parse", "HEAD:shared"])).trim(),
+        );
+      }),
+    );
+
+    it.effect("reuses a nested submodule's objects below a local-path submodule", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+
+        const packTrace = pathService.join(yield* makeTmpDir("git-pack-trace-"), "received.pack");
+        const previousEnv = {
+          GIT_ALLOW_PROTOCOL: process.env.GIT_ALLOW_PROTOCOL,
+          GIT_TRACE_PACKFILE: process.env.GIT_TRACE_PACKFILE,
+        };
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            for (const [key, value] of Object.entries(previousEnv)) {
+              if (value === undefined) {
+                delete process.env[key];
+              } else {
+                process.env[key] = value;
+              }
+            }
+          }),
+        );
+        process.env.GIT_ALLOW_PROTOCOL = "file";
+
+        const blobBytes = 4 * 1024 * 1024;
+        const childRepo = yield* makeTmpDir("git-child-");
+        yield* initRepoWithCommit(childRepo);
+        yield* fileSystem.writeFile(
+          pathService.join(childRepo, "blob.bin"),
+          NodeCrypto.randomBytes(blobBytes),
+        );
+        yield* git(childRepo, ["add", "."]);
+        yield* git(childRepo, ["commit", "-m", "blob"]);
+
+        // The parent's local-path URL makes Git hardlink it, so it is not borrowed,
+        // but its child's `file://` clone still is.
+        const parentRepo = yield* makeTmpDir("git-parent-");
+        yield* initRepoWithCommit(parentRepo);
+        yield* git(parentRepo, ["submodule", "add", `file://${childRepo}`, "child"]);
+        yield* git(parentRepo, ["commit", "-m", "add child"]);
+
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["submodule", "add", parentRepo, "parent"]);
+        yield* git(cwd, ["commit", "-m", "add parent"]);
+        yield* git(cwd, ["submodule", "update", "--init", "--recursive"]);
+
+        process.env.GIT_TRACE_PACKFILE = packTrace;
+        const worktreePath = pathService.join(yield* makeTmpDir("git-worktrees-"), "nested");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* driver.createWorktree({
+          cwd,
+          path: worktreePath,
+          refName: initialBranch,
+          newRefName: "feature/nested-submodules",
+        });
+        delete process.env.GIT_TRACE_PACKFILE;
+
+        const receivedBytes = (yield* fileSystem
+          .stat(packTrace)
+          .pipe(Effect.orElseSucceed(() => ({ size: 0n })))).size;
+        assert.isBelow(Number(receivedBytes), blobBytes / 4);
+        yield* git(pathService.join(worktreePath, "parent", "child"), [
+          "cat-file",
+          "-e",
+          "HEAD:blob.bin",
+        ]);
+      }),
+    );
+
     it.effect("still creates the worktree when submodule checkout fails", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
