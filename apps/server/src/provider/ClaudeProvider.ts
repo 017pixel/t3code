@@ -352,6 +352,7 @@ const probeClaudeCapabilities = (
   environment?: NodeJS.ProcessEnv,
   cwd?: string,
   healthCheck = true,
+  runHooks = false,
 ) => {
   const abort = new AbortController();
   return Effect.gen(function* () {
@@ -375,7 +376,7 @@ const probeClaudeCapabilities = (
           environment: claudeEnvironment,
           cwd,
           managedMcpConfig,
-          runHooks: !healthCheck,
+          runHooks,
         }),
       });
       // Claude Code answers initialize only after session.start hooks finish,
@@ -458,22 +459,30 @@ export const probeClaudeWorkspaceSnapshot = Effect.fn("probeClaudeWorkspaceSnaps
   claudeSettings: ClaudeSettings,
   machineSnapshot: ServerProvider,
   cwd: string,
-  environment?: NodeJS.ProcessEnv,
+  environment: NodeJS.ProcessEnv | undefined,
+  runHooks: boolean,
 ): Effect.fn.Return<ProviderWorkspaceSnapshot, never, FileSystem.FileSystem | Path.Path> {
   if (!claudeSettings.enabled) return machineSnapshot;
   const skills = yield* discoverClaudeSkills(claudeSettings, cwd, environment);
-  const probeResult = yield* probeClaudeCapabilities(claudeSettings, environment, cwd, false).pipe(
-    Effect.result,
-  );
+  const probeResult = yield* probeClaudeCapabilities(
+    claudeSettings,
+    environment,
+    cwd,
+    false,
+    runHooks,
+  ).pipe(Effect.result);
   const capabilities = Result.isSuccess(probeResult) ? probeResult.success : undefined;
+  // A hook can outlast the probe deadline. Retrying would rerun it every few
+  // seconds, so settle on the health check's hook-free commands instead.
+  const settled = capabilities !== undefined || runHooks;
   return {
     ...machineSnapshot,
     skills,
     slashCommands: dedupeSlashCommands([
       COMPACT_SLASH_COMMAND,
-      ...(capabilities?.slashCommands ?? []),
+      ...(capabilities?.slashCommands ?? (runHooks ? machineSnapshot.slashCommands : [])),
     ]),
-    slashCommandsPending: !capabilities,
+    slashCommandsPending: !settled,
   };
 });
 
