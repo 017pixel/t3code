@@ -1,20 +1,20 @@
 // Deterministic Codex app-server peer: no tools, model calls, or filesystem actions.
-import { createInterface } from "node:readline";
-import { appendFileSync, readFileSync } from "node:fs";
-const args = process.argv.slice(2);
-if (args.includes("--version")) {
+import * as NodeReadline from "node:readline";
+import * as NodeFS from "node:fs";
+const args = new Set(process.argv.slice(2));
+if (args.has("--version")) {
   console.log("codex-cli 0.159.0");
   process.exit(0);
 }
-if (args.includes("mcp")) {
+if (args.has("mcp")) {
   console.log("[]");
   process.exit(0);
 }
-if (args.includes("exec")) {
+if (args.has("exec")) {
   console.log('{"title":"Fixture submission"}');
   process.exit(0);
 }
-const catalog = JSON.parse(readFileSync(new URL("./catalog.json", import.meta.url)));
+const catalog = JSON.parse(NodeFS.readFileSync(new URL("./catalog.json", import.meta.url)));
 const models = catalog.manifest.currentModels.codex.map((model, i) => ({
   id: model,
   model,
@@ -30,7 +30,7 @@ const models = catalog.manifest.currentModels.codex.map((model, i) => ({
 }));
 const emit = (m) => console.log(JSON.stringify(m));
 let thread;
-for await (const line of createInterface({ input: process.stdin })) {
+for await (const line of NodeReadline.createInterface({ input: process.stdin })) {
   let m;
   try {
     m = JSON.parse(line);

@@ -23,6 +23,8 @@
       // electron-builder loads the macOS signer by path.
       "entry": [
         "knip-schemas.ts",
+        // Loaded directly by the evidence runner, provider subprocess and browser.
+        "fixtures/issue-6508/*.mjs",
         "mobile-native-client.ts",
         "setup-worktree.ts",
         "sign-macos.ts",

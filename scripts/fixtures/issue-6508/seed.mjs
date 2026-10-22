@@ -4,25 +4,27 @@ import {
   OrchestrationV2ConversationMessageJson,
 } from "../../../packages/contracts/src/orchestrationV2.ts";
 import { ServerSettings } from "../../../packages/contracts/src/settings.ts";
-import { createRequire } from "node:module";
-const require = createRequire(new URL("../../../packages/contracts/package.json", import.meta.url));
+import * as NodeModule from "node:module";
+const require = NodeModule.createRequire(
+  new URL("../../../packages/contracts/package.json", import.meta.url),
+);
 const Schema = await import(require.resolve("effect/Schema"));
 const validate = (schema, value) =>
   Schema.decodeUnknownSync(Schema.fromJsonString(schema))(JSON.stringify(value));
-import { DatabaseSync } from "node:sqlite";
-import { mkdirSync, readFileSync, writeFileSync, copyFileSync } from "node:fs";
-import { resolve, join } from "node:path";
-import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import * as NodeSqlite from "node:sqlite";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import * as NodeCrypto from "node:crypto";
+import * as NodeChildProcess from "node:child_process";
 const [homeArg, preset = "H", environment = "E1"] = process.argv.slice(2);
 if (!homeArg || !["H", "N", "P"].includes(preset) || !["E1", "E2"].includes(environment))
   throw Error(
     "Usage: node scripts/fixtures/issue-6508/seed.mjs /tmp/issue-6508-evidence/<home> H|N|P E1|E2 (server stopped, migrations complete)",
   );
-const home = resolve(homeArg);
+const home = NodePath.resolve(homeArg);
 if (!home.startsWith("/tmp/issue-6508-evidence/")) throw Error("Disposable proof homes only");
-const state = join(home, "userdata");
-const catalog = JSON.parse(readFileSync(new URL("./catalog.json", import.meta.url)));
+const state = NodePath.join(home, "userdata");
+const catalog = JSON.parse(NodeFS.readFileSync(new URL("./catalog.json", import.meta.url)));
 const selection = (model, effort) => ({
   instanceId: "codex",
   model,
@@ -41,14 +43,19 @@ const projects = ["A", "B", "Unused"].map((n) => ({
   root: `/tmp/issue-6508-evidence/workspaces/${environment}/${n}`,
 }));
 for (const p of projects) {
-  mkdirSync(p.root, { recursive: true });
+  NodeFS.mkdirSync(p.root, { recursive: true });
   try {
-    execFileSync("git", ["-C", p.root, "rev-parse", "--git-dir"], { stdio: "ignore" });
+    NodeChildProcess.execFileSync("git", ["-C", p.root, "rev-parse", "--git-dir"], {
+      stdio: "ignore",
+    });
   } catch {
-    execFileSync("git", ["init", "-b", "main", p.root], { stdio: "ignore" });
-    writeFileSync(join(p.root, "README.md"), `# ${p.title}\nDeterministic issue 6508 fixture.\n`);
-    execFileSync("git", ["-C", p.root, "add", "README.md"]);
-    execFileSync(
+    NodeChildProcess.execFileSync("git", ["init", "-b", "main", p.root], { stdio: "ignore" });
+    NodeFS.writeFileSync(
+      NodePath.join(p.root, "README.md"),
+      `# ${p.title}\nDeterministic issue 6508 fixture.\n`,
+    );
+    NodeChildProcess.execFileSync("git", ["-C", p.root, "add", "README.md"]);
+    NodeChildProcess.execFileSync(
       "git",
       [
         "-C",
@@ -65,7 +72,7 @@ for (const p of projects) {
     );
   }
 }
-const d = new DatabaseSync(join(state, "statev2.sqlite"));
+const d = new NodeSqlite.DatabaseSync(NodePath.join(state, "statev2.sqlite"));
 const tables = d
   .prepare("select name from sqlite_schema where type='table' and name like 'orchestration_%'")
   .all();
@@ -198,19 +205,28 @@ const settings = {
     codex: {
       driver: "codex",
       enabled: true,
-      config: { binaryPath: join(home, "codex-fixture"), homePath: join(home, "codex-home") },
+      config: {
+        binaryPath: NodePath.join(home, "codex-fixture"),
+        homePath: NodePath.join(home, "codex-home"),
+      },
     },
     claudeAgent: { driver: "claudeAgent", enabled: false },
   },
 };
 validate(ServerSettings, settings);
-mkdirSync(join(home, "codex-home"), { recursive: true });
-writeFileSync(join(state, "settings.json"), JSON.stringify(settings, null, 2) + "\n");
-writeFileSync(join(state, "environment-id"), `issue-6508-${environment}\n`);
-copyFileSync(new URL("./catalog.json", import.meta.url), join(state, "model-manifest.json"));
-writeFileSync(
-  join(home, "codex-fixture"),
-  `#!/bin/sh\nexec node '${resolve(new URL("./provider.mjs", import.meta.url).pathname)}' "$@"\n`,
+NodeFS.mkdirSync(NodePath.join(home, "codex-home"), { recursive: true });
+NodeFS.writeFileSync(
+  NodePath.join(state, "settings.json"),
+  JSON.stringify(settings, null, 2) + "\n",
+);
+NodeFS.writeFileSync(NodePath.join(state, "environment-id"), `issue-6508-${environment}\n`);
+NodeFS.copyFileSync(
+  new URL("./catalog.json", import.meta.url),
+  NodePath.join(state, "model-manifest.json"),
+);
+NodeFS.writeFileSync(
+  NodePath.join(home, "codex-fixture"),
+  `#!/bin/sh\nexec node '${NodePath.resolve(new URL("./provider.mjs", import.meta.url).pathname)}' "$@"\n`,
   { mode: 0o755 },
 );
 const manifest = {
@@ -226,12 +242,15 @@ const manifest = {
   J,
   F,
   settings,
-  catalogHash: createHash("sha256").update(JSON.stringify(catalog)).digest("hex"),
-  seedHash: createHash("sha256")
-    .update(readFileSync(new URL("./seed.mjs", import.meta.url)))
+  catalogHash: NodeCrypto.createHash("sha256").update(JSON.stringify(catalog)).digest("hex"),
+  seedHash: NodeCrypto.createHash("sha256")
+    .update(NodeFS.readFileSync(new URL("./seed.mjs", import.meta.url)))
     .digest("hex"),
 };
-writeFileSync(join(home, "seed-manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
+NodeFS.writeFileSync(
+  NodePath.join(home, "seed-manifest.json"),
+  JSON.stringify(manifest, null, 2) + "\n",
+);
 console.log(
   JSON.stringify({
     home,
