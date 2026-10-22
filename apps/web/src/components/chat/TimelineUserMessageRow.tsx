@@ -17,6 +17,7 @@ import {
   isVideoAttachment,
 } from "../../types";
 import ChatMarkdown from "../ChatMarkdown";
+import { USER_MESSAGE_REMARK_PLUGINS } from "../../markdown-explicit-list-numbers";
 import {
   CalendarClockIcon,
   ChevronDownIcon,
@@ -718,6 +719,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
       className="text-foreground"
       lineBreaks
       parseRawHtml={false}
+      extraRemarkPlugins={USER_MESSAGE_REMARK_PLUGINS}
       renderContextReference={props.renderContextReference}
       headingLevelOffset={MESSAGE_HEADING_LEVEL}
     />
