@@ -147,3 +147,88 @@ describe.each(["react-native.js", "react-native.mjs"])(
     });
   },
 );
+
+function createScrollToEndList(bundle: string) {
+  const source = NodeFS.readFileSync(
+    new URL(`../apps/mobile/node_modules/@legendapp/list/${bundle}`, import.meta.url),
+    "utf8",
+  );
+  const section = (name: string) => {
+    const start = source.indexOf(`// src/${name}\n`);
+    return source.slice(start, source.indexOf("\n// src/", start + 1));
+  };
+  const code = [
+    "utils/getId.ts",
+    "core/updateContentMetricsState.ts",
+    "core/addTotalSize.ts",
+    "core/setSize.ts",
+    "utils/helpers.ts",
+    "utils/getItemSize.ts",
+    "core/mvcp.ts",
+  ]
+    .map(section)
+    .join("\n");
+  const rowSize = 900;
+  const ids = Array.from({ length: 150 }, (_, index) => `row-${index}`);
+  const values = new Map<string, unknown>();
+  const requestAdjust = vi.fn();
+  const state = {
+    props: {
+      data: ids,
+      keyExtractor: (id: string) => id,
+      estimatedItemSize: 90,
+      maintainVisibleContentPosition: { data: true, size: true },
+    },
+    idCache: [] as unknown[],
+    indexByKey: new Map(ids.map((id, index) => [id, index])),
+    positions: ids.map((_, index) => index * rowSize),
+    sizes: new Map(ids.map((id) => [id, rowSize])),
+    sizesKnown: new Map(ids.map((id) => [id, rowSize])),
+    averageSizes: { "": { avg: rowSize, num: ids.length } },
+    idsInView: ids.slice(140),
+    didContainersLayout: true,
+    totalSize: ids.length * rowSize,
+    scroll: 5000,
+    scrollLength: 800,
+    // In flight from `scrollToEnd({ animated: true })`.
+    scrollingTo: { index: ids.length - 1, viewPosition: 1, itemSize: rowSize, offset: 134200 },
+  };
+  const ctx = { state, values, scrollAxisGap: 0 };
+  const api = NodeVM.runInNewContext(`${code}\n({ prepareMVCP })`, {
+    Platform: { OS: "web" },
+    IS_DEV: false,
+    IsNewArchitecture: true,
+    peek$: (_ctx: unknown, key: string) => values.get(key),
+    set$: (_ctx: unknown, key: string, value: unknown) => values.set(key, value),
+    getContentSize: () => state.totalSize,
+    getContentInsetEnd: () => 0,
+    requestAdjust,
+  }) as { prepareMVCP: (context: typeof ctx, dataChanged: boolean) => (() => void) | undefined };
+  return {
+    state,
+    requestAdjust,
+    removeLastRow() {
+      const data = ids.slice(0, -1);
+      state.props.data = data;
+      state.indexByKey = new Map(data.map((id, index) => [id, index]));
+      state.idsInView = state.idsInView.filter((id) => state.indexByKey.has(id));
+      state.sizes.delete(ids.at(-1)!);
+      state.sizesKnown.delete(ids.at(-1)!);
+      state.positions = state.positions.slice(0, -1);
+      state.totalSize -= rowSize;
+    },
+    prepareMVCP: (dataChanged: boolean) => api.prepareMVCP(ctx, dataChanged),
+  };
+}
+
+describe.each(["react.js", "react.mjs", "react-native.js", "react-native.mjs"])(
+  "scrollToEnd while data shrinks (%s)",
+  (bundle) => {
+    it("keeps the total size when the in-flight scroll target index is past the end", () => {
+      const list = createScrollToEndList(bundle);
+      list.removeLastRow();
+      list.prepareMVCP(true)?.();
+      expect(list.state.totalSize).toBe(149 * 900);
+    });
+  },
+);
