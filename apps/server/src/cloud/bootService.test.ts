@@ -471,6 +471,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
         expect(parseServiceState(yield* fs.readFileString(statePath))).toEqual({
           protocol: SERVICE_LAUNCHER_PROTOCOL,
           activeVersion: "1.2.4",
+          launcherVersion: "1.2.4",
         });
         expect(yield* fs.readFileString(plan.unitPath)).toContain("versions/1.2.4/t3");
         expect(
@@ -766,6 +767,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
       expect(parseServiceState(yield* fs.readFileString(statePath))).toEqual({
         protocol: SERVICE_LAUNCHER_PROTOCOL,
         activeVersion: "1.2.3",
+        launcherVersion: "1.2.3",
       });
       expect(yield* fs.readFileString(plan.unitPath)).toContain(
         `    <string>${runtime.entryPath}</string>\n    <string>__service-launcher</string>`,
