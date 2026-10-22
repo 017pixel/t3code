@@ -6,6 +6,7 @@ import * as DateTime from "effect/DateTime";
 import {
   commandDetailRepeatsCommand,
   extractCommandOutputText,
+  resolveViewedImageAsset,
   resolveWorkEntryToolPresentation,
   toolItemForDisplay,
   type WorkLogPresentationEntry,
@@ -242,5 +243,24 @@ describe("command work-log details", () => {
         data: { command: "pnpm test" },
       }),
     ).toBe(false);
+  });
+});
+
+describe("resolveViewedImageAsset", () => {
+  it("gives a later Read of an overwritten image its own signed URL", () => {
+    const threadId = ThreadId.make("thread");
+    const read = (itemId: string) => {
+      const input = { threadId, workspaceRoot: "/workspace", itemId: TurnItemId.make(itemId) };
+      return resolveViewedImageAsset("/tmp/color-test/square.png", input);
+    };
+
+    const blueRead = read("read-blue");
+    const redRead = read("read-red");
+
+    expect(blueRead).not.toBeNull();
+    expect(read("read-red")).toEqual(redRead);
+    // Clients key the signed-URL cache on this asset, so sharing it with the
+    // earlier Read shows that Read's bytes after the file is overwritten.
+    expect(redRead).not.toEqual(blueRead);
   });
 });
