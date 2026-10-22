@@ -1,3 +1,4 @@
+import { knownProviderFailureMessage } from "@t3tools/provider-core/server/failure";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import {
   makeProviderTextDeltaCoalescer,
@@ -526,6 +527,20 @@ function makeCodexReplayTurn(input: {
 const errorCauseChainText = (error: unknown): string =>
   error instanceof Error ? `${error.message} ${errorCauseChainText(error.cause)}` : String(error);
 
+// Mirrors ProviderTurnStartService's settleStartFailure, which persists only the
+// adapter error's immediate cause, so a doubly wrapped cause hides its message.
+const startFailureMessage = (error: Error): string => {
+  const nestedCause = "cause" in error ? error.cause : undefined;
+  return (
+    knownProviderFailureMessage(error) ??
+    (nestedCause instanceof Error
+      ? nestedCause.message
+      : typeof nestedCause === "string"
+        ? nestedCause
+        : error.message)
+  );
+};
+
 const codexReplayThreadResult = (input: {
   readonly nativeThreadId: string;
   readonly forkedFromId: string | null;
@@ -1031,7 +1046,7 @@ describe("CodexAdapterV2 session initialize", () => {
         assert.equal(result._tag, "Failure");
         if (result._tag === "Failure") {
           assert.equal(result.failure._tag, "ProviderAdapterForkThreadError");
-          assert.include(errorCauseChainText(result.failure), "`/hooks`");
+          assert.include(startFailureMessage(result.failure), "`/hooks`");
         }
         assert.notInclude(session.requests(), "thread/fork");
       } else {

@@ -7544,14 +7544,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     }),
                   }),
                 ),
-                Effect.mapError(
-                  (cause) =>
-                    new ProviderAdapter.ProviderAdapterForkThreadError({
-                      driver: CODEX_PROVIDER,
-                      providerThreadId: threadInput.sourceProviderThread.id,
-                      cause: normalizeCodexCause(cause),
-                    }),
-                ),
               );
               let forkedThread = response.thread;
               if (boundary.rollbackTurnCount > 0) {
