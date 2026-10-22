@@ -1325,6 +1325,28 @@ const make = Effect.gen(function* () {
       })
       .pipe(Effect.mapError(threadManagementFailure));
 
+  const readModelPreferences = (instanceId: ProviderInstanceId) =>
+    serverSettings.getSettings.pipe(
+      Effect.map((settings) => settings.providerModelPreferences?.[instanceId]),
+      Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
+    );
+
+  // Checks the slug itself so a hidden model missing from the catalog is still refused.
+  const assertModelVisible = (
+    provider: ServerProvider,
+    model: string,
+    preferences: ModelPreferences,
+  ) =>
+    preferences?.hiddenModels.includes(model) &&
+    provider.models.find((candidate) => candidate.slug === model)?.isCustom !== true
+      ? Effect.fail(
+          failure(
+            "model_unavailable",
+            `Model ${model} is hidden in Provider settings for provider ${provider.instanceId}.`,
+          ),
+        )
+      : Effect.void;
+
   const resolveTargetRechecking = (input: Parameters<typeof resolveTarget>[0]) => {
     const instanceId =
       input.target?.providerInstanceId ??
@@ -1435,11 +1457,7 @@ const make = Effect.gen(function* () {
     const preferences =
       input.skipProjectEnablementFilter === true
         ? undefined
-        : (yield* serverSettings.getSettings.pipe(
-            Effect.mapError(() =>
-              failure("orchestration_error", "Unable to read server settings."),
-            ),
-          )).providerModelPreferences?.[instanceId];
+        : yield* readModelPreferences(instanceId);
     const inheritedSelection = input.parent.thread.modelSelection;
     const requestedModel = input.target?.model;
     const model =
@@ -1464,16 +1482,7 @@ const make = Effect.gen(function* () {
         `Model ${requestedModel} is not advertised by provider ${instanceId}.`,
       );
     }
-    if (
-      provider.models.some(
-        (candidate) => candidate.slug === model && !isModelVisible(candidate, preferences),
-      )
-    ) {
-      return yield* failure(
-        "model_unavailable",
-        `Model ${model} is hidden in Provider settings for provider ${instanceId}.`,
-      );
-    }
+    yield* assertModelVisible(provider, model, preferences);
 
     const requestedOptions = input.target?.options;
     if (requestedOptions !== undefined) {
@@ -2635,17 +2644,33 @@ const make = Effect.gen(function* () {
                 .getThreadRecords(threadId, [])
                 .pipe(Effect.mapError(threadManagementFailure))).thread.modelSelection;
               if (request.prompt !== undefined) {
+                const dispatchCommandId = stableCommandId({
+                  scope,
+                  requestKey: key,
+                  operation: "dispatch-thread",
+                  index,
+                });
+                // The creation receipt exempted target resolution, but this dispatch starts new
+                // work unless it has its own receipt; check the committed model against settings now.
+                const committedProvider = providers.find(
+                  (provider) => provider.instanceId === resolvedModelSelection.instanceId,
+                );
+                if (
+                  committedProvider !== undefined &&
+                  !(yield* threadManagement.hasReceipt(dispatchCommandId))
+                ) {
+                  yield* assertModelVisible(
+                    committedProvider,
+                    resolvedModelSelection.model,
+                    yield* readModelPreferences(resolvedModelSelection.instanceId),
+                  );
+                }
                 yield* threadManagement
                   .dispatch({
                     type: "message.dispatch",
                     createdBy: "agent",
                     creationSource: "mcp",
-                    commandId: stableCommandId({
-                      scope,
-                      requestKey: key,
-                      operation: "dispatch-thread",
-                      index,
-                    }),
+                    commandId: dispatchCommandId,
                     threadId,
                     senderThreadId: scope.thread.threadId,
                     messageId: stableMessageId({

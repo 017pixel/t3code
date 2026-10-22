@@ -1386,11 +1386,44 @@ describe("OrchestratorMcpService provider resolution", () => {
     }),
   );
 
+  const opencodeCatalog = ["opencode-go/deepseek-v4-pro", "opencode-go/deepseek-v4.1-flash"];
   it.effect.each([
-    { name: "explicit", inheritsHiddenModel: false, replay: false, expected: "model_unavailable" },
-    { name: "inherited", inheritsHiddenModel: true, replay: false, expected: "model_unavailable" },
-    { name: "accepted replay", inheritsHiddenModel: false, replay: true, expected: "accepted" },
-  ] as const)("hidden OpenCode model delegation: $name", (testCase) =>
+    {
+      name: "explicit",
+      inheritsHiddenModel: false,
+      replay: false,
+      catalog: opencodeCatalog,
+      expected: "model_unavailable",
+    },
+    {
+      name: "inherited",
+      inheritsHiddenModel: true,
+      replay: false,
+      catalog: opencodeCatalog,
+      expected: "model_unavailable",
+    },
+    {
+      name: "explicit with an empty catalog",
+      inheritsHiddenModel: false,
+      replay: false,
+      catalog: [],
+      expected: "model_unavailable",
+    },
+    {
+      name: "inherited and missing from the catalog",
+      inheritsHiddenModel: true,
+      replay: false,
+      catalog: ["opencode-go/deepseek-v4.1-flash"],
+      expected: "model_unavailable",
+    },
+    {
+      name: "accepted replay",
+      inheritsHiddenModel: false,
+      replay: true,
+      catalog: opencodeCatalog,
+      expected: "accepted",
+    },
+  ])("hidden OpenCode model delegation: $name", (testCase) =>
     Effect.gen(function* () {
       const opencodeInstanceId = ProviderInstanceId.make("opencode");
       const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
@@ -1461,9 +1494,12 @@ describe("OrchestratorMcpService provider resolution", () => {
               driver: ProviderDriverKind.make("opencode"),
               model: "opencode-go/deepseek-v4-pro",
             }),
-            models: ["opencode-go/deepseek-v4-pro", "opencode-go/deepseek-v4.1-flash"].map(
-              (slug) => ({ slug, name: slug, isCustom: false, capabilities: null }),
-            ),
+            models: testCase.catalog.map((slug) => ({
+              slug,
+              name: slug,
+              isCustom: false,
+              capabilities: null,
+            })),
           },
         ]),
         adapterRegistryLayer([codexInstanceId, opencodeInstanceId]),
@@ -1890,6 +1926,115 @@ describe("OrchestratorMcpService provider resolution", () => {
           }).pipe(Effect.provide(layerTest));
         }).pipe(Effect.provide(NodeServices.layer)),
       ),
+  );
+
+  it.live("does not start a created thread's prompt on a model hidden after creation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const driver = ProviderDriverKind.make("codex");
+        const cwd = yield* checkpointWorkspace("mcp-create-hidden");
+        const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+          {
+            instanceId: codexInstanceId,
+            driver,
+            getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+            planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
+            openSession: () =>
+              Effect.die("These tests exercise committed commands before provider execution."),
+          },
+        ]);
+        const layerDatabase = SqlitePersistence.layerMemory;
+        const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
+          { name: "mcp-create-hidden", runtimePolicyOverride: { cwd } },
+          layerRegistry,
+          { databaseLayer: layerDatabase, runEffectWorker: false },
+        );
+        const layerSettings = ServerSettings.layerTest();
+        const layerThreads = ThreadManagementService.layer.pipe(
+          Layer.provideMerge(layerOrchestrator),
+          Layer.provide(
+            LegacyV1ThreadImporter.layer.pipe(
+              Layer.provide(layerOrchestrator),
+              Layer.provide(layerDatabase),
+            ),
+          ),
+          Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
+          Layer.provideMerge(layerSettings),
+        );
+        const layerTest = layerOrchestratorService.pipe(
+          Layer.provideMerge(layerThreads),
+          Layer.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              layerRegistry,
+              layerSettings,
+              providerRegistryLayer([
+                providerSnapshot({ instanceId: codexInstanceId, driver, model: "gpt-5.4" }),
+              ]),
+              Layer.mock(ProjectService.ProjectService)({}),
+              Layer.mock(SecretRequests.SecretRequests)({}),
+              Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+            ),
+          ),
+        );
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          const settings = yield* ServerSettings.ServerSettingsService;
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("parent:create"),
+            threadId: parentThreadId,
+            projectId,
+            title: "MCP parent",
+            modelSelection: { instanceId: codexInstanceId, model: "gpt-5.4" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("parent:start"),
+            threadId: parentThreadId,
+            messageId: MessageId.make("parent:message"),
+            text: "Create a thread.",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+          });
+          const accepted = { threads: [{ prompt: "Start work." }], clientRequestId: "accepted" };
+          const started = yield* service.createThreads(scope, accepted);
+          // Leaves the creation receipt without the prompt's, as an interrupted call would.
+          const interrupted = yield* service.createThreads(scope, {
+            threads: [{}],
+            clientRequestId: "interrupted",
+          });
+
+          yield* settings.updateSettings({
+            providerModelPreferences: {
+              [codexInstanceId]: { hiddenModels: ["gpt-5.4"], modelOrder: [] },
+            },
+          });
+          assert.deepEqual(yield* service.createThreads(scope, accepted), started);
+          const error = yield* service
+            .createThreads(scope, {
+              threads: [{ prompt: "Start work." }],
+              clientRequestId: "interrupted",
+            })
+            .pipe(Effect.flip);
+          assert.equal(error.code, "model_unavailable");
+          const untouched = yield* orchestrator.getThreadProjection(
+            interrupted.threads[0]!.threadId,
+          );
+          assert.equal(untouched.messages.length, 0);
+          assert.equal(untouched.runs.length, 0);
+        }).pipe(Effect.provide(layerTest));
+      }).pipe(Effect.provide(NodeServices.layer)),
+    ),
   );
 
   it.effect(
