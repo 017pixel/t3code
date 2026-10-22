@@ -12,18 +12,15 @@ import { ChildProcessSpawner } from "effect/process";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { CLOUD_ENDPOINT_RUNTIME_CONFIG } from "./config.ts";
-import {
-  ConnectReachability,
-  classifyReachability,
-  layer as connectReachabilityLayer,
-  type ReachabilityFacts,
-} from "./ConnectReachability.ts";
+import * as ConnectReachability from "./ConnectReachability.ts";
 import * as ManagedEndpointRuntime from "./ManagedEndpointRuntime.ts";
 
 const checkedAt = "2026-10-19T00:00:00.000Z";
 const connected = { readyConnections: 4, hostname: "env.example.test", protocol: "quic" };
 const notConnected = { readyConnections: 0, hostname: null, protocol: null };
-const facts = (overrides: Partial<ReachabilityFacts>): ReachabilityFacts => ({
+const facts = (
+  overrides: Partial<ConnectReachability.ReachabilityFacts>,
+): ConnectReachability.ReachabilityFacts => ({
   managedTunnelConfigured: true,
   connector: connected,
   endpoint: null,
@@ -38,21 +35,21 @@ describe("classifyReachability", () => {
     [{ kind: "status", status: 530 }, "no_connector"],
     [{ kind: "network_error" }, "timeout"],
   ] as const)("maps endpoint result %o to %s", (endpoint, cause) => {
-    expect(classifyReachability(facts({ endpoint, edgeReachable: true }), checkedAt)).toMatchObject(
-      { status: "unreachable", cause },
-    );
+    expect(
+      ConnectReachability.classifyReachability(facts({ endpoint, edgeReachable: true }), checkedAt),
+    ).toMatchObject({ status: "unreachable", cause });
   });
 
   it("keeps the endpoint cause when the TCP edge test cannot explain it", () => {
     // QUIC (UDP) can connect while TCP 7844 is blocked.
     expect(
-      classifyReachability(
+      ConnectReachability.classifyReachability(
         facts({ endpoint: { kind: "status", status: 502 }, edgeReachable: false }),
         checkedAt,
       ),
     ).toMatchObject({ cause: "origin_unreachable" });
     expect(
-      classifyReachability(
+      ConnectReachability.classifyReachability(
         facts({
           connector: { readyConnections: null, hostname: "env.example.test", protocol: null },
           endpoint: { kind: "status", status: 502 },
@@ -63,7 +60,7 @@ describe("classifyReachability", () => {
     ).toMatchObject({ cause: "origin_unreachable" });
     // Failed DNS also fails the edge lookups.
     expect(
-      classifyReachability(
+      ConnectReachability.classifyReachability(
         facts({
           connector: { readyConnections: null, hostname: "env.example.test", protocol: null },
           endpoint: { kind: "dns_failed" },
@@ -75,7 +72,7 @@ describe("classifyReachability", () => {
   });
 
   it("gives the MCP URL on the host the running tunnel answered on", () => {
-    const result = classifyReachability(
+    const result = ConnectReachability.classifyReachability(
       facts({ endpoint: { kind: "status", status: 200 } }),
       checkedAt,
     );
@@ -87,7 +84,10 @@ describe("classifyReachability", () => {
 
   it("waits on a connector that has not connected while the edge answers", () => {
     expect(
-      classifyReachability(facts({ connector: notConnected, edgeReachable: true }), checkedAt),
+      ConnectReachability.classifyReachability(
+        facts({ connector: notConnected, edgeReachable: true }),
+        checkedAt,
+      ),
     ).toMatchObject({ cause: "connector_not_ready" });
   });
 });
@@ -132,7 +132,7 @@ describe("ConnectReachability", () => {
     );
 
     return Effect.gen(function* () {
-      const reachability = yield* ConnectReachability;
+      const reachability = yield* ConnectReachability.ConnectReachability;
       yield* reachability.check;
       expect(Option.getOrNull(yield* reachability.latest)).toMatchObject({
         hostname: "env.example.test",
@@ -141,7 +141,7 @@ describe("ConnectReachability", () => {
       // A relink stores a new tunnel before its connector reports in.
       secrets.set(CLOUD_ENDPOINT_RUNTIME_CONFIG, new TextEncoder().encode("second"));
       expect(yield* reachability.latest).toEqual(Option.none());
-    }).pipe(Effect.provide(connectReachabilityLayer.pipe(Layer.provide(dependencies))));
+    }).pipe(Effect.provide(ConnectReachability.layer.pipe(Layer.provide(dependencies))));
   });
 });
 
