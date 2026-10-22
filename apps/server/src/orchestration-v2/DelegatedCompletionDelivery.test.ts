@@ -1488,6 +1488,27 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           commandId: reconcileCommandId("background-wake-finished"),
           events: [
             {
+              id: EventId.make("event:background-wake-result"),
+              type: "message.updated",
+              threadId: child.childThreadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: {
+                id: MessageId.make("message:background-wake-result"),
+                threadId: child.childThreadId,
+                runId: run.id,
+                nodeId: null,
+                role: "assistant",
+                text: "The background command finished cleanly.",
+                attachments: [],
+                streaming: false,
+                createdBy: "agent",
+                creationSource: "server",
+                createdAt: now,
+                updatedAt: now,
+              },
+            },
+            {
               id: EventId.make("event:background-wake-finished"),
               type: "run.updated",
               threadId: child.childThreadId,
@@ -1502,6 +1523,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           (task) => task.id === run.delegatedTaskId,
         )!;
         assert.equal(followup.status, "completed");
+        assert.equal(followup.result, "The background command finished cleanly.");
         assert.equal(followup.completionDelivery?.state, "claimed");
         let wake = yield* requests.take;
         while (
