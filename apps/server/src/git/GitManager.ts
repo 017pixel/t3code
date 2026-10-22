@@ -65,6 +65,7 @@ import {
 import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
+  gitHubApiHostForRemote,
   parseGitHubRepositorySelector,
   resolveGitHubRepository,
 } from "@t3tools/source-control-github/server/gitHubRepositoryResolution";
@@ -2795,11 +2796,17 @@ export const make = Effect.gen(function* () {
         ...(yield* listRemoteUrls(["config", "--get-regexp", "^remote\\..*\\.url$"])),
         ...(yield* listRemoteUrls(["remote", "-v"])),
       ];
-      if (
-        !remoteUrls.some((remoteUrl) =>
-          repositoryKeys.has(canonicalRepositoryKey(normalizeGitRemoteUrl(remoteUrl))),
-        )
-      ) {
+      // An SSH alias such as `git@github-work:owner/repo` names a github.com repository.
+      const remoteRepositoryKey = (remoteUrl: string) => {
+        const key = normalizeGitRemoteUrl(remoteUrl);
+        const path = key.indexOf("/");
+        return canonicalRepositoryKey(
+          path !== -1 && gitHubApiHostForRemote(remoteUrl) === "github.com"
+            ? `github.com${key.slice(path)}`
+            : key,
+        );
+      };
+      if (!remoteUrls.some((remoteUrl) => repositoryKeys.has(remoteRepositoryKey(remoteUrl)))) {
         return yield* new GitManagerError({
           operation: "preparePullRequestThread",
           cwd,

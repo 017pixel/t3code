@@ -4640,6 +4640,63 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
+  it.effect("prepares a worktree PR thread through a GitHub SSH host alias remote", () =>
+    Effect.gen(function* () {
+      // `github-work` is an `~/.ssh/config` alias for github.com; the SSH command serves it from a
+      // local bare repository.
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/alias"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "alias.txt"), "alias\n");
+      yield* runGit(repoDir, ["add", "alias.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Alias PR branch"]);
+      yield* runGit(repoDir, ["push", "origin", "feature/alias"]);
+      yield* runGit(repoDir, ["push", "origin", "HEAD:refs/pull/85/head"]);
+      yield* runGit(repoDir, ["checkout", "main"]);
+      yield* runGit(repoDir, ["branch", "-D", "feature/alias"]);
+      yield* runGit(repoDir, [
+        "remote",
+        "set-url",
+        "origin",
+        "git@github-work:pingdotgg/codething-mvp.git",
+      ]);
+      yield* runGit(repoDir, ["config", "ssh.variant", "simple"]);
+      yield* runGit(repoDir, [
+        "config",
+        "core.sshCommand",
+        `sh -c 'exec git-upload-pack "$0"' '${remoteDir}'`,
+      ]);
+
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          pullRequest: {
+            number: 85,
+            title: "Alias PR",
+            url: "https://github.com/pingdotgg/codething-mvp/pull/85",
+            baseRefName: "main",
+            headRefName: "feature/alias",
+            state: "open",
+            isCrossRepository: false,
+          },
+        },
+      });
+
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "85",
+        mode: "worktree",
+      });
+
+      expect(result.worktreePath).not.toBeNull();
+      expect(
+        (yield* runGit(result.worktreePath as string, ["show", "HEAD:alias.txt"])).stdout,
+      ).toBe("alias\n");
+    }),
+  );
+
   it.effect("prepares a worktree PR thread in a clone of only the head fork", () =>
     Effect.gen(function* () {
       // A contributor's clone of their own fork has no remote for the base repository; the head
