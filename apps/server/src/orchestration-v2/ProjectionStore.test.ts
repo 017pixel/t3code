@@ -3130,7 +3130,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         `EXPLAIN QUERY PLAN ${providerThreadRead}`,
       ))
         .map((row) => row.detail)
-        .filter((detail) => detail.startsWith("SEARCH item "));
+        .filter((detail) => /^(SEARCH|SCAN) item /.test(detail));
       assert.isNotEmpty(itemLookups);
       for (const detail of itemLookups) {
         const indexName = /INDEX (\S+)/.exec(detail)?.[1] ?? "";
