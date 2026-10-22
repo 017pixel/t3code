@@ -4051,49 +4051,49 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         // The SDK can't cancel a move, so each command has at most one in
         // flight. A request made meanwhile, from another steer or the task's
-        // late registration, runs again once that move answers.
+        // late registration, runs again once that move answers. The entry is
+        // claimed and released without a yield in between, so no request
+        // lands on a move that already decided to stop.
         const rootCommandMoves = new Map<string, { rerun: boolean }>();
-        const backgroundForSteer = Effect.fn("ClaudeAdapterV2.backgroundForSteer")(function* (
-          context: ActiveClaudeTurnContext,
-          query: ClaudeAgentSdkQuerySession,
-          toolUseId: string,
-        ) {
-          const inFlight = rootCommandMoves.get(toolUseId);
-          if (inFlight !== undefined) {
-            inFlight.rerun = true;
-            return;
-          }
-          const move = { rerun: true };
-          rootCommandMoves.set(toolUseId, move);
-          yield* Effect.gen(function* () {
-            while (move.rerun) {
-              move.rerun = false;
-              if (
-                context.rootCommands.get(toolUseId) !== "steered" ||
-                (yield* Ref.get(activeTurn)) !== context ||
-                (yield* Ref.get(queryContext))?.query !== query ||
-                !context.toolCalls.has(toolUseId)
-              ) {
-                return;
-              }
-              const moved = yield* query.backgroundTasks(toolUseId).pipe(
-                Effect.catch((cause) =>
-                  Effect.logWarning("orchestration-v2.claude-steer-background-command-failed", {
-                    toolUseId,
-                    cause,
-                  }).pipe(Effect.as(false)),
-                ),
-              );
-              if (moved) {
-                context.rootCommands.delete(toolUseId);
-                return;
-              }
+        const backgroundForSteer = Effect.fn("ClaudeAdapterV2.backgroundForSteer")(
+          function* (
+            context: ActiveClaudeTurnContext,
+            query: ClaudeAgentSdkQuerySession,
+            toolUseId: string,
+          ) {
+            const inFlight = rootCommandMoves.get(toolUseId);
+            if (inFlight !== undefined) {
+              inFlight.rerun = true;
+              return;
             }
-          }).pipe(
-            Effect.ensuring(Effect.sync(() => rootCommandMoves.delete(toolUseId))),
-            Effect.forkIn(sessionScope),
-          );
-        });
+            const move = { rerun: false };
+            rootCommandMoves.set(toolUseId, move);
+            for (;;) {
+              if (
+                context.rootCommands.get(toolUseId) === "steered" &&
+                (yield* Ref.get(activeTurn)) === context &&
+                (yield* Ref.get(queryContext))?.query === query &&
+                context.toolCalls.has(toolUseId) &&
+                (yield* query.backgroundTasks(toolUseId).pipe(
+                  Effect.catch((cause) =>
+                    Effect.logWarning("orchestration-v2.claude-steer-background-command-failed", {
+                      toolUseId,
+                      cause,
+                    }).pipe(Effect.as(false)),
+                  ),
+                ))
+              ) {
+                context.rootCommands.delete(toolUseId);
+                break;
+              }
+              if (!move.rerun) break;
+              move.rerun = false;
+            }
+            rootCommandMoves.delete(toolUseId);
+          },
+          // Only the session scope interrupts the move, and the map ends with it.
+          (effect) => effect.pipe(Effect.forkIn(sessionScope)),
+        );
         // A worktree handoff changes the project settings even within one session.
         let bypassCache: { cwd: string | null; availability: ClaudeBypassAvailability } | null =
           null;
