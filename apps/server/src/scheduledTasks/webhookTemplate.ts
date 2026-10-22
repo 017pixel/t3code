@@ -83,30 +83,12 @@ function parseBody(request: WebhookRequest): unknown {
   }
 }
 
-const WILDCARD = /^(.*)\[\]$/;
-
-/**
- * Walks `segments` from `root`. A segment ending in `[]` names an array and
- * the rest of the path applies to each element, so `labels[].name` resolves
- * to the list of every label's name. Elements without the rest of the path
- * are dropped; a wildcard on a non-array resolves to undefined.
- */
 function lookup(root: unknown, segments: ReadonlyArray<string>): unknown {
   let current = root;
-  for (const [index, segment] of segments.entries()) {
+  for (const segment of segments) {
     if (current === null || typeof current !== "object") return undefined;
-    const wildcard = WILDCARD.exec(segment);
-    const key = wildcard ? wildcard[1]! : segment;
-    if (!Object.hasOwn(current, key)) return undefined;
-    current = (current as Record<string, unknown>)[key];
-    if (!wildcard) continue;
-    if (!Array.isArray(current)) return undefined;
-    const rest = segments.slice(index + 1);
-    return current.flatMap((element) => {
-      const value = rest.length === 0 ? element : lookup(element, rest);
-      if (value === undefined) return [];
-      return rest.some((part) => WILDCARD.test(part)) && Array.isArray(value) ? value : [value];
-    });
+    if (!Object.hasOwn(current, segment)) return undefined;
+    current = (current as Record<string, unknown>)[segment];
   }
   return current;
 }
