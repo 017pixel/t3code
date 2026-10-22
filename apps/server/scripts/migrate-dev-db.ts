@@ -236,59 +236,53 @@ const rootIsVisible = (sql: SqlClient.SqlClient) => sql`
   AND json_extract(root.payload_json, '$.archivedAt') IS NULL`;
 
 /**
+ * One transaction reads the source, so the copy is consistent while the real server writes.
+ *
  * The server imports V1 threads into the V2 tables at runtime, not in a
  * migration, and the copy keeps only threads that already have V2 rows, so a
  * source with unimported threads would migrate cleanly and silently lose them.
- * Mirrors the first half of LegacyV1ThreadImporter's pendingThreadCount; the
- * other half (lazy transcript imports) survives the copy.
- */
-const ensureNoPendingLegacyThreads = Effect.fn("ensureDevDbNoPendingLegacyThreads")(function* (
-  sourcePath: string,
-) {
-  const sql = yield* SqlClient.SqlClient;
-  const tables = yield* sql<{ name: string }>`
-    SELECT name FROM sqlite_master WHERE type = 'table'
-      AND name IN ('projection_threads', 'orchestration_v2_projection_threads')`;
-  const names = new Set(tables.map((table) => table.name));
-  if (!names.has("projection_threads")) return;
-  // The V2 tables, application_event_version, and the partial index arrive in
-  // the same migration. Without the hint SQLite scans each thread's stream.
-  const [pending] = names.has("orchestration_v2_projection_threads")
-    ? yield* sql<{ count: number }>`
-        SELECT COUNT(*) AS count FROM projection_threads AS thread
-        WHERE NOT EXISTS (
-          SELECT 1
-          FROM orchestration_events AS event INDEXED BY orchestration_events_v2_created_threads_idx
-          WHERE event.application_event_version = 2
-            AND event.aggregate_kind = 'thread'
-            AND event.stream_id = thread.thread_id
-            AND event.event_type = 'thread.created'
-        )`
-    : yield* sql<{ count: number }>`SELECT COUNT(*) AS count FROM projection_threads`;
-  const legacyThreads = Number(pending?.count ?? 0);
-  if (legacyThreads > 0) {
-    return yield* new MigrateDevDbLegacySourceError({ sourcePath, legacyThreads });
-  }
-});
-
-/**
- * One transaction reads the source, so the copy is consistent while the real server writes.
+ * The check reads the same snapshot as the copy: a V1 server can commit its
+ * first thread at any moment before it. Mirrors the first half of
+ * LegacyV1ThreadImporter's pendingThreadCount; the other half (lazy transcript
+ * imports) survives the copy.
  */
 const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath: string) {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`ATTACH DATABASE ${`${NodeURL.pathToFileURL(sourcePath).href}?mode=ro`} AS src`;
-  const schema = yield* sql<{ type: string; name: string; sql: string }>`
-    SELECT type, name, sql FROM src.sqlite_master
-    WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'`;
-  const threadColumns = yield* sql<{ name: string; notnull: number }>`
-    SELECT m.name, c."notnull" FROM src.sqlite_master m, pragma_table_info(m.name, 'src') c
-    WHERE m.type = 'table' AND c.name = 'thread_id'`;
-  const threadIdNullable = new Map(threadColumns.map((row) => [row.name, row.notnull === 0]));
-  const tables = schema.filter((entry) => entry.type === "table");
-  const filtered = tables.some((table) => table.name === "orchestration_v2_projection_threads");
 
   yield* sql.withTransaction(
     Effect.gen(function* () {
+      const schema = yield* sql<{ type: string; name: string; sql: string }>`
+        SELECT type, name, sql FROM src.sqlite_master
+        WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'`;
+      const threadColumns = yield* sql<{ name: string; notnull: number }>`
+        SELECT m.name, c."notnull" FROM src.sqlite_master m, pragma_table_info(m.name, 'src') c
+        WHERE m.type = 'table' AND c.name = 'thread_id'`;
+      const threadIdNullable = new Map(threadColumns.map((row) => [row.name, row.notnull === 0]));
+      const tables = schema.filter((entry) => entry.type === "table");
+      const filtered = tables.some((table) => table.name === "orchestration_v2_projection_threads");
+
+      if (tables.some((table) => table.name === "projection_threads")) {
+        // The V2 tables, application_event_version, and the partial index arrive in
+        // the same migration. Without the hint SQLite scans each thread's stream.
+        const [pending] = filtered
+          ? yield* sql<{ count: number }>`
+              SELECT COUNT(*) AS count FROM src.projection_threads AS thread
+              WHERE NOT EXISTS (
+                SELECT 1
+                FROM src.orchestration_events AS event INDEXED BY orchestration_events_v2_created_threads_idx
+                WHERE event.application_event_version = 2
+                  AND event.aggregate_kind = 'thread'
+                  AND event.stream_id = thread.thread_id
+                  AND event.event_type = 'thread.created'
+              )`
+          : yield* sql<{ count: number }>`SELECT COUNT(*) AS count FROM src.projection_threads`;
+        const legacyThreads = Number(pending?.count ?? 0);
+        if (legacyThreads > 0) {
+          return yield* new MigrateDevDbLegacySourceError({ sourcePath, legacyThreads });
+        }
+      }
+
       for (const table of tables) yield* sql.unsafe(table.sql).unprepared;
       if (filtered) {
         yield* sql`CREATE TEMP TABLE copied_threads (thread_id TEXT PRIMARY KEY)`;
@@ -511,19 +505,7 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
     }
   }
 
-  // Before ensureNotInUse, whose checkpoint already rewrites the destination.
-  yield* ensureNoPendingLegacyThreads(sourcePath).pipe(
-    Effect.provide(NodeSqliteClient.layer({ filename: sourcePath, readonly: true })),
-    Effect.catchTags({
-      SqlError: (cause) =>
-        Effect.fail(
-          new MigrateDevDbPhaseError({ phase: "snapshot", databasePath: sourcePath, cause }),
-        ),
-    }),
-  );
-
   yield* fs.makeDirectory(stateDir, { recursive: true });
-  yield* ensureNotInUse(databasePath);
 
   const wrapPhase =
     (phase: MigrateDevDbPhaseError["phase"], phaseDatabasePath: string) =>
@@ -539,8 +521,16 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
     yield* Console.log(`Copying visible threads from ${sourcePath} (read-only)...`);
     yield* copySourceSlice(sourcePath).pipe(
       Effect.provide(NodeSqliteClient.layer({ filename: snapshotPath })),
-      wrapPhase("snapshot", sourcePath),
+      Effect.catchTags({
+        SqlError: (cause) =>
+          Effect.fail(
+            new MigrateDevDbPhaseError({ phase: "snapshot", databasePath: sourcePath, cause }),
+          ),
+      }),
     );
+    // After the copy, whose legacy check must refuse before this checkpoint
+    // rewrites the destination.
+    yield* ensureNotInUse(databasePath);
 
     // Migrate before pruning: a source older than this checkout would
     // otherwise crash the prune queries on columns that don't exist yet.
