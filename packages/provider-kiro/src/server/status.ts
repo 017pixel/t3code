@@ -105,22 +105,21 @@ export const buildInitialKiroProviderSnapshot = (
     }),
   );
 
-const runKiroCli = (
+const runKiroCli = Effect.fn("KiroProvider.runKiroCli")(function* (
   settings: KiroSettings,
   args: ReadonlyArray<string>,
   environment: NodeJS.ProcessEnv,
-) =>
-  Effect.gen(function* () {
-    const command = settings.binaryPath || "kiro-cli";
-    const spawnCommand = yield* resolveSpawnCommand(command, args, { env: environment });
-    return yield* spawnAndCollect(
-      command,
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        env: environment,
-        shell: spawnCommand.shell,
-      }),
-    );
-  });
+) {
+  const command = settings.binaryPath || "kiro-cli";
+  const spawnCommand = yield* resolveSpawnCommand(command, args, { env: environment });
+  return yield* spawnAndCollect(
+    command,
+    ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+      env: environment,
+      shell: spawnCommand.shell,
+    }),
+  );
+});
 
 const KiroWhoami = Schema.fromJsonString(
   Schema.Struct({
@@ -346,17 +345,19 @@ export function kiroAgentDescriptor(template: unknown): ProviderOptionDescriptor
  * nothing more: no `session/new`, so no MCP server starts and no session is
  * stored. The process runs in the server's working directory.
  */
-const probeKiroAgents = (settings: KiroSettings, environment: NodeJS.ProcessEnv) =>
-  Effect.gen(function* () {
-    const runtime = yield* makeKiroAcpRuntime({
-      settings,
-      environment,
-      cwd: yield* HostProcess.WorkingDirectory,
-      clientInfo: { name: "t3-code-provider-probe", version: "0.0.0" },
-    });
-    yield* runtime.initialize();
-    return kiroAgentDescriptor(yield* runtime.request("_kiro/config/template", {}));
-  }).pipe(Effect.scoped);
+const probeKiroAgents = Effect.fn("KiroProvider.probeKiroAgents")(function* (
+  settings: KiroSettings,
+  environment: NodeJS.ProcessEnv,
+) {
+  const runtime = yield* makeKiroAcpRuntime({
+    settings,
+    environment,
+    cwd: yield* HostProcess.WorkingDirectory,
+    clientInfo: { name: "t3-code-provider-probe", version: "0.0.0" },
+  });
+  yield* runtime.initialize();
+  return kiroAgentDescriptor(yield* runtime.request("_kiro/config/template", {}));
+}, Effect.scoped);
 
 export const checkKiroProviderStatus = Effect.fn("checkKiroProviderStatus")(function* (
   settings: KiroSettings,

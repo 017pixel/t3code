@@ -136,20 +136,19 @@ export interface KiroAcpRuntimeInput extends Omit<
   readonly environment?: NodeJS.ProcessEnv;
 }
 
-export const makeKiroAcpRuntime = (
+export const makeKiroAcpRuntime = Effect.fn("KiroAcpSupport.makeKiroAcpRuntime")(function* (
   input: KiroAcpRuntimeInput,
-): Effect.Effect<
+): Effect.fn.Return<
   AcpSessionRuntime.AcpSessionRuntime["Service"],
   EffectAcpErrors.AcpError,
   ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | Scope.Scope
-> =>
-  Effect.gen(function* () {
-    const { settings, environment, ...runtimeOptions } = input;
-    const context = yield* Layer.build(
-      AcpSessionRuntime.layer({
-        ...runtimeOptions,
-        spawn: buildKiroAcpSpawnInput(settings, input.cwd, environment),
-      }),
-    );
-    return yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(Effect.provide(context));
-  });
+> {
+  const { settings, environment, ...runtimeOptions } = input;
+  const context = yield* Layer.build(
+    AcpSessionRuntime.layer({
+      ...runtimeOptions,
+      spawn: buildKiroAcpSpawnInput(settings, input.cwd, environment),
+    }),
+  );
+  return yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(Effect.provide(context));
+});

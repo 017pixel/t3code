@@ -110,31 +110,30 @@ const findKiroModelOption = (configOptions: ReadonlyArray<EffectAcpSchema.Sessio
  * A model Kiro does not list is still written, so a custom model from the
  * provider settings reaches Kiro, which decides.
  */
-const applyKiroModel = (
+const applyKiroModel = Effect.fn("KiroAdapterV2.applyKiroModel")(function* (
   runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
   modelSelection: ModelSelection,
   defaultModel: Effect.Effect<string>,
   agentSwitched: boolean,
-) =>
-  Effect.gen(function* () {
-    const modelOption = findKiroModelOption(yield* runtime.getConfigOptions);
-    const current = modelOption?.type === "select" ? modelOption.currentValue : undefined;
-    const selected = modelSelection.model.trim();
-    const isDefault = selected.length === 0 || selected === KIRO_DEFAULT_MODEL;
-    // Before Kiro advertises `model` the session is new, so it already runs
-    // Kiro's default, unless an agent switch just moved it to the agent's model.
-    if (isDefault && modelOption?.type !== "select" && !agentSwitched) {
-      return current;
-    }
-    const requested = isDefault ? yield* defaultModel : selected;
-    if (requested === current) {
-      return current;
-    }
-    yield* runtime.setConfigOption(modelOption?.id ?? KIRO_MODEL_CONFIG_ID, requested, {
-      allowUnlistedValue: true,
-    });
-    return requested;
+) {
+  const modelOption = findKiroModelOption(yield* runtime.getConfigOptions);
+  const current = modelOption?.type === "select" ? modelOption.currentValue : undefined;
+  const selected = modelSelection.model.trim();
+  const isDefault = selected.length === 0 || selected === KIRO_DEFAULT_MODEL;
+  // Before Kiro advertises `model` the session is new, so it already runs
+  // Kiro's default, unless an agent switch just moved it to the agent's model.
+  if (isDefault && modelOption?.type !== "select" && !agentSwitched) {
+    return current;
+  }
+  const requested = isDefault ? yield* defaultModel : selected;
+  if (requested === current) {
+    return current;
+  }
+  yield* runtime.setConfigOption(modelOption?.id ?? KIRO_MODEL_CONFIG_ID, requested, {
+    allowUnlistedValue: true,
   });
+  return requested;
+});
 
 /**
  * Bound on waiting for Kiro to advertise the model T3 just wrote. Kiro 2.27.0
@@ -158,46 +157,45 @@ const KIRO_MODEL_ADVERT_BOUND = "2 seconds";
  * write, or no advert within the bound, leaves Kiro's level in place rather
  * than failing the turn.
  */
-const applyKiroEffort = (
+const applyKiroEffort = Effect.fn("KiroAdapterV2.applyKiroEffort")(function* (
   runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
   modelSelection: ModelSelection,
   appliedModel: string | undefined,
-) =>
-  Effect.gen(function* () {
-    const requested = getModelSelectionStringOptionValue(modelSelection, "reasoningEffort");
-    if (requested === undefined) return;
-    const advertised = yield* runtime.configOptionChanges.pipe(
-      Stream.filter((configOptions) => {
-        const modelOption = findKiroModelOption(configOptions);
-        return (
-          appliedModel === undefined ||
-          (modelOption?.type === "select" && modelOption.currentValue === appliedModel)
-        );
-      }),
-      Stream.runHead,
-      Effect.timeoutOption(KIRO_MODEL_ADVERT_BOUND),
-      Effect.map(Option.flatten),
-    );
-    if (Option.isNone(advertised)) {
-      return yield* Effect.logWarning("Kiro did not advertise the model's reasoning effort", {
-        model: appliedModel,
-        value: requested,
-      });
-    }
-    const effortOption = advertised.value.find((option) => option.id === KIRO_EFFORT_CONFIG_ID);
-    if (effortOption?.type !== "select" || !selectValues(effortOption).includes(requested)) {
-      return;
-    }
-    yield* runtime.setConfigOption(KIRO_EFFORT_CONFIG_ID, requested).pipe(
-      Effect.catchTags({
-        AcpRequestError: (error) =>
-          Effect.logWarning("Kiro rejected the reasoning effort", {
-            value: requested,
-            detail: error.message,
-          }),
-      }),
-    );
-  });
+) {
+  const requested = getModelSelectionStringOptionValue(modelSelection, "reasoningEffort");
+  if (requested === undefined) return;
+  const advertised = yield* runtime.configOptionChanges.pipe(
+    Stream.filter((configOptions) => {
+      const modelOption = findKiroModelOption(configOptions);
+      return (
+        appliedModel === undefined ||
+        (modelOption?.type === "select" && modelOption.currentValue === appliedModel)
+      );
+    }),
+    Stream.runHead,
+    Effect.timeoutOption(KIRO_MODEL_ADVERT_BOUND),
+    Effect.map(Option.flatten),
+  );
+  if (Option.isNone(advertised)) {
+    return yield* Effect.logWarning("Kiro did not advertise the model's reasoning effort", {
+      model: appliedModel,
+      value: requested,
+    });
+  }
+  const effortOption = advertised.value.find((option) => option.id === KIRO_EFFORT_CONFIG_ID);
+  if (effortOption?.type !== "select" || !selectValues(effortOption).includes(requested)) {
+    return;
+  }
+  yield* runtime.setConfigOption(KIRO_EFFORT_CONFIG_ID, requested).pipe(
+    Effect.catchTags({
+      AcpRequestError: (error) =>
+        Effect.logWarning("Kiro rejected the reasoning effort", {
+          value: requested,
+          detail: error.message,
+        }),
+    }),
+  );
+});
 
 /**
  * Selects the thread's Kiro agent (the snapshot's `mode` select) and reports
@@ -208,24 +206,23 @@ const applyKiroEffort = (
  * since the provider snapshot) is skipped: Kiro would accept the write and
  * stay on its current agent.
  */
-const applyKiroAgent = (
+const applyKiroAgent = Effect.fn("KiroAdapterV2.applyKiroAgent")(function* (
   runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
   modelSelection: ModelSelection,
-) =>
-  Effect.gen(function* () {
-    const requested = getModelSelectionStringOptionValue(modelSelection, KIRO_AGENT_CONFIG_ID);
-    if (requested === undefined) return false;
-    const agentOption = (yield* runtime.getConfigOptions).find(
-      (option) => option.id === KIRO_AGENT_CONFIG_ID,
-    );
-    if (agentOption?.type !== "select" || agentOption.currentValue === requested) return false;
-    if (!selectValues(agentOption).includes(requested)) {
-      yield* Effect.logWarning("Kiro does not list the thread's agent", { agent: requested });
-      return false;
-    }
-    yield* runtime.setConfigOption(KIRO_AGENT_CONFIG_ID, requested);
-    return true;
-  });
+) {
+  const requested = getModelSelectionStringOptionValue(modelSelection, KIRO_AGENT_CONFIG_ID);
+  if (requested === undefined) return false;
+  const agentOption = (yield* runtime.getConfigOptions).find(
+    (option) => option.id === KIRO_AGENT_CONFIG_ID,
+  );
+  if (agentOption?.type !== "select" || agentOption.currentValue === requested) return false;
+  if (!selectValues(agentOption).includes(requested)) {
+    yield* Effect.logWarning("Kiro does not list the thread's agent", { agent: requested });
+    return false;
+  }
+  yield* runtime.setConfigOption(KIRO_AGENT_CONFIG_ID, requested);
+  return true;
+});
 
 const applyKiroModelSelection =
   (defaultModel: Effect.Effect<string>): NonNullable<AcpAdapterV2Flavor["applyModelSelection"]> =>
