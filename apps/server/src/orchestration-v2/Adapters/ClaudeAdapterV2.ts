@@ -4051,9 +4051,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         // The SDK can't cancel a move, so each command has at most one in
         // flight. A request made meanwhile, from another steer or the task's
-        // late registration, runs again once that move answers. The entry is
-        // claimed and released without a yield in between, so no request
-        // lands on a move that already decided to stop.
+        // late registration, runs again once that move answers. The last rerun
+        // check and the release don't yield in between, so no request lands
+        // on a move that already decided to stop.
         const rootCommandMoves = new Map<string, { rerun: boolean }>();
         const backgroundForSteer = Effect.fn("ClaudeAdapterV2.backgroundForSteer")(
           function* (
