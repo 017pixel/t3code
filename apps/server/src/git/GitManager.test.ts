@@ -4804,6 +4804,14 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       pullPath: "pulls",
       forgejo: true,
     },
+    // SSH omits the mount; only the provider maps the remote to its mounted web repository.
+    {
+      host: "Forgejo under /git over SSH",
+      root: "https://forge.test/git",
+      pullPath: "pulls",
+      forgejo: true,
+      remoteUrl: "git@forge.test:octocat/codething-mvp.git",
+    },
   ])("prepares a worktree PR thread in a clone of only the head fork on $host", (forge) =>
     Effect.gen(function* () {
       // A contributor's clone of their own fork has no remote for the base repository; the head
@@ -4812,12 +4820,8 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* initRepo(repoDir);
       const forkDir = yield* createBareRemote();
       yield* runGit(repoDir, ["remote", "add", "origin", forkDir]);
-      yield* configureVisibleRemoteUrlWithLocalRewrite(
-        repoDir,
-        "origin",
-        `${forge.root}/octocat/codething-mvp.git`,
-        forkDir,
-      );
+      const visibleUrl = forge.remoteUrl ?? `${forge.root}/octocat/codething-mvp.git`;
+      yield* configureVisibleRemoteUrlWithLocalRewrite(repoDir, "origin", visibleUrl, forkDir);
       yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
       yield* runGit(repoDir, ["checkout", "-b", "feature/fork-only"]);
       NodeFS.writeFileSync(NodePath.join(repoDir, "fork.txt"), "fork\n");
@@ -4855,6 +4859,12 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
                 ...createGitHubProviderWithFakeGh(ghScenario).service,
                 repositoryNameFromRemoteUrl:
                   ForgejoSourceControlProvider.repositoryNameFromRemoteUrl,
+                refineRepositoryIdentity: ({ identity }) =>
+                  Effect.succeed(
+                    identity.locator.remoteUrl === forge.remoteUrl
+                      ? { ...identity, webUrl: `${forge.root}/octocat/codething-mvp` }
+                      : identity,
+                  ),
               },
             }
           : {}),
@@ -4871,6 +4881,61 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         "fork\n",
       );
     }),
+  );
+
+  it.effect.each(["local", "worktree"] as const)(
+    "refuses a mounted Forgejo PR in %s mode from a checkout on the host's root server",
+    (mode) =>
+      Effect.gen(function* () {
+        // A host can proxy one forge at its root and another under `/git`; the same owner/name on
+        // the root server is a different repository.
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        const forkDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", forkDir]);
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "origin",
+          "https://forge.test/octocat/codething-mvp.git",
+          forkDir,
+        );
+
+        const ghScenario = {
+          pullRequest: {
+            number: 82,
+            title: "Fork-only PR",
+            url: "https://forge.test/git/pingdotgg/codething-mvp/pulls/82",
+            baseRefName: "main",
+            headRefName: "feature/fork-only",
+            state: "open",
+            isCrossRepository: true,
+            headRepositoryNameWithOwner: "octocat/codething-mvp",
+            headRepositoryOwnerLogin: "octocat",
+          },
+        };
+        const gitCommands: string[] = [];
+        const { manager } = yield* makeManager({
+          gitCommands,
+          ghScenario,
+          sourceControlProvider: {
+            ...createGitHubProviderWithFakeGh(ghScenario).service,
+            repositoryNameFromRemoteUrl: ForgejoSourceControlProvider.repositoryNameFromRemoteUrl,
+          },
+        });
+
+        const error = yield* preparePullRequestThread(manager, {
+          cwd: repoDir,
+          reference: "82",
+          mode,
+        }).pipe(Effect.flip);
+
+        expect(error.message).toContain(
+          "Pull request #82 belongs to forge.test/git/pingdotgg/codething-mvp, and this project is not a checkout of it.",
+        );
+        expect(gitCommands.filter((command) => command.startsWith("fetch"))).toEqual([]);
+        const worktrees = (yield* runGit(repoDir, ["worktree", "list", "--porcelain"])).stdout;
+        expect(worktrees.match(/^worktree /gm)).toHaveLength(1);
+      }),
   );
 
   it.effect("preserves fork upstream tracking when preparing a worktree PR thread", () =>

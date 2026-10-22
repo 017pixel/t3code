@@ -2758,7 +2758,8 @@ export const make = Effect.gen(function* () {
       const baseKey = pullRequestRepositoryKey(pullRequest.url);
       const headRepository = resolvePullRequestHeadRepositoryNameWithOwner(pullRequest);
       // The head is named without the installation mount (Forgejo under `/git`) its web URL
-      // carries, and SSH remotes omit that mount too, so it is looked for at both.
+      // carries, so it lives under the base's serving root. The same path at the host's root can be
+      // another server; SSH remotes that omit the mount match through provider refinement below.
       const baseName =
         baseKey === null
           ? null
@@ -2766,24 +2767,19 @@ export const make = Effect.gen(function* () {
               `https://${baseKey}`,
               provider,
             )?.toLowerCase();
-      const headRoots =
+      const headRoot =
         baseKey === null
-          ? []
-          : [
-              baseKey.split("/")[0],
-              ...(baseName && baseKey.endsWith(`/${baseName}`)
-                ? [baseKey.slice(0, -baseName.length - 1)]
-                : []),
-            ];
+          ? null
+          : baseName && baseKey.endsWith(`/${baseName}`)
+            ? baseKey.slice(0, -baseName.length - 1)
+            : baseKey.split("/")[0];
       const repositoryKeys = new Set(
         baseKey === null
           ? []
           : [
               canonicalRepositoryKey(baseKey),
               ...(headRepository
-                ? headRoots.map((root) =>
-                    canonicalRepositoryKey(`${root}/${headRepository.toLowerCase()}`),
-                  )
+                ? [canonicalRepositoryKey(`${headRoot}/${headRepository.toLowerCase()}`)]
                 : []),
             ],
       );
