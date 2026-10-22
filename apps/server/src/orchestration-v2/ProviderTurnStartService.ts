@@ -4,6 +4,7 @@ import { projectComposerContextForProvider } from "@t3tools/shared/composerConte
 import {
   CommandId,
   latestProviderTurnForAttempt,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderThread,
@@ -421,7 +422,7 @@ export const layer: Layer.Layer<
               providerAuth.tryHandlePromptCommand({
                 instanceId: authInstanceId,
                 text: projectComposerContextForProvider({
-                  text: expandAssistantCitationsForProvider(message.text),
+                  text: message.text,
                   records: message.context?.records ?? [],
                 }),
                 hasAttachments: false,
@@ -472,6 +473,28 @@ export const layer: Layer.Layer<
           });
           return;
         }
+      }
+      // Encoded links fit the input limit at send time; the expanded excerpts may not.
+      const citedText = expandAssistantCitationsForProvider(message.text);
+      if (citedText !== message.text && citedText.length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
+        const now = yield* DateTime.now;
+        yield* settleRunBeforeStart({
+          signal: "citation-input-limit",
+          status: "failed",
+          now,
+          startedAt: now,
+          providerInstanceId: run.providerInstanceId,
+          itemProviderThreadId: providerThread.id,
+          item: {
+            type: "error",
+            title: "Message too long",
+            failure: makeProviderFailure({
+              class: "validation_error",
+              message: `Quoted citations expand this message past the ${PROVIDER_SEND_TURN_MAX_INPUT_CHARS.toLocaleString("en-US")}-character limit. Quote less or split the message.`,
+            }),
+          },
+        });
+        return;
       }
       const { worktreePath, branch } = projection.thread;
       if (worktreePath !== null && branch !== null) {
@@ -956,7 +979,7 @@ export const layer: Layer.Layer<
         RunExecutionService.canRouteRelatedSubagent(subagent.status),
       );
       const userText = projectComposerContextForProvider({
-        text: expandAssistantCitationsForProvider(message.text),
+        text: citedText,
         records: message.context?.records ?? [],
       });
       // Delivered once: this run's provider turn marks the work as told. A

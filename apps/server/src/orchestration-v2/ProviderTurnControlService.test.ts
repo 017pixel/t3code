@@ -5,6 +5,7 @@ import {
   type ModelSelection,
   NodeId,
   type OrchestrationV2ProviderThread,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type OrchestrationV2ThreadProjection,
   ProjectId,
   ProviderDriverKind,
@@ -336,8 +337,20 @@ it.effect(
     }),
 );
 
-// regression: #16327 assistant citations reached providers as raw links
-it.effect("expands assistant citations before steering the provider turn", () =>
+const citationText = (excerpt: string) =>
+  serializeAssistantCitation({
+    version: 1,
+    environmentId: EnvironmentId.make("environment-citation"),
+    threadId: ThreadId.make("thread:steer-citation"),
+    messageId: MessageId.make("assistant-message-citation"),
+    text: excerpt,
+    start: 0,
+    end: excerpt.length,
+    prefix: "",
+    suffix: "",
+  });
+
+const steerCitationMessage = (text: string) =>
   Effect.gen(function* () {
     const now = yield* DateTime.now;
     const threadId = ThreadId.make("thread:steer-citation");
@@ -364,18 +377,6 @@ it.effect("expands assistant citations before steering the provider turn", () =>
       updatedAt: now,
     };
     const projection = makeProjection({ now, threadId, providerThread, providerTurnId, attemptId });
-    const citation = serializeAssistantCitation({
-      version: 1,
-      environmentId: EnvironmentId.make("environment-citation"),
-      threadId,
-      messageId: MessageId.make("assistant-message-citation"),
-      text: "The café opens at noon.",
-      start: 0,
-      end: 23,
-      prefix: "",
-      suffix: "",
-    });
-    const text = `${citation} Echo my input exactly.`;
     const message = {
       id: messageId,
       text,
@@ -416,7 +417,7 @@ it.effect("expands assistant citations before steering the provider turn", () =>
       ),
     );
 
-    yield* Effect.gen(function* () {
+    const exit = yield* Effect.gen(function* () {
       const control = yield* ProviderTurnControlService.ProviderTurnControlServiceV2;
       yield* control.steer({
         threadId,
@@ -425,8 +426,34 @@ it.effect("expands assistant citations before steering the provider turn", () =>
         providerTurnId,
         messageId,
       });
-    }).pipe(Effect.provide(layerControl));
+    }).pipe(Effect.provide(layerControl), Effect.exit);
 
-    assert.equal(yield* Ref.get(steered), expandAssistantCitationsForProvider(text));
+    return { exit, steered: yield* Ref.get(steered) };
+  });
+
+// regression: #16327 assistant citations reached providers as raw links
+it.effect("expands assistant citations before steering the provider turn", () =>
+  Effect.gen(function* () {
+    const text = `${citationText("The café opens at noon.")} Echo my input exactly.`;
+
+    const { exit, steered } = yield* steerCitationMessage(text);
+
+    assert.isTrue(Exit.isSuccess(exit));
+    assert.equal(steered, expandAssistantCitationsForProvider(text));
+  }),
+);
+
+it.effect("rejects a steer whose expanded citations exceed the provider input limit", () =>
+  Effect.gen(function* () {
+    const followUp = `${citationText("The café opens at noon.")} Echo my input exactly.`;
+    const text = `${"x".repeat(
+      PROVIDER_SEND_TURN_MAX_INPUT_CHARS - expandAssistantCitationsForProvider(followUp).length + 1,
+    )}${followUp}`;
+    assert.isBelow(text.length, PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+
+    const { exit, steered } = yield* steerCitationMessage(text);
+
+    assert.isTrue(Exit.isFailure(exit));
+    assert.isNull(steered);
   }),
 );

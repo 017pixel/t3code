@@ -4,6 +4,7 @@ import { it as effectIt } from "@effect/vitest";
 import {
   CheckpointScopeId,
   EnvironmentId,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   MessageId,
   NodeId,
   ProviderSessionId,
@@ -827,6 +828,35 @@ effectIt.effect("expands assistant citations before the provider turn starts", (
       expandAssistantCitationsForProvider(text),
     );
     expect(harness.projection().messages.at(-1)?.text).toBe(text);
+  }),
+);
+
+effectIt.effect("fails the run when expanded citations exceed the provider input limit", () =>
+  Effect.gen(function* () {
+    const followUp = `${serializeAssistantCitation({
+      version: 1,
+      environmentId: EnvironmentId.make("environment-citation"),
+      threadId: ThreadId.make("thread-citation"),
+      messageId: MessageId.make("assistant-message-citation"),
+      text: "The café opens at noon.",
+      start: 0,
+      end: 23,
+      prefix: "",
+      suffix: "",
+    })} Echo my input exactly.`;
+    const text = `${"x".repeat(
+      PROVIDER_SEND_TURN_MAX_INPUT_CHARS - expandAssistantCitationsForProvider(followUp).length + 1,
+    )}${followUp}`;
+    expect(text.length).toBeLessThan(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+    const harness = makeLocalCommandHarness({ text });
+
+    yield* harness.start;
+
+    expect(harness.startRootRun).not.toHaveBeenCalled();
+    expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+    expect(harness.projection().turnItems).toMatchObject([
+      { type: "error", failure: { class: "validation_error" } },
+    ]);
   }),
 );
 
