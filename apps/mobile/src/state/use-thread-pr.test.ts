@@ -1,7 +1,12 @@
-import { ProjectId, type ThreadPullRequestLink } from "@t3tools/contracts";
+import { ProjectId, type ThreadPullRequestLink, type VcsStatusResult } from "@t3tools/contracts";
+import { buildMenuItems } from "@t3tools/client-runtime/state/vcs";
 import { describe, expect, it } from "vite-plus/test";
 
-import { presentThreadLinkedPullRequests, resolveThreadPrSource } from "./thread-pr-presentation";
+import {
+  presentThreadLinkedPullRequests,
+  resolveThreadPrSource,
+  withThreadOpenPullRequest,
+} from "./thread-pr-presentation";
 
 function linkedPr(
   number: number,
@@ -100,5 +105,64 @@ describe("resolveThreadPrSource compatibility", () => {
         { threadPullRequests: true },
       ),
     ).toMatchObject({ linkedPresentation: { number: 3, state: null }, pullRequestRef: null });
+  });
+});
+
+describe("withThreadOpenPullRequest", () => {
+  const status: VcsStatusResult = {
+    isRepo: true,
+    hasPrimaryRemote: true,
+    isDefaultRef: false,
+    refName: "local-work",
+    hasWorkingTreeChanges: false,
+    workingTree: { files: [], insertions: 0, deletions: 0 },
+    hasUpstream: true,
+    aheadCount: 1,
+    behindCount: 0,
+    pr: null,
+  };
+  const prLabel = (next: VcsStatusResult | null) =>
+    buildMenuItems(next, false).find((item) => item.id === "pr")?.label;
+
+  it("offers the linked open pull request when the checkout's ref has none", () => {
+    const next = withThreadOpenPullRequest(status, [linkedPr(42)]);
+    expect(next?.pr).toMatchObject({ number: 42, url: linkedPr(42).url, state: "open" });
+    expect(prLabel(next)).toBe("View PR");
+  });
+
+  it("treats a link waiting for its first sync as open", () => {
+    expect(withThreadOpenPullRequest(status, [linkedPr(42, { snapshot: null })])?.pr).toMatchObject(
+      { number: 42, state: "open" },
+    );
+  });
+
+  it("keeps the checkout ref's own open pull request", () => {
+    const own: VcsStatusResult = {
+      ...status,
+      pr: {
+        number: 3,
+        title: "Own change",
+        url: "https://github.com/t3tools/t3code/pull/3",
+        baseRef: "main",
+        headRef: "local-work",
+        state: "open",
+      },
+    };
+    expect(withThreadOpenPullRequest(own, [linkedPr(42)])).toBe(own);
+  });
+
+  it("ignores links that are no longer open", () => {
+    const merged = linkedPr(42, { snapshot: { ...linkedPr(42).snapshot!, state: "merged" } });
+    const closed = linkedPr(43, { snapshot: { ...linkedPr(43).snapshot!, state: "closed" } });
+    expect(withThreadOpenPullRequest(status, [merged, closed])).toBe(status);
+    expect(prLabel(withThreadOpenPullRequest(status, [merged]))).toBe("Create PR");
+  });
+
+  it("prefers an open link over a merged one", () => {
+    const merged = linkedPr(41, {
+      linkedAt: "2026-09-10T00:00:00.000Z",
+      snapshot: { ...linkedPr(41).snapshot!, state: "merged" },
+    });
+    expect(withThreadOpenPullRequest(status, [merged, linkedPr(42)])?.pr?.number).toBe(42);
   });
 });

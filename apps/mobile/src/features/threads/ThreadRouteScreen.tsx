@@ -66,6 +66,7 @@ import {
 import { terminalDebugLog } from "../terminal/terminalDebugLog";
 import { ThreadDetailScreen, type ThreadDetailScreenProps } from "./ThreadDetailScreen";
 import { GitOverviewSheet } from "./git/GitOverviewSheet";
+import { withThreadOpenPullRequest } from "../../state/thread-pr-presentation";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useSelectedThreadGitActions } from "../../state/use-selected-thread-git-actions";
 import { useSelectedThreadGitState } from "../../state/use-selected-thread-git-state";
@@ -711,7 +712,10 @@ function ThreadRouteContent(
         ? () => void handleMergeBack()
         : undefined,
     currentBranch: selectedThread?.branch ?? null,
-    gitStatus: gitStatus.data,
+    gitStatus: withThreadOpenPullRequest(
+      gitStatus.data ?? null,
+      selectedThread?.pullRequests ?? [],
+    ),
     gitOperationLabel: gitState.gitOperationLabel,
     canOpenTerminal:
       Boolean(selectedThreadProject?.workspaceRoot) && (canReadTerminal || canOperateTerminal),
@@ -993,6 +997,7 @@ function ThreadRouteContent(
         headerColor={headerColor}
         usesNativeHeaderGlass={usesNativeHeaderGlass}
         gitControls={threadGitControlProps}
+        thread={selectedThread}
         hasThreadCwd={selectedThreadCwd !== null}
         hasWorkspaceRoot={Boolean(selectedThreadProject?.workspaceRoot)}
         fileInspectorSupported={fileInspector.supported}

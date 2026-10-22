@@ -123,3 +123,32 @@ export function resolveThreadPrBadgeAction(pr: ThreadPrPresentation) {
     ? { kind: "list" as const, accessibilityLabel: `Show ${pr.accessibilityLabel}` }
     : { kind: "open" as const, accessibilityLabel: `Open ${pr.accessibilityLabel}` };
 }
+
+/**
+ * Checkout status only sees a PR on the checked-out ref, so a linked PR on another ref (a fork
+ * branch, another stack layer) would leave the Git menus offering Create PR. The ref's own open
+ * PR wins; otherwise the thread's current open link stands in. Unsynced links count as open,
+ * as they do in the thread list.
+ */
+export function withThreadOpenPullRequest(
+  status: VcsStatusResult | null,
+  links: ReadonlyArray<ThreadPullRequestLink>,
+): VcsStatusResult | null {
+  if (status === null || status.pr?.state === "open") return status;
+  const link = resolveThreadCurrentPullRequestLink(links);
+  const snapshot = link?.snapshot ?? null;
+  if (link === null || (snapshot !== null && snapshot.state !== "open")) return status;
+  return {
+    ...status,
+    pr: {
+      number: link.number,
+      title: snapshot?.title ?? `#${link.number}`,
+      url: link.url,
+      baseRef: snapshot?.baseBranch ?? "unknown",
+      headRef: snapshot?.headBranch ?? "unknown",
+      state: "open",
+      isDraft: snapshot?.isDraft === true,
+      updatedAt: snapshot?.updatedAt ?? null,
+    },
+  };
+}
