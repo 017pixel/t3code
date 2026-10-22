@@ -103,47 +103,49 @@ it.effect("forks a session stored under the instance's own CLAUDE_CONFIG_DIR", (
 // a project hook can legitimately run past 90 s, e.g. a cold worktree's setup
 // script (#23151).
 it.effect("opens a session whose SessionStart hook outlasts 90 seconds", () =>
-  Effect.gen(function* () {
-    const registrationStarted = yield* Deferred.make<void>();
-    let answerRegistration: () => void = () => {};
-    const close = vi.fn();
-    const fakeQuery = vi.spyOn(ClaudeSdk, "query").mockImplementation(
-      () =>
-        ({
-          setMcpServers: () => {
-            Deferred.doneUnsafe(registrationStarted, Exit.void);
-            return new Promise((resolve) => {
-              answerRegistration = () => resolve({ added: ["t3-code"], removed: [], errors: {} });
-            });
+  Effect.scoped(
+    Effect.gen(function* () {
+      const registrationStarted = yield* Deferred.make<void>();
+      let answerRegistration: () => void = () => {};
+      const close = vi.fn();
+      const fakeQuery = vi.spyOn(ClaudeSdk, "query").mockImplementation(
+        () =>
+          ({
+            setMcpServers: () => {
+              Deferred.doneUnsafe(registrationStarted, Exit.void);
+              return new Promise((resolve) => {
+                answerRegistration = () => resolve({ added: ["t3-code"], removed: [], errors: {} });
+              });
+            },
+            close,
+          }) as unknown as ClaudeSdk.Query,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(() => fakeQuery.mockRestore()));
+
+      const runner = yield* ClaudeAgentSdkQueryRunner;
+      const opening = yield* runner
+        .open({
+          threadId: ThreadId.make("thread-slow-session-start-hook"),
+          providerSessionId: ProviderSessionId.make("session-slow-session-start-hook"),
+          options: {
+            sessionId: "native-session-slow-session-start-hook",
+            model: "claude-sonnet-4-6",
+            tools: [],
+            permissionMode: "default",
+            mcpServers: { "t3-code": { type: "http", url: "http://127.0.0.1:1/mcp" } },
           },
-          close,
-        }) as unknown as ClaudeSdk.Query,
-    );
-    yield* Effect.addFinalizer(() => Effect.sync(() => fakeQuery.mockRestore()));
+        })
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(registrationStarted);
 
-    const runner = yield* ClaudeAgentSdkQueryRunner;
-    const opening = yield* runner
-      .open({
-        threadId: ThreadId.make("thread-slow-session-start-hook"),
-        providerSessionId: ProviderSessionId.make("session-slow-session-start-hook"),
-        options: {
-          sessionId: "native-session-slow-session-start-hook",
-          model: "claude-sonnet-4-6",
-          tools: [],
-          permissionMode: "default",
-          mcpServers: { "t3-code": { type: "http", url: "http://127.0.0.1:1/mcp" } },
-        },
-      })
-      .pipe(Effect.forkScoped);
-    yield* Deferred.await(registrationStarted);
+      yield* TestClock.adjust("105 seconds");
+      answerRegistration();
+      const exit = yield* Fiber.await(opening);
 
-    yield* TestClock.adjust("105 seconds");
-    answerRegistration();
-    const exit = yield* Fiber.await(opening);
-
-    assert.isTrue(Exit.isSuccess(exit), `open failed: ${String(exit)}`);
-    assert.equal(close.mock.calls.length, 0);
-  }).pipe(Effect.provide(forkRunnerLayer), Effect.provide(NodeServices.layer), Effect.scoped),
+      assert.isTrue(Exit.isSuccess(exit), `open failed: ${String(exit)}`);
+      assert.equal(close.mock.calls.length, 0);
+    }).pipe(Effect.provide(forkRunnerLayer)),
+  ).pipe(Effect.provide(NodeServices.layer)),
 );
 
 const realQueryRunner = layerQueryRunner.pipe(
