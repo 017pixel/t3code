@@ -304,6 +304,37 @@ describe("DesktopBackendPool", () => {
     );
   });
 
+  it.effect("surfaces a new crash loop after an explicit stop and start", () => {
+    const native = makeNativeSpy();
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pool = yield* DesktopBackendPool.DesktopBackendPool;
+        const primary = yield* pool.primary;
+        yield* primary.start;
+        yield* TestClock.adjust(Duration.minutes(1));
+        assert.equal(native.messageBoxes.length, 1);
+
+        yield* primary.stop();
+        yield* primary.start;
+        yield* TestClock.adjust(Duration.minutes(1));
+
+        assert.equal(native.messageBoxes.length, 2);
+      }).pipe(
+        Effect.provide(
+          Layer.merge(
+            layerPool(Ref.makeUnsafe("Windows"), {
+              resolvePrimary: Effect.succeed(primaryConfig),
+              spawner: exitingProcess(() => {}),
+              httpClient: HttpClient.make(() => Effect.never),
+              native,
+            }),
+            TestClock.layer(),
+          ),
+        ),
+      ),
+    );
+  });
+
   it.effect("still surfaces crashes that follow a bounded preflight fallback", () => {
     const native = makeNativeSpy();
     let resolveCount = 0;

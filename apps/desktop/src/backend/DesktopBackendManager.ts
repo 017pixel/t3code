@@ -1070,6 +1070,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
               ...latest,
               desiredRunning: false,
               ready: false,
+              startFailureStreak: 0,
               active,
               restartFiber: Option.none<Fiber.Fiber<void, never>>(),
             },

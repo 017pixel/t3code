@@ -34,6 +34,9 @@ p.add_argument("--seconds", type=int, default=33)
 p.add_argument("--xclip", default="xclip")
 a = p.parse_args()
 w = pathlib.Path(a.worktree).resolve()
+# Bounds every synchronous helper call; a timeout raises into the finally that
+# restores the checkout.
+TIMEOUT = 30
 out = pathlib.Path(a.output).resolve()
 
 
@@ -59,6 +62,7 @@ def source(ref):
         + [ref + "^{commit}"],
         capture_output=True,
         text=True,
+        timeout=TIMEOUT,
     )
     if r.returncode != 0:
         raise SystemExit(f"source ref {ref!r} is not a commit in {w}")
@@ -128,7 +132,9 @@ events = []
 caption_columns = max(
     24,
     int(
-        subprocess.check_output(["xdotool", "getdisplaygeometry"], text=True).split()[0]
+        subprocess.check_output(
+            ["xdotool", "getdisplaygeometry"], text=True, timeout=TIMEOUT
+        ).split()[0]
     )
     // 9,
 )
@@ -173,6 +179,7 @@ def windows():
         ["xdotool", "search", "--name", "T3 Code's backend"],
         capture_output=True,
         text=True,
+        timeout=TIMEOUT,
     )
     return r.stdout.split()
 
@@ -207,7 +214,9 @@ try:
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     event("recording starts; whole X display; captions are capture instrumentation")
     geo = (
-        subprocess.check_output(["xdotool", "getdisplaygeometry"], text=True)
+        subprocess.check_output(
+            ["xdotool", "getdisplaygeometry"], text=True, timeout=TIMEOUT
+        )
         .strip()
         .split()
     )
@@ -288,27 +297,36 @@ try:
     event("dialog windows=" + str(ids))
     (out / "windows.txt").write_text(
         subprocess.run(
-            ["xdotool", "search", "--name", "."], capture_output=True, text=True
+            ["xdotool", "search", "--name", "."],
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
         ).stdout
     )
     if ids:
         (out / "geometry.txt").write_text(
             subprocess.check_output(
-                ["xdotool", "getwindowgeometry", "--shell", ids[-1]], text=True
+                ["xdotool", "getwindowgeometry", "--shell", ids[-1]],
+                text=True,
+                timeout=TIMEOUT,
             )
         )
     subprocess.run(
-        ["import", "-window", "root", str(out / "before-action.png")], check=True
+        ["import", "-window", "root", str(out / "before-action.png")],
+        check=True,
+        timeout=TIMEOUT,
     )
     if ids and a.action != "none":
         wid = ids[-1]
-        subprocess.run(["xdotool", "windowfocus", wid])
+        subprocess.run(["xdotool", "windowfocus", wid], timeout=TIMEOUT)
         event("action " + a.action)
         if a.action == "click":
             geometry = dict(
                 line.split("=", 1)
                 for line in subprocess.check_output(
-                    ["xdotool", "getwindowgeometry", "--shell", wid], text=True
+                    ["xdotool", "getwindowgeometry", "--shell", wid],
+                    text=True,
+                    timeout=TIMEOUT,
                 ).splitlines()
             )
             subprocess.run(
@@ -321,13 +339,15 @@ try:
                     str(int(geometry["HEIGHT"]) - 18),
                     "click",
                     "1",
-                ]
+                ],
+                timeout=TIMEOUT,
             )
         elif a.action == "close":
-            subprocess.run(["xdotool", "key", "Tab", "Return"])
+            subprocess.run(["xdotool", "key", "Tab", "Return"], timeout=TIMEOUT)
         else:
             subprocess.run(
-                ["xdotool", "key", "Return" if a.action == "copy" else "Escape"]
+                ["xdotool", "key", "Return" if a.action == "copy" else "Escape"],
+                timeout=TIMEOUT,
             )
         time.sleep(2)
         text = subprocess.check_output(
@@ -342,7 +362,9 @@ try:
         event("no dialog action target; matched observation")
         time.sleep(5)
     subprocess.run(
-        ["import", "-window", "root", str(out / "after-action.png")], check=True
+        ["import", "-window", "root", str(out / "after-action.png")],
+        check=True,
+        timeout=TIMEOUT,
     )
     event(
         "final restart schedules="
@@ -361,9 +383,13 @@ finally:
         for proc in reversed(procs):
             stop(proc)
     finally:
-        main.write_bytes(original)
-        if saved_entry.exists():
-            saved_entry.rename(entry)
-        (out / "cleanup.json").write_text(
-            json.dumps({str(proc.pid): proc.poll() for proc in procs})
-        )
+        try:
+            main.write_bytes(original)
+        finally:
+            try:
+                if saved_entry.exists():
+                    saved_entry.rename(entry)
+            finally:
+                (out / "cleanup.json").write_text(
+                    json.dumps({str(proc.pid): proc.poll() for proc in procs})
+                )
