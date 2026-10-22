@@ -1,11 +1,13 @@
-import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 // Keep captures reproducible without copying conversation or application state.
-const output = path.resolve(process.argv[2] ?? path.join(tmpdir(), "source-selection-fixtures"));
-await mkdir(output, { recursive: true });
+const output = NodePath.resolve(
+  process.argv[2] ?? NodePath.join(NodeOS.tmpdir(), "source-selection-fixtures"),
+);
+await NodeFSP.mkdir(output, { recursive: true });
 const lines = Array.from({ length: 226 }, (_, index) => {
   const id = String(index + 1).padStart(3, "0");
   return `SELECT ${id} AS line_number; -- clipboard fixture ${id}`;
@@ -30,11 +32,11 @@ const fixtures = {
 };
 const manifest = {};
 for (const [name, text] of Object.entries(fixtures)) {
-  await writeFile(path.join(output, name), text);
+  await NodeFSP.writeFile(NodePath.join(output, name), text);
   manifest[name] = {
     bytes: Buffer.byteLength(text),
     utf16Length: text.length,
-    sha256: createHash("sha256").update(text).digest("hex"),
+    sha256: NodeCrypto.createHash("sha256").update(text).digest("hex"),
     crlf: (text.match(/\r\n/g) ?? []).length,
     loneCr: (text.match(/\r(?!\n)/g) ?? []).length,
     loneLf: (text.match(/(?<!\r)\n/g) ?? []).length,
@@ -43,5 +45,8 @@ for (const [name, text] of Object.entries(fixtures)) {
     firstTwoStatements: name.endsWith(".sql") ? text.slice(0, text.indexOf("SELECT 003")) : null,
   };
 }
-await writeFile(path.join(output, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+await NodeFSP.writeFile(
+  NodePath.join(output, "manifest.json"),
+  `${JSON.stringify(manifest, null, 2)}\n`,
+);
 console.log(output);
