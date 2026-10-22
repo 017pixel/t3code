@@ -443,6 +443,30 @@ it.effect("expands assistant citations before steering the provider turn", () =>
   }),
 );
 
+it.effect("keeps context links quoted inside a steered citation literal", () =>
+  Effect.gen(function* () {
+    const excerpt = "Use [Thread: label](t3-context://v1/thread/demo) here.";
+    const text = `${serializeAssistantCitation({
+      version: 1,
+      environmentId: EnvironmentId.make("environment-citation"),
+      threadId: ThreadId.make("thread:steer-citation"),
+      messageId: MessageId.make("assistant-message-citation"),
+      text: excerpt,
+      start: 0,
+      end: excerpt.length,
+      prefix: "",
+      suffix: "",
+      comment: excerpt,
+    })} Echo my input exactly.`;
+
+    const { exit, steered } = yield* steerCitationMessage(text);
+
+    assert.isTrue(Exit.isSuccess(exit));
+    assert.equal(steered, expandAssistantCitationsForProvider(text));
+    assert.notInclude(steered, "<t3_context");
+  }),
+);
+
 it.effect("rejects a steer whose expanded citations exceed the provider input limit", () =>
   Effect.gen(function* () {
     const followUp = `${citationText("The café opens at noon.")} Echo my input exactly.`;

@@ -373,10 +373,12 @@ export const layer: Layer.Layer<
               providerTurnId: loaded.providerTurn.id,
               message: {
                 messageId: message.id,
-                text: projectComposerContextForProvider({
-                  text: citedText,
-                  records: message.context?.records ?? [],
-                }),
+                text: expandAssistantCitationsForProvider(message.text, (text) =>
+                  projectComposerContextForProvider({
+                    text,
+                    records: message.context?.records ?? [],
+                  }),
+                ),
                 attachments: message.attachments,
                 createdBy: message.createdBy,
                 creationSource: message.creationSource,

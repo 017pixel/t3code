@@ -831,6 +831,31 @@ effectIt.effect("expands assistant citations before the provider turn starts", (
   }),
 );
 
+effectIt.effect("keeps context links quoted inside a citation literal", () =>
+  Effect.gen(function* () {
+    const excerpt = "Use [Thread: label](t3-context://v1/thread/demo) here.";
+    const text = `${serializeAssistantCitation({
+      version: 1,
+      environmentId: EnvironmentId.make("environment-citation"),
+      threadId: ThreadId.make("thread-citation"),
+      messageId: MessageId.make("assistant-message-citation"),
+      text: excerpt,
+      start: 0,
+      end: excerpt.length,
+      prefix: "",
+      suffix: "",
+      comment: excerpt,
+    })} Echo my input exactly.`;
+    const harness = makeLocalCommandHarness({ text, failReadsAfterRunning: true });
+
+    yield* harness.start;
+
+    const providerText = harness.startRootRun.mock.calls[0]![0].message.text;
+    expect(providerText).toBe(expandAssistantCitationsForProvider(text));
+    expect(providerText).not.toContain("<t3_context");
+  }),
+);
+
 effectIt.effect("fails the run when expanded citations exceed the provider input limit", () =>
   Effect.gen(function* () {
     const followUp = `${serializeAssistantCitation({
