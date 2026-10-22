@@ -660,8 +660,9 @@ export const click = async (
 
 /**
  * Playwright's timeout names neither the target nor why it waited. Counting only after the
- * wait failed keeps auto-wait intact while telling an absent target from one that never
- * became actionable.
+ * wait failed keeps auto-wait intact, but the count describes the page after the timeout, not
+ * what the click did: Playwright can dispatch the click and then time out waiting for the
+ * navigation it started.
  */
 const namedTargetTimeout = async (
   locator: Locator,
@@ -682,8 +683,8 @@ const namedTargetTimeout = async (
   return new ServerBrowserOperationError(
     "PreviewAutomationTimeoutError",
     matches === 0
-      ? `No element matched ${target}. Take a fresh snapshot and use its locator.`
-      : `${target} matched an element, but it never became clickable.`,
+      ? `No element matches ${target} after the timeout. Take a fresh snapshot and use its locator.`
+      : `${target} still matches an element after the timeout. The click may have happened; check the page before retrying.`,
   );
 };
 
