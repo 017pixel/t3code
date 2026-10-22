@@ -1,43 +1,45 @@
 #!/usr/bin/env node
 // Usage: node apps/server/scripts/fixtures/seed-antigravity-lifecycle-proof.mjs /absolute/scratch-dir
 // Stop the isolated dev server before running this. Create/send threads through the real client.
-import { mkdirSync, readFileSync, writeFileSync, chmodSync, realpathSync } from "node:fs";
-import { resolve, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 
-const root = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../.."));
+const root = NodeFS.realpathSync(
+  NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "../../../.."),
+);
 const scratch = process.argv[2];
 if (!scratch || !scratch.startsWith("/tmp/"))
   throw new Error("Supply a scratch directory below /tmp");
-const settingsPath = join(root, ".t3/userdata/settings.json");
-if (!realpathSync(settingsPath).startsWith(join(root, ".t3/")))
+const settingsPath = NodePath.join(root, ".t3/userdata/settings.json");
+if (!NodeFS.realpathSync(settingsPath).startsWith(NodePath.join(root, ".t3/")))
   throw new Error("Isolated settings must not be symlinked outside this checkout");
-mkdirSync(scratch, { recursive: true });
-const scenario = join(scratch, "scenario");
-const wrapper = join(scratch, "agy_acp_server.par");
-const fixture = join(root, "apps/server/scripts/fixtures/antigravity-lifecycle-proof.mjs");
+NodeFS.mkdirSync(scratch, { recursive: true });
+const scenario = NodePath.join(scratch, "scenario");
+const wrapper = NodePath.join(scratch, "agy_acp_server.par");
+const fixture = NodePath.join(root, "apps/server/scripts/fixtures/antigravity-lifecycle-proof.mjs");
 const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
-writeFileSync(scenario, "pending\n");
-writeFileSync(
+NodeFS.writeFileSync(scenario, "pending\n");
+NodeFS.writeFileSync(
   wrapper,
   [
     "#!/bin/sh",
     `export T3_LIFECYCLE_SCENARIO_PATH=${quote(scenario)}`,
-    `export T3_LIFECYCLE_TRANSCRIPT_PATH=${quote(join(scratch, "lifecycle.jsonl"))}`,
-    `export T3_ACP_RUNNING_COMMAND_PID_PATH=${quote(join(scratch, "command-pids"))}`,
+    `export T3_LIFECYCLE_TRANSCRIPT_PATH=${quote(NodePath.join(scratch, "lifecycle.jsonl"))}`,
+    `export T3_ACP_RUNNING_COMMAND_PID_PATH=${quote(NodePath.join(scratch, "command-pids"))}`,
     `exec ${quote(process.execPath)} ${quote(fixture)}`,
     "",
   ].join("\n"),
 );
-chmodSync(wrapper, 0o700);
-const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+NodeFS.chmodSync(wrapper, 0o700);
+const settings = JSON.parse(NodeFS.readFileSync(settingsPath, "utf8"));
 settings.providerInstances ??= {};
 settings.providerInstances.antigravity = {
   driver: "antigravity",
   enabled: true,
   config: { binaryPath: wrapper },
 };
-writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+NodeFS.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 console.log(`Configured isolated Antigravity fixture. Scenario file: ${scenario}`);
 console.log(
   "Use pending for D; completed/failed for C; passthrough then Stop and ordinary for E. Start a new thread for each C/D scenario.",

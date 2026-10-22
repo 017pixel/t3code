@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // ACP transport fixture for real-client lifecycle verification. No credentials or prompt text are logged.
-import { spawn } from "node:child_process";
-import { readFileSync, appendFileSync } from "node:fs";
-import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeReadline from "node:readline";
+import * as NodeURL from "node:url";
 
 const scenarioPath = process.env.T3_LIFECYCLE_SCENARIO_PATH;
 const transcriptPath = process.env.T3_LIFECYCLE_TRANSCRIPT_PATH;
@@ -11,16 +11,16 @@ if (!scenarioPath)
   throw new Error(
     "Set T3_LIFECYCLE_SCENARIO_PATH to a file containing pending, completed, failed, passthrough, or ordinary",
   );
-const initialScenario = readFileSync(scenarioPath, "utf8").trim();
+const initialScenario = NodeFS.readFileSync(scenarioPath, "utf8").trim();
 const running = ["completed", "failed", "passthrough"].includes(initialScenario);
 const mockEnv = { ...process.env };
 delete mockEnv.T3_ACP_RUNNING_COMMAND_FINISH;
 if (["completed", "failed"].includes(initialScenario)) {
   mockEnv.T3_ACP_RUNNING_COMMAND_FINISH = initialScenario;
 }
-const mock = spawn(
+const mock = NodeChildProcess.spawn(
   process.execPath,
-  [fileURLToPath(new URL("../acp-mock-agent.ts", import.meta.url))],
+  [NodeURL.fileURLToPath(new URL("../acp-mock-agent.ts", import.meta.url))],
   {
     env: {
       ...mockEnv,
@@ -33,14 +33,14 @@ const mock = spawn(
 );
 const log = (event) => {
   if (transcriptPath)
-    appendFileSync(
+    NodeFS.appendFileSync(
       transcriptPath,
       JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n",
     );
 };
 const write = (message) =>
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n");
-createInterface({ input: mock.stdout }).on("line", (line) => {
+NodeReadline.createInterface({ input: mock.stdout }).on("line", (line) => {
   const message = JSON.parse(line);
   const update = message.method === "session/update" ? message.params?.update : undefined;
   if (update?.toolCallId) update.toolCallId += `:proof:${process.pid}`;
@@ -55,9 +55,9 @@ createInterface({ input: mock.stdout }).on("line", (line) => {
     });
   write(message);
 });
-createInterface({ input: process.stdin }).on("line", (line) => {
+NodeReadline.createInterface({ input: process.stdin }).on("line", (line) => {
   const request = JSON.parse(line);
-  const scenario = readFileSync(scenarioPath, "utf8").trim();
+  const scenario = NodeFS.readFileSync(scenarioPath, "utf8").trim();
   if (request.method !== "session/prompt" || scenario !== "pending") {
     mock.stdin.write(line + "\n");
     return;
