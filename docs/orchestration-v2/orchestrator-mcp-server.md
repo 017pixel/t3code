@@ -458,12 +458,13 @@ returned unchanged, and a thread with no active provider turn returns
 runs its prompt on an interval, at a fixed time in the server's local time
 zone, or on each qualifying webhook request, even when no turn is active.
 Without a signature, anyone with the webhook URL can trigger a run.
-Signature checks, filters, and dedupe can skip a webhook request. For a task
-in the caller's project, runs post into the calling thread by default, so an
-orchestrator sees every trigger. With `bindToCurrentThread: false`, or for a
-task in another project, each run launches a fresh thread in the task's
-project. Pausing uses `update_scheduled_task` with `enabled: false`; deletion
-is permanent.
+Signature checks, filters, and dedupe can skip a webhook request.
+`bindToCurrentThread` defaults to `true` only when the caller has a thread in
+the task's project; otherwise it defaults to `false`. Bound runs post into
+that thread; unbound runs each launch a fresh thread in the task's project.
+Explicit `bindToCurrentThread: true` without a caller thread in that project
+is rejected. Pausing uses `update_scheduled_task` with `enabled: false`;
+deletion is permanent.
 
 ## Delegated Task Lifecycle
 
