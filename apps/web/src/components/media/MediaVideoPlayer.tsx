@@ -5,6 +5,7 @@ import { useEffect, useState, type CSSProperties } from "react";
 
 import { cn } from "../../lib/utils";
 import { prepareVideoFirstFrame } from "../../lib/videoFirstFrame";
+import { useVideoFrameStepping } from "../../hooks/useVideoFrameStepping";
 import { Button } from "../ui/button";
 import { OpenMediaLink } from "./OpenMediaLink";
 import { MediaActions, type MediaActionSource } from "./MediaActions";
@@ -59,6 +60,7 @@ export function MediaVideoPlayer({
   const sourceRevision = playbackSource === null ? revision : playbackSource.revision;
   const failed = src !== null ? failedSrc === src : sourceFailed;
   const preloaded = preloadedSrc === src || typeof IntersectionObserver === "undefined";
+  const frameSteppingFailed = useVideoFrameStepping(onOpen ? null : video, src);
 
   // Re-signing must not reload a loaded source. Changed files load once playback pauses.
   if (
@@ -165,6 +167,8 @@ export function MediaVideoPlayer({
           ref={setVideo}
           src={src}
           aria-label={label || "Video preview"}
+          aria-keyshortcuts={onOpen ? undefined : ", ."}
+          aria-description={onOpen ? undefined : "Previous frame (,), next frame (.)"}
           aria-hidden={onOpen ? true : undefined}
           autoPlay={onOpen ? false : autoPlay}
           controls={!onOpen}
@@ -201,6 +205,14 @@ export function MediaVideoPlayer({
           style={style}
         />
       )}
+      {frameSteppingFailed ? (
+        <span
+          role="status"
+          className="absolute right-2 bottom-12 left-2 rounded bg-black/80 p-2 text-center text-xs text-white"
+        >
+          Frame stepping is unavailable for this video.
+        </span>
+      ) : null}
       {onOpen ? (
         <button
           type="button"
