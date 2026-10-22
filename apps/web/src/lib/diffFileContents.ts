@@ -49,8 +49,14 @@ type GetPullRequestDiffFileContents<E> = (request: {
   readonly input: PullRequestDiffFileContentsInput;
 }) => Promise<AtomCommandResult<PullRequestDiffFileContentsResult, E>>;
 
-// Partial diffs omit gaps between hunks, so changed blocks need their compact line indices
-// translated back to source coordinates before validating the loaded files.
+// Git's --ignore-all-space treats these as whitespace. Newlines stay so line boundaries still count.
+const IGNORED_WHITESPACE = /[ \t\v\f\r]+/g;
+const exactLine = (a: string | undefined, b: string | undefined) => a === b;
+const whitespaceInsensitiveLine = (a: string | undefined, b: string | undefined) =>
+  a?.replace(IGNORED_WHITESPACE, "") === b?.replace(IGNORED_WHITESPACE, "");
+
+// Partial diffs omit gaps between hunks, so compact line indices are translated back to source
+// coordinates before validating the loaded files.
 function matchesPatchLines(fileDiff: FileDiffMetadata, oldContents: string, newContents: string) {
   if (!fileDiff.isPartial) return true;
   const oldLines = oldContents.split(/(?<=\n)/);
@@ -61,37 +67,43 @@ function matchesPatchLines(fileDiff: FileDiffMetadata, oldContents: string, newC
     fileLines: ReadonlyArray<string>,
     start: number,
     count: number,
+    linesMatch: typeof exactLine,
   ) => {
     if (count === 0) return true;
     // Out-of-range lines would compare `undefined === undefined`, so bounds come first.
     if (patchIndex < 0 || patchIndex + count > patchLines.length) return false;
     if (start < 1 || start - 1 + count > fileLines.length) return false;
     for (let offset = 0; offset < count; offset++) {
-      if (patchLines[patchIndex + offset] !== fileLines[start - 1 + offset]) return false;
+      if (!linesMatch(patchLines[patchIndex + offset], fileLines[start - 1 + offset])) return false;
     }
     return true;
   };
-  // Ignored whitespace can differ between the two files' context lines. Changed lines still
-  // come from their respective source files and must match at the patch's coordinates.
+  // Context is checked on both sides so a one-sided change cannot accept a shifted file. Ignored
+  // whitespace can differ between the two files' context; changed lines must match exactly.
   return fileDiff.hunks.every((hunk) =>
-    hunk.hunkContent.every(
-      (content) =>
-        content.type !== "change" ||
-        (sideMatches(
+    hunk.hunkContent.every((content) => {
+      const deletions = content.type === "change" ? content.deletions : content.lines;
+      const additions = content.type === "change" ? content.additions : content.lines;
+      const linesMatch = content.type === "change" ? exactLine : whitespaceInsensitiveLine;
+      return (
+        sideMatches(
           fileDiff.deletionLines,
           content.deletionLineIndex,
           oldLines,
           hunk.deletionStart + content.deletionLineIndex - hunk.deletionLineIndex,
-          content.deletions,
+          deletions,
+          linesMatch,
         ) &&
-          sideMatches(
-            fileDiff.additionLines,
-            content.additionLineIndex,
-            newLines,
-            hunk.additionStart + content.additionLineIndex - hunk.additionLineIndex,
-            content.additions,
-          )),
-    ),
+        sideMatches(
+          fileDiff.additionLines,
+          content.additionLineIndex,
+          newLines,
+          hunk.additionStart + content.additionLineIndex - hunk.additionLineIndex,
+          additions,
+          linesMatch,
+        )
+      );
+    }),
   );
 }
 
