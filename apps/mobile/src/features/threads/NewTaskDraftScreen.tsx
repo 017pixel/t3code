@@ -16,6 +16,7 @@ import * as Dialog from "../../components/ui/Dialog";
 import { useAtomValue } from "@effect/atom-react";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
+import { scratchEntryTitle } from "@t3tools/client-runtime/state/projects";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   CommonActions,
@@ -38,6 +39,7 @@ import { ComposerEditor, type ComposerEditorHandle } from "../../components/Comp
 import { composerContextImportsAtom } from "../../state/use-composer-drafts";
 import { composerContextSendBlockReason } from "../../lib/composerContext";
 import { ComposerInlineControl } from "../../components/ComposerToolbar";
+import { ProjectFavicon } from "../../components/ProjectFavicon";
 
 import {
   composerAttachmentUploadBlockReason,
@@ -1005,6 +1007,8 @@ export function NewTaskDraftScreen(props: {
       onChooseEnvironment={() => openContextPicker("NewTaskEnvironment")}
     />
   );
+  const scratchProject = flow.isScratchDraft ? flow.selectedProject : null;
+  const scratchEntryName = scratchEntryTitle(scratchProject?.title);
   const hero = flow.isScratchDraft ? (
     <View className="items-center gap-2 px-6" testID="new-task-hero">
       <Text className="text-center text-2xl font-t3-medium tracking-tight text-foreground">
@@ -1013,12 +1017,26 @@ export function NewTaskDraftScreen(props: {
       <View className="flex-row flex-wrap items-center justify-center gap-x-1">
         <ComposerInlineControl
           accessibilityHint="Opens the project picker"
-          accessibilityLabel="No project"
+          accessibilityLabel={scratchEntryName}
           chevronDirection="right"
           disabled={isComposerInteractionLocked}
-          icon="folder"
-          label="No project"
+          icon={scratchProject ? undefined : "folder"}
+          label={scratchEntryName}
           onPress={chooseProject}
+          renderIcon={
+            scratchProject
+              ? (size) => (
+                  <ProjectFavicon
+                    environmentId={scratchProject.environmentId}
+                    faviconPath={scratchProject.faviconPath}
+                    projectIcon={scratchProject.projectIcon}
+                    projectTitle={scratchEntryName}
+                    size={size}
+                    workspaceRoot={scratchProject.workspaceRoot}
+                  />
+                )
+              : undefined
+          }
         />
         {environmentControl}
       </View>

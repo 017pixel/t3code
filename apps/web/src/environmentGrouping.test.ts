@@ -66,6 +66,7 @@ describe("environment grouping", () => {
     const filters = buildSidebarProjectSnapshots({ ...input, groupScratchProjects: true });
     const settingsGroups = buildSidebarProjectSnapshots(input);
     expect(filters).toHaveLength(1);
+    expect(filters[0]?.displayName).toBe("No project");
     expect(settingsGroups).toHaveLength(2);
     expect(settingsGroups.map((group) => group.memberProjectRefs)).toEqual([
       [{ environmentId: local.environmentId, projectId: local.id }],
@@ -103,6 +104,25 @@ describe("environment grouping", () => {
       ).toBe(groups[0]?.projectKey);
     },
   );
+
+  it("keeps a grouped scratch project's saved title with its own icon", () => {
+    const scratch = makeProject({
+      title: "None",
+      workspaceRoot: "/local/scratch",
+      isScratch: true,
+      projectIcon: { kind: "lucide", name: "info", color: "gray" },
+    });
+    const [group] = buildSidebarProjectSnapshots({
+      projects: [scratch],
+      groupScratchProjects: true,
+      settings: defaultGroupingSettings,
+      primaryEnvironmentId,
+      resolveEnvironmentLabel: () => null,
+    });
+    expect(group?.displayName).toBe("None");
+    expect(group?.projectIcon).toEqual(scratch.projectIcon);
+    expect(group?.id).toBe(scratch.id);
+  });
 
   it("prefers an existing ordinary repository scope over a scratch alias", () => {
     const scratch = makeProject({ isScratch: true, repositoryIdentity });

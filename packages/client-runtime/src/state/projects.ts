@@ -144,6 +144,13 @@ export function isScratchProject(
   );
 }
 
+// Scratch projects are created titled "No project". A rename is stored on the
+// project, so a blank title is the only case that still needs that label.
+export function scratchEntryTitle(title: string | null | undefined): string {
+  const trimmed = title?.trim() ?? "";
+  return trimmed.length > 0 ? trimmed : "No project";
+}
+
 export function inferProjectTitleFromPath(value: string): string {
   const normalized = normalizeProjectPathForDispatch(value);
   const absolutePath = splitAbsolutePath(normalized);

@@ -106,7 +106,7 @@ import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { useNewProject } from "../hooks/useNewProject";
-import { isScratchProject } from "@t3tools/client-runtime/state/projects";
+import { isScratchProject, scratchEntryTitle } from "@t3tools/client-runtime/state/projects";
 import {
   useEnvironmentProviders,
   useEnvironments,
@@ -214,6 +214,7 @@ import {
   scrollCommandPaletteRowIntoView,
 } from "./CommandPaletteResults";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
+import { ProjectFavicon } from "./ProjectFavicon";
 import { Checkbox } from "./ui/checkbox";
 import { ProjectFilePicker } from "./files/ProjectFilePicker";
 import { openLinkPullRequestDialog } from "./pullRequest/LinkPullRequestDialog";
@@ -879,15 +880,24 @@ function OpenCommandPaletteDialog(props: {
     );
     if (scratchTargetEnvironmentId === null) return projectItems;
 
+    const scratchPickerProject =
+      pickerProjects.find(
+        (project) => project.environmentId === scratchTargetEnvironmentId && isScratch(project),
+      ) ?? null;
+    const scratchEntryName = scratchEntryTitle(scratchPickerProject?.title);
     const noProjectIndex = pickerProjects[0] !== undefined && isScratch(pickerProjects[0]) ? 0 : 1;
     return [
       ...projectItems.slice(0, noProjectIndex),
       {
         kind: "action" as const,
         value: "new-thread-in:no-project",
-        searchTerms: ["no project", "without project", "none"],
-        title: "No project",
-        icon: <MessageSquareDashedIcon className={ITEM_ICON_CLASS} />,
+        searchTerms: ["no project", "without project", "none", scratchEntryName],
+        title: scratchEntryName,
+        icon: scratchPickerProject ? (
+          <ProjectFavicon project={scratchPickerProject} className={ITEM_ICON_CLASS} />
+        ) : (
+          <MessageSquareDashedIcon className={ITEM_ICON_CLASS} />
+        ),
         shortcutCommand: "chat.newWithoutProject" as const,
         run: () => startScratchThread(scratchTargetEnvironmentId),
       },

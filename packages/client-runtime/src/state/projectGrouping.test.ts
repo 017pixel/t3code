@@ -245,6 +245,41 @@ describe("buildProjectGroups", () => {
     },
   );
 
+  it("uses each scratch project's saved title when scratch homes are grouped", () => {
+    const preferred = makeProject("scratch-preferred", "/preferred/scratch", {
+      title: "None",
+      isScratch: true,
+      repositoryIdentity: null,
+    });
+    const other = makeProject("scratch-other", "/other/scratch", {
+      title: "Inbox",
+      environmentId: EnvironmentId.make("remote"),
+      isScratch: true,
+      repositoryIdentity: null,
+    });
+    const untitled = makeProject("scratch-untitled", "/untitled/scratch", {
+      title: "   ",
+      isScratch: true,
+      repositoryIdentity: null,
+    });
+    const named = buildProjectGroups({
+      projects: [other, preferred],
+      groupScratchProjects: true,
+      settings: settings("separate"),
+      preferredEnvironmentId: preferred.environmentId,
+    });
+    const scratch = named.find((group) => group.representative.isScratch)!;
+    expect(scratch.representative.id).toBe(preferred.id);
+    expect(scratch.label).toBe("None");
+    expect(
+      buildProjectGroups({
+        projects: [untitled],
+        groupScratchProjects: true,
+        settings: settings("separate"),
+      })[0]?.label,
+    ).toBe("No project");
+  });
+
   it("preserves every physical clone as a selectable member in repository modes", () => {
     const projects = [
       makeProject("t3code", "/work/t3code"),

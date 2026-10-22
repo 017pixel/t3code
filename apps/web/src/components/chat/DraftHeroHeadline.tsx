@@ -2,7 +2,7 @@ import type { DraftId } from "~/composerDraftStore";
 import { composerDraftHasUserContent, useComposerDraftStore } from "~/composerDraftStore";
 import { resolveEnvironmentMachineKind, type ScopedProjectRef } from "@t3tools/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
-import { isScratchProject } from "@t3tools/client-runtime/state/projects";
+import { isScratchProject, scratchEntryTitle } from "@t3tools/client-runtime/state/projects";
 import { FolderPlusIcon } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
 import { useEffect, useRef, useState } from "react";
@@ -143,6 +143,10 @@ export function DraftHeroHeadline({
   const scratchWorkspaceRoot = scratchWorkspaceRootFor(scratchTargetEnvironmentId);
   const isScratchDraft =
     activeProject !== null && isScratchProject(activeProject, scratchWorkspaceRoot);
+  const scratchEntryName = scratchEntryTitle(activeProject?.title);
+  const projectTriggerLabel = isScratchDraft
+    ? scratchEntryName
+    : (activeProjectDisplayName ?? "Choose a project");
 
   const pickerItems: readonly PickerItem[] = [
     ...menuEntries.map(({ group }) => ({ value: group.projectKey, label: group.displayName })),
@@ -259,13 +263,12 @@ export function DraftHeroHeadline({
             />
           }
         >
-          <DraftProjectName
-            value={isScratchDraft ? "No project" : (activeProjectDisplayName ?? "Choose a project")}
-            singleLine
-          />
+          <DraftProjectName value={projectTriggerLabel} singleLine />
         </TooltipTrigger>
-        {activeProjectDisplayName && !isScratchDraft ? (
-          <TooltipPopup side="top">{activeProjectDisplayName}</TooltipPopup>
+        {isScratchDraft || activeProjectDisplayName ? (
+          <TooltipPopup side="top">
+            {isScratchDraft ? scratchEntryName : activeProjectDisplayName}
+          </TooltipPopup>
         ) : null}
       </Tooltip>
       <ComboboxPopup align="center" className="w-72 overflow-hidden">

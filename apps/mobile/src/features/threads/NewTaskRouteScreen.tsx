@@ -11,7 +11,7 @@ import {
 } from "@react-navigation/native";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { availableScratchWorkspaceRoot } from "@t3tools/client-runtime/operations/projects";
-import { isScratchProject } from "@t3tools/client-runtime/state/projects";
+import { isScratchProject, scratchEntryTitle } from "@t3tools/client-runtime/state/projects";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -205,6 +205,35 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
     scratchEnvironments[0] ??
     null;
   const canStartScratch = scratchEnvironment !== null && reservedDestinationProject === null;
+  const scratchProject =
+    scratchEnvironment === null
+      ? null
+      : (projects.find(
+          (project) =>
+            project.environmentId === scratchEnvironment.environmentId &&
+            isScratchProject(
+              project,
+              serverConfigs.get(project.environmentId)?.scratchWorkspaceRoot,
+            ),
+        ) ?? null);
+  const scratchEntryName = scratchEntryTitle(scratchProject?.title);
+  const scratchLeading = scratchProject ? (
+    <ProjectFavicon
+      environmentId={scratchProject.environmentId}
+      faviconPath={scratchProject.faviconPath}
+      projectIcon={scratchProject.projectIcon}
+      projectTitle={scratchEntryName}
+      size={Platform.OS === "android" ? 24 : 20}
+      workspaceRoot={scratchProject.workspaceRoot}
+    />
+  ) : (
+    <SymbolView
+      name="text.bubble"
+      size={Platform.OS === "android" ? 22 : 18}
+      tintColorClassName="accent-icon-muted"
+      type="monochrome"
+    />
+  );
   const scratchStartInFlightRef = useRef(false);
 
   async function selectProject(project: EnvironmentProject): Promise<void> {
@@ -328,37 +357,23 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
               <View collapsable={false} className="overflow-hidden rounded-[28px] bg-grouped-card">
                 <NavigationRow
                   className="bg-grouped-card"
-                  title="No project"
+                  title={scratchEntryName}
                   subtitle="Start a task without a project"
                   onPress={() => void startScratch()}
-                  leading={
-                    <SymbolView
-                      name="text.bubble"
-                      size={22}
-                      tintColorClassName="accent-icon-muted"
-                      type="monochrome"
-                    />
-                  }
+                  leading={scratchLeading}
                 />
               </View>
             ) : (
               <View collapsable={false} className="overflow-hidden rounded-[24px] bg-grouped-card">
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel="No project"
+                  accessibilityLabel={scratchEntryName}
                   onPress={() => void startScratch()}
                   className="flex-row items-center gap-3 bg-grouped-card px-4 py-3.5"
                 >
-                  <View className="h-7 w-7 items-center justify-center">
-                    <SymbolView
-                      name="text.bubble"
-                      size={18}
-                      tintColorClassName="accent-icon-muted"
-                      type="monochrome"
-                    />
-                  </View>
+                  <View className="h-7 w-7 items-center justify-center">{scratchLeading}</View>
                   <View className="min-w-0 flex-1">
-                    <Text className="text-base font-t3-bold leading-snug">No project</Text>
+                    <Text className="text-base font-t3-bold leading-snug">{scratchEntryName}</Text>
                     <Text className="text-xs leading-snug text-foreground-muted" numberOfLines={1}>
                       Start a task without a project
                     </Text>

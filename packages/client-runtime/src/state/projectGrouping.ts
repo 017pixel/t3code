@@ -9,7 +9,7 @@ import {
 import type { ClientSettings } from "@t3tools/contracts/settings";
 
 import type { EnvironmentProject } from "./models.ts";
-import { normalizeProjectPathForComparison } from "./projects.ts";
+import { normalizeProjectPathForComparison, scratchEntryTitle } from "./projects.ts";
 
 const SCRATCH_PROJECT_SCOPE_KEY = "\0no-project";
 
@@ -353,7 +353,7 @@ export function buildProjectGroups<TProject extends EnvironmentProject>(input: {
       key,
       label:
         input.groupScratchProjects && representative.isScratch
-          ? "No project"
+          ? scratchEntryTitle(representative.title)
           : members.length > 1
             ? deriveProjectGroupLabel({
                 representative,
