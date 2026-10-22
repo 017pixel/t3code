@@ -1,4 +1,4 @@
-import type { FileDiffContentsLoader } from "@pierre/diffs";
+import type { FileDiffContentsLoader, FileDiffMetadata } from "@pierre/diffs";
 import {
   squashAtomCommandFailure,
   type AtomCommandResult,
@@ -49,11 +49,68 @@ type GetPullRequestDiffFileContents<E> = (request: {
   readonly input: PullRequestDiffFileContentsInput;
 }) => Promise<AtomCommandResult<PullRequestDiffFileContentsResult, E>>;
 
+// A partial diff's line arrays hold each hunk's side contiguously, in hunk order; the same lines
+// must sit at the hunk's start line in the loaded file. Lines keep their endings, as Pierre's
+// splitFileContents does.
+function matchesPatchLines(fileDiff: FileDiffMetadata, oldContents: string, newContents: string) {
+  if (!fileDiff.isPartial) return true;
+  const oldLines = oldContents.split(/(?<=\n)/);
+  const newLines = newContents.split(/(?<=\n)/);
+  const sideMatches = (
+    patchLines: ReadonlyArray<string>,
+    patchIndex: number,
+    fileLines: ReadonlyArray<string>,
+    start: number,
+    count: number,
+  ) => {
+    if (count === 0) return true;
+    // Out-of-range lines would compare `undefined === undefined`, so bounds come first.
+    if (patchIndex < 0 || patchIndex + count > patchLines.length) return false;
+    if (start < 1 || start - 1 + count > fileLines.length) return false;
+    for (let offset = 0; offset < count; offset++) {
+      if (patchLines[patchIndex + offset] !== fileLines[start - 1 + offset]) return false;
+    }
+    return true;
+  };
+  return fileDiff.hunks.every(
+    (hunk) =>
+      sideMatches(
+        fileDiff.deletionLines,
+        hunk.deletionLineIndex,
+        oldLines,
+        hunk.deletionStart,
+        hunk.deletionCount,
+      ) &&
+      sideMatches(
+        fileDiff.additionLines,
+        hunk.additionLineIndex,
+        newLines,
+        hunk.additionStart,
+        hunk.additionCount,
+      ),
+  );
+}
+
+// Hydration keeps the patch's hunk coordinates, so files that moved on since the patch was made
+// (an edited working tree, a moved HEAD) would put unrelated lines under its changes. Rejecting
+// keeps the patch rendered as it was. Pull request loaders skip this: their excerpts are synthetic.
+function assertMatchesPatch(
+  fileDiff: FileDiffMetadata,
+  newPath: string,
+  contents: { readonly oldContents: string; readonly newContents: string },
+) {
+  if (!matchesPatchLines(fileDiff, contents.oldContents, contents.newContents)) {
+    throw new Error(`Loaded contents of ${newPath} no longer match its diff`);
+  }
+  return contents;
+}
+
 function createDiffFileContentsLoader(
   load: (input: {
     readonly changeType: PullRequestDiffFileContentsInput["changeType"];
     readonly oldPath: string;
     readonly newPath: string;
+    readonly fileDiff: FileDiffMetadata;
   }) => Promise<{ readonly oldContents: string; readonly newContents: string }>,
   cacheKey: string,
 ): FileDiffContentsLoader {
@@ -62,7 +119,7 @@ function createDiffFileContentsLoader(
     const oldPath = fileDiff.prevName
       ? resolveFileDiffPath({ ...fileDiff, name: fileDiff.prevName })
       : newPath;
-    const contents = await load({ changeType: fileDiff.type, oldPath, newPath });
+    const contents = await load({ changeType: fileDiff.type, oldPath, newPath, fileDiff });
     const newFile = {
       name: newPath,
       contents: contents.newContents,
@@ -86,7 +143,7 @@ export function createGitDiffFileContentsLoader<E>(
   getDiffFileContents: GetDiffFileContents<E>,
   source: GitDiffFileContentsSource,
 ): FileDiffContentsLoader {
-  return createDiffFileContentsLoader(async ({ changeType, oldPath, newPath }) => {
+  return createDiffFileContentsLoader(async ({ changeType, oldPath, newPath, fileDiff }) => {
     const result = await getDiffFileContents({
       environmentId: source.environmentId,
       input: {
@@ -102,7 +159,7 @@ export function createGitDiffFileContentsLoader<E>(
     if (result._tag !== "Success") {
       throw squashAtomCommandFailure(result);
     }
-    return result.value;
+    return assertMatchesPatch(fileDiff, newPath, result.value);
   }, source.cacheKey);
 }
 
@@ -130,14 +187,14 @@ export function createCheckpointDiffFileContentsLoader<E>(
     }
     return result.value.oldContents;
   };
-  return createDiffFileContentsLoader(async ({ changeType, oldPath, newPath }) => {
+  return createDiffFileContentsLoader(async ({ changeType, oldPath, newPath, fileDiff }) => {
     const [oldContents, newContents] = await Promise.all([
       changeType === "new" || changeType === "rename-pure"
         ? ""
         : readAt(source.fromCheckpointRef, oldPath),
       changeType === "deleted" ? "" : readAt(source.toCheckpointRef, newPath),
     ]);
-    return { oldContents, newContents };
+    return assertMatchesPatch(fileDiff, newPath, { oldContents, newContents });
   }, source.cacheKey);
 }
 
