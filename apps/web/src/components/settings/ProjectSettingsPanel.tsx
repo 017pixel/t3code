@@ -447,8 +447,8 @@ function ProjectDetail({
   // A lone checkout is removed from the Danger section, but it still needs its grouping
   // rule here so "Keep separate" can be undone.
   const checkoutControls = (member: SidebarProjectGroupMember) => (
-    <div className="flex items-center gap-2">
-      <div className="w-48 sm:w-72">
+    <div className="flex w-full min-w-0 items-center gap-2 @min-[32rem]/settings-row:w-auto">
+      <div className="min-w-0 flex-1 @min-[32rem]/settings-row:w-72 @min-[32rem]/settings-row:flex-none">
         <CheckoutGroupingSelect member={member} />
       </div>
       {hasMultipleCheckouts ? (
@@ -513,7 +513,7 @@ function ProjectDetail({
                 {members.map((member) => (
                   <div
                     key={member.physicalProjectKey}
-                    className="flex min-w-0 flex-col items-start gap-1.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3"
+                    className="flex min-w-0 flex-col gap-1.5 @min-[36rem]/settings-row:flex-row @min-[36rem]/settings-row:items-center @min-[36rem]/settings-row:justify-between @min-[36rem]/settings-row:gap-3"
                   >
                     <Tooltip>
                       <TooltipTrigger
