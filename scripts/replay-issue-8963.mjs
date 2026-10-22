@@ -70,47 +70,69 @@ export async function replayR1(
       awaitPromise: true,
       expression: "new Promise(resolve => setTimeout(resolve, 2500))",
     });
-  const recording = await call("preview_recording_start", { tabId });
-  await call("preview_type", {
-    tabId,
-    locator: 'role=textbox[name="Message"]',
-    text: fixture.r1.answer,
-    clear: true,
-  });
-  await settle();
-  const before = await call("preview_snapshot", { tabId, save: true });
-  await call("preview_click", { tabId: stopTabId, locator: 'role=button[name="Stop generation"]' });
-  await call("preview_wait_for", {
-    tabId,
-    selector: 'body:not(:has(button[aria-label="Stop generation"]))',
-  });
-  await call("preview_wait_for", {
-    tabId,
-    selector: "body:not(:has([data-pending-user-input-toggle]))",
-  });
-  const result = await call("preview_evaluate", {
-    tabId,
-    expression: 'document.querySelector(\'[role="textbox"][aria-label="Message"]\')?.textContent',
-  });
-  if (result.value !== expected)
-    throw new Error(`Composer contained ${JSON.stringify(result.value)}`);
-  await settle();
-  const after = await call("preview_snapshot", { tabId, save: true });
-  if (expected) {
+  let recording;
+  let recordingActive = false;
+  let failed = false;
+  let before;
+  let after;
+  let video;
+  // A failed replay must not leave the tab recording or on the frozen clock, and
+  // cleanup errors must not hide the failure that triggered them.
+  try {
+    recording = await call("preview_recording_start", { tabId });
+    recordingActive = true;
     await call("preview_type", {
       tabId,
       locator: 'role=textbox[name="Message"]',
-      text: fixture.r1.editedAnswer,
+      text: fixture.r1.answer,
       clear: true,
     });
-  }
-  await settle();
-  const video = await call("preview_recording_stop", { tabId });
-  if (frozenTime !== undefined) {
-    await call("preview_evaluate", {
-      tabId,
-      expression: "globalThis.Date = globalThis.__proofOriginalDate",
+    await settle();
+    before = await call("preview_snapshot", { tabId, save: true });
+    await call("preview_click", {
+      tabId: stopTabId,
+      locator: 'role=button[name="Stop generation"]',
     });
+    await call("preview_wait_for", {
+      tabId,
+      selector: 'body:not(:has(button[aria-label="Stop generation"]))',
+    });
+    await call("preview_wait_for", {
+      tabId,
+      selector: "body:not(:has([data-pending-user-input-toggle]))",
+    });
+    const result = await call("preview_evaluate", {
+      tabId,
+      expression: 'document.querySelector(\'[role="textbox"][aria-label="Message"]\')?.textContent',
+    });
+    if (result.value !== expected)
+      throw new Error(`Composer contained ${JSON.stringify(result.value)}`);
+    await settle();
+    after = await call("preview_snapshot", { tabId, save: true });
+    if (expected) {
+      await call("preview_type", {
+        tabId,
+        locator: 'role=textbox[name="Message"]',
+        text: fixture.r1.editedAnswer,
+        clear: true,
+      });
+    }
+    await settle();
+    recordingActive = false;
+    video = await call("preview_recording_stop", { tabId });
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    // Only a failed replay can still be recording here.
+    if (recordingActive) await call("preview_recording_stop", { tabId }).catch(() => {});
+    if (frozenTime !== undefined)
+      await call("preview_evaluate", {
+        tabId,
+        expression: "globalThis.Date = globalThis.__proofOriginalDate",
+      }).catch((error) => {
+        if (!failed) throw error;
+      });
   }
   const environment = await call("preview_evaluate", {
     tabId,
