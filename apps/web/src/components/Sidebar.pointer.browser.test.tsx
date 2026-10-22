@@ -98,7 +98,8 @@ describe("sidebar stale press guard", () => {
     });
     document.body.append(node);
     stack.defer(() => node.remove());
-    stack.defer(guardSidebarStalePress(node));
+    const guard = guardSidebarStalePress(node);
+    stack.defer(guard.release);
     const clicked: string[] = [];
     node.addEventListener("click", (event) => {
       clicked.push((event.target as HTMLElement).textContent ?? "");
@@ -108,7 +109,7 @@ describe("sidebar stale press guard", () => {
       row.dispatchEvent(pointer("pointerup", { pointerType: "mouse", buttons: 0 }));
       row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }));
     };
-    return { stack, rows, clicked, press };
+    return { stack, guard, rows, clicked, press };
   }
 
   it("swallows the first press on a row another client slid under the mouse", () => {
@@ -125,7 +126,24 @@ describe("sidebar stale press guard", () => {
   });
 
   // regression: settling a row must not swallow the deliberate click on the row that replaces it
-  it("trusts the row that slides in after the user's own click", () => {
+  it("trusts the row that slides in after the user's own settle", () => {
+    const { stack, guard, rows, clicked, press } = list();
+    using _list = stack;
+    const [alpha, beta] = rows;
+    alpha!.addEventListener("click", () => {
+      guard.trust();
+      alpha!.remove();
+    });
+    alpha!.dispatchEvent(pointer("pointermove", { pointerType: "mouse", buttons: 0 }));
+    press(alpha!);
+
+    press(beta!);
+
+    expect(clicked).toEqual(["alpha", "beta"]);
+  });
+
+  // regression: a click that keeps its row must not disarm the guard for a later remote shift
+  it("still swallows a remote shift after a click that kept its row", () => {
     const { stack, rows, clicked, press } = list();
     using _list = stack;
     const [alpha, beta] = rows;
@@ -133,6 +151,7 @@ describe("sidebar stale press guard", () => {
     press(alpha!);
     alpha!.remove();
 
+    press(beta!);
     press(beta!);
 
     expect(clicked).toEqual(["alpha", "beta"]);

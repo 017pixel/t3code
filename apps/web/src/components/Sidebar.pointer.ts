@@ -154,6 +154,8 @@ export class SidebarPointerSensor {
  * Another client can insert or remove rows while the mouse rests on the list, sliding a
  * different row under it. Hit-testing follows the new layout, so swallow the first press
  * that lands on a list child the mouse never moved onto. Touch has no hover to go stale.
+ * Call `trust` when the user's own action changes the rows, so the row it slides under the
+ * mouse takes the next press.
  */
 export function guardSidebarStalePress(list: HTMLElement) {
   const document = list.ownerDocument;
@@ -195,9 +197,7 @@ export function guardSidebarStalePress(list: HTMLElement) {
     event.stopPropagation();
   };
   const click = (event: MouseEvent) => {
-    // The user's own click can remove the row it acted on and slide the next one under the
-    // mouse; trust that row rather than swallowing the follow-up press.
-    if (!swallowClick) return forget();
+    if (!swallowClick) return;
     swallowClick = false;
     // A keyboard activation (detail 0) is never the stale press.
     if (event.detail === 0) return;
@@ -209,11 +209,14 @@ export function guardSidebarStalePress(list: HTMLElement) {
   list.addEventListener("pointerdown", press, { capture: true });
   list.addEventListener("click", click, { capture: true });
   document.addEventListener("scroll", scroll, { capture: true, passive: true });
-  return () => {
-    list.removeEventListener("pointermove", move);
-    list.removeEventListener("pointerleave", forget);
-    list.removeEventListener("pointerdown", press, { capture: true });
-    list.removeEventListener("click", click, { capture: true });
-    document.removeEventListener("scroll", scroll, { capture: true });
+  return {
+    trust: forget,
+    release: () => {
+      list.removeEventListener("pointermove", move);
+      list.removeEventListener("pointerleave", forget);
+      list.removeEventListener("pointerdown", press, { capture: true });
+      list.removeEventListener("click", click, { capture: true });
+      document.removeEventListener("scroll", scroll, { capture: true });
+    },
   };
 }

@@ -882,7 +882,7 @@ export default function Sidebar() {
   const threadListRef = useRef<HTMLUListElement | null>(null);
   const dragLabelOffsetRef = useRef(0);
   const listMotionRef = useRef<ReturnType<typeof createSidebarListMotion> | null>(null);
-  const releaseListPressGuardRef = useRef<(() => void) | null>(null);
+  const listPressGuardRef = useRef<ReturnType<typeof guardSidebarStalePress> | null>(null);
   const [dragState, setDragState] = useState<{
     readonly activeKey: string;
     readonly activeSection: SidebarSection;
@@ -1293,6 +1293,7 @@ export default function Sidebar() {
       const threadKey = scopedThreadKey(threadRef);
       if (settlingThreadKeysRef.current.has(threadKey)) return;
       settlingThreadKeysRef.current.add(threadKey);
+      listPressGuardRef.current?.trust();
       const navigateAfterSettle = planForwardNavigation(threadKey, opts.coSettlingKeys);
       const result = await settleThread(threadRef);
       settlingThreadKeysRef.current.delete(threadKey);
@@ -1332,6 +1333,7 @@ export default function Sidebar() {
     }
   };
   const attemptUnsettle = (threadRef: ScopedThreadRef) => {
+    listPressGuardRef.current?.trust();
     void (async () => {
       const result = await unsettleThread(threadRef);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
@@ -1347,6 +1349,7 @@ export default function Sidebar() {
     })();
   };
   const attemptUnsnooze = (threadRef: ScopedThreadRef) => {
+    listPressGuardRef.current?.trust();
     void (async () => {
       const result = await unsnoozeThread(threadRef);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
@@ -1374,8 +1377,8 @@ export default function Sidebar() {
     listMotionRef.current?.dispose();
     listMotionRef.current = node === null ? null : createSidebarListMotion(node);
     listMotionRef.current?.update(false);
-    releaseListPressGuardRef.current?.();
-    releaseListPressGuardRef.current = node === null ? null : guardSidebarStalePress(node);
+    listPressGuardRef.current?.release();
+    listPressGuardRef.current = node === null ? null : guardSidebarStalePress(node);
   };
 
   // Working rows can supply chat context, but never preview sidebar movement.
@@ -1525,6 +1528,7 @@ export default function Sidebar() {
     setOptimisticDrop(null);
   }
   const attemptPin = (threadRef: ScopedThreadRef) => {
+    listPressGuardRef.current?.trust();
     void (async () => {
       // Fresh pins take the top of the arranged run: pinThread computes a
       // key before the smallest key across ALL pinned shells — including
@@ -1544,6 +1548,7 @@ export default function Sidebar() {
     })();
   };
   const attemptUnpin = (threadRef: ScopedThreadRef) => {
+    listPressGuardRef.current?.trust();
     void (async () => {
       const result = await confirmAndUnpinThread(threadRef);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
@@ -1799,6 +1804,7 @@ export default function Sidebar() {
       assignedKeys: new Map(assignments.map(({ id, orderKey }) => [id, orderKey])),
     };
     setOptimisticDrop(drop);
+    listPressGuardRef.current?.trust();
     void (async () => {
       const run = async (
         operation: Promise<AtomCommandResult<unknown, unknown>>,
@@ -1890,6 +1896,7 @@ export default function Sidebar() {
       return { status: "skipped" } as const;
     }
     snoozingThreadKeysRef.current.add(threadKey);
+    listPressGuardRef.current?.trust();
     const navigateAfterSnooze = planForwardNavigation(threadKey, opts.coSnoozingKeys);
     const result = await snoozeThread(threadRef, preset.snoozedUntil);
     snoozingThreadKeysRef.current.delete(threadKey);
