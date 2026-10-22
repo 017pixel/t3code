@@ -109,6 +109,41 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     }),
   );
 
+  it.effect("honors explicit skills-dir plugin disablement and manifest defaults", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const configDir = path.join(tempDir, "claude-home");
+      for (const [folder, manifest] of [
+        ["disabled", '{"name":"demo-tools"}'],
+        ["opt-in", '{"name":"opt-in","defaultEnabled":false}'],
+      ] as const) {
+        const wrapper = path.join(configDir, "skills", folder);
+        yield* writeSkill(path.join(wrapper, "skills"), "review", "# Review");
+        yield* fs.makeDirectory(path.join(wrapper, ".claude-plugin"), { recursive: true });
+        yield* fs.writeFileString(path.join(wrapper, ".claude-plugin", "plugin.json"), manifest);
+      }
+      yield* fs.writeFileString(
+        path.join(configDir, "settings.json"),
+        '{"enabledPlugins":{"demo-tools@skills-dir":false}}',
+      );
+      const environment = { CLAUDE_CONFIG_DIR: configDir };
+
+      assert.deepEqual(yield* discoverClaudeSkills({ homePath: "" }, undefined, environment), []);
+
+      yield* fs.writeFileString(
+        path.join(configDir, "settings.json"),
+        '{"enabledPlugins":{"opt-in@skills-dir":true}}',
+      );
+      const skills = yield* discoverClaudeSkills({ homePath: "" }, undefined, environment);
+      assert.deepEqual(
+        skills.map((skill) => skill.name),
+        ["demo-tools:review", "opt-in:review"],
+      );
+    }),
+  );
+
   it.effect("merges plugin enablement and selects installs in native registry order", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
