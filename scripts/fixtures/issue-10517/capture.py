@@ -124,7 +124,12 @@ env.pop("ELECTRON_RUN_AS_NODE", None)
 env["T3CODE_HOME"] = str(home)
 env["CLIP_VERSION"] = str(out / "versions.json")
 env["XDG_DATA_HOME"] = str(w / ".t3/keyring-data")
-for key in ["VITE_HTTP_URL", "VITE_WS_URL", "ELECTRON_RENDERER_URL"]:
+for key in [
+    "VITE_HTTP_URL",
+    "VITE_WS_URL",
+    "VITE_DEV_SERVER_URL",
+    "ELECTRON_RENDERER_URL",
+]:
     env.pop(key, None)
 procs = []
 start = time.monotonic()
