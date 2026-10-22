@@ -16,6 +16,7 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -270,9 +271,12 @@ const makeOpenGate = Effect.fn("AgentSessionScanner.test.makeOpenGate")(function
  * which never comes, so the work runs detached and only the join is timed.
  * The gate finalizer later lets the abandoned fiber finish.
  */
-const awaitWithinDeadline = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+const awaitWithinDeadline = <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+  deadline: Duration.Input = SCAN_DEADLINE,
+) =>
   Effect.forkDetach(effect).pipe(
-    Effect.flatMap((fiber) => Fiber.join(fiber).pipe(Effect.timeoutOption(SCAN_DEADLINE))),
+    Effect.flatMap((fiber) => Fiber.join(fiber).pipe(Effect.timeoutOption(deadline))),
   );
 
 const scanUntilDeadline = <E, R>(
@@ -1702,7 +1706,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
 
-    it.live("still reads the git identity of repositories batched after a blocked one", () =>
+    it.live("still reads the git identity of repositories next to a blocked one", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const fileSystem = yield* FileSystem.FileSystem;
@@ -1753,55 +1757,92 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
 
-    it.live("completes every scan when open() of a regular .git/config never returns", () =>
+    it.live("waits about one read deadline when several git configs block in one scan", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const fileSystem = yield* FileSystem.FileSystem;
         const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
         const codexHomePath = yield* makeTempDir("t3code-codex-home-");
-        const repo = yield* makeTempDir("t3code-workspace-protected-config-");
-        const gates = yield* makeTempDir("t3code-open-gates-");
-        const configPath = path.join(repo, ".git", "config");
-        yield* fileSystem.makeDirectory(path.join(repo, ".git"));
-        yield* fileSystem.writeFileString(
-          configPath,
-          '[remote "origin"]\n\turl = git@github.com:pingdotgg/t3code.git\n',
-        );
-        const gatePath = path.join(gates, "tcc-prompt");
-        yield* makeOpenGate(gatePath);
-        const transcriptPath = path.join(claudeHomePath, "projects", "-protected", "a.jsonl");
-        yield* writeTranscript({
-          filePath: transcriptPath,
-          contents: claudeSessionLine(repo),
-          mtimeMs: Date.parse("2026-05-03T00:00:00.000Z"),
-        });
-        // TCC blocks open() of a regular file whatever its flags, so stat still
-        // reports a File and O_NONBLOCK does not help: every open of the config
-        // pins a pool thread on the gate.
-        const tccFileSystem = FileSystem.FileSystem.of({
-          ...fileSystem,
-          open: (target, options) =>
-            fileSystem.open(path.resolve(target) === configPath ? gatePath : target, options),
-          readFile: (target) =>
-            fileSystem.readFile(path.resolve(target) === configPath ? gatePath : target),
-          readFileString: (target, encoding) =>
-            fileSystem.readFileString(
-              path.resolve(target) === configPath ? gatePath : target,
-              encoding,
-            ),
-        });
-        const scan = runScan({ claudeHomePath, codexHomePath }).pipe(
-          Effect.provideService(FileSystem.FileSystem, tccFileSystem),
-        );
-
-        for (let attempt = 1; attempt <= LIBUV_POOL_SIZE + 1; attempt++) {
-          expect(
-            yield* scanUntilDeadline(scan),
-            `scan ${attempt} of ${LIBUV_POOL_SIZE + 1} hung opening the protected ${configPath}`,
-          ).toEqual(Option.some([repo]));
+        const root = yield* makeTempDir("t3code-workspace-blocked-configs-");
+        const repos = [path.join(root, "repo-a"), path.join(root, "repo-b")];
+        for (const repo of repos) {
+          yield* fileSystem.makeDirectory(path.join(repo, ".git"), { recursive: true });
+          yield* makeOpenGate(path.join(repo, ".git", "config"));
         }
+        // Two linked worktrees of one bare repository share its blocked config.
+        const bareGitDir = path.join(root, "bare.git");
+        yield* fileSystem.makeDirectory(bareGitDir);
+        yield* makeOpenGate(path.join(bareGitDir, "config"));
+        const worktrees = [path.join(root, "wt-1"), path.join(root, "wt-2")];
+        for (const worktree of worktrees) {
+          const gitDir = path.join(bareGitDir, "worktrees", path.basename(worktree));
+          yield* fileSystem.makeDirectory(gitDir, { recursive: true });
+          yield* fileSystem.writeFileString(path.join(gitDir, "commondir"), "../..\n");
+          yield* fileSystem.makeDirectory(worktree);
+          yield* fileSystem.writeFileString(path.join(worktree, ".git"), `gitdir: ${gitDir}\n`);
+        }
+        for (const [index, cwd] of [...repos, ...worktrees].entries()) {
+          yield* writeTranscript({
+            filePath: path.join(claudeHomePath, "projects", `-slug-${index}`, "a.jsonl"),
+            contents: claudeSessionLine(cwd),
+            mtimeMs: Date.parse(`2026-01-0${index + 1}T00:00:00.000Z`),
+          });
+        }
+
+        // Each blocked read costs one deadline; reading them one after another
+        // would take a deadline per config.
         expect(
-          Option.isSome(yield* awaitWithinDeadline(fileSystem.readFileString(transcriptPath))),
+          yield* awaitWithinDeadline(
+            runScan({ claudeHomePath, codexHomePath }).pipe(
+              Effect.map(({ candidates }) => candidates.map(({ path }) => path).toSorted()),
+            ),
+            "4 seconds",
+          ),
+        ).toEqual(Option.some(repos));
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+
+    it.live("completes every scan when a .git pointer file or commondir never opens", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const root = yield* makeTempDir("t3code-workspace-blocked-pointers-");
+        const pointerCheckout = path.join(root, "pointer");
+        yield* fileSystem.makeDirectory(pointerCheckout);
+        yield* makeOpenGate(path.join(pointerCheckout, ".git"));
+        const worktree = path.join(root, "worktree");
+        const worktreeGitDir = path.join(root, "main", ".git", "worktrees", "worktree");
+        yield* fileSystem.makeDirectory(worktreeGitDir, { recursive: true });
+        yield* makeOpenGate(path.join(worktreeGitDir, "commondir"));
+        yield* fileSystem.makeDirectory(worktree);
+        yield* fileSystem.writeFileString(
+          path.join(worktree, ".git"),
+          `gitdir: ${worktreeGitDir}\n`,
+        );
+        for (const [index, cwd] of [pointerCheckout, worktree].entries()) {
+          yield* writeTranscript({
+            filePath: path.join(claudeHomePath, "projects", `-slug-${index}`, "a.jsonl"),
+            contents: claudeSessionLine(cwd),
+            mtimeMs: Date.parse(`2026-01-0${index + 1}T00:00:00.000Z`),
+          });
+        }
+
+        // One scanner across scans: later scans skip the files that blocked.
+        yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          for (let attempt = 1; attempt <= LIBUV_POOL_SIZE + 1; attempt++) {
+            expect(
+              yield* scanUntilDeadline(scanner.scan),
+              `scan ${attempt} of ${LIBUV_POOL_SIZE + 1} hung opening a blocked git file`,
+            ).toEqual(Option.some([pointerCheckout]));
+          }
+        }).pipe(Effect.provide(layerScannerTest({ claudeHomePath, codexHomePath })));
+        expect(
+          Option.isSome(
+            yield* awaitWithinDeadline(fileSystem.readFileString(path.join(worktree, ".git"))),
+          ),
           "an unrelated fs read hung: the scans left libuv pool threads stuck in open()",
         ).toBe(true);
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),

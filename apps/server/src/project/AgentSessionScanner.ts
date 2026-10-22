@@ -73,41 +73,13 @@ const MAX_IMPORT_RECORDS = 100_000;
  * open() of a file under macOS privacy protection waits on a consent prompt
  * that a headless server never gets, and a FIFO waits for a writer. Either
  * pins a libuv pool thread that interruption cannot free, so git files of
- * arbitrary transcript cwds are read by a shell we can kill instead.
+ * arbitrary transcript cwds are read by a `cat` child we can kill instead.
  */
 const GIT_FILE_READ_DEADLINE = "2 seconds";
-const MAX_GIT_FILE_OUTPUT_BYTES = 4 * 1024 * 1024;
-// The shell opens each file itself, so killing it frees a stuck open() and no
-// forked reader outlives it. Per file it prints `<bytes>\n<content>`, or `-\n`
-// when unreadable; the appended dot keeps trailing newlines out of `$(...)`.
-const GIT_FILE_READ_SCRIPT =
-  'for f do if { c=$(cat) && c="$c."; } 2>/dev/null <"$f"; then printf "%s\\n" "${#c}"; printf "%s" "$c"; else echo -; fi; done';
-/** Paths whose open() outlived the deadline; later scans don't wait on them again. */
-const blockedGitFilePaths = new Set<string>();
-
-/** Decodes complete records in order; stops at the first incomplete one. */
-function decodeGitFileRecords(output: Uint8Array): Array<string | null> {
-  const records: Array<string | null> = [];
-  const decoder = new TextDecoder();
-  let offset = 0;
-  while (offset < output.length) {
-    const newline = output.indexOf(10, offset);
-    if (newline === -1) break;
-    const header = decoder.decode(output.subarray(offset, newline));
-    if (header === "-") {
-      records.push(null);
-      offset = newline + 1;
-      continue;
-    }
-    const length = Number(header);
-    const end = newline + 1 + length;
-    if (!/^\d+$/.test(header) || length < 1 || end > output.length) break;
-    // Drop the dot the script appended.
-    records.push(decoder.decode(output.subarray(newline + 1, end - 1)));
-    offset = end;
-  }
-  return records;
-}
+const MAX_GIT_FILE_BYTES = 1024 * 1024;
+// Reads run concurrently so a scan waits about one deadline per phase however
+// many files block, not one per blocked file.
+const GIT_FILE_READ_CONCURRENCY = 16;
 
 const TranscriptContentBlock = Schema.Struct({
   type: Schema.optional(Schema.String),
@@ -731,59 +703,46 @@ export const make = Effect.gen(function* () {
     return `path:${normalizeProjectPathForComparison(realPath)}`;
   });
 
-  /** Reads small files without the libuv pool; null when missing, unreadable or blocked. */
+  // Paths whose own read outlived the deadline. Without this every later scan
+  // would wait out the deadline again for each phase that touches them.
+  const blockedGitFilePaths = new Set<string>();
+
+  /** Reads small files without the libuv pool; "" when missing, unreadable or blocked. */
   const readGitFiles = Effect.fn("AgentSessionScanner.readGitFiles")(function* (
     filePaths: ReadonlyArray<string>,
   ) {
-    const contents = new Map<string, string | null>();
-    if (isWindows) {
-      // No privacy prompts or FIFOs to block open() here.
-      for (const filePath of filePaths) {
-        contents.set(
-          filePath,
-          yield* fileSystem.readFileString(filePath).pipe(Effect.orElseSucceed(() => null)),
-        );
-      }
-      return contents;
-    }
-    let pending = filePaths.filter((filePath) => {
-      if (!blockedGitFilePaths.has(filePath)) return true;
-      contents.set(filePath, null);
-      return false;
-    });
-    while (pending.length > 0) {
-      const chunks: Array<Uint8Array> = [];
-      let outputBytes = 0;
-      const result = yield* processRunner
-        .run({
-          command: "/bin/sh",
-          args: ["-c", GIT_FILE_READ_SCRIPT, "sh", ...pending],
-          // `${#c}` must count bytes, not characters.
-          env: { LC_ALL: "C" },
-          timeout: GIT_FILE_READ_DEADLINE,
-          timeoutBehavior: "timedOutResult",
-          maxOutputBytes: MAX_GIT_FILE_OUTPUT_BYTES,
-          outputMode: "truncate",
-          onStdoutChunk: (chunk) => {
-            if (outputBytes >= MAX_GIT_FILE_OUTPUT_BYTES) return;
-            chunks.push(chunk);
-            outputBytes += chunk.byteLength;
-          },
-        })
-        .pipe(Effect.option);
-      const records = decodeGitFileRecords(Buffer.concat(chunks));
-      pending.forEach((filePath, index) => contents.set(filePath, records[index] ?? null));
-      if (Option.isNone(result) || !result.value.timedOut || records.length >= pending.length) {
-        break;
-      }
-      // The shell reads in order, so the first missing record is the one it was stuck on.
-      blockedGitFilePaths.add(pending[records.length]!);
-      pending = pending.slice(records.length + 1);
-    }
-    return contents;
+    const unique = Array.from(new Set(filePaths));
+    const contents = yield* Effect.forEach(
+      unique,
+      (filePath) => {
+        // No privacy prompts or FIFOs to block open() here.
+        if (isWindows) {
+          return fileSystem.readFileString(filePath).pipe(Effect.orElseSucceed(() => ""));
+        }
+        if (blockedGitFilePaths.has(filePath)) return Effect.succeed("");
+        return processRunner
+          .run({
+            command: "cat",
+            args: ["--", filePath],
+            timeout: GIT_FILE_READ_DEADLINE,
+            timeoutBehavior: "timedOutResult",
+            maxOutputBytes: MAX_GIT_FILE_BYTES,
+            outputMode: "truncate",
+          })
+          .pipe(
+            Effect.map((result) => {
+              if (result.timedOut) blockedGitFilePaths.add(filePath);
+              return result.code === 0 ? result.stdout : "";
+            }),
+            Effect.orElseSucceed(() => ""),
+          );
+      },
+      { concurrency: isWindows ? 1 : GIT_FILE_READ_CONCURRENCY },
+    );
+    return new Map(unique.map((filePath, index) => [filePath, contents[index]!]));
   });
 
-  /** Reads every directory's git identity with at most three batched reads. */
+  /** Reads every directory's git identity in three phases of concurrent reads. */
   const readGitIdentities = Effect.fn("AgentSessionScanner.readGitIdentities")(function* (
     directories: ReadonlyArray<string>,
   ) {
