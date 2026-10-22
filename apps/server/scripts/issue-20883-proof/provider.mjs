@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-import fs from "node:fs";
-import readline from "node:readline";
-import { randomUUID } from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodeReadline from "node:readline";
+import * as NodeCrypto from "node:crypto";
 
 // Public wire shapes come from the existing Codex protocol fixture. A file gate
 // lets the real browser observe running state before a notification is emitted.
-const wire = JSON.parse(fs.readFileSync(new URL("./wire.json", import.meta.url)));
+const wire = JSON.parse(NodeFS.readFileSync(new URL("./wire.json", import.meta.url)));
 const gate = process.env.T3_PROOF_GATE ?? "/tmp/issue-20883-gate";
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\n");
 const notify = (method, params) => send({ jsonrpc: "2.0", method, params });
@@ -14,7 +14,7 @@ if (process.argv.includes("--version")) {
   process.exit();
 }
 let counter = 0;
-const lines = readline.createInterface({ input: process.stdin });
+const lines = NodeReadline.createInterface({ input: process.stdin });
 lines.on("line", (line) => {
   const msg = JSON.parse(line);
   const { id, method } = msg;
@@ -52,7 +52,7 @@ lines.on("line", (line) => {
     });
   if (method === "skills/list") return send({ id, result: { data: [] } });
   if (method === "thread/start" || method === "thread/resume") {
-    const nativeId = msg.params?.threadId ?? randomUUID();
+    const nativeId = msg.params?.threadId ?? NodeCrypto.randomUUID();
     const result = structuredClone(wire.threadStart);
     result.thread.id = nativeId;
     result.thread.sessionId = nativeId;
@@ -69,10 +69,10 @@ lines.on("line", (line) => {
     const kind =
       ["input", "approval", "failed", "limited"].find((k) => text.includes(`PROOF:${k}`)) ??
       "complete";
-    fs.writeFileSync(`${gate}.ready`, kind);
+    NodeFS.writeFileSync(`${gate}.ready`, kind);
     const timer = setInterval(() => {
-      if (!fs.existsSync(gate)) return;
-      fs.unlinkSync(gate);
+      if (!NodeFS.existsSync(gate)) return;
+      NodeFS.unlinkSync(gate);
       clearInterval(timer);
       const common = { threadId: nativeId, turnId: turn.id };
       if (kind === "input")

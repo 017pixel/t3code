@@ -215,7 +215,7 @@ export async function capture(tools, { tabId, config }) {
     JSON.stringify(JSON.stringify(result)) +
     "\nd=json.loads(r)\np=" +
     JSON.stringify(dst) +
-    '\nfor key,suffix in [(\"pre\",\"-pre.png\"),(\"post\",\"-post.png\"),(\"video\",\".mp4\")]:shutil.copy2(d[key].get(\"screenshotPath\",d[key].get(\"path\")),p+suffix)\nopen(p+\".json\",\"w\").write(json.dumps(d,indent=2))\nPY';
+    '\nfor key,suffix in [("pre","-pre.png"),("post","-post.png"),("video",".mp4")]:shutil.copy2(d[key].get("screenshotPath",d[key].get("path")),p+suffix)\nopen(p+".json","w").write(json.dumps(d,indent=2))\nPY';
   text(await tools.exec_command({ cmd, max_output_tokens: 100 }));
   text({ row: cfg.row, cell: cfg.cell, state });
   return result;
