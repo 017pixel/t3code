@@ -1475,17 +1475,10 @@ export const make = Effect.gen(function* () {
   // The repository the GitHub provider creates PRs in: GH_REPO when it parses, else what
   // resolveGitHubRepository makes of every remote and its gh-resolved mark. The provider reads
   // `git remote -v`, which in a checkout without `insteadOf` rewrites prints the configured URLs
-  // read here. Null unless `remoteUrl` is on GitHub, or when nothing resolves.
+  // read here. Null unless origin is on GitHub, or when nothing resolves.
   const resolveGitHubTargetRepository = Effect.fn("resolveGitHubTargetRepository")(function* (
     cwd: string,
-    remoteUrl: string | null,
   ) {
-    const provider =
-      remoteUrl === null ? null : detectSourceControlProviderFromGitRemoteUrl(remoteUrl);
-    if (provider?.kind !== "github") return null;
-    const host = urlHost(provider.baseUrl);
-    const fromEnvironment = parseGitHubRepositorySelector(environment.GH_REPO ?? "", host ?? "");
-    if (fromEnvironment !== null) return `${fromEnvironment.owner}/${fromEnvironment.name}`;
     const config = yield* gitCore
       .execute({
         operation: "GitManager.resolveGitHubTargetRepository.config",
@@ -1512,6 +1505,13 @@ export const make = Effect.gen(function* () {
         if (!remotes.has(name)) remotes.set(name, line.slice(separator + 1));
       }
     }
+    const originUrl = remotes.get("origin");
+    const provider =
+      originUrl === undefined ? null : detectSourceControlProviderFromGitRemoteUrl(originUrl);
+    if (provider?.kind !== "github") return null;
+    const host = urlHost(provider.baseUrl);
+    const fromEnvironment = parseGitHubRepositorySelector(environment.GH_REPO ?? "", host ?? "");
+    if (fromEnvironment !== null) return `${fromEnvironment.owner}/${fromEnvironment.name}`;
     const { locator } = resolveGitHubRepository({
       remotes: [...remotes].map(([name, url]) => `${name}\t${url} (fetch)`).join("\n"),
       resolved: resolved.join("\n"),
@@ -1636,15 +1636,11 @@ export const make = Effect.gen(function* () {
       (yield* targetsOnlyRemote(cwd, remoteName, remoteRepository));
     const isForeignRemote = remoteName !== null && remoteName !== "origin" && !isOnlyRemote;
 
-    // A fork branch can live on origin while gh creates the PR in upstream (#7382), so with a
-    // GitHub origin compare against the repository the provider targets.
-    const targetRepositoryNameWithOwner =
-      (yield* resolveGitHubTargetRepository(cwd, originRepository.remoteUrl)) ??
-      originRepository.repositoryNameWithOwner;
     const isCrossRepository =
-      remoteRepository.repositoryNameWithOwner !== null && targetRepositoryNameWithOwner !== null
+      remoteRepository.repositoryNameWithOwner !== null &&
+      originRepository.repositoryNameWithOwner !== null
         ? remoteRepository.repositoryNameWithOwner.toLowerCase() !==
-          targetRepositoryNameWithOwner.toLowerCase()
+          originRepository.repositoryNameWithOwner.toLowerCase()
         : isForeignRemote && remoteRepository.repositoryNameWithOwner !== null;
 
     const ownerHeadSelector =
@@ -2421,11 +2417,22 @@ export const make = Effect.gen(function* () {
       phase: "pr",
       label: `Creating ${terms.singular}...`,
     });
+    // A fork branch can live on origin while gh creates the PR in upstream (#7382), so the head
+    // is compared against the repository the provider targets rather than origin.
+    const targetRepository =
+      provider.kind === "github" ? yield* resolveGitHubTargetRepository(cwd) : null;
+    const headSelector =
+      targetRepository !== null &&
+      headContext.headRepositoryOwnerLogin !== null &&
+      headContext.headRepositoryNameWithOwner !== null &&
+      headContext.headRepositoryNameWithOwner.toLowerCase() !== targetRepository.toLowerCase()
+        ? `${headContext.headRepositoryOwnerLogin}:${headContext.headBranch}`
+        : headContext.preferredHeadSelector;
     yield* provider
       .createChangeRequest({
         cwd,
         baseRefName: baseBranch,
-        headSelector: headContext.preferredHeadSelector,
+        headSelector,
         title: generated.title,
         bodyFile,
       })
