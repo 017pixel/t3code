@@ -2608,7 +2608,11 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       return;
     }
     if (props.latestRun.runId === previous.runId) {
-      if (previous.status === "running" && props.latestRun.status === "interrupted") {
+      if (
+        previous.status === "running" &&
+        props.latestRun.status === "interrupted" &&
+        !interactionState.expandedTurnIds.has(props.latestRun.runId)
+      ) {
         const interruptedTurnId = props.latestRun.runId;
         autoExpandedTurnIdRef.current = interruptedTurnId;
         setInteractionState((current) => ({
@@ -2632,7 +2636,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       next.delete(previous.runId);
       return { ...current, expandedTurnIds: next };
     });
-  }, [props.latestRun]);
+  }, [interactionState.expandedTurnIds, props.latestRun]);
 
   useEffect(() => {
     return () => {
