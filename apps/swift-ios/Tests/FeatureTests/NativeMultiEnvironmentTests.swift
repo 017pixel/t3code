@@ -1035,15 +1035,29 @@ final class NativeMultiEnvironmentTests: XCTestCase {
         await fixture.transport.holdNextShellRead(host: "two.example")
         var events = fixture.client.events().makeAsyncIterator()
 
-        // The passive read stays held until after the first snapshot returns,
-        // so a startup that still waited for it would never get here.
-        let initial = try await fixture.client.initialSnapshot()
+        let activeStartup = expectation(description: "Active startup must return before a passive computer answers")
+        var startupReturned = false
+        let startup = Task {
+            let snapshot = try await fixture.client.initialSnapshot()
+            startupReturned = true
+            activeStartup.fulfill()
+            return snapshot
+        }
         await fixture.transport.waitForHeldShellRead()
+        await fulfillment(of: [activeStartup], timeout: 2)
+        let returnedBeforeRelease = startupReturned
+        // Release even when the expectation fails so the old startup path can
+        // finish and does not leave the transport continuation suspended.
+        await fixture.transport.releaseShellRead()
+        let initial = try await startup.value
+        guard returnedBeforeRelease else {
+            await fixture.client.disconnect()
+            return
+        }
         XCTAssertEqual(Set(initial.threads.compactMap(\.wireID)), ["thread-one"])
         XCTAssertEqual(initial.connection.state, .connected)
         XCTAssertNil(initial.environments.first(where: { $0.id == "two" })?.connectionState)
 
-        await fixture.transport.releaseShellRead()
         var hydrated: FeatureSnapshot?
         while let event = await events.next() {
             if case let .snapshot(snapshot) = event,
