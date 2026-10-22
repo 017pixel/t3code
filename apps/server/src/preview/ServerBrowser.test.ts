@@ -83,8 +83,8 @@ const PNG_HEADER = (() => {
 function makeSession(frame?: ReturnType<typeof makeFrame>) {
   const events = new NodeEvents.EventEmitter();
   return {
-    on: vi.fn((name: string, listener: () => void) => events.on(name, listener)),
-    emit: (name: string) => events.emit(name),
+    on: vi.fn((name: string, listener: (...args: never[]) => void) => events.on(name, listener)),
+    emit: (name: string, ...args: unknown[]) => events.emit(name, ...args),
     detach: vi.fn(async () => {}),
     send: vi.fn(async (method: string, input?: unknown): Promise<Record<string, unknown>> => {
       if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{}] };
@@ -669,6 +669,60 @@ it.live("reports a pending dialog without evaluating the page and resolves it ex
         input: {},
       });
       expect(resolved.dialog).toBeNull();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("asks for HTTP Basic credentials as a pending dialog that can be cancelled", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      yield* broker.invoke({
+        scope,
+        tabId,
+        operation: "navigate",
+        input: { url: "http://localhost:18914/" },
+      });
+      const session = contexts[0]!.sessions[0]!;
+      // Without handleAuthRequests, Chromium renders the 401 body and never asks for credentials.
+      expect(session.send).toHaveBeenCalledWith(
+        "Fetch.enable",
+        expect.objectContaining({ handleAuthRequests: true }),
+      );
+      session.emit("Fetch.authRequired", {
+        requestId: "auth-1",
+        frameId: "main",
+        resourceType: "Document",
+        request: { url: "http://localhost:18914/", method: "GET", headers: {} },
+        authChallenge: {
+          source: "Server",
+          origin: "http://localhost:18914",
+          scheme: "basic",
+          realm: "test",
+        },
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.dialog).toMatchObject({
+        message: expect.stringContaining("http://localhost:18914"),
+      });
+      expect(status.dialog?.message).toContain("test");
+      yield* broker.invoke({ scope, tabId, operation: "dialog", input: { accept: false } });
+      expect(session.send).toHaveBeenCalledWith("Fetch.continueWithAuth", {
+        requestId: "auth-1",
+        authChallengeResponse: { response: "CancelAuth" },
+      });
+      const cancelled = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(cancelled.dialog).toBeNull();
     }),
   ).pipe(Effect.provide(layer)),
 );
