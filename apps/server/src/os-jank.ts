@@ -1,5 +1,7 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
+  buildEnvironmentCaptureCommand,
+  extractEnvironmentValues,
   listLoginShellCandidates,
   mergePathEntries,
   readEnvironmentFromLoginShell,
@@ -7,9 +9,14 @@ import {
   resolveWindowsEnvironment,
   setWindowsPath,
 } from "@t3tools/shared/shell";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as NodeOS from "node:os";
 
 function logPathHydrationWarning(message: string, error?: unknown): void {
@@ -18,24 +25,20 @@ function logPathHydrationWarning(message: string, error?: unknown): void {
   );
 }
 
-function hydratePosixPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): void {
-  let shellEnvironment: Partial<Record<string, string>> = {};
-  for (const shell of listLoginShellCandidates(platform, env.SHELL)) {
-    try {
-      // mise's record of the PATH entries it added. It must travel with the
-      // shell's PATH, or `mise x` can rebuild PATH behind a same-named wrapper
-      // (`exec mise x claude -- claude`) that then re-runs itself forever.
-      shellEnvironment = readEnvironmentFromLoginShell(shell, ["PATH", "__MISE_DIFF", "JAVA_HOME"]);
-    } catch (error) {
-      logPathHydrationWarning(`Failed to read PATH from login shell ${shell}.`, error);
-    }
+// __MISE_DIFF is mise's record of the PATH entries it added. It must travel
+// with the shell's PATH, or `mise x` can rebuild PATH behind a same-named
+// wrapper (`exec mise x claude -- claude`) that then re-runs itself forever.
+const LOGIN_SHELL_ENV_NAMES = ["PATH", "__MISE_DIFF", "JAVA_HOME"] as const;
+const LOGIN_SHELL_TIMEOUT = Duration.seconds(5);
 
-    if (shellEnvironment.PATH) break;
-  }
-
+function applyLoginShellEnvironment(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  shellEnvironment: Partial<Record<string, string>>,
+  fallbackPath?: string,
+): void {
   const shellPath = shellEnvironment.PATH;
-  const launchctlPath = platform === "darwin" && !shellPath ? readPathFromLaunchctl() : undefined;
-  const mergedPath = mergePathEntries(shellPath ?? launchctlPath, env.PATH, platform);
+  const mergedPath = mergePathEntries(shellPath ?? fallbackPath, env.PATH, platform);
   if (mergedPath) {
     env.PATH = mergedPath;
   }
@@ -47,6 +50,23 @@ function hydratePosixPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): vo
   if (!env.JAVA_HOME && shellEnvironment.JAVA_HOME) {
     env.JAVA_HOME = shellEnvironment.JAVA_HOME;
   }
+}
+
+function hydratePosixPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): void {
+  let shellEnvironment: Partial<Record<string, string>> = {};
+  for (const shell of listLoginShellCandidates(platform, env.SHELL)) {
+    try {
+      shellEnvironment = readEnvironmentFromLoginShell(shell, LOGIN_SHELL_ENV_NAMES);
+    } catch (error) {
+      logPathHydrationWarning(`Failed to read PATH from login shell ${shell}.`, error);
+    }
+
+    if (shellEnvironment.PATH) break;
+  }
+
+  const launchctlPath =
+    platform === "darwin" && !shellEnvironment.PATH ? readPathFromLaunchctl() : undefined;
+  applyLoginShellEnvironment(env, platform, shellEnvironment, launchctlPath);
 }
 
 export function hydratePosixHome(
@@ -107,6 +127,56 @@ export const fixPath = Effect.fn("fixPath")(function* (options?: {
       }),
     ),
   );
+});
+
+const readLoginShellOutput = (shell: string) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const child = yield* spawner.spawn(
+        ChildProcess.make(
+          shell,
+          ["-ilc", buildEnvironmentCaptureCommand(shell, LOGIN_SHELL_ENV_NAMES)],
+          {
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "ignore",
+          },
+        ),
+      );
+      const [stdout, exitCode] = yield* Effect.all(
+        [Stream.mkString(Stream.decodeText(child.stdout)), child.exitCode],
+        { concurrency: 2 },
+      );
+      return exitCode === 0 ? stdout : "";
+    }),
+  ).pipe(Effect.timeoutOption(LOGIN_SHELL_TIMEOUT), Effect.map(Option.getOrElse(() => "")));
+
+/**
+ * Re-reads PATH from the login shell so tools installed after startup become
+ * spawnable without restarting. Unlike the startup hydration it never blocks
+ * the event loop, and it runs even when the desktop prepared the environment,
+ * because that capture was taken once at launch. Failure leaves PATH alone.
+ */
+export const refreshPathFromLoginShell = Effect.fn("refreshPathFromLoginShell")(function* () {
+  const platform = yield* HostProcess.Platform;
+  if (platform !== "darwin" && platform !== "linux") return;
+  const env = yield* HostProcess.Environment;
+
+  for (const shell of listLoginShellCandidates(platform, env.SHELL)) {
+    const output = yield* readLoginShellOutput(shell).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning(`Failed to read PATH from login shell ${shell}.`, cause).pipe(
+          Effect.as(""),
+        ),
+      ),
+    );
+    const shellEnvironment = extractEnvironmentValues(output, LOGIN_SHELL_ENV_NAMES);
+    if (shellEnvironment.PATH) {
+      applyLoginShellEnvironment(env, platform, shellEnvironment);
+      return;
+    }
+  }
 });
 
 export const expandHomePath = Effect.fn(function* (input: string) {
