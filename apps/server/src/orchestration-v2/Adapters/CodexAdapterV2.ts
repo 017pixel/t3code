@@ -1876,6 +1876,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         );
         const turnWaiters = yield* Ref.make(new Map<string, Deferred.Deferred<void, never>>());
         const subagentThreads = yield* Ref.make(new Map<string, CodexSubagentThreadContext>());
+        // Kept after the turn ends, like a registered child's parent context, so
+        // a child resumed after a restart still finds the parent that resumed it.
+        const latestTurnContexts = new Map<string, ActiveCodexTurnContext>();
         const subagentSelections = new Map<string, Omit<ModelSelection, "instanceId">>();
         const pendingSubagentTurns = yield* Ref.make(
           new Map<string, ReadonlyArray<PendingCodexSubagentTurnStarted>>(),
@@ -2021,6 +2024,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           });
         });
 
+        const rememberLatestTurnContext = (context: ActiveCodexTurnContext) => {
+          const nativeThreadId = context.providerThread.nativeThreadRef?.nativeId;
+          if (nativeThreadId != null) latestTurnContexts.set(nativeThreadId, context);
+        };
+
         const registerRootTurn = Effect.fn("CodexAdapterV2.registerRootTurn")(function* (input: {
           readonly turnInput: ProviderAdapter.ProviderAdapterV2TurnInput;
           readonly nativeTurnId: string;
@@ -2068,6 +2076,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             updated.set(input.nativeTurnId, context);
             return updated;
           });
+          rememberLatestTurnContext(context);
           yield* emitProviderEvent({
             type: "provider_turn.updated",
             driver: CODEX_PROVIDER,
@@ -2645,6 +2654,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               updated.set(turn.nativeTurnId, activeContext);
               return updated;
             });
+            rememberLatestTurnContext(activeContext);
             yield* emitSubagentTaskUpdate({
               subagent,
               status: "running",
@@ -2710,25 +2720,46 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         const restoreSubagentThread =
           /* Provider events include streaming deltas; avoid a span for each update. */
           Effect.fnUntraced(function* (nativeThreadId: string) {
-            const rootContext = Array.from((yield* Ref.get(activeTurns)).values()).find(
-              (context) => context.subagent === null,
-            );
-            const readSubagentThread = rootContext?.input.readSubagentThread;
-            if (rootContext === undefined || readSubagentThread === undefined) return undefined;
             const childThreadId = idAllocator.derive.threadFromProviderThread({
               driver: CODEX_PROVIDER,
               nativeThreadId,
             });
-            const saved = yield* readSubagentThread(childThreadId);
+            // Each root reads only children in its own thread's lineage.
+            let rootContext: ActiveCodexTurnContext | undefined;
+            let saved: ProviderAdapter.ProviderAdapterV2SubagentThread | null = null;
+            for (const context of latestTurnContexts.values()) {
+              const read = context.subagent === null ? context.input.readSubagentThread : undefined;
+              if (read === undefined) continue;
+              saved = yield* read(childThreadId);
+              if (saved !== null) {
+                rootContext = context;
+                break;
+              }
+            }
             const nativeItemId = saved?.subagent.nativeTaskRef?.nativeId;
             if (
+              rootContext === undefined ||
               saved === null ||
               nativeItemId == null ||
               saved.providerThread.nativeThreadRef?.nativeId !== nativeThreadId
             )
               return undefined;
+            const parentThreadId = saved.subagent.threadId;
+            // A nested child's parent resumed it, so that parent already had a
+            // turn in this session.
+            const parentNativeThreadId =
+              parentThreadId === rootContext.projectionThreadId
+                ? rootContext.providerThread.nativeThreadRef?.nativeId
+                : Array.from((yield* Ref.get(subagentThreads)).values()).find(
+                    (candidate) => candidate.childThreadId === parentThreadId,
+                  )?.providerThread.nativeThreadRef?.nativeId;
+            const parentContext =
+              parentNativeThreadId == null
+                ? undefined
+                : latestTurnContexts.get(parentNativeThreadId);
+            if (parentContext === undefined) return undefined;
             const subagent: CodexSubagentThreadContext = {
-              parentContext: rootContext,
+              parentContext,
               providerThread: {
                 ...saved.providerThread,
                 providerSessionId: rootContext.providerThread.providerSessionId,
@@ -2743,7 +2774,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeToolCallId: nativeItemId,
               ordinal: 1,
               nativeTurnIds: new Set<string>(),
-              startedAt: saved.subagent.startedAt ?? rootContext.startedAt,
+              startedAt: saved.subagent.startedAt ?? parentContext.startedAt,
               turnItemId: saved.turnItem.id,
               turnItemOrdinal: saved.turnItem.ordinal,
               task: saved.subagent,
@@ -2755,14 +2786,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 : [existing, current];
             });
             if (registered === subagent) {
+              const latestOrdinal = saved.latestProviderTurnOrdinal;
               // Continue after the saved turns so the resumed one reopens the task.
               yield* Ref.update(nextProviderTurnOrdinals, (current) =>
                 new Map(current).set(
                   String(subagent.providerThread.id),
-                  Math.max(
-                    current.get(String(subagent.providerThread.id)) ?? 0,
-                    saved.latestProviderTurnOrdinal,
-                  ),
+                  Math.max(current.get(String(subagent.providerThread.id)) ?? 0, latestOrdinal),
                 ),
               );
             }

@@ -169,8 +169,25 @@ export const layer: Layer.Layer<
         shouldStartProviderTurn: () => isCurrentAttemptInStatus("running"),
         readSubagentThread: Effect.fn("ProviderTurnStartService.readSubagentThread")(
           function* (childThreadId: ThreadId) {
+            // A child's turn can start before the spawn that creates its thread.
+            const shell = yield* projectionStore.getThreadShell(childThreadId);
+            if (shell === null) return null;
+            const { parentThreadId, relationshipToParent } = shell.lineage;
+            if (relationshipToParent !== "subagent" || parentThreadId === null) return null;
+            // A nested child is saved on its immediate parent. Only children
+            // descended from this run's thread through subagent links belong to it.
+            let ancestorId = parentThreadId;
+            const visited = new Set<ThreadId>([childThreadId]);
+            while (ancestorId !== input.threadId) {
+              if (visited.has(ancestorId)) return null;
+              visited.add(ancestorId);
+              const { lineage } = yield* projectionStore.getThread(ancestorId);
+              if (lineage.relationshipToParent !== "subagent" || lineage.parentThreadId === null)
+                return null;
+              ancestorId = lineage.parentThreadId;
+            }
             const parent = yield* projectionStore.getThreadRecords(
-              input.threadId,
+              parentThreadId,
               ["subagents", "turnItems"],
               { turnItemTypes: ["subagent"] },
             );
