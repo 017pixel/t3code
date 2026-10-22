@@ -174,6 +174,46 @@ describe("MessagesTimeline messages", () => {
     expect(maxNestedCommits).toBeLessThan(20);
   });
 
+  it("keeps the first and last message headings reachable from either end", async () => {
+    const props = baseProps();
+    const entries = Array.from({ length: 120 }, (_, index) =>
+      message(
+        index === 0
+          ? "First turn"
+          : index === 119
+            ? "Last turn"
+            : `Turn ${index}:\n\n${"x ".repeat(200)}`,
+        { role: index % 2 === 0 ? "user" : "assistant" },
+        `turn-${index}`,
+      ),
+    );
+    await using screen = await renderElement(
+      <MessagesTimeline {...props} timelineEntries={entries} />,
+    );
+    const headingFor = (text: string) =>
+      [...screen.container.querySelectorAll("h3")].find((heading) =>
+        heading.parentElement?.textContent?.includes(text),
+      );
+    const viewport = props.listRef.current!.getScrollableNode()!;
+    // A screen reader scrolls the heading it moves to into view.
+    const expectHeadingInView = async (text: string, neighbour: string) => {
+      await act(() => headingFor(text)!.scrollIntoView({ block: "start" }));
+      await vi.waitFor(() => expect(screen.text()).toContain(neighbour));
+      const row = headingFor(text)!.parentElement!.getBoundingClientRect();
+      const view = viewport.getBoundingClientRect();
+      expect(row.top).toBeLessThan(view.bottom);
+      expect(row.bottom).toBeGreaterThan(view.top);
+    };
+
+    await vi.waitFor(() => expect(headingFor("Last turn")).toBeDefined());
+    expect(headingFor("First turn")).toBeDefined();
+    expect(screen.text()).not.toContain("Turn 60:");
+
+    await expectHeadingInView("First turn", "Turn 1:");
+    expect(headingFor("Last turn")).toBeDefined();
+    await expectHeadingInView("Last turn", "Turn 118:");
+  });
+
   it("preserves XML-like tags and comparisons in user messages as text", async () => {
     const source = [
       'Without reading a file, do you have <global-agent-instructions scope="workspace">',
