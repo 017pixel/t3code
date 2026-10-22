@@ -861,6 +861,58 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
+  it.effect("keeps the unread notification budget while a reader is slow", () =>
+    Effect.gen(function* () {
+      const MIB = 1024 * 1024;
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const handled = yield* Queue.unbounded<void>();
+      const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        stdio,
+        serverRequestMethods: new Set(),
+        onNotification: () => Queue.offer(handled, undefined).pipe(Effect.asVoid),
+      });
+      const send = (index: number, text: string) =>
+        Queue.offer(
+          input,
+          encoder.encode(
+            `${encodeUnknownJsonString({ jsonrpc: "2.0", method: "x/large", params: { index, text } })}\n`,
+          ),
+        ).pipe(Effect.andThen(Queue.take(handled)));
+
+      yield* send(1, "x".repeat(6 * MIB));
+      yield* send(2, "x".repeat(6 * MIB));
+
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const done = yield* Deferred.make<void>();
+      const seen: Array<number> = [];
+      yield* transport.incoming.pipe(
+        Stream.runForEach((notification) =>
+          Effect.gen(function* () {
+            const index = (notification.params as { readonly index: number }).index;
+            seen.push(index);
+            if (index === 1) {
+              yield* Deferred.succeed(entered, undefined);
+              yield* Deferred.await(release);
+            }
+            if (index === 5) yield* Deferred.succeed(done, undefined);
+          }),
+        ),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(entered);
+
+      // Notification 2 is still unread here, so the 16 MiB budget must evict it.
+      yield* send(3, "x".repeat(6 * MIB));
+      yield* send(4, "x".repeat(6 * MIB));
+      yield* send(5, "sentinel");
+      yield* Deferred.succeed(release, undefined);
+      yield* Deferred.await(done);
+
+      assert.deepEqual(seen, [1, 3, 4, 5]);
+    }),
+  );
+
   it.effect("cleans up interrupted extension requests before a late response arrives", () =>
     Effect.gen(function* () {
       const { stdio, input, output } = yield* makeInMemoryStdio();

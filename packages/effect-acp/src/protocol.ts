@@ -1021,11 +1021,15 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     clientProtocol,
     serverProtocol,
     get incoming() {
-      return Stream.fromQueue(notificationQueue).pipe(
-        Stream.map(({ notification, size }) => {
-          bufferedNotificationChars -= size;
-          return notification;
-        }),
+      // One at a time: Stream.fromQueue drains every buffered item into a batch,
+      // which a slow reader would hold outside the eviction budget.
+      return Stream.fromPull(
+        Effect.succeed(
+          Effect.map(Queue.take(notificationQueue), ({ notification, size }) => {
+            bufferedNotificationChars -= size;
+            return [notification] as const;
+          }),
+        ),
       );
     },
     request: sendRequest,
