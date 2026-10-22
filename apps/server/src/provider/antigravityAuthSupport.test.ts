@@ -102,6 +102,19 @@ describe("Antigravity process environment", () => {
     });
   });
 
+  it("lets the Linux runtime start when the user's passwd lookup fails", () => {
+    // OS Login users have no /etc/passwd entry. The runtime's bundled libgcc_s cannot load
+    // libnss_oslogin, so getpwuid fails and the runtime exits 255 unless told to fall back.
+    const spawn = buildAntigravityAcpSpawnInput({
+      installation: { executablePath: "/release/acp", harnessPath: "/release/harness" },
+      profile,
+      cwd: "/project",
+      baseEnv: { HOME: "/home/oslogin-user", PATH: "/usr/bin" },
+    });
+
+    expect(spawn.args).toContain("--loas_pwd_fallback_in_corp");
+  });
+
   it("passes only the configured method's credential and keeps the GCP pair out of the environment", () => {
     const baseEnv = { PATH: "/usr/bin", GOOGLE_API_KEY: "ambient-key" };
     const spawnFor = (auth: AntigravityAuthConfig) =>
