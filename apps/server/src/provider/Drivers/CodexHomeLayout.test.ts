@@ -415,8 +415,9 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
           yield* materializeCodexShadowHome(layout);
           expect(yield* isSymlink(path.join(shadowHome, "logs_2.sqlite"))).toBe(true);
 
-          // SQLite opens its journal next to the path it was given, so Codex writes regular
-          // sidecars beside the linked base database while the shared home has its own.
+          // SQLite's Windows VFS opens the journal next to the path it was given rather than
+          // the link target, so Codex there writes regular sidecars beside the linked base
+          // database while the shared home has its own.
           for (const suffix of ["-wal", "-shm"]) {
             const name = `logs_2.sqlite${suffix}`;
             yield* writeTextFile(path.join(sharedHome, name), `shared ${name}`);
