@@ -42,7 +42,7 @@ for i,(label,message) in enumerate(messages.items()):
    p=json.loads(row['payload_json']) if 'payload_json' in row else None
    if p:
     if table=='orchestration_v2_projection_threads': p['title']=label+' — permission fixture'; row['title']=p['title']; p['lastVisitedAt']=now
-    if table.endswith(('_runs','_run_attempts','_provider_turns','_nodes')):
+    if table.endswith(('_runs','_run_attempts','_provider_turns')) or (table.endswith('_nodes') and p['id']==json.loads(tables['orchestration_v2_projection_runs'][0]['payload_json'])['rootNodeId']):
      p['status']='failed' if failed else 'completed'; row['status']=p['status']
     if p.get('type')=='system_notice':
      if not failed: continue
