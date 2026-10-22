@@ -785,6 +785,45 @@ it.live("signs in to an HTTP Basic challenge without holding the action queue", 
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("a sign-in prompt Chromium already dropped clears when answering it fails", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, browser, tabId } = yield* ready;
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      const session = contexts[0]!.sessions[0]!;
+      const send = session.send.getMockImplementation()!;
+      // Chromium forgets a paused request when its frame goes away.
+      session.send.mockImplementation(async (method, input) =>
+        method === "Fetch.continueWithAuth"
+          ? Promise.reject(new Error("Invalid InterceptionId."))
+          : send(method, input),
+      );
+      session.emit("Fetch.authRequired", basicChallenge);
+      yield* Queue.takeAll(viewer.output);
+      const failed = yield* broker
+        .invoke({
+          scope,
+          tabId,
+          operation: "dialog",
+          input: { accept: true, username: "test", password: "test" },
+        })
+        .pipe(Effect.flip);
+      expect(JSON.stringify(failed)).toContain("Invalid InterceptionId.");
+      expect(yield* Queue.clear(viewer.output)).toContainEqual(
+        expect.objectContaining({ _tag: "control", dialog: null }),
+      );
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.dialog).toBeNull();
+      yield* broker.invoke({ scope, tabId, operation: "evaluate", input: { expression: "1" } });
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("a fresh tab opened to an HTTP Basic challenge returns with the sign-in prompt", () =>
   Effect.scoped(
     Effect.gen(function* () {

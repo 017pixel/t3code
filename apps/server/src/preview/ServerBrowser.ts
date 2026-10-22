@@ -546,11 +546,20 @@ const make = Effect.gen(function* () {
   const resolveDialog = async (tab: ServerTab, input: PreviewAutomationDialogInput) => {
     const dialog = tab.dialog;
     if (!dialog) throw new Error("No dialog is pending.");
-    if (input.accept) await dialog.accept(input);
-    else await dialog.dismiss();
-    if (tab.dialog === dialog) tab.dialog = null;
-    ServerBrowserPage.invalidateRefs(tab.page);
-    broadcastControl(tab);
+    let answered = false;
+    try {
+      if (input.accept) await dialog.accept(input);
+      else await dialog.dismiss();
+      answered = true;
+    } finally {
+      // Chromium silently drops a paused request when its frame goes away, so a
+      // sign-in prompt that cannot be answered is already over.
+      if (answered || dialog.type === "auth") {
+        if (tab.dialog === dialog) tab.dialog = null;
+        ServerBrowserPage.invalidateRefs(tab.page);
+        broadcastControl(tab);
+      }
+    }
   };
 
   /**
