@@ -4,10 +4,22 @@ import * as NodePath from "node:path";
 
 const base = process.argv[2];
 if (!base) throw new Error("Usage: node scripts/fixtures/minimax-auth.mjs <isolated-t3-home>");
-await NodeFSP.mkdir(base, { recursive: true });
-const resolved = await NodeFSP.realpath(base);
-if (resolved === NodePath.join(NodeOS.homedir(), ".t3"))
+// Resolve symlinks through the deepest existing ancestor so neither a linked
+// live home nor a not-yet-created path can alias ~/.t3 before anything is written.
+const canonical = async (path) => {
+  const absolute = NodePath.resolve(path);
+  try {
+    return await NodeFSP.realpath(absolute);
+  } catch (error) {
+    const parent = NodePath.dirname(absolute);
+    if (error.code !== "ENOENT" || parent === absolute) throw error;
+    return NodePath.join(await canonical(parent), NodePath.basename(absolute));
+  }
+};
+const resolved = await canonical(base);
+if (resolved === (await canonical(NodePath.join(NodeOS.homedir(), ".t3"))))
   throw new Error("Refusing the live T3 home");
+await NodeFSP.mkdir(resolved, { recursive: true });
 const userdata = NodePath.join(resolved, "userdata");
 const readJson = async (file) => {
   try {
