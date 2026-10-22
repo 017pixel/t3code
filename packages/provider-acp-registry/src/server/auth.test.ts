@@ -345,3 +345,26 @@ it.effect("does not report authentication when post-login verification fails", (
     assert.isTrue(h.killed());
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it.effect("offers MiniMax Code's Global region alongside its Mainland China default login", () =>
+  Effect.gen(function* () {
+    // mcode advertises one terminal method whose `login` defaults to mainland
+    // China; its CLI selects a Global account with `--region global`.
+    const h = yield* makeHarness(
+      {
+        id: "minimax-code-login",
+        name: "Sign in to MiniMax Code",
+        type: "terminal",
+        args: ["login"],
+      },
+      false,
+      decodeSettings({ agentId: "minimax-code" }),
+    );
+    const { methods = [] } = yield* h.state((value) => (value.methods?.length ?? 0) > 0);
+    const global = methods.find((method) => /global/i.test(method.name));
+    assert.isDefined(global, `no Global sign-in among ${JSON.stringify(methods)}`);
+    yield* h.controller.start("owner", Effect.void, global!.id);
+    yield* h.phase("waiting");
+    assert.deepEqual(h.terminalSpawn()?.args, ["--acp", "login", "--region", "global"]);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
