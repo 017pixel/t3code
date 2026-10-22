@@ -191,7 +191,7 @@ const applyKiroEffort = Effect.fn("KiroAdapterV2.applyKiroEffort")(function* (
       AcpRequestError: (error) =>
         Effect.logWarning("Kiro rejected the reasoning effort", {
           value: requested,
-          detail: error.message,
+          code: error.code,
         }),
     }),
   );
