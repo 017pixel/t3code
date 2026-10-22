@@ -90,10 +90,13 @@ export function resolveGitHostBinding(
       : sourceControlRepositorySelector(identity);
   const kind = identity?.provider;
   if (!identity || kind === undefined || kind === "unknown" || scope === null) return null;
+  const host = pullRequestHostOf(identity, SourceControlProviderKind.make(kind));
   return {
-    canonicalKey: identity.canonicalKey,
+    // Every repository of an Azure DevOps project shares its work items.
+    canonicalKey:
+      kind === "azure-devops" ? `${host}/${scope}`.toLowerCase() : identity.canonicalKey,
     tracker: IssueTrackerKind.make(kind),
-    host: pullRequestHostOf(identity, SourceControlProviderKind.make(kind)),
+    host,
     scope,
   };
 }

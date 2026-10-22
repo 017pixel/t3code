@@ -158,7 +158,12 @@ describe("resolveGitHostBinding", () => {
           repository: "acme/Web App/_git/web",
         }),
       ),
-    ).toEqual({ tracker: "azure-devops", host: "dev.azure.com", scope: "acme/Web App" });
+    ).toEqual({
+      canonicalKey: "dev.azure.com/acme/web app",
+      tracker: "azure-devops",
+      host: "dev.azure.com",
+      scope: "acme/Web App",
+    });
     expect(
       IssueService.resolveGitHostBinding(
         project({ id: "p", provider: "azure-devops", host: "dev.azure.com", repository: "web" }),

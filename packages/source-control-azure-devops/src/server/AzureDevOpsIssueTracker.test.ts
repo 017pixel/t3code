@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
 
@@ -14,7 +15,7 @@ const WORK_ITEM = {
   url: "https://dev.azure.com/acme/_apis/wit/workItems/7",
   fields: {
     "System.Title": "Composer loses focus",
-    "System.State": "Resolved",
+    "System.State": "Shipped",
     "System.CreatedDate": "2026-07-01T00:00:00Z",
     "System.ChangedDate": "2026-07-03T00:00:00Z",
     "Microsoft.VSTS.Common.ClosedDate": "2026-07-03T00:00:00Z",
@@ -31,10 +32,24 @@ const WORK_ITEM = {
   ],
 };
 
+/** A custom process: "Shipped" is finished only because its category says so. */
+const WORK_ITEM_TYPES = {
+  value: [
+    {
+      name: "Bug",
+      states: [
+        { name: "Active", category: "InProgress" },
+        { name: "Shipped", category: "Completed" },
+      ],
+    },
+  ],
+};
+
 /** Every `az` command the detail read runs, told apart by its first few arguments. */
 function answer(args: ReadonlyArray<string>): string {
   const resource = args[args.indexOf("--resource") + 1];
   if (args[0] === "boards") return encode(WORK_ITEM);
+  if (resource === "workitemtypes") return encode(WORK_ITEM_TYPES);
   if (args[0] === "repos") {
     return encode({
       pullRequestId: 50,
@@ -89,7 +104,7 @@ function answer(args: ReadonlyArray<string>): string {
           revisedDate: "2026-07-03T00:00:00Z",
           revisedBy: { uniqueName: "theo@acme.test" },
           fields: {
-            "System.State": { oldValue: "Active", newValue: "Resolved" },
+            "System.State": { oldValue: "Active", newValue: "Shipped" },
             "System.Tags": { oldValue: "ui", newValue: "bug; ui" },
           },
         },
@@ -137,7 +152,7 @@ describe("AzureDevOpsIssueTracker", () => {
         title: "Composer loses focus",
         url: "https://dev.azure.com/acme/Web%20App/_workitems/edit/7",
         // The project's own state name survives; the category is what the list filters by.
-        state: { category: "closed", name: "Resolved" },
+        state: { category: "closed", name: "Shipped" },
         author: { login: "octo@acme.test", name: "Octo Cat" },
         assignees: [{ login: "Theo <theo@acme.test>" }],
         labels: [
@@ -161,7 +176,7 @@ describe("AzureDevOpsIssueTracker", () => {
       ]);
       // The first revision is the creation; a state move across the category line is a close.
       expect(issue.events.map((event) => [event.kind, event.detail])).toEqual([
-        ["closed", "Resolved"],
+        ["closed", "Shipped"],
         ["labeled", "bug"],
       ]);
       expect(issue.linkedPullRequests).toEqual([
@@ -176,6 +191,40 @@ describe("AzureDevOpsIssueTracker", () => {
         },
       ]);
     }),
+  );
+
+  it.effect("filters open work items by the project's own finished states", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const bodies: string[] = [];
+      const api = yield* AzureDevOpsIssueTracker.make.pipe(
+        Effect.provide(
+          Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({
+            execute: ({ args }) =>
+              args[args.indexOf("--resource") + 1] === "wiql"
+                ? fs.readFileString(args[args.indexOf("--in-file") + 1]!).pipe(
+                    Effect.orDie,
+                    Effect.map((body) => {
+                      bodies.push(body);
+                      return TestSourceControlHost.processOutput(encode({ workItems: [] }));
+                    }),
+                  )
+                : Effect.succeed(TestSourceControlHost.processOutput(answer(args))),
+          }),
+        ),
+      );
+      yield* api.listIssues({
+        cwd: "/w",
+        host: "dev.azure.com",
+        scope: "acme/Web App",
+        state: "open",
+        involvement: "all",
+        viewer: "octo@acme.test",
+        limit: 10,
+      });
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]).toContain("AND [System.State] NOT IN ('shipped')");
+    }).pipe(Effect.provide(NodeFileSystem.layer)),
   );
 
   it.effect("refuses a scope that is not organization/project without a request", () =>
