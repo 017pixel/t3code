@@ -22,8 +22,17 @@ if (
   );
 }
 const base = NodeFS.realpathSync(values["base-dir"]);
-const shared = NodePath.resolve(NodeOS.homedir(), ".t3");
-if (base === shared || base.startsWith(`${shared}/`)) throw new Error("Use an isolated T3 home.");
+// Canonicalize both sides so a symlinked live home cannot slip past the lexical check.
+const sharedPath = NodePath.resolve(NodeOS.homedir(), ".t3");
+const shared = NodeFS.existsSync(sharedPath) ? NodeFS.realpathSync(sharedPath) : sharedPath;
+const fromShared = NodePath.relative(shared, base);
+if (
+  fromShared === "" ||
+  (fromShared !== ".." &&
+    !fromShared.startsWith(`..${NodePath.sep}`) &&
+    !NodePath.isAbsolute(fromShared))
+)
+  throw new Error("Use an isolated T3 home.");
 const runtimePath = NodePath.join(base, "userdata/server-runtime.json");
 if (NodeFS.existsSync(runtimePath)) {
   const { pid } = JSON.parse(NodeFS.readFileSync(runtimePath, "utf8"));
