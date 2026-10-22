@@ -512,8 +512,9 @@ const initialize = () => {
 const atCeiling = (state) => state.log >= workerData.backpressureFrames;
 const exceedsSizeLimit = () =>
   journalSizeLimit >= 0 && statSync(workerData.filename + "-wal").size > journalSizeLimit;
-const schedule = (state, blocked) => {
-  if (blocked || state.log - state.checkpointed >= workerData.frames) {
+// Retry a WAL past its limits even with admission open, so it resets once a pinning reader closes.
+const schedule = (state, retry) => {
+  if (retry || state.log - state.checkpointed >= workerData.frames) {
     idle = setTimeout(() => check(undefined, undefined, true), workerData.idleMs);
   }
 };
@@ -543,7 +544,7 @@ const check = (id, nextJournalSizeLimit, force, nextGeneration = generation) => 
   }
   const blocked = !pinned && (atCeiling(state) || oversized) && state.checkpointed < state.log;
   parentPort.postMessage({ type: "checkpoint", id, generation, ...state, blocked });
-  schedule(state, blocked);
+  schedule(state, atCeiling(state) || oversized);
 };
 const finishTruncate = (truncateId) => {
   if (pendingTruncate === undefined || pendingTruncate.truncateId !== truncateId) return;
@@ -565,14 +566,14 @@ const finishTruncate = (truncateId) => {
     truncateId,
     ...state,
     // With writes held, only a reader can stop the reset, and holding them longer would not
-    // release it. The next write past the ceiling retries.
+    // release it.
     blocked: false,
   });
   while (pendingBarriers > 0) {
     pendingBarriers--;
     parentPort.postMessage("barrier");
   }
-  schedule(state, false);
+  schedule(state, atCeiling(state) || exceedsSizeLimit());
 };
 parentPort.on("message", (request) => {
   clearTimeout(idle);
