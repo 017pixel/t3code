@@ -4514,6 +4514,58 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
+  it.effect("refuses a worktree PR checkout in a checkout of another repository", () =>
+    Effect.gen(function* () {
+      // A pull request read can borrow any project on its host, but checking it out there would
+      // fetch another repository's history into the wrong checkout.
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/foreign"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "foreign.txt"), "foreign\n");
+      yield* runGit(repoDir, ["add", "foreign.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Another repository's head"]);
+      yield* runGit(repoDir, ["push", "origin", "HEAD:refs/pull/23165/head"]);
+      yield* runGit(repoDir, ["push", "origin", "feature/foreign"]);
+      yield* runGit(repoDir, ["checkout", "main"]);
+      yield* runGit(repoDir, ["branch", "-D", "feature/foreign"]);
+      const remoteUrl = "https://github.com/octocat/Hello-World.git";
+      yield* runGit(repoDir, ["remote", "set-url", "origin", remoteUrl]);
+      yield* runGit(repoDir, ["config", `url.${remoteDir}.insteadOf`, remoteUrl]);
+
+      const gitCommands: string[] = [];
+      const { manager } = yield* makeManager({
+        gitCommands,
+        ghScenario: {
+          pullRequest: {
+            number: 23165,
+            title: "Another repository's PR",
+            url: "https://github.com/pingdotgg/t3code/pull/23165",
+            baseRefName: "main",
+            headRefName: "feature/foreign",
+            state: "open",
+            isCrossRepository: false,
+          },
+        },
+      });
+
+      const exit = yield* Effect.exit(
+        preparePullRequestThread(manager, {
+          cwd: repoDir,
+          reference: "https://github.com/pingdotgg/t3code/pull/23165",
+          mode: "worktree",
+        }),
+      );
+
+      expect(exit._tag).toBe("Failure");
+      expect(gitCommands.filter((command) => command.startsWith("fetch"))).toEqual([]);
+      const worktrees = (yield* runGit(repoDir, ["worktree", "list", "--porcelain"])).stdout;
+      expect(worktrees.match(/^worktree /gm)).toHaveLength(1);
+    }),
+  );
+
   it.effect("preserves fork upstream tracking when preparing a worktree PR thread", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
