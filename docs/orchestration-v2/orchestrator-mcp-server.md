@@ -455,11 +455,14 @@ returned unchanged, and a thread with no active provider turn returns
 
 `schedule_task`, `list_scheduled_tasks`, `update_scheduled_task`, and
 `delete_scheduled_task` manage recurring work in the app scheduler. A schedule
-runs its prompt on an interval, at a fixed local time, or on each webhook
-request, even when no turn is active. In the caller's project, runs post into
-the calling thread by default, so an orchestrator sees every trigger;
-otherwise each run launches a fresh thread. Pausing uses
-`update_scheduled_task` with `enabled: false`; deletion is permanent.
+runs its prompt on an interval, at a fixed time in the server's local time
+zone, or on each qualifying webhook request, even when no turn is active.
+Signature checks, filters, and dedupe can skip a webhook request. For a task
+in the caller's project, runs post into the calling thread by default, so an
+orchestrator sees every trigger. With `bindToCurrentThread: false`, or for a
+task in another project, each run launches a fresh thread in the task's
+project. Pausing uses `update_scheduled_task` with `enabled: false`; deletion
+is permanent.
 
 ## Delegated Task Lifecycle
 
