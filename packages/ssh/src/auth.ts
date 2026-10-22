@@ -202,13 +202,25 @@ export const buildSshChildEnvironment = Effect.fn("ssh/auth.buildSshChildEnviron
   };
 });
 
-export function isSshAuthFailure(error: unknown): boolean {
+// Only offer the password prompt when re-running ssh with askpass can succeed:
+// the server must accept a password-style method, and a broken ssh-agent must
+// surface its own error because a password cannot repair it.
+export function canRetrySshAuthWithPassword(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   const normalized = message.toLowerCase();
+  if (/agent refused operation|communication with agent failed/u.test(normalized)) {
+    return false;
+  }
+  const deniedPrefix = "permission denied (";
+  const deniedStart = normalized.indexOf(deniedPrefix);
+  const deniedEnd = deniedStart === -1 ? -1 : normalized.indexOf(")", deniedStart);
+  if (deniedEnd !== -1) {
+    return normalized
+      .slice(deniedStart + deniedPrefix.length, deniedEnd)
+      .split(",")
+      .some((method) => method === "password" || method === "keyboard-interactive");
+  }
   return (
-    /permission denied \((?:publickey|password|keyboard-interactive|hostbased|gssapi-with-mic)[^)]*\)/u.test(
-      normalized,
-    ) ||
     /authentication failed/u.test(normalized) ||
     /too many authentication failures/u.test(normalized)
   );
