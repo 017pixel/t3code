@@ -2397,6 +2397,18 @@ export const make = Effect.gen(function* () {
       modelSelection: settings.modelSelection,
     });
 
+    // A fork branch can live on origin while gh creates the PR in upstream (#7382), so the head
+    // is compared against the repository the provider targets rather than origin.
+    const targetRepository =
+      provider.kind === "github" ? yield* resolveGitHubTargetRepository(cwd) : null;
+    const headSelector =
+      targetRepository !== null &&
+      headContext.headRepositoryOwnerLogin !== null &&
+      headContext.headRepositoryNameWithOwner !== null &&
+      headContext.headRepositoryNameWithOwner.toLowerCase() !== targetRepository.toLowerCase()
+        ? `${headContext.headRepositoryOwnerLogin}:${headContext.headBranch}`
+        : headContext.preferredHeadSelector;
+
     const bodyFile = path.join(
       tempDir,
       `t3code-pr-body-${process.pid}-${yield* randomUUIDv4(cwd)}.md`,
@@ -2417,17 +2429,6 @@ export const make = Effect.gen(function* () {
       phase: "pr",
       label: `Creating ${terms.singular}...`,
     });
-    // A fork branch can live on origin while gh creates the PR in upstream (#7382), so the head
-    // is compared against the repository the provider targets rather than origin.
-    const targetRepository =
-      provider.kind === "github" ? yield* resolveGitHubTargetRepository(cwd) : null;
-    const headSelector =
-      targetRepository !== null &&
-      headContext.headRepositoryOwnerLogin !== null &&
-      headContext.headRepositoryNameWithOwner !== null &&
-      headContext.headRepositoryNameWithOwner.toLowerCase() !== targetRepository.toLowerCase()
-        ? `${headContext.headRepositoryOwnerLogin}:${headContext.headBranch}`
-        : headContext.preferredHeadSelector;
     yield* provider
       .createChangeRequest({
         cwd,
