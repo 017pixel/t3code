@@ -1702,6 +1702,57 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
 
+    it.live("still reads the git identity of repositories batched after a blocked one", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const repos = [
+          yield* makeTempDir("t3code-workspace-before-"),
+          yield* makeTempDir("t3code-workspace-blocked-"),
+          yield* makeTempDir("t3code-workspace-after-"),
+        ] as const;
+        for (const [index, repo] of repos.entries()) {
+          yield* fileSystem.makeDirectory(path.join(repo, ".git"));
+          const configPath = path.join(repo, ".git", "config");
+          if (index === 1) yield* makeOpenGate(configPath);
+          else
+            yield* fileSystem.writeFileString(
+              configPath,
+              `[remote "origin"]\n\turl = git@github.com:pingdotgg/repo-${index}.git\n`,
+            );
+          yield* writeTranscript({
+            filePath: path.join(claudeHomePath, "projects", `-slug-${index}`, "a.jsonl"),
+            contents: claudeSessionLine(repo),
+            mtimeMs: Date.parse(`2026-01-0${index + 1}T00:00:00.000Z`),
+          });
+        }
+
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          const result = yield* awaitWithinDeadline(runScan({ claudeHomePath, codexHomePath }));
+          expect(
+            Option.map(result, ({ candidates }) =>
+              candidates.map((candidate) => ({ path: candidate.path, git: candidate.git })),
+            ),
+            `scan ${attempt}`,
+          ).toEqual(
+            Option.some([
+              {
+                path: repos[2],
+                git: { remoteKey: "github.com/pingdotgg/repo-2", repository: "pingdotgg/repo-2" },
+              },
+              { path: repos[1], git: { remoteKey: null, repository: null } },
+              {
+                path: repos[0],
+                git: { remoteKey: "github.com/pingdotgg/repo-0", repository: "pingdotgg/repo-0" },
+              },
+            ]),
+          );
+        }
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+
     it.live("completes every scan when open() of a regular .git/config never returns", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;

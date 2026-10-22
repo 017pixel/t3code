@@ -34,6 +34,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 
 import * as ServerConfig from "../config.ts";
+import * as ProcessRunner from "../processRunner.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
@@ -67,6 +68,46 @@ const MAX_IMPORT_HISTORY_BYTES = 32 * 1024 * 1024;
 const MAX_IMPORT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORT_TRANSCRIPTS = 100;
 const MAX_IMPORT_RECORDS = 100_000;
+
+/**
+ * open() of a file under macOS privacy protection waits on a consent prompt
+ * that a headless server never gets, and a FIFO waits for a writer. Either
+ * pins a libuv pool thread that interruption cannot free, so git files of
+ * arbitrary transcript cwds are read by a shell we can kill instead.
+ */
+const GIT_FILE_READ_DEADLINE = "2 seconds";
+const MAX_GIT_FILE_OUTPUT_BYTES = 4 * 1024 * 1024;
+// The shell opens each file itself, so killing it frees a stuck open() and no
+// forked reader outlives it. Per file it prints `<bytes>\n<content>`, or `-\n`
+// when unreadable; the appended dot keeps trailing newlines out of `$(...)`.
+const GIT_FILE_READ_SCRIPT =
+  'for f do if { c=$(cat) && c="$c."; } 2>/dev/null <"$f"; then printf "%s\\n" "${#c}"; printf "%s" "$c"; else echo -; fi; done';
+/** Paths whose open() outlived the deadline; later scans don't wait on them again. */
+const blockedGitFilePaths = new Set<string>();
+
+/** Decodes complete records in order; stops at the first incomplete one. */
+function decodeGitFileRecords(output: Uint8Array): Array<string | null> {
+  const records: Array<string | null> = [];
+  const decoder = new TextDecoder();
+  let offset = 0;
+  while (offset < output.length) {
+    const newline = output.indexOf(10, offset);
+    if (newline === -1) break;
+    const header = decoder.decode(output.subarray(offset, newline));
+    if (header === "-") {
+      records.push(null);
+      offset = newline + 1;
+      continue;
+    }
+    const length = Number(header);
+    const end = newline + 1 + length;
+    if (!/^\d+$/.test(header) || length < 1 || end > output.length) break;
+    // Drop the dot the script appended.
+    records.push(decoder.decode(output.subarray(newline + 1, end - 1)));
+    offset = end;
+  }
+  return records;
+}
 
 const TranscriptContentBlock = Schema.Struct({
   type: Schema.optional(Schema.String),
@@ -632,6 +673,7 @@ function sameTranscriptIdentity(left: TranscriptIdentity, right: TranscriptIdent
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
+  const processRunner = yield* ProcessRunner.ProcessRunner;
   // Different project imports can arrive concurrently from multiple clients.
   // Only one transcript may hold its selected-history budget at a time.
   const importReadLock = yield* Semaphore.make(1);
@@ -641,7 +683,8 @@ export const make = Effect.gen(function* () {
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const baseDir = path.resolve(serverConfig.baseDir);
   const worktreesDir = path.resolve(serverConfig.worktreesDir);
-  const foldWorktreeCase = (yield* HostProcess.Platform) === "win32";
+  const isWindows = (yield* HostProcess.Platform) === "win32";
+  const foldWorktreeCase = isWindows;
   const hostEnvironment = yield* HostProcess.Environment;
   const homeDir = yield* HostProcess.HomeDirectory;
   // `/private/tmp` is what macOS reports for sessions started in `/tmp`.
@@ -688,47 +731,126 @@ export const make = Effect.gen(function* () {
     return `path:${normalizeProjectPathForComparison(realPath)}`;
   });
 
-  const readGitIdentity = Effect.fn("AgentSessionScanner.readGitIdentity")(function* (
-    directory: string,
-  ): Effect.fn.Return<
-    | { readonly _tag: "Repository"; readonly git: AgentSessionProjectGit | null }
-    | { readonly _tag: "Worktree" }
-    | { readonly _tag: "NotGit" }
-  > {
-    const gitPath = path.join(directory, ".git");
-    const gitStats = yield* statOption(gitPath);
-    if (Option.isNone(gitStats)) return { _tag: "NotGit" } as const;
-    let gitDir = gitPath;
-    if (gitStats.value.type !== "Directory") {
-      const pointer = yield* fileSystem
-        .readFileString(gitPath)
-        .pipe(Effect.orElseSucceed(() => ""));
-      const target = /^gitdir:\s*(.+)$/m.exec(pointer)?.[1]?.trim();
-      if (target === undefined || target.length === 0) return { _tag: "NotGit" } as const;
-      gitDir = path.resolve(directory, target);
+  /** Reads small files without the libuv pool; null when missing, unreadable or blocked. */
+  const readGitFiles = Effect.fn("AgentSessionScanner.readGitFiles")(function* (
+    filePaths: ReadonlyArray<string>,
+  ) {
+    const contents = new Map<string, string | null>();
+    if (isWindows) {
+      // No privacy prompts or FIFOs to block open() here.
+      for (const filePath of filePaths) {
+        contents.set(
+          filePath,
+          yield* fileSystem.readFileString(filePath).pipe(Effect.orElseSucceed(() => null)),
+        );
+      }
+      return contents;
     }
-    const linkedWorktree =
-      gitStats.value.type !== "Directory" && /[\\/]worktrees[\\/][^\\/]+[\\/]?$/.test(gitDir);
-    if (linkedWorktree) {
-      const commonDir = yield* fileSystem
-        .readFileString(path.join(gitDir, "commondir"))
-        .pipe(Effect.orElseSucceed(() => ""));
-      if (commonDir.trim().length === 0) return { _tag: "Worktree" } as const;
-      gitDir = path.resolve(gitDir, commonDir.trim());
+    let pending = filePaths.filter((filePath) => {
+      if (!blockedGitFilePaths.has(filePath)) return true;
+      contents.set(filePath, null);
+      return false;
+    });
+    while (pending.length > 0) {
+      const chunks: Array<Uint8Array> = [];
+      let outputBytes = 0;
+      const result = yield* processRunner
+        .run({
+          command: "/bin/sh",
+          args: ["-c", GIT_FILE_READ_SCRIPT, "sh", ...pending],
+          // `${#c}` must count bytes, not characters.
+          env: { LC_ALL: "C" },
+          timeout: GIT_FILE_READ_DEADLINE,
+          timeoutBehavior: "timedOutResult",
+          maxOutputBytes: MAX_GIT_FILE_OUTPUT_BYTES,
+          outputMode: "truncate",
+          onStdoutChunk: (chunk) => {
+            if (outputBytes >= MAX_GIT_FILE_OUTPUT_BYTES) return;
+            chunks.push(chunk);
+            outputBytes += chunk.byteLength;
+          },
+        })
+        .pipe(Effect.option);
+      const records = decodeGitFileRecords(Buffer.concat(chunks));
+      pending.forEach((filePath, index) => contents.set(filePath, records[index] ?? null));
+      if (Option.isNone(result) || !result.value.timedOut || records.length >= pending.length) {
+        break;
+      }
+      // The shell reads in order, so the first missing record is the one it was stuck on.
+      blockedGitFilePaths.add(pending[records.length]!);
+      pending = pending.slice(records.length + 1);
     }
-    const configText = yield* fileSystem
-      .readFileString(path.join(gitDir, "config"))
-      .pipe(Effect.orElseSucceed(() => ""));
-    // Bare repositories have no main checkout, so offer their linked worktrees independently.
-    if (linkedWorktree && !isBareGitConfig(configText)) return { _tag: "Worktree" } as const;
-    const originUrl = parseOriginUrlFromGitConfig(configText);
-    return {
-      _tag: "Repository",
-      git: {
-        remoteKey: originUrl === null ? null : normalizeGitRemoteUrl(originUrl),
-        repository: parseGitHubRepositoryNameWithOwnerFromRemoteUrl(originUrl),
-      },
-    } as const;
+    return contents;
+  });
+
+  /** Reads every directory's git identity with at most three batched reads. */
+  const readGitIdentities = Effect.fn("AgentSessionScanner.readGitIdentities")(function* (
+    directories: ReadonlyArray<string>,
+  ) {
+    type GitIdentity =
+      | { readonly _tag: "Repository"; readonly git: AgentSessionProjectGit | null }
+      | { readonly _tag: "Worktree" }
+      | { readonly _tag: "NotGit" };
+    const identities = new Map<string, GitIdentity>();
+    const repositories: Array<{ directory: string; gitDir: string; linkedWorktree: boolean }> = [];
+    const pointers: Array<{ directory: string; gitPath: string }> = [];
+    for (const directory of directories) {
+      const gitPath = path.join(directory, ".git");
+      const gitStats = yield* statOption(gitPath);
+      if (Option.isNone(gitStats)) identities.set(directory, { _tag: "NotGit" });
+      else if (gitStats.value.type === "Directory") {
+        repositories.push({ directory, gitDir: gitPath, linkedWorktree: false });
+      } else pointers.push({ directory, gitPath });
+    }
+
+    const pointerTexts = yield* readGitFiles(pointers.map(({ gitPath }) => gitPath));
+    const linkedWorktrees: Array<{ directory: string; gitDir: string }> = [];
+    for (const { directory, gitPath } of pointers) {
+      const target = /^gitdir:\s*(.+)$/m.exec(pointerTexts.get(gitPath) ?? "")?.[1]?.trim();
+      if (target === undefined || target.length === 0) {
+        identities.set(directory, { _tag: "NotGit" });
+        continue;
+      }
+      const gitDir = path.resolve(directory, target);
+      if (/[\\/]worktrees[\\/][^\\/]+[\\/]?$/.test(gitDir)) {
+        linkedWorktrees.push({ directory, gitDir });
+      } else repositories.push({ directory, gitDir, linkedWorktree: false });
+    }
+
+    const commonDirTexts = yield* readGitFiles(
+      linkedWorktrees.map(({ gitDir }) => path.join(gitDir, "commondir")),
+    );
+    for (const { directory, gitDir } of linkedWorktrees) {
+      const commonDir = (commonDirTexts.get(path.join(gitDir, "commondir")) ?? "").trim();
+      if (commonDir.length === 0) identities.set(directory, { _tag: "Worktree" });
+      else
+        repositories.push({
+          directory,
+          gitDir: path.resolve(gitDir, commonDir),
+          linkedWorktree: true,
+        });
+    }
+
+    const configTexts = yield* readGitFiles(
+      repositories.map(({ gitDir }) => path.join(gitDir, "config")),
+    );
+    for (const { directory, gitDir, linkedWorktree } of repositories) {
+      const configText = configTexts.get(path.join(gitDir, "config")) ?? "";
+      // Bare repositories have no main checkout, so offer their linked worktrees independently.
+      if (linkedWorktree && !isBareGitConfig(configText)) {
+        identities.set(directory, { _tag: "Worktree" });
+        continue;
+      }
+      const originUrl = parseOriginUrlFromGitConfig(configText);
+      identities.set(directory, {
+        _tag: "Repository",
+        git: {
+          remoteKey: originUrl === null ? null : normalizeGitRemoteUrl(originUrl),
+          repository: parseGitHubRepositoryNameWithOwnerFromRemoteUrl(originUrl),
+        },
+      });
+    }
+    return identities;
   });
 
   const readCwd = Effect.fn("AgentSessionScanner.readCwd")(function* (
@@ -1206,6 +1328,31 @@ export const make = Effect.gen(function* () {
         git: AgentSessionProjectGit | null;
       }
     >();
+    // Resolve every candidate directory first so one batch reads all git identities.
+    const directories = new Map<string, Option.Option<FileSystem.File.Info>>();
+    for (const candidate of raw) {
+      const expanded = expandHomePath(candidate.cwd.trim(), homeDir);
+      if (!path.isAbsolute(expanded)) continue;
+      const resolved = path.resolve(expanded);
+      if (directories.has(resolved) || isExcludedProjectPath(resolved)) continue;
+      const stats = yield* statOption(resolved);
+      if (Option.isNone(stats) || stats.value.type !== "Directory") {
+        directories.set(resolved, Option.none());
+        continue;
+      }
+      const realPath = yield* fileSystem
+        .realPath(resolved)
+        .pipe(Effect.orElseSucceed(() => resolved));
+      // A symlink can point into the worktrees directory even when its own
+      // spelling doesn't; check again with links resolved.
+      directories.set(resolved, isExcludedProjectPath(realPath) ? Option.none() : stats);
+    }
+    const directoryGitIdentities = yield* readGitIdentities(
+      Array.from(directories).flatMap(([directory, stats]) =>
+        Option.isSome(stats) ? [directory] : [],
+      ),
+    );
+
     const directoryKeys = new Map<string, string>();
     const gitIdentities = new Map<string, AgentSessionProjectGit | null>();
 
@@ -1213,29 +1360,16 @@ export const make = Effect.gen(function* () {
       const expanded = expandHomePath(candidate.cwd.trim(), homeDir);
       if (!path.isAbsolute(expanded)) continue;
       const resolved = path.resolve(expanded);
-      if (isExcludedProjectPath(resolved)) continue;
+      const stats = directories.get(resolved);
+      if (stats === undefined || Option.isNone(stats)) continue;
       let key = directoryKeys.get(resolved);
       if (key === undefined) {
-        const stats = yield* statOption(resolved);
-        if (Option.isNone(stats) || stats.value.type !== "Directory") {
-          directoryKeys.set(resolved, "");
-          continue;
-        }
-        const realPath = yield* fileSystem
-          .realPath(resolved)
-          .pipe(Effect.orElseSucceed(() => resolved));
-        // A symlink can point into the worktrees directory even when its own
-        // spelling doesn't; check again with links resolved.
-        if (isExcludedProjectPath(realPath)) {
+        const gitIdentity = directoryGitIdentities.get(resolved);
+        if (gitIdentity === undefined || gitIdentity._tag === "Worktree") {
           key = "";
         } else {
-          const gitIdentity = yield* readGitIdentity(resolved);
-          if (gitIdentity._tag === "Worktree") {
-            key = "";
-          } else {
-            key = yield* directoryIdentity(resolved, stats.value);
-            gitIdentities.set(key, gitIdentity._tag === "Repository" ? gitIdentity.git : null);
-          }
+          key = yield* directoryIdentity(resolved, stats.value);
+          gitIdentities.set(key, gitIdentity._tag === "Repository" ? gitIdentity.git : null);
         }
         directoryKeys.set(resolved, key);
       }
@@ -1474,4 +1608,6 @@ export const make = Effect.gen(function* () {
   return AgentSessionScanner.of({ scan, recentThreads });
 });
 
-export const layer = Layer.effect(AgentSessionScanner, make);
+export const layer = Layer.effect(AgentSessionScanner, make).pipe(
+  Layer.provide(ProcessRunner.layer),
+);
