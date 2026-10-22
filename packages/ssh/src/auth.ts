@@ -202,13 +202,13 @@ export const buildSshChildEnvironment = Effect.fn("ssh/auth.buildSshChildEnviron
   };
 });
 
-// Only offer the password prompt when re-running ssh with askpass can succeed:
-// the server must accept a password-style method, and a broken ssh-agent must
-// surface its own error because a password cannot repair it.
+// Offer the password prompt only when the server accepts a password-style
+// method. When the agent failed to sign for a key, that signing error is the
+// diagnostic to surface; a password prompt would hide it.
 export function canRetrySshAuthWithPassword(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   const normalized = message.toLowerCase();
-  if (/agent refused operation|communication with agent failed/u.test(normalized)) {
+  if (/(?:^|\n)sign_and_send_pubkey: signing failed [^\n]* from agent: /u.test(normalized)) {
     return false;
   }
   const deniedPrefix = "permission denied (";

@@ -268,10 +268,16 @@ describe("ssh tunnel scripts", () => {
       expectedPrompts: 0,
     },
     {
-      name: "agent communication failure",
+      name: "agent communication failure while signing",
+      stderr:
+        'sign_and_send_pubkey: signing failed for ED25519 "/tmp/key" from agent: communication with agent failed\r\nubuntu@127.0.0.1: Permission denied (publickey,password).',
+      expectedPrompts: 0,
+    },
+    {
+      name: "agent unreachable before any key is offered",
       stderr:
         "error fetching identities: communication with agent failed\nubuntu@127.0.0.1: Permission denied (publickey,password).",
-      expectedPrompts: 0,
+      expectedPrompts: 1,
     },
     {
       name: "publickey-only denial",
@@ -332,6 +338,12 @@ describe("ssh tunnel scripts", () => {
         );
         assert.isTrue(Result.isFailure(result));
         assert.equal(prompts, expectedPrompts);
+        if (expectedPrompts === 0 && Result.isFailure(result)) {
+          assert.instanceOf(result.failure, SshCommandError);
+          if (result.failure instanceof SshCommandError) {
+            assert.equal(result.failure.stderr, stderr);
+          }
+        }
       }).pipe(Effect.provide(layer), Effect.scoped);
     }),
   );
