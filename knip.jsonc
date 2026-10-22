@@ -23,6 +23,8 @@
       // electron-builder loads the macOS signer by path. Fixture proxies are run by hand.
       "entry": [
         "fixtures/linked-pull-requests/proxy.cjs",
+        // These fixture scripts are injected into a browser page by path.
+        "fixtures/issue-16534/*.js",
         "knip-schemas.ts",
         "mobile-native-client.ts",
         "setup-worktree.ts",
