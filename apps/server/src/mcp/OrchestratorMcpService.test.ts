@@ -1274,6 +1274,44 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
 
+    it.effect(
+      "schedule_task from an outside caller uses a full target when the project has no default model",
+      () =>
+        Effect.gen(function* () {
+          const upserts = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+          const outsideClient: McpInvocationScope = {
+            environmentId: EnvironmentId.make("environment:scheduled-target"),
+            requestNamespace: "client:scheduled-target",
+            thread: undefined,
+            client: { sessionId: "scheduled-target", label: "Claude Code", access: "full-access" },
+            capabilities: new Set(["orchestration"]),
+            issuedAt: 1,
+          };
+          yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+            Effect.flatMap((mcp) =>
+              mcp.scheduleTask(outsideClient, {
+                prompt: "Do the nightly thing",
+                schedule: { type: "fixed_time", timeOfDay: "09:00" },
+                projectId,
+                bindToCurrentThread: false,
+                target: xhighTarget,
+              }),
+            ),
+            Effect.provide(service(upserts)),
+          );
+          assert.deepEqual(
+            (yield* Ref.get(upserts)).map((upsert) => upsert.modelSelection),
+            [
+              {
+                instanceId: claudeInstanceId,
+                model: opus,
+                options: [{ id: "effort", value: "xhigh" }],
+              },
+            ],
+          );
+        }),
+    );
+
     const scheduleInput = {
       prompt: "Do the nightly thing",
       schedule: { type: "fixed_time", timeOfDay: "09:00" } as const,

@@ -1875,11 +1875,20 @@ const make = Effect.gen(function* () {
             : "bindToCurrentThread binds to this thread, which belongs to a different project.",
         );
       }
+      // A target naming both instance and model stands on its own, so an outside
+      // caller can still schedule in a project that has no default model.
+      const fullTargetSelection =
+        input.target?.providerInstanceId !== undefined && input.target.model !== undefined
+          ? { instanceId: input.target.providerInstanceId, model: input.target.model }
+          : undefined;
       const { modelSelection, runtimeMode } = yield* resolveScheduledTaskTarget({
         inherit: {
           projectId,
           modelSelection:
-            parent?.thread.modelSelection ?? (yield* projectDefaultModelSelection(project)),
+            parent?.thread.modelSelection ??
+            project.defaultModelSelection ??
+            fullTargetSelection ??
+            (yield* projectDefaultModelSelection(project)),
         },
         target: input.target,
         runtimeMode: limits.runtimeMode,
