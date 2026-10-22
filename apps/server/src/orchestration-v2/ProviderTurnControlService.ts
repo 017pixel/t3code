@@ -1,3 +1,4 @@
+import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
   MessageId,
@@ -362,7 +363,7 @@ export const layer: Layer.Layer<
               message: {
                 messageId: message.id,
                 text: projectComposerContextForProvider({
-                  text: message.text,
+                  text: expandAssistantCitationsForProvider(message.text),
                   records: message.context?.records ?? [],
                 }),
                 attachments: message.attachments,

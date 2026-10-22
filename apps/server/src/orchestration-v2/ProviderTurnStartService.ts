@@ -1,4 +1,5 @@
 import { modelSelectionsEqual } from "@t3tools/shared/model";
+import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
   CommandId,
@@ -420,7 +421,7 @@ export const layer: Layer.Layer<
               providerAuth.tryHandlePromptCommand({
                 instanceId: authInstanceId,
                 text: projectComposerContextForProvider({
-                  text: message.text,
+                  text: expandAssistantCitationsForProvider(message.text),
                   records: message.context?.records ?? [],
                 }),
                 hasAttachments: false,
@@ -955,7 +956,7 @@ export const layer: Layer.Layer<
         RunExecutionService.canRouteRelatedSubagent(subagent.status),
       );
       const userText = projectComposerContextForProvider({
-        text: message.text,
+        text: expandAssistantCitationsForProvider(message.text),
         records: message.context?.records ?? [],
       });
       // Delivered once: this run's provider turn marks the work as told. A
