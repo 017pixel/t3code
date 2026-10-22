@@ -3,10 +3,10 @@
 
 The evidence home must be a private directory you own that holds a marker file
 declaring it disposable. Every table in its database is deleted.
-  mkdir -m 700 /absolute/evidence-home
-  touch /absolute/evidence-home/ISSUE_23378_DISPOSABLE_FIXTURE
-Run dev:desktop --home-dir /absolute/evidence-home --no-seed once to initialize
-migrations, stop it, then run:
+  (umask 077; mkdir /absolute/evidence-home
+   touch /absolute/evidence-home/ISSUE_23378_DISPOSABLE_FIXTURE)
+Run (umask 077; vp run dev:desktop --home-dir /absolute/evidence-home --no-seed)
+once to initialize migrations, stop it, then run:
   python3 scripts/issue-23378/seed-evidence.py /absolute/evidence-home
 Never pass the live T3 home. This fixture uses real local authentication.
 """
@@ -22,10 +22,11 @@ MARKER = 'ISSUE_23378_DISPOSABLE_FIXTURE'
 
 
 def private_entry(path, kind):
-    # lstat so a planted symlink is refused instead of followed.
+    # lstat so a planted symlink is refused instead of followed. Group write is
+    # refused too: a group member could swap a checked entry before it is opened.
     info = os.lstat(path)
-    if not kind(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o002:
-        raise SystemExit(f'Refusing {path}: expected your own non-symlink entry, not world writable')
+    if not kind(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise SystemExit(f'Refusing {path}: expected your own non-symlink entry, not group or world writable')
 
 
 if len(sys.argv) != 2:
