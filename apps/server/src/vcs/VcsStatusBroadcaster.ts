@@ -794,7 +794,12 @@ export const make = Effect.gen(function* () {
         Stream.runForEach(() =>
           refreshCheckedOutRef(cwd).pipe(
             Effect.retry(CHECKOUT_REFRESH_RETRY),
-            Effect.ignoreCause({ log: true }),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("VCS checked-out ref refresh failed", {
+                cwdLength: cwd.length,
+                ...remoteRefreshFailureDiagnostics(cause),
+              }),
+            ),
           ),
         ),
       );
@@ -816,7 +821,12 @@ export const make = Effect.gen(function* () {
       return Effect.gen(function* () {
         const ready = yield* Deferred.make<void>();
         const fiber = yield* watchHead(cwd, ready).pipe(
-          Effect.ignoreCause({ log: true }),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("VCS HEAD watch failed", {
+              cwdLength: cwd.length,
+              ...remoteRefreshFailureDiagnostics(cause),
+            }),
+          ),
           // Subscribers wait for the watch, so one that cannot start must not hold them.
           Effect.ensuring(Deferred.succeed(ready, undefined)),
           Effect.forkIn(broadcasterScope),
