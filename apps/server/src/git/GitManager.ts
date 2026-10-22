@@ -2773,7 +2773,9 @@ export const make = Effect.gen(function* () {
       }
       const remoteName = yield* gitCore.readConfigValue(cwd, `branch.${branch}.remote`);
       const mergeRef = yield* gitCore.readConfigValue(cwd, `branch.${branch}.merge`);
-      const defaultBranch = yield* gitCore.resolveDefaultBranchName(cwd, remoteName ?? "origin");
+      const defaultBranch = yield* gitCore
+        .resolveDefaultBranchName(cwd, remoteName ?? "origin")
+        .pipe(Effect.orElseSucceed(() => null));
       const { headContext, lookup } = yield* resolveLookupHeadContext(cwd, {
         branch,
         upstreamRef:
@@ -2782,15 +2784,9 @@ export const make = Effect.gen(function* () {
             : null,
         defaultBranch,
       });
-      const repositoryKey = headContext.targetRemoteUrlKey ?? headContext.headRemoteUrlKey;
-      if (
-        !lookup ||
-        repositoryKey === null ||
-        repositoryKey !== pullRequestRepositoryKey(saved.url) ||
-        !matchesBranchHeadContext(saved, headContext)
-      ) {
-        return false;
-      }
+      // The host may target an upstream, GH_REPO, or `gh repo set-default` rather than origin,
+      // so the saved PR's repository is not compared with the remotes; its head must match.
+      if (!lookup || !matchesBranchHeadContext(saved, headContext)) return false;
       return yield* branchMovedPastPullRequest(cwd, branch, saved);
     });
   const invalidateLocalStatus: GitManager["Service"]["invalidateLocalStatus"] = Effect.fn(

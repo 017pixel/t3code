@@ -1959,7 +1959,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
             headBranch: branch,
           },
           {
-            name: "same number in another repository",
+            name: "outgrown PR in an upstream repository",
             number: 30,
             headSha: released,
             repository: "acme/t3code",
@@ -2031,7 +2031,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           { name: "older number at current head", superseded: false },
           { name: "newer number already outgrown", superseded: true },
           { name: "unfetched saved head", superseded: false },
-          { name: "same number in another repository", superseded: false },
+          { name: "outgrown PR in an upstream repository", superseded: true },
           { name: "another branch", superseded: false },
         ]);
       }),
