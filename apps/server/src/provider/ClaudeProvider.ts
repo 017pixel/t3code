@@ -378,15 +378,14 @@ const probeClaudeCapabilities = (
           runHooks: !healthCheck,
         }),
       });
+      // Claude Code answers initialize only after session.start hooks finish,
+      // so init already lists the commands mods register there.
       const init = await q.initializationResult();
-      // Mod commands arrive in a commands_changed push after init, which
-      // supportedCommands() tracks.
-      const commands = healthCheck ? init.commands : await q.supportedCommands();
-      return { q, init, commands };
+      return { q, init };
     });
   }).pipe(
     Effect.timeout(CAPABILITIES_PROBE_TIMEOUT_MS),
-    Effect.flatMap(({ q, init, commands }) =>
+    Effect.flatMap(({ q, init }) =>
       Effect.gen(function* () {
         // Usage has its own deadline so a slow optional request cannot discard initialization.
         // Only the rate limits are read, so skip the local transcript scan that fills
@@ -419,7 +418,7 @@ const probeClaudeCapabilities = (
           tokenSource: account?.tokenSource,
           apiKeySource: account?.apiKeySource,
           apiProvider: account?.apiProvider,
-          slashCommands: parseClaudeInitializationCommands(commands),
+          slashCommands: parseClaudeInitializationCommands(init.commands),
           ...(usage ? { usage, usageCheckedAt } : {}),
         } satisfies ClaudeCapabilitiesProbe;
       }),
