@@ -179,6 +179,34 @@ def spawn(cmd, **kw):
     return proc
 
 
+def recorder_alive(rec):
+    if rec.poll() is not None:
+        event(f"recorder exited early with code {rec.returncode}")
+        raise SystemExit(f"ffmpeg exited early ({rec.returncode}); see ffmpeg.log")
+
+
+def validate_recording(path, minimum):
+    # A missing moov atom (truncated mp4) makes ffprobe fail outright.
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration"]
+        + ["-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=TIMEOUT,
+    )
+    try:
+        duration = float(r.stdout.strip())
+    except ValueError:
+        duration = None
+    if r.returncode != 0 or duration is None or duration < minimum:
+        event(f"recording invalid: duration={duration}")
+        raise SystemExit(
+            f"{path} is missing or truncated (duration={duration}, "
+            f"expected >= {minimum}s): {r.stderr.strip()}"
+        )
+    return duration
+
+
 def windows():
     r = subprocess.run(
         ["xdotool", "search", "--name", "T3 Code's backend"],
@@ -288,6 +316,7 @@ try:
     seen_retries = 0
     seen_windows = []
     while time.monotonic() < deadline:
+        recorder_alive(rec)
         content = (out / "app.log").read_text(errors="replace")
         count = content.count("restart scheduled")
         ids_now = windows()
@@ -378,9 +407,17 @@ try:
         + str(windows())
     )
     time.sleep(2)
-    event("capture completed")
+    recorder_alive(rec)
+    event("recording stops")
     rec.send_signal(signal.SIGINT)
-    rec.wait(timeout=15)
+    # ffmpeg exits 255 after a clean SIGINT shutdown.
+    if rec.wait(timeout=15) not in (0, 255):
+        event(f"recorder exited with code {rec.returncode}")
+        raise SystemExit(f"ffmpeg exited with {rec.returncode}; see ffmpeg.log")
+    duration = validate_recording(out / "recording.mp4", a.seconds)
+    manifest["recordingSeconds"] = duration
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    event("capture completed")
 finally:
     for sig in SIGNALS:
         signal.signal(sig, signal.SIG_IGN)
