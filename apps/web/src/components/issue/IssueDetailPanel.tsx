@@ -24,7 +24,7 @@ import {
   TagIcon,
   UserPlusIcon,
 } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { cn } from "~/lib/utils";
@@ -214,15 +214,13 @@ function IssueLabelPicker({
   );
   const update = useAtomCommand(issueEnvironment.update, { reportFailure: false });
   const applied = new Set(detail.labels.map((label) => label.name));
-  const candidates = useMemo(() => {
-    const needle = query.toLowerCase();
-    return (candidatesQuery.data?.labels ?? []).filter(
-      (label) =>
-        needle.length === 0 ||
-        label.name.toLowerCase().includes(needle) ||
-        (label.description ?? "").toLowerCase().includes(needle),
-    );
-  }, [candidatesQuery.data, query]);
+  const needle = query.toLowerCase();
+  const candidates = (candidatesQuery.data?.labels ?? []).filter(
+    (label) =>
+      needle.length === 0 ||
+      label.name.toLowerCase().includes(needle) ||
+      (label.description ?? "").toLowerCase().includes(needle),
+  );
   const toggle = async (candidate: IssueLabelCandidate) => {
     if (pending !== null) return;
     setPending(candidate.name);
@@ -308,15 +306,13 @@ function IssueAssigneePicker({
   );
   const update = useAtomCommand(issueEnvironment.update, { reportFailure: false });
   const assigned = new Set(detail.assignees.map((actor) => actor.login.toLowerCase()));
-  const candidates = useMemo(() => {
-    const needle = query.toLowerCase();
-    return (candidatesQuery.data?.assignees ?? []).filter(
-      (candidate) =>
-        needle.length === 0 ||
-        candidate.login.toLowerCase().includes(needle) ||
-        (candidate.name ?? "").toLowerCase().includes(needle),
-    );
-  }, [candidatesQuery.data, query]);
+  const needle = query.toLowerCase();
+  const candidates = (candidatesQuery.data?.assignees ?? []).filter(
+    (candidate) =>
+      needle.length === 0 ||
+      candidate.login.toLowerCase().includes(needle) ||
+      (candidate.name ?? "").toLowerCase().includes(needle),
+  );
   const toggle = async (candidate: IssueAssigneeCandidate) => {
     if (pending !== null) return;
     setPending(candidate.id);
