@@ -220,6 +220,36 @@ describe("readAntigravityUsage", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("pairs a step whose retry copy names the model with its generation copy", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const dir = yield* tempDir;
+      const counts = [...protoNumber(2, 100), ...protoNumber(3, 40)];
+      yield* seedDatabase(path.join(dir, "retry-model-pairing.db"), (db) =>
+        Effect.gen(function* () {
+          yield* createTables(db);
+          yield* db.run("INSERT INTO steps VALUES (?, ?)", [
+            0,
+            new Uint8Array([
+              ...protoBytes(9, counts),
+              ...protoBytes(28, protoBytes(2, [...protoNumber(1, 1026), ...counts])),
+            ]),
+          ]);
+          yield* db.run("INSERT INTO gen_metadata VALUES (?, ?)", [
+            0,
+            new Uint8Array(protoBytes(1, protoBytes(4, [...protoNumber(1, 1026), ...counts]))),
+          ]);
+        }),
+      );
+      const result = yield* readAntigravityUsage(dir, 0);
+      assert.deepStrictEqual(result.errors, []);
+      assert.deepStrictEqual(
+        records(result).map((record) => record.model),
+        ["claude-opus-4-6"],
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("keeps id-less Antigravity calls with equal counters but different models apart", () =>
     Effect.gen(function* () {
       const path = yield* Path.Path;

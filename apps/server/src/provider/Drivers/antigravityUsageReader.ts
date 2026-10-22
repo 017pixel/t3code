@@ -129,6 +129,8 @@ interface Metadata {
   model: string;
   timestampMs: number | null;
   usages: Fields[];
+  /** Each usage's model id, which for the main usage can come from its duplicate retry copy. */
+  modelIds: number[];
 }
 
 function metadata(bytes: Uint8Array, step: boolean): Metadata {
@@ -155,8 +157,8 @@ function metadata(bytes: Uint8Array, step: boolean): Metadata {
       counters(parsed) === counters(main) &&
       usageIds(parsed).every((id) => mainIds.includes(id))
     ) {
-      // The retry copy can be the only one that names the model. Field 1 stays untouched because
-      // usageCandidates pairs a step with its generation copy by it.
+      // The retry copy can be the only one that names the model, and the generation copy of the
+      // same call names it too, so the main usage takes it for pairing and attribution.
       if (numberAt(main, 1) === 0) retryModelId ||= numberAt(parsed, 1);
       continue;
     }
@@ -171,6 +173,9 @@ function metadata(bytes: Uint8Array, step: boolean): Metadata {
       ? (timestamp(nested(data, 8)) ?? timestamp(nested(data, 1)))
       : timestamp(nested(nested(data, 9), 4)),
     usages,
+    modelIds: usages.map((usage) =>
+      usage === main ? numberAt(usage, 1) || retryModelId : numberAt(usage, 1),
+    ),
   };
 }
 
@@ -304,6 +309,7 @@ function usageCandidates(
   ] as const) {
     for (const [index, { idx, entry }] of entries.entries()) {
       for (const [usageIndex, usage] of entry.usages.entries()) {
+        const modelId = entry.modelIds[usageIndex]!;
         const outputTokens = Math.max(numberAt(usage, 3), numberAt(usage, 9) + numberAt(usage, 10));
         const totals = {
           uncachedInputTokens: numberAt(usage, 2),
@@ -328,10 +334,10 @@ function usageCandidates(
           sessionId,
           timestampMs: entry.timestampMs ?? trajectoryTimestamp ?? fallbackTimestamp,
           model:
-            MODEL_IDS[numberAt(usage, 1)] ||
+            MODEL_IDS[modelId] ||
             entry.model ||
             (source === "step" ? generationModels.get(idx) : "") ||
-            modelName("", numberAt(usage, 1)) ||
+            modelName("", modelId) ||
             "antigravity-unknown",
           totals,
           reportedCostUsd: null,
@@ -339,7 +345,7 @@ function usageCandidates(
           dedupeKey: keys[0] ?? `antigravity:${sessionId}:${source}:${index}:${usageIndex}`,
         };
         if (keys.length === 0) {
-          const key = `${counters(usage)}:${numberAt(usage, 1)}`;
+          const key = `${counters(usage)}:${modelId}`;
           const pending = unpairedSteps.get(key);
           if (source === "step") {
             if (pending === undefined)
