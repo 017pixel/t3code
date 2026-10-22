@@ -441,6 +441,7 @@ export const make = Effect.gen(function* () {
   const preserveUndecryptableCatalog = Effect.fn(
     "desktop.connectionCatalogStore.preserveUndecryptableCatalog",
   )(function* (
+    document: EncryptedConnectionCatalogDocument,
     encryptedCatalog: Uint8Array,
     decryptError: ElectronSafeStorage.ElectronSafeStorageDecryptError,
   ) {
@@ -457,14 +458,9 @@ export const make = Effect.gen(function* () {
         /-/g,
         "",
       );
-      const tempPath = `${backupPath}.${process.pid}.${suffix}.tmp`;
-      yield* fileSystem
-        .copyFile(catalogPath, tempPath)
-        .pipe(
-          Effect.andThen(fileSystem.rename(tempPath, backupPath)),
-          Effect.mapError(preserveError),
-          Effect.ensuring(fileSystem.remove(tempPath, { force: true }).pipe(Effect.ignore)),
-        );
+      // Back up the document that failed to decrypt, not the file at `catalogPath`: a
+      // concurrent `set` may already have replaced it.
+      yield* writeDocument({ fileSystem, path, catalogPath: backupPath, document, suffix });
       yield* Effect.logWarning(
         "The desktop connection catalog can no longer be decrypted; starting a new one.",
         { catalogPath, backupPath, error: decryptError },
@@ -531,7 +527,7 @@ export const make = Effect.gen(function* () {
         Effect.asSome,
         Effect.catchTags({
           ElectronSafeStorageDecryptError: (decryptError) =>
-            preserveUndecryptableCatalog(encryptedCatalog, decryptError),
+            preserveUndecryptableCatalog(document.value, encryptedCatalog, decryptError),
         }),
       );
     }).pipe(Effect.withSpan("desktop.connectionCatalogStore.get")),

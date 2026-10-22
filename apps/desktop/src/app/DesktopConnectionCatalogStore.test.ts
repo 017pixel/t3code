@@ -2,8 +2,10 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { ConnectionCatalogDocument } from "@t3tools/client-runtime/platform";
 import { EnvironmentId, type PersistedSavedEnvironmentRecord } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Base64 from "effect/encoding/Base64";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
@@ -308,6 +310,58 @@ describe("DesktopConnectionCatalogStore", () => {
       assert.isTrue(yield* store.set(fresh));
       assert.deepStrictEqual(yield* store.get, Option.some(fresh));
       assert.equal((yield* findBackups).length, 1);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("preserves the undecryptable catalog even when a save replaces it mid-read", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-desktop-connection-catalog-test-",
+      });
+      const key = yield* Ref.make("original-key");
+      const stateDir = path.join(baseDir, "userdata");
+      const catalogPath = path.join(stateDir, "connection-catalog.json");
+      const preserving = yield* Deferred.make<void>();
+      const saved = yield* Deferred.make<void>();
+      const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore.pipe(
+        Effect.provide(
+          layerFor(
+            baseDir,
+            true,
+            key,
+            Layer.succeed(FileSystem.FileSystem, {
+              ...fileSystem,
+              exists: (entryPath) =>
+                entryPath.endsWith(".undecryptable")
+                  ? Deferred.succeed(preserving, undefined).pipe(
+                      Effect.andThen(Deferred.await(saved)),
+                      Effect.andThen(fileSystem.exists(entryPath)),
+                    )
+                  : fileSystem.exists(entryPath),
+            }),
+          ),
+        ),
+      );
+      assert.isTrue(yield* store.set('{"schemaVersion":1,"targets":[]}'));
+      const original = yield* fileSystem.readFileString(catalogPath);
+      yield* Ref.set(key, "regenerated-key");
+
+      const read = yield* Effect.forkChild(store.get);
+      yield* Deferred.await(preserving);
+      assert.isTrue(yield* store.set('{"schemaVersion":1,"targets":[],"profiles":[]}'));
+      yield* Deferred.succeed(saved, undefined);
+      assert.deepStrictEqual(yield* Fiber.join(read), Option.none());
+
+      const backups = (yield* fileSystem.readDirectory(stateDir)).filter((name) =>
+        name.endsWith(".undecryptable"),
+      );
+      assert.equal(backups.length, 1);
+      assert.equal(
+        yield* fileSystem.readFileString(path.join(stateDir, backups[0] ?? "")),
+        original,
+      );
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
