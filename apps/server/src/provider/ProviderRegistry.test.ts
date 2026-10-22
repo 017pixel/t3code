@@ -165,6 +165,7 @@ type TestClaudeCapabilities = {
   readonly apiKeySource: string | undefined;
   readonly apiProvider: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
+  readonly maxEffortLevel?: string;
 };
 
 function claudeCapabilities(overrides: Partial<TestClaudeCapabilities> = {}) {
@@ -2259,6 +2260,37 @@ it.layer(
           layerMockSpawner((args) => {
             const joined = args.join(" ");
             if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      ),
+    );
+
+    it.effect("does not offer effort above the CLI's maxEffortLevel cap", () =>
+      Effect.gen(function* () {
+        // Claude Code silently clamps `--effort max` to the settings.json
+        // `maxEffortLevel`, so offering Max would show an effort the turn never uses.
+        const status = yield* checkClaudeProviderStatus(
+          defaultClaudeSettings,
+          claudeCapabilities({ maxEffortLevel: "xhigh" }),
+        );
+        const effortOptions = status.models.flatMap((model) =>
+          (model.capabilities?.optionDescriptors ?? []).flatMap((descriptor) =>
+            descriptor.id === "effort" && descriptor.type === "select"
+              ? [{ slug: model.slug, options: descriptor.options.map((option) => option.id) }]
+              : [],
+          ),
+        );
+        assert.isTrue(effortOptions.some(({ options }) => options.includes("xhigh")));
+        assert.deepStrictEqual(
+          effortOptions.filter(({ options }) => options.includes("max")).map(({ slug }) => slug),
+          [],
+        );
+      }).pipe(
+        Effect.provide(
+          layerMockSpawner((args) => {
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: "2.1.303\n", stderr: "", code: 0 };
             throw new Error(`Unexpected args: ${joined}`);
           }),
         ),
