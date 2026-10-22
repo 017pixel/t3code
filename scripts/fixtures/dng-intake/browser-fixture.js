@@ -168,22 +168,32 @@ export function installSyntheticEvents() {
         uploads: u.useAttachmentUploadStore.getState().uploadsByImageId,
       };
     };
-    window.__settle = async () => {
+    // Pass the expected total staged attachments after intake; image preparation is asynchronous.
+    window.__settle = async (expectedCount) => {
+      if (!Number.isSafeInteger(expectedCount) || expectedCount <= 0) {
+        throw new TypeError("__settle requires a positive integer expected attachment count");
+      }
       const d = await import("/src/composerDraftStore.ts"),
         u = await import("/src/lib/attachmentUploadQueue.ts");
       return new Promise((resolve) => {
-        let unsub = () => {};
+        let unsubscribeDraft = () => {};
+        let unsubscribeUpload = () => {};
         const check = () => {
           const files = Object.values(d.useComposerDraftStore.getState().draftsByThreadKey).flatMap(
             (d) => [...(d.files ?? []), ...(d.images ?? [])],
           );
           const s = u.useAttachmentUploadStore.getState().uploadsByImageId;
-          if (files.every((f) => ["ready", "failed"].includes(s[f.id]?.status))) {
-            unsub();
+          if (
+            files.length >= expectedCount &&
+            files.every((f) => ["ready", "failed"].includes(s[f.id]?.status))
+          ) {
+            unsubscribeDraft();
+            unsubscribeUpload();
             resolve(s);
           }
         };
-        unsub = u.useAttachmentUploadStore.subscribe(check);
+        unsubscribeDraft = d.useComposerDraftStore.subscribe(check);
+        unsubscribeUpload = u.useAttachmentUploadStore.subscribe(check);
         check();
       });
     };
