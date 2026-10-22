@@ -132,6 +132,15 @@ export const ProviderAdapterV2Event = Schema.Union([
     itemId: TurnItemId,
     chunk: Schema.String,
   }),
+  /**
+   * Never persisted: the provider stopped streaming this thread, so a run
+   * still subscribed for its late children can end.
+   */
+  Schema.Struct({
+    type: Schema.Literal("provider_thread.unloaded"),
+    driver: ProviderDriverKind,
+    providerThreadId: ProviderThreadId,
+  }),
   Schema.Struct({
     type: Schema.Literal("runtime_request.updated"),
     driver: ProviderDriverKind,
@@ -593,7 +602,8 @@ export interface ProviderAdapterV2SessionRuntime {
   /**
    * Set when the provider can resume a saved child after the turn that resumed
    * it ended, so a completed run keeps an idle subscription for that child
-   * until a newer root turn on its thread or the session ends.
+   * until a newer root turn on its thread, the provider unloads the thread
+   * (`provider_thread.unloaded`), or the session ends.
    */
   readonly resumesChildrenAfterRootTurn?: true;
   readonly getModelContextWindow?: (

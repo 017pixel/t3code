@@ -516,6 +516,8 @@ export function routeProviderEvent(
             state.ownedProviderTurns.has(event.runtimeRequest.providerTurnId)),
         state,
       ];
+    case "provider_thread.unloaded":
+      return [false, state];
     case "command_output.delta":
       // The session manager hands live output to the command output hub; runs never see it.
       return [false, state];
@@ -1037,6 +1039,7 @@ export const layer: Layer.Layer<
         // it resumed can start its turn after the root turn ended.
         const dormant = yield* Ref.make(false);
         const newerRootTurnSeen = yield* Ref.make(false);
+        const providerThreadUnloaded = yield* Ref.make(false);
         const activeChildProviderTurns = yield* Ref.make<ReadonlySet<ProviderTurnId>>(new Set());
         const activeChildSubagents = yield* Ref.make<ReadonlyMap<NodeId, ThreadId>>(new Map());
         const activeBackgroundTurnItems = yield* Ref.make<
@@ -1228,7 +1231,7 @@ export const layer: Layer.Layer<
             return false;
           }
           if (yield* Ref.get(dormant)) {
-            return yield* Ref.get(newerRootTurnSeen);
+            return (yield* Ref.get(newerRootTurnSeen)) || (yield* Ref.get(providerThreadUnloaded));
           }
           const terminal = yield* Ref.get(terminalEvent);
           if (
@@ -1272,7 +1275,8 @@ export const layer: Layer.Layer<
           if (
             input.session.resumesChildrenAfterRootTurn !== true ||
             terminal?.status !== "completed" ||
-            (yield* Ref.get(newerRootTurnSeen))
+            (yield* Ref.get(newerRootTurnSeen)) ||
+            (yield* Ref.get(providerThreadUnloaded))
           ) {
             return true;
           }
@@ -1294,6 +1298,12 @@ export const layer: Layer.Layer<
                   event.providerTurn.providerThreadId === input.providerThread.id)
               ) {
                 yield* Ref.set(newerRootTurnSeen, true);
+              }
+              if (
+                event.type === "provider_thread.unloaded" &&
+                event.providerThreadId === input.providerThread.id
+              ) {
+                yield* Ref.set(providerThreadUnloaded, true);
               }
               const previous = yield* Ref.get(eventRouting);
               const [accepted, routing] = routeProviderEvent(event, routeIdentity, previous);

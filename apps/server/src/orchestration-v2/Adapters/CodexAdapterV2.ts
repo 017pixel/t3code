@@ -2578,7 +2578,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const parentNativeThreadId = yield* getNativeThreadId(
               subagent.parentContext.providerThread,
             );
-            const currentParent = yield* findActiveTurnByNativeThreadId(parentNativeThreadId);
+            // The parent's latest turn resumed this child, even if it already
+            // ended: an older turn's run no longer ingests the child.
+            const currentParent = latestTurnContexts.get(parentNativeThreadId);
             if (currentParent !== undefined) subagent.parentContext = currentParent;
             const terminalizedNativeTurns = yield* Ref.get(terminalizedNonCompletedNativeTurns);
             let ancestor: ActiveCodexTurnContext | undefined = subagent.parentContext;
@@ -6985,6 +6987,25 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             function* (unloadInput) {
               const nativeThreadId = yield* getNativeThreadId(unloadInput.providerThread);
               sessionApprovals.delete(nativeThreadId);
+              // Child contexts carry their root's turn input. A child resumed
+              // after the thread reloads is restored from its saved projection.
+              const unloadedRoot = (context: ActiveCodexTurnContext) =>
+                context.input.providerThread.id === unloadInput.providerThread.id;
+              for (const [key, context] of latestTurnContexts) {
+                if (unloadedRoot(context)) latestTurnContexts.delete(key);
+              }
+              yield* Ref.update(
+                subagentThreads,
+                (current) =>
+                  new Map(
+                    Array.from(current).filter(([, child]) => !unloadedRoot(child.parentContext)),
+                  ),
+              );
+              yield* emitProviderEvent({
+                type: "provider_thread.unloaded",
+                driver: CODEX_PROVIDER,
+                providerThreadId: unloadInput.providerThread.id,
+              });
               yield* client.request("thread/unsubscribe", { threadId: nativeThreadId });
             },
             (effect, unloadInput) =>

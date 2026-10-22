@@ -1936,6 +1936,10 @@ export const layerWithOptions = (
             if (event.type === "command_output.delta") {
               return commandOutput.append(event);
             }
+            // Only run subscribers act on it; unloading is not provider activity.
+            if (event.type === "provider_thread.unloaded") {
+              return publishToSubscribers(entry.eventSubscribers, { type: "event", event });
+            }
             // A settled item carries its final output, so its live tail can go.
             const releaseLiveOutput =
               event.type === "turn_item.updated" &&
