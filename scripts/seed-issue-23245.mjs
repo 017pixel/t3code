@@ -1,6 +1,8 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import { fromLenientJson } from "@t3tools/shared/schemaJson";
+import * as Schema from "effect/Schema";
 
 // Usage: node scripts/seed-issue-23245.mjs <worktree>/.t3 R1|R2|R3|R4|empty
 // Reset preferences only; create the project/thread and provider setup in the app.
@@ -15,7 +17,11 @@ if (NodePath.basename(base) !== ".t3" || base === NodePath.join(NodeOS.homedir()
   throw new Error("Use a worktree's isolated .t3 directory");
 }
 const path = NodePath.join(base, "userdata/settings.json");
-const settings = JSON.parse(
+// Settings may carry the comments and trailing commas the server accepts.
+const decodeSettings = Schema.decodeSync(
+  fromLenientJson(Schema.Record(Schema.String, Schema.Unknown)),
+);
+const settings = decodeSettings(
   await NodeFSP.readFile(path, "utf8").catch((error) => {
     if (error.code === "ENOENT") return "{}";
     throw error;
