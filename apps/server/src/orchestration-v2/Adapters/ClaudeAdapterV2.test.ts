@@ -2136,7 +2136,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
   const makeWakeHarnessWithOptions = (options?: {
     readonly close?: (sdkMessages: Queue.Queue<SDKMessage>) => Effect.Effect<void>;
-    readonly interrupt?: Effect.Effect<void>;
+    readonly interrupt?: Effect.Effect<void, ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError>;
     readonly setPermissionMode?: ClaudeAdapterV2.ClaudeAgentSdkQuerySession["setPermissionMode"];
     readonly stopTask?: (
       taskId: string,
@@ -3568,6 +3568,68 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
   // #15720: priority "now" alone leaves a running foreground Bash command
   // blocking the CLI, so the steer is never answered until it exits.
+  const steerDuringRunningBash = Effect.fn("steerDuringRunningBash")(function* (
+    harness: Effect.Success<ReturnType<typeof makeWakeHarnessWithOptions>>,
+    name: string,
+  ) {
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const attemptId = RunAttemptId.make(`attempt-${name}`);
+    const input = makeClaudeTestTurnInput({
+      threadId: harness.threadId,
+      providerThread: harness.providerThread,
+      now: yield* DateTime.now,
+      attemptId,
+      text: "Run the slow request.",
+      attachments: [],
+    });
+    yield* harness.runtime.startTurn(input);
+    yield* harness.offerAndWait(
+      claudeSdkFrame({
+        type: "assistant",
+        message: {
+          model: "claude-sonnet-4-6",
+          id: `msg_${name}`,
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_steer_curl",
+              name: "Bash",
+              input: { command: "curl --max-time 180 http://127.0.0.1:15820/" },
+            },
+          ],
+        },
+        parent_tool_use_id: null,
+        uuid: "00000000-0000-4000-8000-000000000910",
+        session_id: WAKE_NATIVE_SESSION,
+      }),
+    );
+    return {
+      steer: harness.runtime.steerTurn({
+        threadId: harness.threadId,
+        runId: input.runId,
+        providerThread: harness.providerThread,
+        providerTurnId: idAllocator.derive.providerTurn({
+          driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+          nativeTurnId: `turn:${attemptId}`,
+        }),
+        message: {
+          createdBy: "user",
+          creationSource: "web",
+          messageId: MessageId.make(`message-${name}`),
+          text: "Change of plan: stop waiting for that command and reply with exactly STEERED_NOW.",
+          attachments: [],
+        },
+      }),
+    };
+  });
+  const steerTestLayer = Layer.mergeAll(
+    IdAllocator.layer,
+    McpProviderSessions.layer,
+    NodeServices.layer,
+  );
+
   it.effect("steering releases a running foreground command", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -3582,66 +3644,108 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               return true;
             }),
         });
-        const idAllocator = yield* IdAllocator.IdAllocatorV2;
-        const attemptId = RunAttemptId.make("attempt-steer-running-command");
-        const input = makeClaudeTestTurnInput({
-          threadId: harness.threadId,
-          providerThread: harness.providerThread,
-          now: yield* DateTime.now,
-          attemptId,
-          text: "Run the slow request.",
-          attachments: [],
-        });
-        yield* harness.runtime.startTurn(input);
-        yield* harness.offerAndWait(
-          claudeSdkFrame({
-            type: "assistant",
-            message: {
-              model: "claude-sonnet-4-6",
-              id: "msg_steer_running_command",
-              type: "message",
-              role: "assistant",
-              content: [
-                {
-                  type: "tool_use",
-                  id: "toolu_steer_curl",
-                  name: "Bash",
-                  input: { command: "curl --max-time 180 http://127.0.0.1:15820/" },
-                },
-              ],
-            },
-            parent_tool_use_id: null,
-            uuid: "00000000-0000-4000-8000-000000000910",
-            session_id: WAKE_NATIVE_SESSION,
-          }),
-        );
-        yield* harness.runtime.steerTurn({
-          threadId: harness.threadId,
-          runId: input.runId,
-          providerThread: harness.providerThread,
-          providerTurnId: idAllocator.derive.providerTurn({
-            driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
-            nativeTurnId: `turn:${attemptId}`,
-          }),
-          message: {
-            createdBy: "user",
-            creationSource: "web",
-            messageId: MessageId.make("message-steer-running-command"),
-            text: "Change of plan: stop waiting for that command and reply with exactly STEERED_NOW.",
-            attachments: [],
-          },
-        });
+        const { steer } = yield* steerDuringRunningBash(harness, "steer-running-command");
+        yield* steer;
         assert.equal(harness.offeredMessages[1]?.priority, "now");
         assert.deepEqual(
           releases,
           ["interrupt"],
           "steer left the running Bash command blocking the turn",
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(steerTestLayer)),
+    ),
+  );
+
+  // Interrupting aborts every pending permission callback, which would deny a
+  // question or approval the user never answered.
+  it.effect("steering leaves the command running while the user is asked something", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let interrupted = false;
+        const harness = yield* makeWakeHarnessWithOptions({
+          interrupt: Effect.sync(() => {
+            interrupted = true;
+          }),
+        });
+        const { steer } = yield* steerDuringRunningBash(harness, "steer-pending-question");
+        const question = new AbortController();
+        yield* Effect.promise(() =>
+          harness.getOpenedOptions()!.canUseTool!(
+            "AskUserQuestion",
+            {
+              questions: [
+                {
+                  header: "Target",
+                  question: "Which environment?",
+                  options: [
+                    { label: "Production", description: "Deploy to production." },
+                    { label: "Staging", description: "Deploy to staging." },
+                  ],
+                  multiSelect: false,
+                },
+              ],
+            },
+            {
+              signal: question.signal,
+              toolUseID: "toolu_steer_question",
+              requestId: "request-steer-question",
+            },
+          ),
+        ).pipe(Effect.forkScoped);
+        yield* Queue.take(harness.runtimeRequestReceipts);
+        yield* steer;
+        assert.isFalse(interrupted, "steer cancelled the pending question");
+        assert.equal(harness.offeredMessages[1]?.priority, "now");
+      }).pipe(Effect.provide(steerTestLayer)),
+    ),
+  );
+
+  it.effect("a steer is not sent when the turn ends while the command is interrupted", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const interruptStarted = yield* Deferred.make<void>();
+        const interruptAnswered = yield* Deferred.make<void>();
+        const harness = yield* makeWakeHarnessWithOptions({
+          interrupt: Deferred.succeed(interruptStarted, undefined).pipe(
+            Effect.andThen(Deferred.await(interruptAnswered)),
+          ),
+        });
+        const { steer } = yield* steerDuringRunningBash(harness, "steer-turn-ends");
+        const steering = yield* Effect.exit(steer).pipe(Effect.forkScoped);
+        yield* Deferred.await(interruptStarted);
+        // The command finished on its own before the interrupt reached it.
+        yield* harness.offerAndWait(
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000911",
+            result: "Done.",
+          }),
+        );
+        yield* Queue.take(harness.terminalReceipts);
+        yield* Deferred.succeed(interruptAnswered, undefined);
+        const exit = yield* Fiber.join(steering);
+        assert.isTrue(Exit.isFailure(exit), "steer reported success after its turn ended");
+        assert.equal(harness.offeredMessages.length, 1, "steer started untracked native work");
+      }).pipe(Effect.provide(steerTestLayer)),
+    ),
+  );
+
+  // The CLI may already have aborted the command, and its aborted result is
+  // swallowed as a steered segment, so only the steer can continue the turn.
+  it.effect("a steer is still sent when interrupting the command fails", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarnessWithOptions({
+          interrupt: Effect.fail(
+            new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+              method: "interrupt",
+              cause: new Error("control request failed"),
+            }),
+          ),
+        });
+        const { steer } = yield* steerDuringRunningBash(harness, "steer-interrupt-fails");
+        yield* steer;
+        assert.equal(harness.offeredMessages[1]?.priority, "now");
+      }).pipe(Effect.provide(steerTestLayer)),
     ),
   );
 

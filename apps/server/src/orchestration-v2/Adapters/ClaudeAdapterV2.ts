@@ -9917,29 +9917,45 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               fileSystem,
               skills: yield* userInvocableSkills(currentTurn.input.runtimePolicy.cwd),
             });
+            // The turn can end while the moves or the interrupt are answered. A
+            // steer offered then would start a new turn the orchestrator never
+            // asked for, so the steer fails and the orchestrator starts the
+            // follow-up turn.
+            const failIfTurnEnded = Effect.gen(function* () {
+              if (
+                (yield* Ref.get(activeTurn))?.providerTurnId !== turnInput.providerTurnId ||
+                (yield* Ref.get(queryContext)) !== existing
+              ) {
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CLAUDE_PROVIDER,
+                  detail: `Claude provider turn ${turnInput.providerTurnId} ended before the steer was sent.`,
+                });
+              }
+            });
             yield* backgroundForegroundSubagents(existing, backgroundDeadline);
-            // The turn can end while the moves are answered. A steer offered
-            // then would start a new turn the orchestrator never asked for, so
-            // the steer fails and the orchestrator starts the follow-up turn.
-            if (
-              (yield* Ref.get(activeTurn))?.providerTurnId !== turnInput.providerTurnId ||
-              (yield* Ref.get(queryContext)) !== existing
-            ) {
-              return yield* new ProviderAdapter.ProviderAdapterProtocolError({
-                driver: CLAUDE_PROVIDER,
-                detail: `Claude provider turn ${turnInput.providerTurnId} ended before the steer was sent.`,
-              });
-            }
+            yield* failIfTurnEnded;
             yield* Ref.update(steeredTurns, (current) => {
               const next = new Set(current);
               next.add(turnInput.providerTurnId);
               return next;
             });
             // Priority "now" does not stop a foreground command (#15720), so a
-            // root tool call still running is interrupted first, as Esc would.
-            // Its aborted_tools result ends only this segment of the steered turn.
-            if (currentTurn.toolCalls.size > 0) {
-              yield* existing.query.interrupt;
+            // running Bash command is interrupted first, as Esc would. Its
+            // aborted_tools result ends only this segment of the steered turn.
+            // Interrupting also aborts pending permission callbacks, so a
+            // question or approval the user has not answered keeps the command.
+            if (
+              [...currentTurn.toolCalls.values()].some((call) => call.toolName === "Bash") &&
+              (yield* Ref.get(pendingRuntimeRequests)).size === 0
+            ) {
+              // The CLI may have aborted before the request failed, and that
+              // result is swallowed, so the steer is still sent to continue.
+              yield* existing.query.interrupt.pipe(
+                Effect.catch((cause) =>
+                  Effect.logWarning("orchestration-v2.claude-steer-interrupt-failed", { cause }),
+                ),
+              );
+              yield* failIfTurnEnded;
             }
             yield* existing.query.offer(userMessage);
           },
