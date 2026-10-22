@@ -1,0 +1,15 @@
+{
+  "clock": "2026-10-21T12:00:00.000Z",
+  "files": { "notes.md": "Seed\n", "other.md": "Other seed\n" },
+  "turns": {
+    "A": {
+      "files": { "notes.md": "Seed\nA-only\n", "other.md": "Other seed\nA-secondary\n" },
+      "fail": false
+    },
+    "B": { "files": { "other.md": "Other seed\nA-secondary\nB-only\n" }, "fail": false },
+    "FIRST": { "files": { "other.md": "Other seed\nB-only\n" }, "fail": false },
+    "Q": { "files": { "notes.md": "Seed\nQ-failed-edit\n" }, "fail": true },
+    "F": { "files": { "notes.md": "Seed\nA-only\nF-local\n" }, "fail": false },
+    "C": { "files": { "notes.md": "Seed\nA-only\nC-only\n" }, "fail": false }
+  }
+}
