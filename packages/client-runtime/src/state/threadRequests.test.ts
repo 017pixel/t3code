@@ -1,6 +1,8 @@
 import {
   NodeId,
   ProviderSessionId,
+  ProviderThreadId,
+  ProviderTurnId,
   RuntimeRequestId,
   TurnItemId,
   type OrchestrationV2ThreadProjection,
@@ -9,6 +11,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { v2Now, v2Projection } from "./orchestrationV2TestFixtures.ts";
 import {
   createQuestionHistoryProjector,
+  createPendingThreadRequestsProjector,
   derivePendingThreadRequests,
   seedUserInputDraftAnswers,
 } from "./threadRequests.ts";
@@ -115,6 +118,48 @@ describe("pending v2 questions", () => {
         ],
       },
     ]);
+  });
+
+  it("keeps an open question after completion but does not reopen it when revisiting", () => {
+    const providerTurnId = ProviderTurnId.make("question-turn");
+    const running = {
+      ...projection,
+      runtimeRequests: projection.runtimeRequests.map((request) => ({
+        ...request,
+        providerTurnId,
+      })),
+      providerTurns: [
+        {
+          id: providerTurnId,
+          providerThreadId: ProviderThreadId.make("question-thread"),
+          nodeId,
+          runAttemptId: null,
+          nativeTurnRef: null,
+          ordinal: 1,
+          status: "running" as const,
+          startedAt: v2Now,
+          completedAt: null,
+        },
+      ],
+    };
+    const completed = {
+      ...running,
+      providerTurns: running.providerTurns.map((turn) => ({
+        ...turn,
+        status: "completed" as const,
+        completedAt: v2Now,
+      })),
+    };
+    const project = createPendingThreadRequestsProjector();
+    expect(project(running).userInputs.map((input) => input.requestId)).toEqual([requestId]);
+    expect(project(completed).userInputs.map((input) => input.requestId)).toEqual([requestId]);
+    expect(createPendingThreadRequestsProjector()(completed).userInputs).toEqual([]);
+    // Completion changes presentation, not whether a late answer can be sent.
+    expect(derivePendingThreadRequests(completed).userInputs).toHaveLength(1);
+    expect(project({ ...completed, runtimeRequests: [] }).userInputs).toEqual([]);
+    project(running, "first-view");
+    expect(project(completed, "first-view").userInputs).toHaveLength(1);
+    expect(project(completed, "reopened-view").userInputs).toEqual([]);
   });
 
   it("only marks asynchronous questions as dismissible", () => {

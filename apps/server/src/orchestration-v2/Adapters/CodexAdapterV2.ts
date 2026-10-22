@@ -1145,7 +1145,11 @@ interface ActiveCodexTurnContext {
   // subagent's approvals allocate on the owning root turn.
   readonly itemPositions: Map<
     string,
-    { readonly ordinal: number; readonly startedAt: DateTime.Utc }
+    {
+      readonly ordinal: number;
+      readonly startedAt: DateTime.Utc;
+      readonly phase?: "commentary" | "final_answer";
+    }
   >;
 }
 
@@ -3217,6 +3221,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeItemId: item.id,
             });
             const { ordinal, startedAt } = yield* resolveItemPosition(context, item.id);
+            const phase = context.itemPositions.get(item.id)?.phase;
             const messageId = idAllocator.derive.messageFromProviderItem({
               driver: CODEX_PROVIDER,
               nativeItemId: item.id,
@@ -3250,6 +3255,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               runId: context.projectionRunId,
               nodeId,
               role: "assistant",
+              ...(phase ? { phase } : {}),
               text: item.text,
               attachments: [],
               streaming: !completed,
@@ -3272,6 +3278,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               completedAt,
               updatedAt,
               type: "assistant_message",
+              ...(phase ? { phase } : {}),
               messageId,
               text: item.text,
               streaming: !completed,
@@ -4693,6 +4700,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             }
 
             if (payload.item.type === "agentMessage") {
+              const position = yield* resolveItemPosition(context, payload.item.id);
+              if (payload.item.phase)
+                context.itemPositions.set(payload.item.id, {
+                  ...position,
+                  phase: payload.item.phase,
+                });
               if (payload.item.phase !== "commentary") {
                 yield* Ref.update(finalAnswerItemIdsByTurn, (current) => {
                   const updated = new Map(current);
@@ -5020,6 +5033,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               return;
             }
 
+            const messagePosition = yield* resolveItemPosition(context, payload.item.id);
+            if (payload.item.phase)
+              context.itemPositions.set(payload.item.id, {
+                ...messagePosition,
+                phase: payload.item.phase,
+              });
             const finalAnswer = payload.item.phase !== "commentary";
             if (finalAnswer) {
               yield* Ref.update(finalAnswerItemIdsByTurn, (current) => {

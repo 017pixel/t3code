@@ -118,7 +118,7 @@ import {
   type CodexFeedbackSubmission,
 } from "@t3tools/client-runtime/state/threads";
 import { resolveThreadLastVisitedAt } from "./Sidebar.logic";
-import { derivePendingThreadRequests } from "@t3tools/client-runtime/state/thread-requests";
+import { createPendingThreadRequestsProjector } from "@t3tools/client-runtime/state/thread-requests";
 import {
   parseScopedThreadKey,
   scopedThreadKey,
@@ -3300,12 +3300,13 @@ export default function ChatView(props: ChatViewProps) {
     conversationProviderStatus !== null &&
     conversationProviderStatus.supportsConversationRollback !== false;
   const phase = derivePhase(activeRuntime);
+  const [projectPendingRequests] = useState(createPendingThreadRequestsProjector);
   const pendingRequests = useMemo(
     () =>
       serverProjection === null
         ? { approvals: [], userInputs: [] }
-        : derivePendingThreadRequests(serverProjection),
-    [serverProjection],
+        : projectPendingRequests(serverProjection, JSON.stringify([environmentId, activeThreadId])),
+    [projectPendingRequests, serverProjection, environmentId, activeThreadId],
   );
   const pendingApprovals = useMemo(
     () => derivePendingApprovals(pendingRequests.approvals),

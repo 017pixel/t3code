@@ -3928,6 +3928,78 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       }),
   );
 
+  it.effect(
+    "stops flagging completed async questions while retaining the pending request for late answers",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const suffix = "async-question-shell";
+        const threadId = yield* addRolledBackRecoveryCandidate(suffix);
+        const nodeId = NodeId.make(`node:${suffix}:rolled-back`);
+        const providerTurnId = ProviderTurnId.make(`turn:${suffix}`);
+        const requestId = RuntimeRequestId.make(`request:${suffix}`);
+        const now = yield* DateTime.now;
+        yield* store.apply({
+          id: EventId.make(`event:${suffix}:request`),
+          type: "runtime-request.updated",
+          threadId,
+          nodeId,
+          driver,
+          occurredAt: now,
+          payload: {
+            id: requestId,
+            nodeId,
+            providerTurnId,
+            nativeRequestRef: null,
+            kind: "user_input",
+            status: "pending",
+            responseCapability: { type: "message" },
+            createdAt: now,
+            resolvedAt: null,
+          },
+        });
+        for (const status of ["running", "completed"] as const) {
+          yield* store.apply({
+            id: EventId.make(`event:${suffix}:${status}`),
+            type: "provider-turn.updated",
+            threadId,
+            nodeId,
+            driver,
+            occurredAt: now,
+            payload: {
+              id: providerTurnId,
+              providerThreadId: ProviderThreadId.make(`provider:${suffix}`),
+              nodeId,
+              runAttemptId: null,
+              nativeTurnRef: null,
+              ordinal: 1,
+              status,
+              startedAt: now,
+              completedAt: status === "running" ? null : now,
+            },
+          });
+          const projection = yield* store.getThreadProjection(threadId);
+          const shell = yield* store.getThreadShell(threadId);
+          const snapshot = yield* store.getShellSnapshot();
+          const expected = status === "running" ? requestId : null;
+          assert.equal(shell?.pendingRuntimeRequest?.id ?? null, expected);
+          assert.equal(
+            snapshot.threads.find((thread) => thread.id === threadId)?.pendingRuntimeRequest?.id ??
+              null,
+            expected,
+          );
+          assert.equal(
+            ProjectionStore.threadShellFromProjection(projection).pendingRuntimeRequest?.id ?? null,
+            expected,
+          );
+          assert.equal(
+            projection.runtimeRequests.find((request) => request.id === requestId)?.status,
+            "pending",
+          );
+        }
+      }),
+  );
+
   it.effect("selects the latest waiting secret only from active runs", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;

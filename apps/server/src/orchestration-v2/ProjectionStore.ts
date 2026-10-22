@@ -1446,9 +1446,23 @@ export function threadShellFromProjection(
       .filter(isActivityRunForShell)
       .toSorted((left, right) => right.ordinal - left.ordinal)[0] ?? null;
   const liveRunIds = new Set(projection.runs.filter(isActivityRunForShell).map((run) => run.id));
+  const settledProviderTurnIds = new Set(
+    projection.providerTurns
+      .filter((turn) => turn.status !== "pending" && turn.status !== "running")
+      .map((turn) => turn.id),
+  );
   const pendingRuntimeRequest =
     projection.runtimeRequests
-      .filter((request) => request.status === "pending")
+      .filter(
+        (request) =>
+          request.status === "pending" &&
+          !(
+            request.kind === "user_input" &&
+            request.responseCapability.type === "message" &&
+            request.providerTurnId !== null &&
+            settledProviderTurnIds.has(request.providerTurnId)
+          ),
+      )
       .toSorted(
         (left, right) =>
           DateTime.toEpochMillis(right.createdAt) - DateTime.toEpochMillis(left.createdAt),
@@ -5342,6 +5356,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 FROM orchestration_v2_projection_runtime_requests request
                 WHERE request.thread_id = t.thread_id
                   AND request.status = 'pending'
+                  AND NOT (
+                    json_extract(request.payload_json, '$.kind') = 'user_input'
+                    AND json_extract(request.payload_json, '$.responseCapability.type') = 'message'
+                    AND EXISTS (
+                      SELECT 1 FROM orchestration_v2_projection_provider_turns provider_turn
+                      WHERE provider_turn.provider_turn_id = json_extract(request.payload_json, '$.providerTurnId')
+                        AND provider_turn.status NOT IN ('pending', 'running')
+                    )
+                  )
                 ORDER BY request.created_at DESC, request.runtime_request_id DESC
                 LIMIT 1
               ) AS pending_request_payload_json,

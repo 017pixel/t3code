@@ -137,6 +137,40 @@ const decodeOrchestrationV2SubscribeThreadInput = Schema.decodeUnknownSync(
 );
 
 describe("orchestration V2 contracts", () => {
+  it("preserves assistant phases through persisted and wire schemas and accepts older messages", () => {
+    for (const phase of ["commentary", "final_answer", undefined]) {
+      const item = decodeOrchestrationV2TurnItem({
+        id: "assistant-item",
+        threadId: "thread",
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        type: "assistant_message",
+        messageId: "reply",
+        text: "Complete reply",
+        streaming: false,
+        status: "completed",
+        title: null,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        ...(phase === undefined ? {} : { phase }),
+      });
+      const stored = encodeOrchestrationV2TurnItemJson(item);
+      if (phase === undefined) expect(stored).not.toHaveProperty("phase");
+      else expect(stored).toMatchObject({ phase });
+      expect(decodeOrchestrationV2TurnItemJson(stored)).toEqual(item);
+      const wire = Schema.encodeSync(Schema.toCodecJson(OrchestrationV2TurnItem))(item);
+      expect(Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2TurnItem))(wire)).toEqual(
+        item,
+      );
+    }
+  });
+
   it("carries command failure metadata through runtime and JSON schemas without output text", () => {
     const base = {
       id: "command-item",

@@ -1334,6 +1334,81 @@ describe("deriveMessagesTimelineRows", () => {
     expect(assistantRow?.assistantTurnDiffSummary).toBe(assistantTurnDiffSummary);
   });
 
+  it.each([false, true])(
+    "preserves final answers after late commentary and a late answer, superseded=%s",
+    (superseded) => {
+      const runId = RunId.make("late-answer-run");
+      const attempt = superseded
+        ? {
+            id: RunAttemptId.make("old-attempt"),
+            runId,
+            attemptOrdinal: 1,
+            rootNodeId: NodeId.make("old-root"),
+            status: "superseded" as const,
+            completedAt: DateTime.makeUnsafe("2026-01-01T00:00:04Z"),
+          }
+        : undefined;
+      const timelineEntries: TimelineEntry[] = (
+        [
+          ["question-prompt", "user", undefined, "Investigate"],
+          ["commentary", "assistant", "commentary", "Checking"],
+          ["original-final", "assistant", "final_answer", "The full investigation is complete."],
+          ["late-commentary", "assistant", "commentary", "For October 12 through 14"],
+          ["late-answer", "user", undefined, "Red"],
+          ["followup-final", "assistant", "final_answer", "Red acknowledged."],
+        ] as const
+      ).map(([id, role, phase, text], index) => {
+        const createdAt = `2026-01-01T00:00:0${index}Z`;
+        return {
+          id,
+          kind: "message",
+          createdAt,
+          ...(index < 4 && attempt ? { attempt } : {}),
+          message: {
+            id: MessageId.make(id),
+            role,
+            ...(phase ? { phase } : {}),
+            text,
+            runId,
+            streaming: false,
+            createdAt,
+            updatedAt: createdAt,
+            ...(role === "user"
+              ? { inputIntent: index === 0 ? ("turn_start" as const) : ("steer" as const) }
+              : {}),
+          },
+        };
+      });
+      const beforeAnswer = deriveMessagesTimelineRows({
+        timelineEntries: timelineEntries.slice(0, 4),
+        isWorking: false,
+        activeTurnStartedAt: null,
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+      });
+      expect(beforeAnswer.filter((row) => row.kind === "message").map((row) => row.id)).toEqual([
+        "question-prompt",
+        "original-final",
+      ]);
+      const rows = deriveMessagesTimelineRows({
+        timelineEntries,
+        isWorking: false,
+        activeTurnStartedAt: null,
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+      });
+      const visibleMessages = rows.flatMap((row) => (row.kind === "message" ? [row] : []));
+      expect(visibleMessages.map((row) => row.id)).toContain("original-final");
+      expect(visibleMessages.map((row) => row.id)).toContain("followup-final");
+      expect(visibleMessages.find((row) => row.id === "original-final")?.message.text).toBe(
+        "The full investigation is complete.",
+      );
+      expect(
+        visibleMessages.find((row) => row.id === "original-final")?.showAssistantCopyButton,
+      ).toBe(true);
+    },
+  );
+
   it("folds the first assistant message and settled work before the terminal response", () => {
     const timelineEntries = [
       {

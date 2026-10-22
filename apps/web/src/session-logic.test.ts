@@ -998,7 +998,7 @@ describe("native provider presentation in the v2 timeline", () => {
     item,
   });
 
-  it("keeps async answers in the question row, including incrementally appended replies", () => {
+  it("shows async answers as user messages, including incrementally appended replies", () => {
     const requestId = RuntimeRequestId.make("question");
     const question: OrchestrationV2TurnItem = {
       ...base,
@@ -1023,7 +1023,7 @@ describe("native provider presentation in the v2 timeline", () => {
     const nextInput = { ...input, visibleTurnItems: [...input.visibleTurnItems, visible(reply)] };
     const next = deriveTimelineEntriesFromVisibleTurnItemsWithState(nextInput, previous);
     expect(next.entries).toEqual(deriveTimelineEntriesFromVisibleTurnItems(nextInput));
-    expect(next.entries).toHaveLength(1);
+    expect(next.entries).toHaveLength(2);
     const replyFirst = { ...input, visibleTurnItems: [visible(reply)] };
     const replyProjection = deriveTimelineEntriesFromVisibleTurnItemsWithState(replyFirst);
     const questionAfterReply = {
@@ -1039,7 +1039,7 @@ describe("native provider presentation in the v2 timeline", () => {
       kind: "work",
       entry: { questionAnswer: question.questionAnswer },
     });
-    // A separately paged reply stays visible until its question history is available.
+    expect(next.entries[1]).toMatchObject({ kind: "message", message: { text: reply.text } });
     expect(
       deriveTimelineEntriesFromVisibleTurnItems({ ...input, visibleTurnItems: [visible(reply)] })[0]
         ?.kind,

@@ -714,6 +714,7 @@ export function resolveAssistantMessageCopyState({
 
 function deriveTerminalAssistantMessageIds(timelineEntries: ReadonlyArray<TimelineEntry>) {
   const lastAssistantMessageIdByResponseKey = new Map<string, string>();
+  const finalMessageIds = new Set<string>();
   let nullTurnResponseIndex = 0;
 
   for (const timelineEntry of timelineEntries) {
@@ -725,9 +726,10 @@ function deriveTerminalAssistantMessageIds(timelineEntries: ReadonlyArray<Timeli
       nullTurnResponseIndex += 1;
       continue;
     }
-    if (message.role !== "assistant") {
+    if (message.role !== "assistant" || message.phase === "commentary") {
       continue;
     }
+    if (message.phase === "final_answer") finalMessageIds.add(message.id);
 
     const responseKey = message.runId
       ? `turn:${message.runId}`
@@ -735,7 +737,7 @@ function deriveTerminalAssistantMessageIds(timelineEntries: ReadonlyArray<Timeli
     lastAssistantMessageIdByResponseKey.set(responseKey, message.id);
   }
 
-  return new Set(lastAssistantMessageIdByResponseKey.values());
+  return new Set([...lastAssistantMessageIdByResponseKey.values(), ...finalMessageIds]);
 }
 
 interface TurnFold {
@@ -755,8 +757,9 @@ interface SupersededAttemptFold {
 }
 
 /**
- * Final replies of superseded attempts that finished before the steer replaced
- * them. A steer stamps the attempt's completedAt when it is dispatched, and the
+ * Explicit final answers stay visible even if later work or steering follows.
+ * For providers without phases, preserve replies that finished before a steer.
+ * A steer stamps the attempt's completedAt when it is dispatched, and the
  * provider closes a reply it cut off only after that, so a reply whose item
  * completed earlier was whole. Item status alone cannot tell: an interrupted
  * stream also closes as `completed`. The reply must be the attempt's last
@@ -778,7 +781,11 @@ function completeSupersededReplyEntryIds(
     }
     lastOutputByAttemptId.set(entry.attempt.id, entry);
   }
-  const replyEntryIds = new Set<string>();
+  const replyEntryIds = new Set<string>(
+    timelineEntries.flatMap((entry) =>
+      entry.kind === "message" && entry.message.phase === "final_answer" ? [entry.id] : [],
+    ),
+  );
   for (const entry of lastOutputByAttemptId.values()) {
     const supersededAt = entry.attempt?.completedAt ?? null;
     const item = entry.kind === "message" ? entry.projectedItem?.item : undefined;
@@ -1112,7 +1119,7 @@ function deriveTurnFolds(input: {
     group.entries.push(entry);
     if (entry.kind === "message") {
       if (input.terminalAssistantMessageIds.has(entry.message.id)) {
-        group.terminalEntry = entry;
+        if (entry.message.phase !== "commentary") group.terminalEntry = entry;
       }
       if (entry.message.streaming) {
         group.hasStreamingMessage = true;
@@ -1138,15 +1145,19 @@ function deriveTurnFolds(input: {
       ? group.entries.findIndex((entry) => entry.id === group.terminalEntry?.id)
       : group.entries.length;
     for (const [index, entry] of group.entries.entries()) {
-      if (entry.id === group.terminalEntry?.id) {
+      if (
+        entry.id === group.terminalEntry?.id ||
+        (entry.kind === "message" && entry.message.phase === "final_answer")
+      ) {
         continue;
       }
       const isCompaction =
         entry.kind === "work" && entry.entry.sourceActivityKind === "context-compaction";
       const isFoldableTrailingActivity =
-        entry.kind === "work" &&
-        entry.entry.toolLifecycleStatus !== "inProgress" &&
-        !workEntryDisplayIndicatesToolFailure(entry.entry);
+        (entry.kind === "message" && entry.message.phase === "commentary") ||
+        (entry.kind === "work" &&
+          entry.entry.toolLifecycleStatus !== "inProgress" &&
+          !workEntryDisplayIndicatesToolFailure(entry.entry));
       if (!isCompaction && index > terminalEntryIndex && !isFoldableTrailingActivity) {
         continue;
       }

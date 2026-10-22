@@ -2254,12 +2254,19 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   );
   const terminalAssistantMessageIds = useMemo(() => {
     const terminalIdsByTurn = new Map<RunId, string>();
+    const finalIds = new Set<string>();
     for (const entry of props.feed) {
-      if (entry.type === "message" && entry.message.role === "assistant" && entry.message.runId) {
+      if (
+        entry.type === "message" &&
+        entry.message.role === "assistant" &&
+        entry.message.runId &&
+        entry.message.phase !== "commentary"
+      ) {
+        if (entry.message.phase === "final_answer") finalIds.add(entry.message.id);
         terminalIdsByTurn.set(entry.message.runId, entry.message.id);
       }
     }
-    return new Set(terminalIdsByTurn.values());
+    return new Set([...terminalIdsByTurn.values(), ...finalIds]);
   }, [props.feed]);
   useEffect(() => {
     const previous = previousLatestTurnRef.current;

@@ -12,7 +12,7 @@ import type { EnvironmentThread } from "./models.ts";
 import { EMPTY_ENVIRONMENT_THREAD_STATE, type EnvironmentThreadState } from "./threadState.ts";
 import {
   createQuestionHistoryProjector,
-  derivePendingThreadRequests,
+  createPendingThreadRequestsProjector,
   type PendingThreadRequests,
 } from "./threadRequests.ts";
 import { arrayElementsEqual, parseThreadKey, threadKey } from "./entities.ts";
@@ -130,8 +130,11 @@ export function createEnvironmentThreadDetailAtoms<E>(
     ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-worktree:${key}`)),
   );
   const pendingRequestsAtomFamily = Atom.family((key: string) => {
-    let previous: Pick<OrchestrationV2ThreadProjection, "runtimeRequests" | "turnItems"> | null =
-      null;
+    const projectPendingRequests = createPendingThreadRequestsProjector();
+    let previous: Pick<
+      OrchestrationV2ThreadProjection,
+      "runtimeRequests" | "turnItems" | "providerTurns"
+    > | null = null;
     let value: PendingThreadRequests | null = null;
     return Atom.make((get) => {
       const projection = Option.getOrNull(get(threadStateValueAtomFamily(key)).data);
@@ -155,10 +158,11 @@ export function createEnvironmentThreadDetailAtoms<E>(
       if (
         previous === null ||
         !arrayElementsEqual(previous.runtimeRequests, runtimeRequests) ||
-        !arrayElementsEqual(previous.turnItems, turnItems)
+        !arrayElementsEqual(previous.turnItems, turnItems) ||
+        !arrayElementsEqual(previous.providerTurns, projection.providerTurns)
       ) {
-        previous = { runtimeRequests, turnItems };
-        value = derivePendingThreadRequests(previous);
+        previous = { runtimeRequests, turnItems, providerTurns: projection.providerTurns };
+        value = projectPendingRequests(previous);
       }
       return value;
     }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-pending-requests:${key}`));

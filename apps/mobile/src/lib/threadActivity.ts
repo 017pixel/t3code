@@ -123,6 +123,7 @@ export interface ThreadFeedActivity {
 }
 
 export interface ThreadFeedMessage {
+  readonly phase?: "commentary" | "final_answer";
   readonly context?: import("@t3tools/contracts").OrchestrationMessageContext | undefined;
   readonly id: MessageId;
   readonly role: "user" | "assistant";
@@ -1124,7 +1125,8 @@ function deriveThreadFeedRunFolds(
       if (!firstAssistantMessageIdByRun.has(runId)) {
         firstAssistantMessageIdByRun.set(runId, entry.id);
       }
-      terminalAssistantMessageIdByRun.set(runId, entry.id);
+      if (entry.message.phase !== "commentary")
+        terminalAssistantMessageIdByRun.set(runId, entry.id);
     }
     if (entry.type !== "activity-group") continue;
     for (const activity of entry.activities) {
@@ -1161,6 +1163,7 @@ function deriveThreadFeedRunFolds(
           (entry) =>
             entry.id !== firstAssistantId &&
             entry.id !== terminalAssistantId &&
+            !(entry.type === "message" && entry.message.phase === "final_answer") &&
             entry.type !== "html-render" &&
             entry.type !== "mcp-app" &&
             !(
@@ -1781,18 +1784,10 @@ export function buildThreadFeed(
     }
     return null;
   };
-  const foldedAnswerMessageIds = new Set(
-    visibleTurnItems.flatMap(({ item }) =>
-      item.type === "user_input_request" && item.questionAnswer
-        ? [`async-answer:${item.questionAnswer.requestId}`]
-        : [],
-    ),
-  );
   for (const row of visibleTurnItems) {
     const item = row.item;
     if (turnItemIsWorkspacePreparation(item)) continue;
     if (item.type === "todo_list" || item.type === "checkpoint") continue;
-    if (item.type === "user_message" && foldedAnswerMessageIds.has(item.messageId)) continue;
     // Match the web timeline: only the terminal interrupt result is useful to
     // users; the preceding request is transient bookkeeping.
     if (item.type === "run_interrupt_request") {
@@ -1850,6 +1845,7 @@ export function buildThreadFeed(
         message: {
           id: item.messageId,
           role: item.type === "user_message" ? "user" : "assistant",
+          ...(item.type === "assistant_message" && item.phase ? { phase: item.phase } : {}),
           text: item.text,
           ...(item.type === "user_message" && item.context ? { context: item.context } : {}),
           attachments: item.attachments ?? [],
@@ -1886,10 +1882,9 @@ export function buildThreadFeed(
     projectedEntriesCache.set(row, { attemptId, entry });
     entries.push(entry);
   }
-  const retainedMessageIds = new Set([
-    ...foldedAnswerMessageIds,
-    ...entries.flatMap((entry) => (entry.type === "message" ? [entry.id] : [])),
-  ]);
+  const retainedMessageIds = new Set(
+    entries.flatMap((entry) => (entry.type === "message" ? [entry.id] : [])),
+  );
   const appendLocalMessage = (message: LocalThreadMessage): RawThreadFeedEntry => {
     const cached = localMessageEntriesCache.get(message);
     if (cached) return cached;

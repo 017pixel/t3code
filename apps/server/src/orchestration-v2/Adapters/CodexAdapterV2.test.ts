@@ -3780,6 +3780,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       readonly phase?: "commentary" | "final_answer" | null;
       readonly omitPhase?: boolean;
       readonly streamed?: boolean;
+      readonly omitCompletion?: boolean;
       readonly completionDelayMs?: number;
     }>,
   ) => {
@@ -3818,7 +3819,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               },
             };
             if (!answer.streamed) {
-              return [completed];
+              return answer.omitCompletion ? [] : [completed];
             }
             return [
               {
@@ -3853,7 +3854,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   },
                 },
               },
-              completed,
+              ...(answer.omitCompletion ? [] : [completed]),
             ];
           },
         ),
@@ -3871,6 +3872,65 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ],
     });
   };
+
+  it.effect.each(["commentary", "final_answer"] as const)(
+    "preserves message phase when an abandoned %s stream closes after the final answer",
+    (phase) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scenario = `codex-abandoned-${phase}`;
+          const transcript = finalAnswerTranscript(scenario, [
+            {
+              id: "abandoned-message",
+              text: "For October 12 through 14",
+              phase,
+              streamed: true,
+              omitCompletion: true,
+            },
+            {
+              id: "completed-answer",
+              text: "The full crash investigation is complete.",
+              streamed: true,
+            },
+          ]);
+          const harness = yield* makeCodexReplayHarness(transcript);
+          yield* harness.runtime.startTurn(
+            makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make(`attempt-${scenario}`),
+              text: "Reply with the requested recovery marker.",
+            }),
+          );
+          yield* harness.firstTerminal;
+          assert.deepEqual(
+            assistantMessages(harness.events).map((event) => event.message.text),
+            ["The full crash investigation is complete.", "For October 12 through 14"],
+          );
+          const messages = assistantMessages(harness.events);
+          assert.deepEqual(
+            messages.map((event) => event.message.phase),
+            ["final_answer", phase],
+          );
+          const items = assistantTurnItems(harness.events);
+          assert.equal(
+            items.find((item) => item.text === "For October 12 through 14")?.phase,
+            phase,
+          );
+          const finalItem = items.findLast(
+            (item) => item.text === "The full crash investigation is complete.",
+          );
+          assert.equal(finalItem?.phase, "final_answer");
+          assert.isFalse(finalItem?.streaming);
+          assert.equal(finalItem?.status, "completed");
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
 
   it.effect("suppresses a trailing empty final answer after a non-empty final answer", () =>
     Effect.scoped(

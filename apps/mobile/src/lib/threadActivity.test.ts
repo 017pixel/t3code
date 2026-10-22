@@ -219,7 +219,7 @@ function assistantMessage(updatedAt = "2026-06-20T00:00:03.000Z") {
 }
 
 describe("buildThreadFeed", () => {
-  it("keeps async answers in question history instead of user bubbles", () => {
+  it("shows async answers as user messages alongside question history", () => {
     const requestId = RuntimeRequestId.make("question");
     const question: OrchestrationV2TurnItem = {
       ...base("question", "2026-06-20T00:00:01.000Z", 0),
@@ -234,11 +234,12 @@ describe("buildThreadFeed", () => {
       messageId: MessageId.make(`async-answer:${requestId}`),
     };
     const feed = buildThreadFeed([projected(question, 0), projected(reply, 1)]);
-    expect(feed).toHaveLength(1);
+    expect(feed).toHaveLength(2);
     expect(feed[0]).toMatchObject({
       type: "activity-group",
       activities: [{ workEntry: { questionAnswer: question.questionAnswer } }],
     });
+    expect(feed[1]).toMatchObject({ type: "message", message: { id: reply.messageId } });
     expect(buildThreadFeed([projected(reply, 0)])[0]?.type).toBe("message");
   });
 
@@ -839,6 +840,54 @@ describe("buildThreadFeed", () => {
           ),
       ),
     ).toBe(false);
+  });
+
+  it("preserves both final answers when commentary arrives late and a question is answered", () => {
+    const makeReply = (id: string, phase: "commentary" | "final_answer", text: string) => ({
+      ...assistantMessage(),
+      id: TurnItemId.make(id),
+      messageId: MessageId.make(id),
+      phase,
+      text,
+    });
+    const feed = buildThreadFeed([
+      projected(userMessage(), 0),
+      projected(makeReply("opening", "commentary", "Checking"), 1),
+      projected(command(), 2),
+      projected(
+        makeReply("original-final", "final_answer", "The full investigation is complete."),
+        3,
+      ),
+      projected(makeReply("late-commentary", "commentary", "For October 12 through 14"), 4),
+      projected(
+        {
+          ...userMessage(),
+          id: TurnItemId.make("answer"),
+          messageId: MessageId.make("answer"),
+          inputIntent: "steer",
+          text: "Red",
+        },
+        5,
+      ),
+      projected(makeReply("followup-final", "final_answer", "Red acknowledged."), 6),
+    ]);
+    const rows = deriveThreadFeedPresentation(
+      feed,
+      {
+        runId,
+        status: "completed",
+        startedAt: "2026-06-20T00:00:01.000Z",
+        completedAt: "2026-06-20T00:00:06.000Z",
+      },
+      new Set(),
+    );
+    const messages = rows.flatMap((row) => (row.type === "message" ? [row.message] : []));
+    expect(messages.find((message) => message.id === "original-final")?.text).toBe(
+      "The full investigation is complete.",
+    );
+    expect(messages.find((message) => message.id === "followup-final")?.text).toBe(
+      "Red acknowledged.",
+    );
   });
 
   it("keeps opening and final assistant messages around the first hidden work", () => {

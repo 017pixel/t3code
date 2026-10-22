@@ -114,6 +114,33 @@ export function derivePendingThreadRequests(
   return { approvals, userInputs };
 }
 
+/** Keeps the open form answerable after completion without reopening old questions on entry. */
+export function createPendingThreadRequestsProjector() {
+  let openRequestId: RuntimeRequestId | undefined;
+  let previousViewKey: string | undefined;
+  return (
+    projection: Pick<
+      OrchestrationV2ThreadProjection,
+      "runtimeRequests" | "turnItems" | "providerTurns"
+    >,
+    viewKey?: string,
+  ): PendingThreadRequests => {
+    if (viewKey !== previousViewKey) openRequestId = undefined;
+    previousViewKey = viewKey;
+    const pending = derivePendingThreadRequests(projection);
+    const userInputs = pending.userInputs.filter((input) => {
+      if (input.responseMode !== "message" || input.requestId === openRequestId) return true;
+      const request = projection.runtimeRequests.find((request) => request.id === input.requestId);
+      const turn = request?.providerTurnId
+        ? projection.providerTurns.find((turn) => turn.id === request.providerTurnId)
+        : undefined;
+      return turn === undefined || turn.status === "pending" || turn.status === "running";
+    });
+    openRequestId = userInputs[0]?.requestId;
+    return { approvals: pending.approvals, userInputs };
+  };
+}
+
 /** Older V2 answers were saved on requests without updating their timeline items. */
 export function createQuestionHistoryProjector() {
   type Rows = OrchestrationV2ThreadProjection["visibleTurnItems"];
