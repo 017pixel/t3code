@@ -116,9 +116,10 @@ export function ProjectIconPickerDialog({
       onOpenChange(false);
     } catch (error) {
       setSaveError(projectIconSaveErrorMessage(error));
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
     }
-    savingRef.current = false;
-    setSaving(false);
   };
 
   return (
@@ -300,10 +301,7 @@ export function ProjectIconPickerDialog({
           <Button variant="outline" disabled={saving} onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button
-            onClick={() => void save()}
-            disabled={saving || (mode === "monogram" && !validMonogram)}
-          >
+          <Button onClick={save} disabled={saving || (mode === "monogram" && !validMonogram)}>
             Save icon
           </Button>
         </DialogFooter>
