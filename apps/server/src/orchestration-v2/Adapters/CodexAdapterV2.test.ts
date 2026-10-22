@@ -671,8 +671,10 @@ describe("CodexAdapterV2 session initialize", () => {
   const openReplaySession = (
     transcript: CodexReplay.CodexAppServerReplayTranscript,
     beforeEmitInbound?: CodexReplay.CodexAppServerReplayDriver["beforeEmitInbound"],
+    hooksList?: CodexSchema.V2HooksListResponse,
   ) =>
     Effect.gen(function* () {
+      const requests: string[] = [];
       const driver = yield* CodexReplay.makeReplayDriver(
         transcript,
         beforeEmitInbound === undefined ? {} : { beforeEmitInbound },
@@ -694,8 +696,15 @@ describe("CodexAdapterV2 session initialize", () => {
                     ...client,
                     request: (method, params) =>
                       Effect.sync(() => {
+                        requests.push(method);
                         if (method === "initialize") initializeRequests++;
-                      }).pipe(Effect.andThen(client.request(method, params))),
+                      }).pipe(
+                        Effect.andThen(
+                          method === "hooks/list" && hooksList !== undefined
+                            ? Effect.succeed(hooksList as never)
+                            : client.request(method, params),
+                        ),
+                      ),
                   }) satisfies CodexClient.CodexAppServerClient["Service"],
               ),
               Effect.mapError(
@@ -727,6 +736,7 @@ describe("CodexAdapterV2 session initialize", () => {
             runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
           }),
         initializeRequests: () => initializeRequests,
+        requests: () => requests,
       };
     });
 
@@ -778,6 +788,64 @@ describe("CodexAdapterV2 session initialize", () => {
         Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
       ),
     ),
+  );
+
+  // regression: #5024 Codex skips hooks that need review, so starting anyway
+  // silently drops the user's SessionStart and UserPromptSubmit hooks.
+  it.effect.each(["untrusted", "modified"] as const)(
+    "refuses to start a thread while an enabled hook is %s",
+    (trustStatus) =>
+      Effect.gen(function* () {
+        const session = yield* openReplaySession(
+          makeCodexReplayTranscript({
+            scenario: `hooks-${trustStatus}`,
+            entries: replayPreamble(`hooks-${trustStatus}`).slice(0, 5),
+          }),
+          undefined,
+          {
+            data: [
+              {
+                cwd: "/workspace",
+                errors: [],
+                warnings: [],
+                hooks: [
+                  {
+                    handlerType: "command",
+                    command: "touch /tmp/hook-fired",
+                    currentHash: "hash",
+                    displayOrder: 0,
+                    enabled: true,
+                    eventName: "userPromptSubmit",
+                    isManaged: false,
+                    key: "user:userPromptSubmit:0",
+                    source: "user",
+                    sourcePath: "/tmp/codex-home/hooks.json",
+                    timeoutSec: 60,
+                    trustStatus,
+                  },
+                ],
+              },
+            ],
+          },
+        );
+
+        const result = yield* session
+          .ensureThread(`thread-hooks-${trustStatus}`)
+          .pipe(Effect.result);
+
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") {
+          assert.equal(result.failure._tag, "ProviderAdapterEnsureThreadError");
+          assert.include(String(result.failure.cause), "codex /hooks");
+        }
+        assert.include(session.requests(), "hooks/list");
+        assert.notInclude(session.requests(), "thread/start");
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
   );
 
   // regression: #16260 one-shot initializers raced; a failed handshake must be retried
