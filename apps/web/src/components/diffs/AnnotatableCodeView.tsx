@@ -37,6 +37,9 @@ interface DiffCommentAnnotationGroup {
 type DiffCommentLineAnnotation = DiffLineAnnotation<DiffCommentAnnotationGroup>;
 export type AnnotatableCodeViewHandle = CodeViewHandle<DiffCommentAnnotationGroup, undefined>;
 const EMPTY_REVIEW_COMMENTS: ReadonlyArray<ReviewCommentContext> = [];
+// Hydration fills the diff in place, so one request per diff object; a failed load is not retried
+// on every repaint.
+const hydrationRequested = new WeakSet<FileDiffMetadata>();
 
 function annotationSide(range: SelectedLineRange): AnnotationSide {
   return (range.endSide ?? range.side) === "deletions" ? "deletions" : "additions";
@@ -276,6 +279,28 @@ export function AnnotatableCodeView({
         enableGutterUtility: draft === null,
         enableLineSelection: draft === null,
         onGutterUtilityClick: beginComment,
+        // Pierre highlights each hunk of a partial patch from a fresh grammar state, so a hunk
+        // that starts inside a docstring or block comment is tokenized as code. Loading the full
+        // files once a changed file is on screen gives the highlighter the real source context.
+        ...(options.loadDiffFiles
+          ? {
+              onPostRender: (_node, _instance, phase, context) => {
+                if (phase === "unmount" || context.type !== "diff") return;
+                const { fileDiff, collapsed } = context.item;
+                if (
+                  collapsed ||
+                  !fileDiff.isPartial ||
+                  (fileDiff.type !== "change" && fileDiff.type !== "rename-changed") ||
+                  hydrationRequested.has(fileDiff)
+                ) {
+                  return;
+                }
+                hydrationRequested.add(fileDiff);
+                // Pierre reports load failures itself; the patch stays rendered as it was.
+                context.instance.prepareForEditing().catch(() => undefined);
+              },
+            }
+          : {}),
       }}
       renderHeaderFilenameSuffix={(item) =>
         item.type === "diff" ? renderHeaderFilenameSuffix(item.fileDiff) : null
