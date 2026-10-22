@@ -209,16 +209,17 @@ export function buildClaudeCapabilitiesProbeQueryOptions(input: {
   readonly environment: NodeJS.ProcessEnv;
   readonly cwd: string | undefined;
   readonly managedMcpConfig: boolean;
+  readonly runHooks?: boolean;
 }): ClaudeQueryOptions {
   return {
     persistSession: false,
     pathToClaudeCodeExecutable: input.executablePath,
     abortController: input.abortController,
     settingSources: [...CLAUDE_CAPABILITIES_PROBE_SETTING_SOURCES],
-    // The probe keeps filesystem setting sources for slash-command discovery,
-    // but must not run the user's hooks: it fires every few minutes, so
-    // SessionStart hooks would run on every health check.
-    settings: { disableAllHooks: true },
+    // The health check fires every few minutes, so it must not run the user's
+    // SessionStart hooks. Workspace command discovery runs them because mods
+    // register their slash commands from a session.start hook.
+    ...(input.runHooks ? {} : { settings: { disableAllHooks: true } }),
     allowedTools: [],
     // Ignore MCP definitions from every filesystem setting source above. The
     // SDK combines this empty explicit map with --strict-mcp-config, which
@@ -350,7 +351,7 @@ const probeClaudeCapabilities = (
   claudeSettings: ClaudeSettings,
   environment?: NodeJS.ProcessEnv,
   cwd?: string,
-  includeUsage = true,
+  healthCheck = true,
 ) => {
   const abort = new AbortController();
   return Effect.gen(function* () {
@@ -374,20 +375,24 @@ const probeClaudeCapabilities = (
           environment: claudeEnvironment,
           cwd,
           managedMcpConfig,
+          runHooks: !healthCheck,
         }),
       });
       const init = await q.initializationResult();
-      return { q, init };
+      // Mod commands arrive in a commands_changed push after init, which
+      // supportedCommands() tracks.
+      const commands = healthCheck ? init.commands : await q.supportedCommands();
+      return { q, init, commands };
     });
   }).pipe(
     Effect.timeout(CAPABILITIES_PROBE_TIMEOUT_MS),
-    Effect.flatMap(({ q, init }) =>
+    Effect.flatMap(({ q, init, commands }) =>
       Effect.gen(function* () {
         // Usage has its own deadline so a slow optional request cannot discard initialization.
         // Only the rate limits are read, so skip the local transcript scan that fills
         // `behaviors`: with a few GB of transcripts it outlasts the deadline.
         const usageCheckedAt = DateTime.formatIso(yield* DateTime.now);
-        const usageResult = includeUsage
+        const usageResult = healthCheck
           ? yield* Effect.tryPromise(() =>
               q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }),
             ).pipe(Effect.timeout(DEFAULT_TIMEOUT_MS), Effect.result)
@@ -414,7 +419,7 @@ const probeClaudeCapabilities = (
           tokenSource: account?.tokenSource,
           apiKeySource: account?.apiKeySource,
           apiProvider: account?.apiProvider,
-          slashCommands: parseClaudeInitializationCommands(init.commands),
+          slashCommands: parseClaudeInitializationCommands(commands),
           ...(usage ? { usage, usageCheckedAt } : {}),
         } satisfies ClaudeCapabilitiesProbe;
       }),
