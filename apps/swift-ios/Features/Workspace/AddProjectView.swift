@@ -49,6 +49,8 @@ public struct AddProjectView: View {
     @State private var isBrowsing = false
     @State private var browseError: String?
     @State private var browseRequestID: UUID?
+    /// The base directory seeded for an environment, kept until the user browses.
+    @State private var seededBaseDirectory: (environmentID: String, path: String)?
 
     @State private var discovery: SourceControlDiscoveryResult?
     @State private var isDiscovering = false
@@ -153,6 +155,9 @@ public struct AddProjectView: View {
             cloneRequestID = nil
             updateSuggestedDestination()
             errorMessage = nil
+        }
+        .onChange(of: addProjectBaseDirectory) {
+            reseedLateBaseDirectory()
         }
         .task(id: selectedEnvironmentID) {
             guard selectedEnvironmentID != nil else { return }
@@ -632,6 +637,7 @@ public struct AddProjectView: View {
         if mode == .newProject && selectedEnvironment?.newProjectsRoot == nil { mode = .folder }
         publishesToGitHub = false
         let baseDirectory = addProjectBaseDirectory
+        seededBaseDirectory = selectedEnvironmentID.map { ($0, baseDirectory) }
         browsePath = baseDirectory
         browseResult = nil
         browseError = nil
@@ -650,6 +656,31 @@ public struct AddProjectView: View {
             ? baseDirectory
             : ProjectCreationPath.appending(repositoryName, to: baseDirectory)
         errorMessage = nil
+    }
+
+    /// A connected environment can publish its shell before its config, so the
+    /// setting may arrive after seeding. Follow it only while the paths are untouched.
+    private func reseedLateBaseDirectory() {
+        let baseDirectory = addProjectBaseDirectory
+        guard selectedEnvironment != nil,
+              let seeded = seededBaseDirectory,
+              seeded.environmentID == selectedEnvironmentID,
+              seeded.path != baseDirectory,
+              localPath == seeded.path,
+              !didEditDestination,
+              !isSubmitting,
+              cloneRequestID == nil,
+              pendingCloneRegistration == nil,
+              pendingManagedClone == nil else {
+            return
+        }
+        seededBaseDirectory = (seeded.environmentID, baseDirectory)
+        browsePath = baseDirectory
+        localPath = baseDirectory
+        destinationPath = repositoryInput.isEmpty
+            ? baseDirectory
+            : ProjectCreationPath.appending(repositoryName, to: baseDirectory)
+        Task { await loadDirectory(baseDirectory, updateSelection: false) }
     }
 
     /// Matches web: a blank per-environment setting falls back to the home directory.
@@ -703,6 +734,7 @@ public struct AddProjectView: View {
         }
         let requestedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !requestedPath.isEmpty else { return }
+        if updateSelection { seededBaseDirectory = nil }
         let requestID = UUID()
         browseRequestID = requestID
         isBrowsing = true
