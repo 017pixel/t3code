@@ -388,7 +388,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   /**
    * Presentation, not lineage: open in the right panel, stay out of the sidebar,
-   * discard on close. How the thread relates to its parent stays in `lineage`.
+   * discard on close while empty. How the thread relates to its parent stays in `lineage`.
    */
   sideChat: Schema.optional(Schema.Boolean),
   lineage: OrchestrationV2AppThreadLineage,
@@ -1827,7 +1827,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   /**
    * Presentation, not lineage: open in the right panel, stay out of the sidebar,
-   * discard on close. How the thread relates to its parent stays in `lineage`.
+   * discard on close while empty. How the thread relates to its parent stays in `lineage`.
    */
   sideChat: Schema.optional(Schema.Boolean),
   lineage: OrchestrationV2AppThreadLineage,
