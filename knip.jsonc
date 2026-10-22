@@ -42,6 +42,9 @@
         "scripts/cli.ts",
         "scripts/evaluate-thread-titles.ts",
         "scripts/fetch-expo-schema.ts",
+        // Lifecycle evidence fixtures run directly under Node by path.
+        "scripts/fixtures/antigravity-lifecycle-proof.mjs",
+        "scripts/fixtures/seed-antigravity-lifecycle-proof.mjs",
         "scripts/measure-pr-preview.ts",
         "scripts/probe-claude-fork-local-rollback-replay.ts",
         "scripts/update-test-shard-weights.ts",
