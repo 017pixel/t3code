@@ -1779,12 +1779,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     }),
                 ),
               );
+        const settings = resolvedRuntime?.config ?? adapterOptions.settings;
         const client = yield* clientFactory.open({
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
           providerSessionId: input.providerSessionId,
           runtimePolicy: input.runtimePolicy,
-          settings: resolvedRuntime?.config ?? adapterOptions.settings,
+          settings,
           environment: resolvedRuntime?.environment ?? adapterOptions.environment,
         });
         const additionalContextByThread = yield* Ref.make(
@@ -1886,7 +1887,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           const one = pending.length === 1;
           const sources = [...new Set(pending.map((hook) => hook.sourcePath))].join(", ");
           const where = cwd === null ? "" : ` in ${cwd}`;
-          const homePath = adapterOptions.settings.homePath;
+          const homePath = settings.homePath;
           const home = homePath ? ` with CODEX_HOME=${homePath}` : "";
           return yield* Effect.fail(
             `Codex will not run ${one ? "an enabled hook" : `${pending.length} enabled hooks`} until ${one ? "it is" : "they are"} reviewed (${sources}). ` +

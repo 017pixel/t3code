@@ -733,6 +733,9 @@ describe("CodexAdapterV2 session initialize", () => {
     hooksList: Effect.Effect<unknown, CodexError.CodexAppServerError> = Effect.succeed({
       data: [],
     }),
+    runtimeOptions: Pick<CodexAdapterV2.CodexAdapterV2Options, "settings" | "resolveRuntime"> = {
+      settings: DEFAULT_CODEX_SETTINGS,
+    },
   ) =>
     Effect.gen(function* () {
       const requests: string[] = [];
@@ -743,7 +746,7 @@ describe("CodexAdapterV2 session initialize", () => {
       let initializeRequests = 0;
       const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
         instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
-        settings: DEFAULT_CODEX_SETTINGS,
+        ...runtimeOptions,
         environment: {},
         clientFactory: {
           open: (openInput) =>
@@ -884,11 +887,13 @@ describe("CodexAdapterV2 session initialize", () => {
   const openHooksSession = (
     scenario: string,
     hooksList: Effect.Effect<unknown, CodexError.CodexAppServerError>,
+    runtimeOptions?: Parameters<typeof openReplaySession>[3],
   ) =>
     openReplaySession(
       makeCodexReplayTranscript({ scenario, entries: replayPreamble(scenario).slice(0, 5) }),
       undefined,
       hooksList,
+      runtimeOptions,
     );
   const hooksTestLayer = Layer.mergeAll(
     IdAllocator.layer,
@@ -902,9 +907,19 @@ describe("CodexAdapterV2 session initialize", () => {
     "refuses to start a thread while an enabled hook is %s",
     (trustStatus) =>
       Effect.gen(function* () {
+        // A managed runtime can move Codex to a home other than the configured one,
+        // and the guidance must send the user to the home Codex actually reads.
         const session = yield* openHooksSession(
           `hooks-${trustStatus}`,
           listedHooks([codexHook({ trustStatus })]),
+          {
+            settings: { ...DEFAULT_CODEX_SETTINGS, homePath: "/configured/codex-home" },
+            resolveRuntime: Effect.succeed({
+              config: { ...DEFAULT_CODEX_SETTINGS, homePath: "/managed/codex-home" },
+              environment: {},
+              revision: "managed",
+            }),
+          },
         );
 
         const result = yield* session
@@ -917,6 +932,8 @@ describe("CodexAdapterV2 session initialize", () => {
           const message = String(result.failure.cause);
           assert.include(message, "`/hooks`");
           assert.notInclude(message, "codex /hooks");
+          assert.include(message, "CODEX_HOME=/managed/codex-home");
+          assert.notInclude(message, "/configured/codex-home");
         }
         assert.include(session.requests(), "hooks/list");
         assert.notInclude(session.requests(), "thread/start");
