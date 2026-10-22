@@ -5951,6 +5951,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             return;
           }
           yield* Ref.set(activeSessionSetup, result);
+          // The selection was configured against the provisional setup's
+          // options, so the next turn re-applies it against the real ones.
+          yield* Ref.set(activeSelection, null);
+          yield* Ref.set(activeInteractionMode, null);
           yield* refreshModelSwitchCapability;
           yield* (
             flavor.onSessionConfigurationUpdate?.(
@@ -6917,14 +6921,18 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           lastError: null,
         };
         // Config options can first offer a model after setup, e.g. when a
-        // session/load response arrives after replay idle.
+        // session/load response arrives after replay idle. Upgrade-only: a
+        // later partial config update must not revoke the switch mid-session.
         refreshModelSwitchCapability = Effect.gen(function* () {
+          const { capabilities } = providerSession;
+          if (capabilities.sessions.supportsModelSwitchInSession) {
+            return;
+          }
           const supportsModelSwitchInSession = canSwitchModelInSession(
             yield* runtime.getConfigOptions,
             (yield* Ref.get(activeSessionSetup))?.sessionSetupResult.models,
           );
-          const { capabilities } = providerSession;
-          if (capabilities.sessions.supportsModelSwitchInSession === supportsModelSwitchInSession) {
+          if (!supportsModelSwitchInSession) {
             return;
           }
           providerSession = {

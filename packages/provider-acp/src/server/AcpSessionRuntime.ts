@@ -2017,7 +2017,15 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
     yield* Fiber.join(lateFiber).pipe(
       Effect.flatMap(
         Option.match({
-          onNone: () => Effect.void,
+          onNone: () =>
+            Effect.fail(
+              new EffectAcpErrors.AcpTransportError({
+                operation: "call-rpc",
+                method: "session/load",
+                detail: "session/load timed out after replay idle",
+                cause: undefined,
+              }),
+            ),
           onSome: (response) =>
             notificationSemaphore.withPermit(adoptLateResponse(response)).pipe(
               Effect.andThen(
@@ -2030,6 +2038,13 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
               ),
             ),
         }),
+      ),
+      // Supersession and shutdown interrupt the request; only a real failure
+      // or timeout is worth a failed log.
+      Effect.onError((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.void
+          : logRequest({ method: "session/load", payload, status: "failed", cause }),
       ),
       Effect.ignore,
       Effect.forkIn(runtimeScope),
