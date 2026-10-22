@@ -881,9 +881,11 @@ function OpenCommandPaletteDialog(props: {
     if (scratchTargetEnvironmentId === null) return projectItems;
 
     const noProjectIndex = pickerProjects[0] !== undefined && isScratch(pickerProjects[0]) ? 0 : 1;
-    // The scratch home is created on first use, so it may not exist yet.
-    const scratchProject = pickerProjects.find(
-      (project) => project.environmentId === scratchTargetEnvironmentId && isScratch(project),
+    // The scratch home is created on first use, so it may not exist yet. Read the
+    // target environment's own record: the grouped picker entry can point at
+    // another environment's scratch home.
+    const scratchProject = projects.find(
+      (project) => project.environmentId === scratchTargetEnvironmentId && project.isScratch,
     );
     return [
       ...projectItems.slice(0, noProjectIndex),
@@ -894,9 +896,9 @@ function OpenCommandPaletteDialog(props: {
           "no project",
           "without project",
           "none",
-          ...(scratchProject ? [scratchProject.displayName] : []),
+          ...(scratchProject ? [scratchProject.title] : []),
         ],
-        title: scratchProject?.displayName ?? "No project",
+        title: scratchProject?.title ?? "No project",
         icon:
           scratchProject?.projectIcon || scratchProject?.faviconPath ? (
             <ProjectFavicon project={scratchProject} className={ITEM_ICON_CLASS} />
