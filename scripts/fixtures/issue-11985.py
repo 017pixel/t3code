@@ -42,6 +42,10 @@ if not (repo / '.git').exists():
                GIT_COMMITTER_DATE='2026-01-01T00:00:00Z')
     subprocess.run(['git', '-C', str(repo), 'commit', '-m', 'Synthetic fixture'],
                    env=env, check=True, capture_output=True)
+try:
+    git('rev-parse', '--verify', 'HEAD^{commit}')
+except subprocess.CalledProcessError:
+    raise SystemExit('Refusing an interrupted fixture repository without a valid HEAD')
 (repo / 'preview.txt').write_text('Synthetic toolbar preview.\nOne deterministic dirty line.\n')
 
 stamp = '2026-01-01T00:00:00.000Z'

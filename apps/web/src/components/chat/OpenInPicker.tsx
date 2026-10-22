@@ -434,7 +434,7 @@ export const OpenInPicker = memo(function OpenInPicker({
             {primaryLabel}
           </span>
         </TooltipTrigger>
-        <TooltipPopup>{compact ? "Open file in preferred editor" : openInLabel}</TooltipPopup>
+        <TooltipPopup>{openInLabel}</TooltipPopup>
       </Tooltip>
       {isPanel ? (
         <span aria-hidden="true" className={THREAD_DETAILS_PANEL_SPLIT_SEPARATOR_CLASS} />
