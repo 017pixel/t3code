@@ -1728,6 +1728,60 @@ struct NativePassiveThreadRefreshTests {
         await fixture.client.disconnect()
     }
 
+    @Test(
+        "A slow passive environment does not delay a peer's rows or cadence",
+        .timeLimit(.minutes(1))
+    )
+    func slowPassiveEnvironmentDoesNotDelayPeerRowsOrCadence() async throws {
+        let refreshSleep = ControllableAggregateRefreshSleep()
+        let fixture = try await NativeMultiEnvironmentTests.makeFixture(
+            includeThirdEnvironment: true,
+            aggregateRefreshSleep: {
+                try await refreshSleep.sleep(for: $0)
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let initial = try await fixture.client.initialSnapshot()
+        let thread = try #require(
+            initial.threads.first(where: { $0.environmentID == "two" })
+        )
+        let updatedTitle = "Peer work published while another computer is slow"
+        let eventProbe = ThreadTitleEventProbe(
+            events: fixture.client.events(),
+            threadID: thread.id,
+            title: updatedTitle
+        )
+        eventProbe.start()
+
+        _ = await refreshSleep.waitUntilRequested(count: 1)
+        await fixture.transport.holdNextShellRead(host: "three.example")
+        await fixture.transport.setShell(
+            multiEnvironmentShell(
+                projectID: "project-two",
+                threadID: "thread-two",
+                title: updatedTitle,
+                providerID: "claudeAgent",
+                modelID: "claude-opus-4-1"
+            ),
+            host: "two.example"
+        )
+        await refreshSleep.resume()
+
+        await fixture.transport.waitForHeldShellRead()
+        await eventProbe.waitUntilObserved()
+        let changedCadence = await refreshSleep.waitUntilRequested(count: 2)
+        #expect(changedCadence == .seconds(5))
+
+        // The held read keeps its place instead of being started again.
+        let heldShellReads = await fixture.transport.shellReadCount(host: "three.example")
+        await refreshSleep.resume()
+        _ = await refreshSleep.waitUntilRequested(count: 3)
+        #expect(await fixture.transport.shellReadCount(host: "three.example") == heldShellReads)
+
+        await fixture.transport.releaseShellRead()
+        await fixture.client.disconnect()
+    }
+
     @Test("A failed passive environment backs off without slowing an active peer")
     func failedPassiveEnvironmentBacksOffWithoutSlowingActivePeer() async throws {
         let refreshSleep = ControllableAggregateRefreshSleep()
