@@ -2746,6 +2746,57 @@ export const make = Effect.gen(function* () {
     }
   });
 
+  // A pull request read may borrow any checkout on its host, and a link can name a renamed
+  // repository, so the URL the host answers with is the one compared. Checking out anywhere but a
+  // checkout of the base or head repository would fetch its history into an unrelated one. Raw
+  // config rather than `git remote -v`, which reports URLs after `insteadOf` rewriting.
+  const ensurePullRequestBelongsToCheckout = Effect.fn("ensurePullRequestBelongsToCheckout")(
+    function* (cwd: string, pullRequest: ResolvedPullRequest & PullRequestHeadRemoteInfo) {
+      const baseKey = pullRequestRepositoryKey(pullRequest.url);
+      const headRepository = resolvePullRequestHeadRepositoryNameWithOwner(pullRequest);
+      const repositoryKeys = new Set(
+        baseKey === null
+          ? []
+          : [
+              canonicalRepositoryKey(baseKey),
+              ...(headRepository
+                ? [
+                    canonicalRepositoryKey(
+                      `${baseKey.split("/")[0]}/${headRepository.toLowerCase()}`,
+                    ),
+                  ]
+                : []),
+            ],
+      );
+      const remoteUrls = yield* gitCore
+        .execute({
+          operation: "GitManager.preparePullRequestThread.remotes",
+          cwd,
+          args: ["config", "--get-regexp", "^remote\\..*\\.url$"],
+          allowNonZeroExit: true,
+        })
+        .pipe(
+          Effect.map((result) =>
+            result.stdout.split("\n").flatMap((line) => {
+              const separator = line.indexOf(" ");
+              return separator === -1 ? [] : [line.slice(separator + 1).trim()];
+            }),
+          ),
+        );
+      if (
+        !remoteUrls.some((remoteUrl) =>
+          repositoryKeys.has(canonicalRepositoryKey(normalizeGitRemoteUrl(remoteUrl))),
+        )
+      ) {
+        return yield* new GitManagerError({
+          operation: "preparePullRequestThread",
+          cwd,
+          detail: `Pull request #${pullRequest.number} belongs to ${baseKey ?? pullRequest.url}, and this project is not a checkout of it.`,
+        });
+      }
+    },
+  );
+
   // Some hosts only switch branches on checkout; use the existing lossless refresh to advance them.
   const moveToPullRequestHead = (cwd: string, headSha: string | undefined) =>
     headSha === undefined || !/^[0-9a-f]{7,64}$/i.test(headSha)
@@ -2789,6 +2840,10 @@ export const make = Effect.gen(function* () {
         reference: normalizedReference,
       });
       const pullRequest = toResolvedPullRequest(pullRequestSummary);
+      yield* ensurePullRequestBelongsToCheckout(input.cwd, {
+        ...pullRequest,
+        ...toPullRequestHeadRemoteInfo(pullRequestSummary),
+      });
 
       if (input.mode === "local") {
         yield* ensureNoTrackedChanges(input.cwd, pullRequest.number);
