@@ -1,0 +1,10 @@
+{
+  "clock": "2026-01-01T12:00:00.000Z",
+  "projectId": "menu-19208-project",
+  "threadId": "menu-19208-thread",
+  "title": "Synthetic menu selection proof",
+  "workspaceRoot": "/tmp/issue-19208-workspace",
+  "model": "gpt-5.4",
+  "file": "example.ts",
+  "messages": ["Update the example greeting.", "Updated the synthetic greeting."]
+}
