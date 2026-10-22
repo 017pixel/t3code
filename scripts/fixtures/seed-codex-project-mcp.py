@@ -41,6 +41,17 @@ for line in sys.stdin:
     print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
 '''
 
+FROZEN_CLOCK = '''const OriginalDate = globalThis.Date;
+const instant = OriginalDate.parse("2026-10-22T08:05:00.000Z");
+globalThis.Date = class extends OriginalDate {
+  constructor(...args) {
+    if (args.length === 0) super(instant);
+    else super(...args);
+  }
+  static now() { return instant; }
+};
+'''
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -53,6 +64,7 @@ def main():
     (project / ".codex").mkdir(parents=True)
     server = root / "mcp.py"
     server.write_text(MCP_SERVER, encoding="utf-8")
+    (root / "freeze-clock.mjs").write_text(FROZEN_CLOCK, encoding="utf-8")
     (project / ".codex" / "config.toml").write_text(
         '[mcp_servers.issue15140]\ncommand = "python3"\n'
         f"args = [{json.dumps(str(server), ensure_ascii=False)}]\n",
