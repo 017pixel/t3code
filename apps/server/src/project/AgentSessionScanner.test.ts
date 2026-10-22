@@ -279,6 +279,17 @@ const awaitWithinDeadline = <A, E, R>(
     Effect.flatMap((fiber) => Fiber.join(fiber).pipe(Effect.timeoutOption(deadline))),
   );
 
+/**
+ * Resolves once a reader has opened the FIFO, so its read deadline is already
+ * scheduled on the TestClock. The writer stays open until the scope closes, so
+ * the reader sees no EOF and has to wait out that deadline.
+ */
+const awaitGateReader = (gatePath: string) =>
+  Effect.acquireRelease(
+    Effect.promise(() => NodeFS.promises.open(gatePath, NodeFS.constants.O_WRONLY)),
+    (handle) => Effect.promise(() => handle.close()),
+  );
+
 const scanUntilDeadline = <E, R>(
   scan: Effect.Effect<{ readonly candidates: ReadonlyArray<{ readonly path: string }> }, E, R>,
 ) =>
@@ -1757,7 +1768,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
 
-    it.live("waits about one read deadline when several git configs block in one scan", () =>
+    it.effect("reads every blocked git config of a scan under one deadline", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const fileSystem = yield* FileSystem.FileSystem;
@@ -1789,16 +1800,20 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           });
         }
 
-        // Each blocked read costs one deadline; reading them one after another
-        // would take a deadline per config.
-        expect(
-          yield* awaitWithinDeadline(
-            runScan({ claudeHomePath, codexHomePath }).pipe(
-              Effect.map(({ candidates }) => candidates.map(({ path }) => path).toSorted()),
-            ),
-            "4 seconds",
+        const scan = yield* Effect.forkChild(
+          runScan({ claudeHomePath, codexHomePath }).pipe(
+            Effect.map(({ candidates }) => candidates.map(({ path }) => path).toSorted()),
           ),
-        ).toEqual(Option.some(repos));
+        );
+        // Every blocked config is open before any deadline passes; reading them
+        // one after another would leave the later ones unopened.
+        yield* Effect.forEach(
+          [...repos.map((repo) => path.join(repo, ".git")), bareGitDir],
+          (gitDir) => awaitGateReader(path.join(gitDir, "config")),
+          { concurrency: "unbounded" },
+        );
+        yield* TestClock.adjust("2 seconds");
+        expect(yield* Fiber.join(scan)).toEqual(repos);
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
 
@@ -1845,6 +1860,54 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           ),
           "an unrelated fs read hung: the scans left libuv pool threads stuck in open()",
         ).toBe(true);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect("reads a once-blocked git config again after the retry interval", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const repo = yield* makeTempDir("t3code-workspace-unblocked-config-");
+        yield* fileSystem.makeDirectory(path.join(repo, ".git"));
+        const configPath = path.join(repo, ".git", "config");
+        yield* makeOpenGate(configPath);
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-unblocked", "a.jsonl"),
+          contents: claudeSessionLine(repo),
+          mtimeMs: Date.parse("2026-05-03T00:00:00.000Z"),
+        });
+        const gitOfScan = (scan: AgentSessionScanner.AgentSessionScanner["Service"]["scan"]) =>
+          scan.pipe(Effect.map(({ candidates }) => candidates.map(({ git }) => git)));
+
+        yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          const blockedScan = yield* Effect.forkChild(gitOfScan(scanner.scan));
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              yield* awaitGateReader(configPath);
+              yield* TestClock.adjust("2 seconds");
+              expect(yield* Fiber.join(blockedScan)).toEqual([
+                { remoteKey: null, repository: null },
+              ]);
+            }),
+          );
+
+          yield* fileSystem.remove(configPath);
+          yield* fileSystem.writeFileString(
+            configPath,
+            `[remote "origin"]\n\turl = git@github.com:pingdotgg/unblocked.git\n`,
+          );
+          expect(yield* gitOfScan(scanner.scan), "a blocked path is skipped for a while").toEqual([
+            { remoteKey: null, repository: null },
+          ]);
+
+          yield* TestClock.adjust("10 minutes");
+          expect(yield* gitOfScan(scanner.scan)).toEqual([
+            { remoteKey: "github.com/pingdotgg/unblocked", repository: "pingdotgg/unblocked" },
+          ]);
+        }).pipe(Effect.provide(layerScannerTest({ claudeHomePath, codexHomePath })));
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
   },

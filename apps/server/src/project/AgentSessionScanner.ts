@@ -13,6 +13,7 @@ import {
   type AgentSessionScanResult,
   type ProviderInstanceConfig,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -77,9 +78,12 @@ const MAX_IMPORT_RECORDS = 100_000;
  */
 const GIT_FILE_READ_DEADLINE = "2 seconds";
 const MAX_GIT_FILE_BYTES = 1024 * 1024;
-// Reads run concurrently so a scan waits about one deadline per phase however
-// many files block, not one per blocked file.
+// Reads run concurrently, so each phase waits one deadline per batch of this
+// many blocked files rather than one per blocked file.
 const GIT_FILE_READ_CONCURRENCY = 16;
+// A blocked path is skipped for a while, then read again in case it was fixed.
+const BLOCKED_GIT_FILE_RETRY_MS = 5 * 60 * 1000;
+const MAX_BLOCKED_GIT_FILE_PATHS = 1024;
 
 const TranscriptContentBlock = Schema.Struct({
   type: Schema.optional(Schema.String),
@@ -703,15 +707,17 @@ export const make = Effect.gen(function* () {
     return `path:${normalizeProjectPathForComparison(realPath)}`;
   });
 
-  // Paths whose own read outlived the deadline. Without this every later scan
-  // would wait out the deadline again for each phase that touches them.
-  const blockedGitFilePaths = new Set<string>();
+  // Paths whose own read outlived the deadline, mapped to when they may be read
+  // again. Without this every later scan would wait out the deadline again for
+  // each phase that touches them.
+  const blockedGitFilePaths = new Map<string, number>();
 
   /** Reads small files without the libuv pool; "" when missing, unreadable or blocked. */
   const readGitFiles = Effect.fn("AgentSessionScanner.readGitFiles")(function* (
     filePaths: ReadonlyArray<string>,
   ) {
     const unique = Array.from(new Set(filePaths));
+    const now = yield* Clock.currentTimeMillis;
     const contents = yield* Effect.forEach(
       unique,
       (filePath) => {
@@ -719,7 +725,8 @@ export const make = Effect.gen(function* () {
         if (isWindows) {
           return fileSystem.readFileString(filePath).pipe(Effect.orElseSucceed(() => ""));
         }
-        if (blockedGitFilePaths.has(filePath)) return Effect.succeed("");
+        if ((blockedGitFilePaths.get(filePath) ?? 0) > now) return Effect.succeed("");
+        blockedGitFilePaths.delete(filePath);
         return processRunner
           .run({
             command: "cat",
@@ -731,7 +738,12 @@ export const make = Effect.gen(function* () {
           })
           .pipe(
             Effect.map((result) => {
-              if (result.timedOut) blockedGitFilePaths.add(filePath);
+              if (result.timedOut) {
+                if (blockedGitFilePaths.size >= MAX_BLOCKED_GIT_FILE_PATHS) {
+                  blockedGitFilePaths.delete(blockedGitFilePaths.keys().next().value!);
+                }
+                blockedGitFilePaths.set(filePath, now + BLOCKED_GIT_FILE_RETRY_MS);
+              }
               return result.code === 0 ? result.stdout : "";
             }),
             Effect.orElseSucceed(() => ""),
