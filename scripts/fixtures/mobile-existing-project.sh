@@ -4,14 +4,27 @@ set -euo pipefail
 # Register through the CLI so fixtures have coherent project events, even with a running server.
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 fixture_home=${1:?Usage: mobile-existing-project.sh ISOLATED_T3_HOME [FIXTURE_ROOT]}
-fixture_root=${2:-"$HOME/t3-23246-repro"}
 fixture_home=$(realpath -m "$fixture_home")
 if [[ "$fixture_home" == "$(realpath -m "$HOME/.t3")" ]]; then
   echo 'Use an isolated T3 home.' >&2
   exit 1
 fi
+fixture_root=${2:-$(mktemp -d "${TMPDIR:-/tmp}/t3-mobile-existing-project.XXXXXX")}
 mkdir -p "$fixture_root"
 fixture_root=$(cd "$fixture_root" && pwd)
+
+# The original script's empty initial commit also identifies fixtures recorded before this guard.
+for name in bike-documents unregistered-local; do
+  folder="$fixture_root/$name"
+  if [[ -e "$folder" || -L "$folder" ]]; then
+    if [[ -L "$folder" || ! -d "$folder/.git" ]] ||
+      [[ "$(git -C "$folder" log --max-parents=0 --format='%s%n%an%n%ae' 2>/dev/null)" != $'Initialize mobile project fixture\nMobile fixture\nfixture@example.invalid' ]] ||
+      [[ -n "$(git -C "$folder" ls-tree "$(git -C "$folder" rev-list --max-parents=0 HEAD)" 2>/dev/null)" ]]; then
+      printf 'Refusing to modify non-fixture folder: %s\n' "$folder" >&2
+      exit 1
+    fi
+  fi
+done
 
 for name in bike-documents unregistered-local; do
   folder="$fixture_root/$name"

@@ -28,6 +28,8 @@ const state = vi.hoisted(() => ({
   cloneCalls: [] as string[],
   alerts: [] as string[],
   navigations: [] as unknown[],
+  draftLoadError: false,
+  stateUpdates: [] as unknown[],
   draftTexts: [] as Array<{ draftId: string; text: string }>,
 }));
 
@@ -42,7 +44,10 @@ vi.mock("react", async (importOriginal) => ({
   ...(await importOriginal<typeof import("react")>()),
   useCallback: (callback: unknown) => callback,
   useMemo: (factory: () => unknown) => factory(),
-  useState: (initial: unknown) => [typeof initial === "function" ? initial() : initial, () => {}],
+  useState: (initial: unknown) => [
+    typeof initial === "function" ? initial() : initial,
+    (value: unknown) => state.stateUpdates.push(value),
+  ],
   useRef: (current: unknown) => ({ current }),
   useEffect: () => {},
 }));
@@ -80,7 +85,9 @@ vi.mock("../../state/session", () => ({
   readEnvironmentScope: (_environmentId: string, scope: string) => state.scopes.has(scope),
 }));
 vi.mock("../../state/use-composer-drafts", () => ({
-  waitForComposerDraftsLoaded: async () => {},
+  waitForComposerDraftsLoaded: async () => {
+    if (state.draftLoadError) throw new Error("Draft storage unavailable");
+  },
   createNewTaskDraft: () => "draft",
   setComposerDraftText: (draftId: string, text: string) => state.draftTexts.push({ draftId, text }),
 }));
@@ -276,6 +283,8 @@ describe("adding an already registered project", () => {
     state.alerts = [];
     state.navigations = [];
     state.draftTexts = [];
+    state.draftLoadError = false;
+    state.stateUpdates = [];
     state.supportsCloneTracking = false;
     state.home = "/home/tester";
     state.os = "linux";
@@ -330,6 +339,33 @@ describe("adding an already registered project", () => {
         ],
       },
     ]);
+  });
+
+  it("keeps the prompt available and reports draft failure before retrying", async () => {
+    state.baseDirectory = "~/repro";
+    state.draftLoadError = true;
+    const action = findAction(
+      AddProjectDestinationScreen({
+        environmentId: "environment",
+        remoteUrl: "https://example.com/bike-documents.git",
+        repositoryName: "bike-documents",
+        prompt: "Fix the bike",
+      }),
+      "Clone project",
+    );
+    if (!action) throw new Error("Clone action missing");
+    await action();
+
+    expect(state.navigations).toEqual([]);
+    expect(state.cloneCalls).toEqual([]);
+    expect(state.stateUpdates).toContain("Draft storage unavailable");
+    expect(state.stateUpdates.at(-1)).toBe(false);
+
+    state.draftLoadError = false;
+    await action();
+    expect(state.draftTexts).toEqual([{ draftId: "draft", text: "Fix the bike" }]);
+    expect(state.navigations).toHaveLength(1);
+    expect(state.cloneCalls).toEqual([]);
   });
 
   it.each([false, true])(

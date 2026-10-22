@@ -717,10 +717,7 @@ function useOpenExistingProject(environment: EnvironmentOption | null) {
       projectId: existing.id,
       title: existing.title,
       ...(prompt
-        ? await draftWithPrompt(existing.environmentId, existing.id, prompt).then(
-            (draftId) => ({ draftId }),
-            () => ({}),
-          )
+        ? { draftId: await draftWithPrompt(existing.environmentId, existing.id, prompt) }
         : {}),
     });
     return true;
@@ -1353,7 +1350,13 @@ export function AddProjectDestinationScreen(props: {
     }
 
     setIsSubmitting(true);
-    if (await openExistingProject(await resolveHomePath(resolved.path), prompt)) {
+    try {
+      if (await openExistingProject(await resolveHomePath(resolved.path), prompt)) {
+        setIsSubmitting(false);
+        return;
+      }
+    } catch (error) {
+      setError(errorMessage(error));
       setIsSubmitting(false);
       return;
     }
