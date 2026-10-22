@@ -12,6 +12,7 @@ import type {
   SDKMessage,
   SDKResultMessage,
   SDKUserMessage,
+  SessionCronSummary,
   SpawnedProcess,
   SpawnOptions,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -6402,6 +6403,72 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.deepEqual(roster, [
           { taskId: longRunning.taskId, kind: "monitor", description: "Monitor 0" },
         ]);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("keeps a session with a pending session cron alive until no cron remains", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        // The SDK reports CronCreate, ScheduleWakeup and /loop jobs only through the Stop hook,
+        // which fires just before the turn's result.
+        const stop = (sessionCrons: ReadonlyArray<SessionCronSummary>) =>
+          Effect.promise(async () => {
+            const matchers = harness.getOpenedOptions()?.hooks?.Stop ?? [];
+            for (const hook of matchers.flatMap((matcher) => matcher.hooks)) {
+              await hook(
+                {
+                  hook_event_name: "Stop",
+                  session_id: WAKE_NATIVE_SESSION,
+                  transcript_path: "/tmp/transcript.jsonl",
+                  cwd: "/tmp",
+                  stop_hook_active: false,
+                  background_tasks: [],
+                  session_crons: [...sessionCrons],
+                },
+                undefined,
+                { signal: new AbortController().signal },
+              );
+            }
+          });
+        const turn = (ordinal: number, text: string) =>
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make(`attempt-claude-session-cron:${ordinal}`),
+            text,
+            attachments: [],
+            providerTurnOrdinal: ordinal,
+          });
+
+        yield* harness.runtime.startTurn(turn(1, "At 12:20 append the date to a file."));
+        yield* stop([
+          {
+            id: "4e805017",
+            schedule: "20 12 22 10 *",
+            recurring: false,
+            prompt: "Append `date -u` to /tmp/cron.txt",
+          },
+        ]);
+        yield* harness.offerAndWait(turnOneResult);
+        yield* harness.awaitTerminal(1);
+        assert.isTrue(
+          yield* harness.hasPendingBackgroundWork,
+          "a pending session cron must keep the idle session alive",
+        );
+
+        yield* harness.runtime.startTurn(turn(2, "Cancel that job."));
+        yield* stop([]);
+        yield* harness.offerAndWait(turnOneResult);
+        yield* harness.awaitTerminal(2);
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
