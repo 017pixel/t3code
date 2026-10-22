@@ -225,10 +225,11 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
           />
         </View>
       </Pressable>
+      {/* Spans the card's full width so question bands can reach its edges; content keeps the card's 16px inset. */}
       <ScrollView
         bounces={false}
-        className="min-h-0"
-        contentContainerClassName="gap-2.5 pb-1"
+        className="-mx-4 min-h-0"
+        contentContainerClassName="gap-2.5 px-4 pb-1"
         keyboardShouldPersistTaps="handled"
         nestedScrollEnabled
         showsVerticalScrollIndicator
@@ -245,7 +246,7 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
           const showHeader = !isGenericUserInputQuestionHeader(question.header);
           return (
             <View key={question.id} className="gap-2 pt-1">
-              <View className="gap-1.5">
+              <View className="-mx-4 gap-1.5 bg-foreground/3 px-4 py-2">
                 {showHeader ? (
                   <Text className="font-t3-medium text-2xs text-foreground-muted">
                     {question.multiSelect ? `${question.header} · Select any` : question.header}

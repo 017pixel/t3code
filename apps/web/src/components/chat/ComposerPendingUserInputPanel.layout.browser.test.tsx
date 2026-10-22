@@ -144,51 +144,63 @@ it.each([
   ["mobile", 414],
   ["sm", 1024],
 ])(
-  "aligns the eyebrow, question, labels and indicators inside the banner surface at %s width",
+  "aligns the header band, question, labels and indicators inside the banner surface at %s width",
   async (_, width) => {
     await page.viewport(width, 900);
     const longQuestion = "Explain which rollout you prefer and why it fits this service. ".repeat(
       40,
     );
-    for (const question of ["Pick one.", longQuestion]) {
-      await renderPanel({ header: "Strategy", question }, async (container) => {
-        const viewport = container.querySelector("[data-slot=scroll-area-viewport]")!;
-        const overflowing = question === longQuestion;
-        if (overflowing) {
-          await vi.waitFor(() => expect(viewport.hasAttribute("data-has-overflow-y")).toBe(true));
-        } else {
-          expect(viewport.hasAttribute("data-has-overflow-y")).toBe(false);
-        }
-        const surface = container.querySelector("[data-slot=composer-banner]")!;
-        const bounds = surface.getBoundingClientRect();
-        const gaps = (element: Element) => {
-          const rect = element.getBoundingClientRect();
-          return { left: rect.left - bounds.left, right: bounds.right - rect.right };
-        };
-        const [eyebrow, questionParagraph] = container.querySelectorAll("p");
-        const { row, label, key } = firstOption(container);
-        expect(gaps(eyebrow!).left).toBeCloseTo(16, 0);
-        expect(gaps(questionParagraph!).left).toBeCloseTo(16, 0);
-        expect(gaps(label).left).toBeCloseTo(16, 0);
-        // The row fill hangs out past the text column on both sides, into the scrollbar gutter when overflowing.
-        expect(gaps(row)).toEqual({ left: 4, right: 4 });
-        // Indicators share the trailing action's axis, 22px in from the surface.
-        const trailing = [
-          ...container.querySelectorAll("[data-slot=composer-banner-actions] svg"),
-        ].at(-1)!;
-        expect(bounds.right - centerX(trailing)).toBeCloseTo(22, 0);
-        expect(centerX(key)).toBeCloseTo(centerX(trailing), 0);
-        // The 12px eyebrow sits 6px above the question; the first row's fill 12px below it.
-        expect(
-          questionParagraph!.getBoundingClientRect().top - eyebrow!.getBoundingClientRect().bottom,
-        ).toBeCloseTo(6, 0);
-        expect(
-          row.getBoundingClientRect().top - questionParagraph!.getBoundingClientRect().bottom,
-        ).toBeCloseTo(12, 0);
-        // The last row's fill ends the body's 4px inset above the banner's own padding.
-        const body = row.parentElement!.parentElement!;
-        expect(body.getBoundingClientRect().bottom - row.getBoundingClientRect().bottom).toBe(4);
-      });
+    for (const header of ["Strategy", "Question"]) {
+      for (const question of ["Pick one.", longQuestion]) {
+        await renderPanel({ header, question }, async (container) => {
+          const viewport = container.querySelector("[data-slot=scroll-area-viewport]")!;
+          const overflowing = question === longQuestion;
+          if (overflowing) {
+            await vi.waitFor(() => expect(viewport.hasAttribute("data-has-overflow-y")).toBe(true));
+          } else {
+            expect(viewport.hasAttribute("data-has-overflow-y")).toBe(false);
+          }
+          const surface = container.querySelector("[data-slot=composer-banner]")!;
+          const bounds = surface.getBoundingClientRect();
+          const gaps = (element: Element) => {
+            const rect = element.getBoundingClientRect();
+            return { left: rect.left - bounds.left, right: bounds.right - rect.right };
+          };
+          const paragraphs = [...container.querySelectorAll("p")];
+          const eyebrow = header === "Strategy" ? paragraphs[0] : undefined;
+          const questionParagraph = paragraphs.at(-1)!;
+          const { row, label, key } = firstOption(container);
+          for (const text of [eyebrow, questionParagraph, label]) {
+            if (text) expect(gaps(text).left).toBeCloseTo(16, 0);
+          }
+          // The row fill hangs out past the text column on both sides, into the scrollbar gutter when overflowing.
+          expect(gaps(row)).toEqual({ left: 4, right: 4 });
+          // Indicators share the trailing action's axis, 22px in from the surface.
+          const trailing = [
+            ...container.querySelectorAll("[data-slot=composer-banner-actions] svg"),
+          ].at(-1)!;
+          expect(bounds.right - centerX(trailing)).toBeCloseTo(22, 0);
+          expect(centerX(key)).toBeCloseTo(centerX(trailing), 0);
+          // The header band runs under the actions to the surface's sides and top, ending 10px below the question.
+          const band = container
+            .querySelector("[data-pending-user-input-header-band]")!
+            .getBoundingClientRect();
+          const questionRect = questionParagraph.getBoundingClientRect();
+          expect(band.left).toBeCloseTo(bounds.left, 0);
+          expect(band.right).toBeCloseTo(bounds.right, 0);
+          expect(band.top).toBeCloseTo(bounds.top, 0);
+          expect(band.bottom - questionRect.bottom).toBeCloseTo(10, 0);
+          // The 12px eyebrow sits 6px above the question; the first row's fill 6px below the band.
+          if (eyebrow) {
+            expect(questionRect.top - eyebrow.getBoundingClientRect().bottom).toBeCloseTo(6, 0);
+          }
+          expect(row.getBoundingClientRect().top - band.bottom).toBeCloseTo(6, 0);
+          expect(row.getBoundingClientRect().top - questionRect.bottom).toBeCloseTo(16, 0);
+          // The last row's fill ends the body's 4px inset above the banner's own padding.
+          const body = row.parentElement!.parentElement!;
+          expect(body.getBoundingClientRect().bottom - row.getBoundingClientRect().bottom).toBe(4);
+        });
+      }
     }
   },
 );

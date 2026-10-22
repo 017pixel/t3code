@@ -201,12 +201,12 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
       }}
     >
       {/* Expanded, the trigger shrinks to its actions and the question rises beside them.
-          Its top margin carries the body down with it, so the first line gains room without losing centering. */}
+          Its bottom margin also cancels its top margin and the banner's 4px padding, so the panel starts at the surface's top edge. */}
       <CollapsibleTrigger
         render={<ComposerBanner.Row render={<button type="button" />} />}
         className={cn(
           !isCollapsed &&
-            "relative z-10 ms-auto mt-1 -mb-(--composer-banner-icon-column) flex w-fit",
+            "relative z-10 ms-auto mt-1 -mb-[calc(var(--composer-banner-icon-column)+--spacing(2))] flex w-fit",
         )}
         title={toggleLabel}
         aria-label={isCollapsed ? undefined : toggleLabel}
@@ -254,47 +254,53 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
           ) : null}
         </ComposerBanner.Actions>
       </CollapsibleTrigger>
-      <CollapsiblePanel>
-        <ComposerBanner.Scroll>
-          {/* Both sides sit 16px in with the banner's px-1; the overflow scrollbar gutter takes 8px of the right.
-              The top inset centers the first line (16px eyebrow or 20px question) on the 28px (24px from sm) actions row. */}
-          <ComposerBanner.Body
-            className={cn(
-              "ps-3 pe-3 pb-1 wrap-anywhere sm:ps-3 [[data-has-overflow-y]>*>&]:pe-1",
-              showHeader ? "pt-1.5 sm:pt-1" : "pt-1 sm:pt-0.5",
-            )}
-          >
-            {/* Mirrors the overlaid actions so only the first line wraps clear of them; the end margin cancels the 12px body inset.
-                Its height matches that first line, so a 16px eyebrow does not push its second line clear too. */}
-            <span
-              aria-hidden
+      {/* The panel cancels the banner's px-1 so the header band can reach the surface's edges; it clips its overflow.
+          The vertical scrollbar keeps the inset it had inside that padding. */}
+      <CollapsiblePanel className="-mx-1">
+        <ComposerBanner.Scroll className="[&>[data-slot=scroll-area-scrollbar][data-orientation=vertical]]:mt-3 [&>[data-slot=scroll-area-scrollbar][data-orientation=vertical]]:mr-[5px]">
+          {/* Both sides sit 16px in from the surface; the overflow scrollbar gutter takes 8px of the right. */}
+          <ComposerBanner.Body className="ps-4 pe-4 pb-1 wrap-anywhere sm:ps-4 [[data-has-overflow-y]>*>&]:pe-2">
+            {/* Bleeds back to the surface's sides and top, under the actions, squaring off with the surface under another attachment.
+                The top inset centers the first line (16px eyebrow or 20px question) on the 28px (24px from sm) actions row. */}
+            <div
+              data-pending-user-input-header-band
               className={cn(
-                "invisible float-end ms-2 -me-3 flex items-center gap-1 pe-1 sm:pe-1.5",
-                showHeader ? "h-4" : "h-5",
+                "-mx-4 rounded-t-2xl bg-foreground/3 px-4 pb-2.5 [[data-slot=composer-banner-attachment]+[data-slot=composer-banner-attachment]_&]:rounded-t-none",
+                showHeader ? "pt-3.5 sm:pt-3" : "pt-3 sm:pt-2.5",
               )}
             >
-              {actionsHint}
-              {questionCount ? (
-                <span className={questionCountClassName}>{questionCount}</span>
+              {/* Mirrors the overlaid actions so only the first line wraps clear of them; the end margin cancels 12px of the band's 16px inset.
+                  Its height matches that first line, so a 16px eyebrow does not push its second line clear too. */}
+              <span
+                aria-hidden
+                className={cn(
+                  "invisible float-end ms-2 -me-3 flex items-center gap-1 pe-1 sm:pe-1.5",
+                  showHeader ? "h-4" : "h-5",
+                )}
+              >
+                {actionsHint}
+                {questionCount ? (
+                  <span className={questionCountClassName}>{questionCount}</span>
+                ) : null}
+                <span className="w-(--composer-banner-icon-column)" />
+                {prompt.dismissible ? <span className="w-(--composer-banner-icon-column)" /> : null}
+              </span>
+              {showHeader ? (
+                <p className="text-xs/4 font-medium text-muted-foreground">
+                  {activeQuestion.multiSelect
+                    ? `${activeQuestion.header} · Select any`
+                    : activeQuestion.header}
+                </p>
               ) : null}
-              <span className="w-(--composer-banner-icon-column)" />
-              {prompt.dismissible ? <span className="w-(--composer-banner-icon-column)" /> : null}
-            </span>
-            {showHeader ? (
-              <p className="text-xs/4 font-medium text-muted-foreground">
-                {activeQuestion.multiSelect
-                  ? `${activeQuestion.header} · Select any`
-                  : activeQuestion.header}
-              </p>
-            ) : null}
-            <ChatMarkdown
-              text={activeQuestion.question}
-              cwd={cwd}
-              threadRef={threadRef}
-              className={cn("text-sm/5 font-medium text-foreground", showHeader && "mt-1.5")}
-            />
+              <ChatMarkdown
+                text={activeQuestion.question}
+                cwd={cwd}
+                threadRef={threadRef}
+                className={cn("text-sm/5 font-medium text-foreground", showHeader && "mt-1.5")}
+              />
+            </div>
             {/* Row fills hang 12px past the text column so labels stay on its edge. */}
-            <div className="-mx-3 mt-3">
+            <div className="-mx-3 mt-1.5">
               {activeQuestion.options.map((option, index) => {
                 const optionValue = option.value ?? option.label;
                 const isOptimisticallySelected =
