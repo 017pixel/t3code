@@ -162,7 +162,7 @@ const makeStaleCopy = Effect.fn(function* (name: string) {
     }).pipe(Effect.provide(layerImporter));
   }).pipe(Effect.provide(services));
   const inV2 = <A, E>(effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
-    effect.pipe(Effect.provide(layerDatabase), Effect.provide(services));
+    effect.pipe(Effect.provide(layerDatabase.pipe(Layer.provide(services))));
 
   assert.deepEqual(yield* startV2, ["thread-a"]);
   return { directory, startV2, inV2 };
