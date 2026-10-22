@@ -19,6 +19,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/process";
+import { TestClock } from "effect/testing";
 import { expect } from "vite-plus/test";
 import type {
   ChangeRequest,
@@ -91,7 +92,6 @@ interface FakeGhScenario {
     baseRefName: string;
     headRefName: string;
     state?: "open" | "closed" | "merged";
-    headSha?: string;
     isDraft?: boolean;
     isCrossRepository?: boolean;
     headRepositoryNameWithOwner?: string | null;
@@ -2017,7 +2017,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
             ).toEqual([false, false, false]);
             const savedReads = () => ghCalls.filter((call) => call.startsWith("pr view ")).length;
             expect(savedReads()).toBe(1);
-            yield* TestClock.adjust(Duration.minutes(5));
+            yield* TestClock.adjust("5 minutes");
             expect(yield* superseded()).toBe(false);
             expect(savedReads()).toBe(2);
           }
