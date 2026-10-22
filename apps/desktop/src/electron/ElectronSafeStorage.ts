@@ -69,19 +69,39 @@ export class ElectronSafeStorage extends Context.Service<
 export const make = Effect.gen(function* () {
   const platform = yield* HostProcess.Platform;
 
+  // On Linux the sync API blocks the main loop while a locked keyring shows its
+  // unlock prompt. Prefer the async API, falling back to sync where it is unavailable.
+  const isAsyncEncryptionAvailable = async () => {
+    try {
+      return await Electron.safeStorage.isAsyncEncryptionAvailable();
+    } catch (cause) {
+      if (!Electron.safeStorage.isEncryptionAvailable()) {
+        throw cause;
+      }
+      return false;
+    }
+  };
+
   return ElectronSafeStorage.of({
-    isEncryptionAvailable: Effect.try({
-      try: () => Electron.safeStorage.isEncryptionAvailable(),
+    isEncryptionAvailable: Effect.tryPromise({
+      try: async () =>
+        (await isAsyncEncryptionAvailable()) || Electron.safeStorage.isEncryptionAvailable(),
       catch: (cause) => new ElectronSafeStorageAvailabilityError({ cause }),
     }),
     encryptString: (value) =>
-      Effect.try({
-        try: () => Electron.safeStorage.encryptString(value),
+      Effect.tryPromise({
+        try: async () =>
+          (await isAsyncEncryptionAvailable())
+            ? Electron.safeStorage.encryptStringAsync(value)
+            : Electron.safeStorage.encryptString(value),
         catch: (cause) => new ElectronSafeStorageEncryptError({ cause }),
       }),
     decryptString: (value) =>
-      Effect.try({
-        try: () => Electron.safeStorage.decryptString(Buffer.from(value)),
+      Effect.tryPromise({
+        try: async () =>
+          (await isAsyncEncryptionAvailable())
+            ? (await Electron.safeStorage.decryptStringAsync(Buffer.from(value))).result
+            : Electron.safeStorage.decryptString(Buffer.from(value)),
         catch: (cause) => new ElectronSafeStorageDecryptError({ cause }),
       }),
     selectedStorageBackend: Effect.sync(() => {
