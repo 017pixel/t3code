@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  ComposerContextId,
   EnvironmentId,
   MessageId,
   type ModelSelection,
@@ -350,7 +351,10 @@ const citationText = (excerpt: string) =>
     suffix: "",
   });
 
-const steerCitationMessage = (text: string) =>
+const steerCitationMessage = (
+  text: string,
+  context?: OrchestrationV2ThreadProjection["messages"][number]["context"],
+) =>
   Effect.gen(function* () {
     const now = yield* DateTime.now;
     const threadId = ThreadId.make("thread:steer-citation");
@@ -380,6 +384,7 @@ const steerCitationMessage = (text: string) =>
     const message = {
       id: messageId,
       text,
+      context,
       attachments: [],
       createdBy: "user",
       creationSource: "web",
@@ -476,6 +481,36 @@ it.effect("rejects a steer whose expanded citations exceed the provider input li
     assert.isBelow(text.length, PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
 
     const { exit, steered } = yield* steerCitationMessage(text);
+
+    assert.isTrue(Exit.isFailure(exit));
+    assert.isNull(steered);
+  }),
+);
+
+it.effect("rejects a steer whose citations and context together exceed the input limit", () =>
+  Effect.gen(function* () {
+    const text = `${citationText("hello")} [Terminal 1](t3-context://v1/terminal/ctx_terminal)`;
+    assert.isBelow(
+      expandAssistantCitationsForProvider(text).length,
+      PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+    );
+
+    const { exit, steered } = yield* steerCitationMessage(text, {
+      version: 1,
+      records: [
+        {
+          version: 1,
+          contextId: ComposerContextId.make("ctx_terminal"),
+          kind: "terminal",
+          label: "Terminal 1",
+          terminalId: "term-1",
+          terminalLabel: "Terminal 1",
+          lineStart: 1,
+          lineEnd: 1,
+          text: "r".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS),
+        },
+      ],
+    });
 
     assert.isTrue(Exit.isFailure(exit));
     assert.isNull(steered);

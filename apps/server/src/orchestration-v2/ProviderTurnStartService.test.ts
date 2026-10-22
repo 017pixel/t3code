@@ -3,6 +3,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  ComposerContextId,
   EnvironmentId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   MessageId,
@@ -265,6 +266,7 @@ it.each([
 
 function makeLocalCommandHarness(input: {
   readonly text: string;
+  readonly context?: OrchestrationV2ThreadProjection["messages"][number]["context"];
   readonly worktreePath?: string;
   readonly worktreesDir?: string;
   readonly fileSystem?: FileSystem.FileSystem;
@@ -340,6 +342,7 @@ function makeLocalCommandHarness(input: {
     nodeId: rootNodeId,
     role: "user",
     text: input.text,
+    ...(input.context === undefined ? {} : { context: input.context }),
     attachments: [],
     streaming: false,
     createdBy: "user",
@@ -1067,6 +1070,52 @@ effectIt.effect("fails the run when expanded citations exceed the provider input
     )}${followUp}`;
     expect(text.length).toBeLessThan(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
     const harness = makeLocalCommandHarness({ text });
+
+    yield* harness.start;
+
+    expect(harness.startRootRun).not.toHaveBeenCalled();
+    expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+    expect(harness.projection().turnItems).toMatchObject([
+      { type: "error", failure: { class: "validation_error" } },
+    ]);
+  }),
+);
+
+effectIt.effect("fails the run when citations and context together exceed the input limit", () =>
+  Effect.gen(function* () {
+    const citedText = `${serializeAssistantCitation({
+      version: 1,
+      environmentId: EnvironmentId.make("environment-citation"),
+      threadId: ThreadId.make("thread-citation"),
+      messageId: MessageId.make("assistant-message-citation"),
+      text: "hello",
+      start: 0,
+      end: 5,
+      prefix: "",
+      suffix: "",
+    })} [Terminal 1](t3-context://v1/terminal/ctx_terminal)`;
+    expect(expandAssistantCitationsForProvider(citedText).length).toBeLessThan(
+      PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+    );
+    const harness = makeLocalCommandHarness({
+      text: citedText,
+      context: {
+        version: 1,
+        records: [
+          {
+            version: 1,
+            contextId: ComposerContextId.make("ctx_terminal"),
+            kind: "terminal",
+            label: "Terminal 1",
+            terminalId: "term-1",
+            terminalLabel: "Terminal 1",
+            lineStart: 1,
+            lineEnd: 1,
+            text: "r".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS),
+          },
+        ],
+      },
+    });
 
     yield* harness.start;
 

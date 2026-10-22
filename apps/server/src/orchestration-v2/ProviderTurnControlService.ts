@@ -356,8 +356,14 @@ export const layer: Layer.Layer<
             });
           }
           // Encoded links fit the input limit at send time; the expanded excerpts may not.
-          const citedText = expandAssistantCitationsForProvider(message.text);
-          if (citedText !== message.text && citedText.length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
+          const hasCitations = expandAssistantCitationsForProvider(message.text) !== message.text;
+          const text = expandAssistantCitationsForProvider(message.text, (body) =>
+            projectComposerContextForProvider({
+              text: body,
+              records: message.context?.records ?? [],
+            }),
+          );
+          if (hasCitations && text.length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
             return yield* new ProviderTurnControlError({
               threadId: input.threadId,
               operation: "steer",
@@ -373,12 +379,7 @@ export const layer: Layer.Layer<
               providerTurnId: loaded.providerTurn.id,
               message: {
                 messageId: message.id,
-                text: expandAssistantCitationsForProvider(message.text, (text) =>
-                  projectComposerContextForProvider({
-                    text,
-                    records: message.context?.records ?? [],
-                  }),
-                ),
+                text,
                 attachments: message.attachments,
                 createdBy: message.createdBy,
                 creationSource: message.creationSource,

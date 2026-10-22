@@ -475,8 +475,11 @@ export const layer: Layer.Layer<
         }
       }
       // Encoded links fit the input limit at send time; the expanded excerpts may not.
-      const citedText = expandAssistantCitationsForProvider(message.text);
-      if (citedText !== message.text && citedText.length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
+      const hasCitations = expandAssistantCitationsForProvider(message.text) !== message.text;
+      const userText = expandAssistantCitationsForProvider(message.text, (text) =>
+        projectComposerContextForProvider({ text, records: message.context?.records ?? [] }),
+      );
+      if (hasCitations && userText.length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
         const now = yield* DateTime.now;
         yield* settleRunBeforeStart({
           signal: "citation-input-limit",
@@ -1042,9 +1045,6 @@ export const layer: Layer.Layer<
       }
       const routableSubagents = projection.subagents.filter((subagent) =>
         RunExecutionService.canRouteRelatedSubagent(subagent.status),
-      );
-      const userText = expandAssistantCitationsForProvider(message.text, (text) =>
-        projectComposerContextForProvider({ text, records: message.context?.records ?? [] }),
       );
       // Delivered once: this run's provider turn marks the work as told. A
       // restart continuation is prompted by its own text or resumes natively.
