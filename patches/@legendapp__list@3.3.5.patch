@@ -1619,7 +1619,7 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..d7cbe1cb43449cc29822b2646deabbdd
      }
    }
 diff --git a/react.js b/react.js
-index 914d2dafaafa001c9ab6791a0a0581659295e333..be40ae11766712592d74c44b3bb161b637e57aef 100644
+index 914d2dafaafa001c9ab6791a0a0581659295e333..390bdeb809a8cc44a824f05dd1f48df3fb6c8fc5 100644
 --- a/react.js
 +++ b/react.js
 @@ -4702,7 +4702,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
@@ -1720,31 +1720,106 @@ index 914d2dafaafa001c9ab6791a0a0581659295e333..be40ae11766712592d74c44b3bb161b6
  function sortDOMElements(container, indexByElement) {
    const elements = Array.from(container.children);
    if (elements.length <= 1) return elements;
-@@ -5674,7 +5722,10 @@ function sortDOMElements(container, indexByElement) {
+@@ -5674,26 +5722,17 @@ function sortDOMElements(container, indexByElement) {
      targetPositions.set(item[0], index);
    });
    const currentPositions = elements.map((el) => targetPositions.get(el));
 -  const lis = findLIS(currentPositions);
+-  const stableIndices = new Set(lis);
+-  for (let targetPos = 0; targetPos < items.length; targetPos++) {
 +  const selectionEnds = getSelectionEndPositions(elements, currentPositions);
 +  const isStableCandidate = (i) => selectionEnds.every((end) => i === end || i < end === currentPositions[i] < currentPositions[end]);
 +  const candidates = currentPositions.map((_, i) => i).filter(isStableCandidate);
 +  const lis = findLIS(candidates.map((i) => currentPositions[i])).map((k) => candidates[k]);
-   const stableIndices = new Set(lis);
-   for (let targetPos = 0; targetPos < items.length; targetPos++) {
++  const stableElements = new Set(lis.map((i) => elements[i]));
++  // T3 patch: insert each unstable element before its target successor, last to first. Same moves
++  // as upstream without its nested indexOf scans, which matter when a long selection pins many rows.
++  for (let targetPos = items.length - 1; targetPos >= 0; targetPos--) {
      const element = items[targetPos][0];
-@@ -5690,9 +5741,9 @@ function sortDOMElements(container, indexByElement) {
-         }
-       }
-       if (nextStableElement) {
+-    const currentPos = elements.indexOf(element);
+-    if (!stableIndices.has(currentPos)) {
+-      let nextStableElement = null;
+-      for (let i = targetPos + 1; i < items.length; i++) {
+-        const nextEl = items[i][0];
+-        const nextCurrentPos = elements.indexOf(nextEl);
+-        if (stableIndices.has(nextCurrentPos)) {
+-          nextStableElement = nextEl;
+-          break;
+-        }
+-      }
+-      if (nextStableElement) {
 -        container.insertBefore(element, nextStableElement);
-+        moveChildBefore(container, element, nextStableElement);
-       } else {
+-      } else {
 -        container.appendChild(element);
-+        moveChildBefore(container, element, null);
-       }
+-      }
++    if (!stableElements.has(element)) {
++      moveChildBefore(container, element, targetPos + 1 < items.length ? items[targetPos + 1][0] : null);
      }
    }
-@@ -6446,8 +6497,8 @@ function ScrollAdjust() {
+ }
+@@ -5738,28 +5777,47 @@ function useDOMOrder(ref) {
+   const ctx = useStateContext();
+   const debounceRef = React3.useRef(void 0);
+   React3.useEffect(() => {
+-    const unsubscribe = listen$(ctx, "lastPositionUpdate", () => {
++    const sort = () => {
+       if (debounceRef.current !== void 0) {
+         clearTimeout(debounceRef.current);
++        debounceRef.current = void 0;
+       }
+-      debounceRef.current = setTimeout(() => {
+-        const parent = ref.current;
+-        if (parent) {
+-          const indexByElement = /* @__PURE__ */ new Map();
+-          for (const [containerId, viewRef] of ctx.viewRefs) {
+-            const element = viewRef.current;
+-            const index = peek$(ctx, `containerItemIndex${containerId}`);
+-            if (element && index !== void 0) {
+-              indexByElement.set(element, index);
+-            }
++      const parent = ref.current;
++      if (parent) {
++        const indexByElement = /* @__PURE__ */ new Map();
++        for (const [containerId, viewRef] of ctx.viewRefs) {
++          const element = viewRef.current;
++          const index = peek$(ctx, `containerItemIndex${containerId}`);
++          if (element && index !== void 0) {
++            indexByElement.set(element, index);
+           }
+-          sortDOMElements(parent, indexByElement);
+         }
+-        debounceRef.current = void 0;
+-      }, 500);
++        sortDOMElements(parent, indexByElement);
++      }
++    };
++    // T3 patch: a native selection spans DOM order, not visual order. Sort before a press can
++    // start or extend one, and keep sorting eagerly while one lives in the list, so a selection's
++    // endpoints are never inverted and rows scrolled into its span land between them.
++    const isSelecting = () => {
++      const parent = ref.current;
++      const selection = typeof window !== "undefined" ? window.getSelection() : null;
++      return !!parent && !!selection && !selection.isCollapsed && (parent.contains(selection.anchorNode) || parent.contains(selection.focusNode));
++    };
++    const parent = ref.current;
++    parent == null ? void 0 : parent.addEventListener("pointerdown", sort, true);
++    const unsubscribe = listen$(ctx, "lastPositionUpdate", () => {
++      if (isSelecting()) {
++        sort();
++        return;
++      }
++      if (debounceRef.current !== void 0) {
++        clearTimeout(debounceRef.current);
++      }
++      debounceRef.current = setTimeout(sort, 500);
+     });
+     return () => {
+       unsubscribe();
++      parent == null ? void 0 : parent.removeEventListener("pointerdown", sort, true);
+       if (debounceRef.current !== void 0) {
+         clearTimeout(debounceRef.current);
+       }
+@@ -6446,8 +6504,8 @@ function ScrollAdjust() {
                window.getComputedStyle(contentNode)[axis.paddingEndProp]
              );
              const temporaryPaddingEnd = `${(currentPaddingEnd || 0) + pad}px`;
@@ -1754,8 +1829,26 @@ index 914d2dafaafa001c9ab6791a0a0581659295e333..be40ae11766712592d74c44b3bb161b6
              void contentNode.offsetHeight;
              scrollBy();
              if (resetPaddingRafRef.current !== void 0) {
+@@ -8194,6 +8252,17 @@ var LegendListInner = typedForwardRef(function LegendListInner2(props, forwarded
+       useAlignItemsAtEndPadding
+     ]
+   );
++  // T3 patch: pins only take effect on the next calculation, so mount newly pinned rows now
++  // instead of waiting for a scroll. A data change in the same commit already recalculates.
++  const alwaysRenderIndicesKey = alwaysRenderIndices.arr.join(",");
++  const previousAlwaysRenderIndicesKeyRef = React3.useRef(alwaysRenderIndicesKey);
++  React3.useLayoutEffect(() => {
++    var _a4;
++    if (previousAlwaysRenderIndicesKeyRef.current === alwaysRenderIndicesKey) return;
++    previousAlwaysRenderIndicesKeyRef.current = alwaysRenderIndicesKey;
++    if (state.isFirst || state.didDataChange || state.didColumnsChange) return;
++    (_a4 = state.triggerCalculateItemsInView) == null ? void 0 : _a4.call(state, { doMVCP: true, forceFullItemPositions: true });
++  }, [alwaysRenderIndicesKey]);
+   React3.useLayoutEffect(() => {
+     const {
+       didColumnsChange,
 diff --git a/react.mjs b/react.mjs
-index 95465f2ab89ce41a10553f58af83618f7310e83c..39c051cf2444f001f4895863db6dd31628211b19 100644
+index 95465f2ab89ce41a10553f58af83618f7310e83c..b9f6e0699fa97a0da2e3bb30ce897443096c5628 100644
 --- a/react.mjs
 +++ b/react.mjs
 @@ -4681,7 +4681,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
@@ -1856,31 +1949,106 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..39c051cf2444f001f4895863db6dd316
  function sortDOMElements(container, indexByElement) {
    const elements = Array.from(container.children);
    if (elements.length <= 1) return elements;
-@@ -5653,7 +5701,10 @@ function sortDOMElements(container, indexByElement) {
+@@ -5653,26 +5701,17 @@ function sortDOMElements(container, indexByElement) {
      targetPositions.set(item[0], index);
    });
    const currentPositions = elements.map((el) => targetPositions.get(el));
 -  const lis = findLIS(currentPositions);
+-  const stableIndices = new Set(lis);
+-  for (let targetPos = 0; targetPos < items.length; targetPos++) {
 +  const selectionEnds = getSelectionEndPositions(elements, currentPositions);
 +  const isStableCandidate = (i) => selectionEnds.every((end) => i === end || i < end === currentPositions[i] < currentPositions[end]);
 +  const candidates = currentPositions.map((_, i) => i).filter(isStableCandidate);
 +  const lis = findLIS(candidates.map((i) => currentPositions[i])).map((k) => candidates[k]);
-   const stableIndices = new Set(lis);
-   for (let targetPos = 0; targetPos < items.length; targetPos++) {
++  const stableElements = new Set(lis.map((i) => elements[i]));
++  // T3 patch: insert each unstable element before its target successor, last to first. Same moves
++  // as upstream without its nested indexOf scans, which matter when a long selection pins many rows.
++  for (let targetPos = items.length - 1; targetPos >= 0; targetPos--) {
      const element = items[targetPos][0];
-@@ -5669,9 +5720,9 @@ function sortDOMElements(container, indexByElement) {
-         }
-       }
-       if (nextStableElement) {
+-    const currentPos = elements.indexOf(element);
+-    if (!stableIndices.has(currentPos)) {
+-      let nextStableElement = null;
+-      for (let i = targetPos + 1; i < items.length; i++) {
+-        const nextEl = items[i][0];
+-        const nextCurrentPos = elements.indexOf(nextEl);
+-        if (stableIndices.has(nextCurrentPos)) {
+-          nextStableElement = nextEl;
+-          break;
+-        }
+-      }
+-      if (nextStableElement) {
 -        container.insertBefore(element, nextStableElement);
-+        moveChildBefore(container, element, nextStableElement);
-       } else {
+-      } else {
 -        container.appendChild(element);
-+        moveChildBefore(container, element, null);
-       }
+-      }
++    if (!stableElements.has(element)) {
++      moveChildBefore(container, element, targetPos + 1 < items.length ? items[targetPos + 1][0] : null);
      }
    }
-@@ -6425,8 +6476,8 @@ function ScrollAdjust() {
+ }
+@@ -5717,28 +5756,47 @@ function useDOMOrder(ref) {
+   const ctx = useStateContext();
+   const debounceRef = useRef(void 0);
+   useEffect(() => {
+-    const unsubscribe = listen$(ctx, "lastPositionUpdate", () => {
++    const sort = () => {
+       if (debounceRef.current !== void 0) {
+         clearTimeout(debounceRef.current);
++        debounceRef.current = void 0;
+       }
+-      debounceRef.current = setTimeout(() => {
+-        const parent = ref.current;
+-        if (parent) {
+-          const indexByElement = /* @__PURE__ */ new Map();
+-          for (const [containerId, viewRef] of ctx.viewRefs) {
+-            const element = viewRef.current;
+-            const index = peek$(ctx, `containerItemIndex${containerId}`);
+-            if (element && index !== void 0) {
+-              indexByElement.set(element, index);
+-            }
++      const parent = ref.current;
++      if (parent) {
++        const indexByElement = /* @__PURE__ */ new Map();
++        for (const [containerId, viewRef] of ctx.viewRefs) {
++          const element = viewRef.current;
++          const index = peek$(ctx, `containerItemIndex${containerId}`);
++          if (element && index !== void 0) {
++            indexByElement.set(element, index);
+           }
+-          sortDOMElements(parent, indexByElement);
+         }
+-        debounceRef.current = void 0;
+-      }, 500);
++        sortDOMElements(parent, indexByElement);
++      }
++    };
++    // T3 patch: a native selection spans DOM order, not visual order. Sort before a press can
++    // start or extend one, and keep sorting eagerly while one lives in the list, so a selection's
++    // endpoints are never inverted and rows scrolled into its span land between them.
++    const isSelecting = () => {
++      const parent = ref.current;
++      const selection = typeof window !== "undefined" ? window.getSelection() : null;
++      return !!parent && !!selection && !selection.isCollapsed && (parent.contains(selection.anchorNode) || parent.contains(selection.focusNode));
++    };
++    const parent = ref.current;
++    parent == null ? void 0 : parent.addEventListener("pointerdown", sort, true);
++    const unsubscribe = listen$(ctx, "lastPositionUpdate", () => {
++      if (isSelecting()) {
++        sort();
++        return;
++      }
++      if (debounceRef.current !== void 0) {
++        clearTimeout(debounceRef.current);
++      }
++      debounceRef.current = setTimeout(sort, 500);
+     });
+     return () => {
+       unsubscribe();
++      parent == null ? void 0 : parent.removeEventListener("pointerdown", sort, true);
+       if (debounceRef.current !== void 0) {
+         clearTimeout(debounceRef.current);
+       }
+@@ -6425,8 +6483,8 @@ function ScrollAdjust() {
                window.getComputedStyle(contentNode)[axis.paddingEndProp]
              );
              const temporaryPaddingEnd = `${(currentPaddingEnd || 0) + pad}px`;
@@ -1890,6 +2058,24 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..39c051cf2444f001f4895863db6dd316
              void contentNode.offsetHeight;
              scrollBy();
              if (resetPaddingRafRef.current !== void 0) {
+@@ -8173,6 +8231,17 @@ var LegendListInner = typedForwardRef(function LegendListInner2(props, forwarded
+       useAlignItemsAtEndPadding
+     ]
+   );
++  // T3 patch: pins only take effect on the next calculation, so mount newly pinned rows now
++  // instead of waiting for a scroll. A data change in the same commit already recalculates.
++  const alwaysRenderIndicesKey = alwaysRenderIndices.arr.join(",");
++  const previousAlwaysRenderIndicesKeyRef = useRef(alwaysRenderIndicesKey);
++  useLayoutEffect(() => {
++    var _a4;
++    if (previousAlwaysRenderIndicesKeyRef.current === alwaysRenderIndicesKey) return;
++    previousAlwaysRenderIndicesKeyRef.current = alwaysRenderIndicesKey;
++    if (state.isFirst || state.didDataChange || state.didColumnsChange) return;
++    (_a4 = state.triggerCalculateItemsInView) == null ? void 0 : _a4.call(state, { doMVCP: true, forceFullItemPositions: true });
++  }, [alwaysRenderIndicesKey]);
+   useLayoutEffect(() => {
+     const {
+       didColumnsChange,
 diff --git a/reanimated.d.ts b/reanimated.d.ts
 index e5043320700b12f34f4c0babbc341f85ca8135c1..e8cbd461325a2e2e9ffd61de26a85ae4d108555c 100644
 --- a/reanimated.d.ts
