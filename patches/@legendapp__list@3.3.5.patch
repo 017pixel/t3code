@@ -1,5 +1,5 @@
 diff --git a/keyboard.d.ts b/keyboard.d.ts
-index 367945c..0ac7bf8 100644
+index 367945cdfa8a8c260b7a127657a75c016c9ab46f..0ac7bf8b8e9c386058b2374199e58fe8c92d39b3 100644
 --- a/keyboard.d.ts
 +++ b/keyboard.d.ts
 @@ -279,7 +279,7 @@ type KeyboardChatComposerInsetListRef = {
@@ -23,7 +23,7 @@ index 367945c..0ac7bf8 100644
  } & React.RefAttributes<LegendListRef>) => React.ReactElement | null;
  
 diff --git a/keyboard.js b/keyboard.js
-index 6645bcb..321c4c3 100644
+index 6645bcbb1f77c36c432035eaf8b2d6d924fc8bda..321c4c305129dd3ce3f06127c47d51720a73fb83 100644
 --- a/keyboard.js
 +++ b/keyboard.js
 @@ -33,19 +33,22 @@ if (typeof __DEV__ !== "undefined" && __DEV__ && !reactNativeKeyboardController.
@@ -119,7 +119,7 @@ index 6645bcb..321c4c3 100644
        renderScrollComponent: memoList,
        ...rest
 diff --git a/keyboard.mjs b/keyboard.mjs
-index 87b38b9..111eb24 100644
+index 87b38b9607c2eba6b407c2acfd520633bdb0e7c2..111eb242ba9d9ade1cb912550f7df85cf4f361ee 100644
 --- a/keyboard.mjs
 +++ b/keyboard.mjs
 @@ -1,7 +1,7 @@
@@ -224,7 +224,7 @@ index 87b38b9..111eb24 100644
        renderScrollComponent: memoList,
        ...rest
 diff --git a/react-native.d.ts b/react-native.d.ts
-index ce1fe00..3ccf6f1 100644
+index ce1fe00001c9e5aee6c6ea8bb2d4757d4586d002..3ccf6f16067152dfcb0c143371e2ec6aba6636e5 100644
 --- a/react-native.d.ts
 +++ b/react-native.d.ts
 @@ -293,6 +293,12 @@ interface LegendListSpecificProps<ItemT, TItemType extends string | undefined> {
@@ -241,7 +241,7 @@ index ce1fe00..3ccf6f1 100644
       * Number of columns to render items in.
       * @default 1
 diff --git a/react-native.js b/react-native.js
-index b3c5a30..5ac6bbe 100644
+index b3c5a306b293f797a8b338adfca3060c0f6db22b..95af29f88fd82370484f2205f7a1bd8513c3acc2 100644
 --- a/react-native.js
 +++ b/react-native.js
 @@ -717,6 +717,15 @@ function hasActiveInitialScroll(state) {
@@ -450,6 +450,15 @@ index b3c5a30..5ac6bbe 100644
                state.scroll = maxScroll;
                state.scrollPending = maxScroll;
                diff = 0;
+@@ -1934,7 +1992,7 @@ function prepareMVCP(ctx, dataChanged) {
+           anchorPositionForLock = newPosition;
+         }
+       }
+-      if (scrollingToViewPosition && scrollingToViewPosition > 0) {
++      if (targetId !== null && scrollingToViewPosition && scrollingToViewPosition > 0) {
+         const newSize = getItemSize(ctx, targetId, scrollTarget, state.props.data[scrollTarget]);
+         const prevSize = scrollingTo == null ? void 0 : scrollingTo.itemSize;
+         if (newSize !== void 0 && prevSize !== void 0 && newSize !== prevSize) {
 @@ -2320,8 +2378,121 @@ function scrollToIndex(ctx, {
  }
  
@@ -809,7 +818,7 @@ index b3c5a30..5ac6bbe 100644
        recycleItems,
        refreshControl: refreshControlElement ? stylePaddingTopState > 0 ? React2__namespace.cloneElement(refreshControlElement, {
 diff --git a/react-native.mjs b/react-native.mjs
-index 40e87cd..93aac74 100644
+index 40e87cda8c9bc79a889e5542f29af429a24b24d4..a0157522217c2fe6039a1ff0994826786f8bea06 100644
 --- a/react-native.mjs
 +++ b/react-native.mjs
 @@ -696,6 +696,15 @@ function hasActiveInitialScroll(state) {
@@ -1018,6 +1027,15 @@ index 40e87cd..93aac74 100644
                state.scroll = maxScroll;
                state.scrollPending = maxScroll;
                diff = 0;
+@@ -1913,7 +1971,7 @@ function prepareMVCP(ctx, dataChanged) {
+           anchorPositionForLock = newPosition;
+         }
+       }
+-      if (scrollingToViewPosition && scrollingToViewPosition > 0) {
++      if (targetId !== null && scrollingToViewPosition && scrollingToViewPosition > 0) {
+         const newSize = getItemSize(ctx, targetId, scrollTarget, state.props.data[scrollTarget]);
+         const prevSize = scrollingTo == null ? void 0 : scrollingTo.itemSize;
+         if (newSize !== void 0 && prevSize !== void 0 && newSize !== prevSize) {
 @@ -2299,8 +2357,121 @@ function scrollToIndex(ctx, {
  }
  
@@ -1377,9 +1395,18 @@ index 40e87cd..93aac74 100644
        recycleItems,
        refreshControl: refreshControlElement ? stylePaddingTopState > 0 ? React2.cloneElement(refreshControlElement, {
 diff --git a/react-native.web.js b/react-native.web.js
-index 914d2da..8b88b09 100644
+index 914d2dafaafa001c9ab6791a0a0581659295e333..f353083de443d0014e96ed157362a0d2c9fe6d69 100644
 --- a/react-native.web.js
 +++ b/react-native.web.js
+@@ -1771,7 +1771,7 @@ function prepareMVCP(ctx, dataChanged) {
+           anchorPositionForLock = newPosition;
+         }
+       }
+-      if (scrollingToViewPosition && scrollingToViewPosition > 0) {
++      if (targetId !== null && scrollingToViewPosition && scrollingToViewPosition > 0) {
+         const newSize = getItemSize(ctx, targetId, scrollTarget, state.props.data[scrollTarget]);
+         const prevSize = scrollingTo == null ? void 0 : scrollingTo.itemSize;
+         if (newSize !== void 0 && prevSize !== void 0 && newSize !== prevSize) {
 @@ -5651,6 +5651,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
  });
  
@@ -1412,9 +1439,18 @@ index 914d2da..8b88b09 100644
      }
    }
 diff --git a/react-native.web.mjs b/react-native.web.mjs
-index 95465f2..d7cbe1c 100644
+index 95465f2ab89ce41a10553f58af83618f7310e83c..5db89fbb16f33c9b1666dae68e81ec3f55de2d2a 100644
 --- a/react-native.web.mjs
 +++ b/react-native.web.mjs
+@@ -1750,7 +1750,7 @@ function prepareMVCP(ctx, dataChanged) {
+           anchorPositionForLock = newPosition;
+         }
+       }
+-      if (scrollingToViewPosition && scrollingToViewPosition > 0) {
++      if (targetId !== null && scrollingToViewPosition && scrollingToViewPosition > 0) {
+         const newSize = getItemSize(ctx, targetId, scrollTarget, state.props.data[scrollTarget]);
+         const prevSize = scrollingTo == null ? void 0 : scrollingTo.itemSize;
+         if (newSize !== void 0 && prevSize !== void 0 && newSize !== prevSize) {
 @@ -5630,6 +5630,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
  });
  
@@ -1447,9 +1483,18 @@ index 95465f2..d7cbe1c 100644
      }
    }
 diff --git a/react.js b/react.js
-index 914d2da..86dbd9a 100644
+index 914d2dafaafa001c9ab6791a0a0581659295e333..b811ea02fe90673515e6adfc82e527b607ad3ed8 100644
 --- a/react.js
 +++ b/react.js
+@@ -1771,7 +1771,7 @@ function prepareMVCP(ctx, dataChanged) {
+           anchorPositionForLock = newPosition;
+         }
+       }
+-      if (scrollingToViewPosition && scrollingToViewPosition > 0) {
++      if (targetId !== null && scrollingToViewPosition && scrollingToViewPosition > 0) {
+         const newSize = getItemSize(ctx, targetId, scrollTarget, state.props.data[scrollTarget]);
+         const prevSize = scrollingTo == null ? void 0 : scrollingTo.itemSize;
+         if (newSize !== void 0 && prevSize !== void 0 && newSize !== prevSize) {
 @@ -4702,7 +4702,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
        contentBelowAnchor = Math.max(0, contentBelowAnchor - ctx.scrollAxisGap);
        contentBelowAnchor += (ctx.values.get("footerSize") || 0) + getStylePaddingEnd(state.props);
@@ -1525,9 +1570,18 @@ index 914d2da..86dbd9a 100644
              scrollBy();
              if (resetPaddingRafRef.current !== void 0) {
 diff --git a/react.mjs b/react.mjs
-index 95465f2..cff49dc 100644
+index 95465f2ab89ce41a10553f58af83618f7310e83c..189857836eeb60ae9b9e69c5f911b3e4f6a7e72d 100644
 --- a/react.mjs
 +++ b/react.mjs
+@@ -1750,7 +1750,7 @@ function prepareMVCP(ctx, dataChanged) {
+           anchorPositionForLock = newPosition;
+         }
+       }
+-      if (scrollingToViewPosition && scrollingToViewPosition > 0) {
++      if (targetId !== null && scrollingToViewPosition && scrollingToViewPosition > 0) {
+         const newSize = getItemSize(ctx, targetId, scrollTarget, state.props.data[scrollTarget]);
+         const prevSize = scrollingTo == null ? void 0 : scrollingTo.itemSize;
+         if (newSize !== void 0 && prevSize !== void 0 && newSize !== prevSize) {
 @@ -4681,7 +4681,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
        contentBelowAnchor = Math.max(0, contentBelowAnchor - ctx.scrollAxisGap);
        contentBelowAnchor += (ctx.values.get("footerSize") || 0) + getStylePaddingEnd(state.props);
@@ -1603,7 +1657,7 @@ index 95465f2..cff49dc 100644
              scrollBy();
              if (resetPaddingRafRef.current !== void 0) {
 diff --git a/reanimated.d.ts b/reanimated.d.ts
-index e504332..2ce6383 100644
+index e5043320700b12f34f4c0babbc341f85ca8135c1..2ce63830a28636b21937a0741fd0e613dae950fe 100644
 --- a/reanimated.d.ts
 +++ b/reanimated.d.ts
 @@ -294,6 +294,12 @@ interface LegendListSpecificProps<ItemT, TItemType extends string | undefined> {
@@ -1620,7 +1674,7 @@ index e504332..2ce6383 100644
       * Number of columns to render items in.
       * @default 1
 diff --git a/reanimated.js b/reanimated.js
-index f1265fa..fc03be2 100644
+index f1265fad74189591b5aae86cf2e3a31f9c0fdb02..fc03be2190c046f743ffde45ed189ee7868d0cec 100644
 --- a/reanimated.js
 +++ b/reanimated.js
 @@ -115,8 +115,10 @@ var ReanimatedPositionView = typedMemo(function ReanimatedPositionViewComponent(
@@ -1783,7 +1837,7 @@ index f1265fa..fc03be2 100644
          renderScrollComponent: renderReanimatedScrollComponent,
          ...IsNewArchitecture ? { stickyPositionComponentInternal } : {}
 diff --git a/reanimated.mjs b/reanimated.mjs
-index 29a00d5..6ab9292 100644
+index 29a00d5dc084fd408a0e0a0a4d64e856d0ed1525..6ab929250c8924e2d9919ee09a4f774238fbb90a 100644
 --- a/reanimated.mjs
 +++ b/reanimated.mjs
 @@ -1,7 +1,7 @@
