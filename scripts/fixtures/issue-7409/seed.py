@@ -27,6 +27,8 @@ env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
            GIT_AUTHOR_NAME=data['author'], GIT_COMMITTER_NAME=data['author'],
            GIT_AUTHOR_EMAIL=data['email'], GIT_COMMITTER_EMAIL=data['email'],
            GIT_AUTHOR_DATE=data['timestamp'], GIT_COMMITTER_DATE=data['timestamp'])
+for key in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE'):
+    env.pop(key, None)
 
 def git(directory, *arguments):
     return subprocess.check_output(['git', '-C', str(directory), *arguments], env=env, stderr=subprocess.PIPE, text=True).strip()
