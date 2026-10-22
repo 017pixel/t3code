@@ -8,12 +8,15 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderSessionId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 import { vi } from "vite-plus/test";
 
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { ProviderEventLoggers } from "@t3tools/provider-core/server/ProviderEventLoggers";
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
 import {
@@ -166,6 +169,30 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("Claude CLI pro
       yield* Effect.promise(() => leftoverStarted);
       yield* session.close;
       yield* Effect.promise(() => leftoverStopped);
+    }).pipe(Effect.provide(realQueryRunner)),
+  );
+
+  // Claude Code refuses bypassPermissions as root and explains why only on
+  // stderr, so the turn failure has to carry that line (#15882).
+  it.effect("reports the CLI's startup error when it exits before answering", () =>
+    Effect.gen(function* () {
+      const reason =
+        "--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons";
+      const cli = fakeClaudeCli(`echo '${reason}' >&2\nexit 1`);
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(NodePath.dirname(cli), { recursive: true, force: true })),
+      );
+
+      const session = yield* openFakeCli(cli);
+      const exit = yield* Stream.runDrain(session.messages).pipe(Effect.exit);
+
+      assert.isTrue(Exit.isFailure(exit));
+      if (Exit.isFailure(exit)) {
+        assert.include(
+          makeProviderFailure({ cause: exit.cause, class: "transport_error" }).message,
+          reason,
+        );
+      }
     }).pipe(Effect.provide(realQueryRunner)),
   );
 
