@@ -367,6 +367,19 @@ export const layerExecutor: Layer.Layer<
                     willRetry,
                   }),
                 ),
+                // The replacement run waits in "starting" for this effect.
+                // Once retries are spent, fail it instead of leaving it there.
+                Effect.tapError((cause) =>
+                  willRetry || effect.request.type !== "provider-turn.restart"
+                    ? Effect.void
+                    : providerTurnStart
+                        .start({
+                          threadId: effect.threadId,
+                          runId: effect.request.runId,
+                          failBeforeStart: cause,
+                        })
+                        .pipe(Effect.ignore({ log: true })),
+                ),
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({
@@ -571,13 +584,33 @@ export class OrchestrationEffectWorkerV2 extends Context.Service<
   OrchestrationEffectWorkerV2Shape
 >()("t3/orchestration-v2/EffectWorker/OrchestrationEffectWorkerV2") {}
 
-// Backstop for provider control effects whose own calls are not bounded, such
-// as interrupts and steers sent to a provider that stopped answering. A timeout
-// fails through the normal retry path and frees the worker. Starts bound each
-// provider call more tightly so the run settles in-band before this fires.
-const PROCESS_BOUND_EFFECT_TIMEOUT = Duration.minutes(12);
-const processBound = (effect: EffectOutbox.OrchestrationEffectV2) =>
-  EffectOutbox.PROCESS_BOUND_EFFECT_TYPES.some((type) => type === effect.request.type);
+// Backstop for provider turn control effects. Each provider call carries its
+// own tighter deadline; this catches unbounded work between them so a provider
+// that stopped answering cannot hold a worker forever.
+const PROVIDER_TURN_CONTROL_EFFECT_TIMEOUT = Duration.minutes(12);
+const PROVIDER_TURN_CONTROL_EFFECT_TYPES = [
+  "provider-turn.start",
+  "provider-turn.interrupt",
+  "provider-turn.steer",
+  "provider-turn.restart",
+] as const satisfies ReadonlyArray<EffectOutbox.OrchestrationEffectV2["request"]["type"]>;
+const providerTurnControl = (effect: EffectOutbox.OrchestrationEffectV2) =>
+  PROVIDER_TURN_CONTROL_EFFECT_TYPES.some((type) => type === effect.request.type);
+
+// A steer that timed out may still have been accepted, and providers do not
+// deduplicate steering input, so a retry could deliver the message twice.
+const uncertainSteer = (
+  effect: EffectOutbox.OrchestrationEffectV2,
+  cause: Cause.Cause<unknown>,
+) => {
+  if (effect.request.type !== "provider-turn.steer") return false;
+  let error: unknown = Cause.squash(cause);
+  while (typeof error === "object" && error !== null) {
+    if (Cause.isTimeoutError(error)) return true;
+    error = "cause" in error ? error.cause : undefined;
+  }
+  return false;
+};
 
 export interface OrchestrationEffectWorkerOptions {
   readonly workerId?: string;
@@ -744,7 +777,9 @@ export const layerWithOptions = (
           const execution = executor
             .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
             .pipe(
-              processBound(effect) ? Effect.timeout(PROCESS_BOUND_EFFECT_TIMEOUT) : identity,
+              providerTurnControl(effect)
+                ? Effect.timeout(PROVIDER_TURN_CONTROL_EFFECT_TIMEOUT)
+                : identity,
               Effect.as("executed" as const),
             );
           const exit = yield* Effect.exit(Effect.raceFirst(execution, cancellation)).pipe(
@@ -781,7 +816,7 @@ export const layerWithOptions = (
             ? yield* outbox
                 .succeed({ effectId: effect.id, workerId })
                 .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
-            : effect.attemptCount >= maxAttempts
+            : effect.attemptCount >= maxAttempts || uncertainSteer(effect, exit.cause)
               ? yield* outbox
                   .fail({ effectId: effect.id, workerId, error })
                   .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))

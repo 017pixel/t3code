@@ -3,6 +3,7 @@ import {
   CheckpointId,
   CheckpointScopeId,
   CommandId,
+  MessageId,
   NodeId,
   ProviderSessionId,
   ProviderThreadId,
@@ -667,4 +668,76 @@ it.effect("a provider that never answers turn starts does not hold every worker"
       );
     }).pipe(Effect.scoped, Effect.provide(layerWorker));
   }),
+);
+
+it.effect.each(["timeout", "ordinary"] as const)(
+  "a steer that failed by %s is retried only when it was not possibly delivered",
+  (failure) =>
+    Effect.gen(function* () {
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const steer: EffectOutbox.OrchestrationEffectV2 = {
+        id: "effect:steer",
+        commandId: CommandId.make("command:steer"),
+        threadId: ThreadId.make("thread:steer"),
+        request: {
+          type: "provider-turn.steer",
+          providerSessionId: ProviderSessionId.make("provider-session:steer"),
+          providerThreadId: ProviderThreadId.make("provider-thread:steer"),
+          providerTurnId: ProviderTurnId.make("provider-turn:steer"),
+          messageId: MessageId.make("message:steer"),
+        },
+        status: "running",
+        attemptCount: 1,
+        availableAt: now,
+        leaseOwner: "worker",
+        leaseExpiresAt: now,
+        createdAt: now,
+        updatedAt: now,
+        completedAt: null,
+        lastError: null,
+      };
+      const settled = yield* Ref.make<"retried" | "failed" | null>(null);
+      const layerOutbox = Layer.mock(EffectOutbox.EffectOutboxV2)({
+        claimNext: () => Effect.succeedSome(steer),
+        get: () => Effect.succeedSome(steer),
+        awaitCancellation: () => Effect.never,
+        clearCancellation: () => Effect.void,
+        retry: () => Ref.set(settled, "retried").pipe(Effect.as(true)),
+        fail: () => Ref.set(settled, "failed").pipe(Effect.as(true)),
+      });
+      const layerExecutor = Layer.succeed(
+        EffectWorker.OrchestrationEffectExecutorV2,
+        EffectWorker.OrchestrationEffectExecutorV2.of({
+          execute: (effect) =>
+            Effect.fail(
+              new EffectWorker.OrchestrationEffectExecutionError({
+                effectId: effect.id,
+                effectType: effect.request.type,
+                cause:
+                  failure === "timeout"
+                    ? new ProviderTurnControlService.ProviderTurnControlError({
+                        threadId: effect.threadId,
+                        operation: "steer",
+                        providerTurnId: ProviderTurnId.make("provider-turn:steer"),
+                        cause: new Cause.TimeoutError(),
+                      })
+                    : new Error("provider rejected the steer"),
+              }),
+            ),
+        }),
+      );
+
+      yield* Effect.gen(function* () {
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        yield* worker.runOnce;
+      }).pipe(
+        Effect.provide(
+          EffectWorker.layerWithOptions().pipe(
+            Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
+          ),
+        ),
+      );
+
+      assert.equal(yield* Ref.get(settled), failure === "timeout" ? "failed" : "retried");
+    }),
 );

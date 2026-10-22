@@ -14,19 +14,24 @@ import {
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
+import { PROVIDER_CONTROL_TIMEOUT } from "./RunExecutionService.ts";
 
 const driver = ProviderDriverKind.make("codex");
 const providerInstanceId = ProviderInstanceId.make("codex");
@@ -328,4 +333,103 @@ it.effect(
       assert.equal(interrupted?.id, providerThreadId);
       assert.equal(interrupted?.nativeThreadRef?.nativeId, "native-thread:restart-session");
     }),
+);
+
+it.effect("gives up on an interrupt the provider never answers", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:unanswered-interrupt");
+    const providerSessionId = ProviderSessionId.make("provider-session:unanswered-interrupt");
+    const providerThreadId = ProviderThreadId.make("provider-thread:unanswered-interrupt");
+    const providerTurnId = ProviderTurnId.make("provider-turn:unanswered-interrupt");
+    const interruptRequested = yield* Deferred.make<void>();
+    const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
+      instanceId: providerInstanceId,
+      driver,
+      providerSessionId,
+      providerSession: {
+        id: providerSessionId,
+        driver,
+        providerInstanceId,
+        status: "running",
+        cwd: "/workspace",
+        model: modelSelection.model,
+        capabilities: CodexProviderCapabilitiesV2,
+        createdAt: now,
+        updatedAt: now,
+        lastError: null,
+      },
+      events: Stream.empty,
+      ensureThread: () => Effect.die("unused ensureThread"),
+      resumeThread: () => Effect.die("unused resumeThread"),
+      startTurn: () => Effect.die("unused startTurn"),
+      steerTurn: () => Effect.die("unused steerTurn"),
+      // The process stays alive but never answers turn/interrupt.
+      interruptTurn: () =>
+        Deferred.succeed(interruptRequested, undefined).pipe(Effect.andThen(Effect.never)),
+      respondToRuntimeRequest: () => Effect.die("unused respondToRuntimeRequest"),
+      readThreadSnapshot: () => Effect.die("unused readThreadSnapshot"),
+      rollbackThread: () => Effect.die("unused rollbackThread"),
+      forkThread: () => Effect.die("unused forkThread"),
+    };
+    const layerProjection = Layer.mock(ProjectionStore.ProjectionStoreV2)({
+      getProviderControlContext: () =>
+        Effect.succeed({
+          providerThread: {
+            id: providerThreadId,
+            driver,
+            providerInstanceId,
+            providerSessionId,
+            appThreadId: threadId,
+            ownerNodeId: null,
+            nativeThreadRef: null,
+            nativeConversationHeadRef: null,
+            status: "active",
+            firstRunOrdinal: 1,
+            lastRunOrdinal: 1,
+            handoffIds: [],
+            forkedFrom: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+          providerTurn: {
+            id: providerTurnId,
+            providerThreadId,
+            nodeId: NodeId.make("node:unanswered-interrupt"),
+            runAttemptId: RunAttemptId.make("run-attempt:unanswered-interrupt"),
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "running",
+            startedAt: now,
+            completedAt: null,
+          },
+          attempt: undefined,
+          message: undefined,
+          run: undefined,
+        }),
+    });
+    const layerSessionManager = Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+      get: () => Effect.succeedSome(runtime),
+    });
+
+    const exit = yield* Effect.gen(function* () {
+      const control = yield* ProviderTurnControlService.ProviderTurnControlServiceV2;
+      const interrupt = yield* control
+        .interrupt({ threadId, providerSessionId, providerThreadId, providerTurnId })
+        .pipe(Effect.exit, Effect.forkScoped);
+      yield* Deferred.await(interruptRequested);
+      yield* TestClock.adjust(PROVIDER_CONTROL_TIMEOUT);
+      return yield* Fiber.join(interrupt);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        ProviderTurnControlService.layer.pipe(
+          Layer.provide(Layer.merge(layerProjection, layerSessionManager)),
+        ),
+      ),
+    );
+
+    assert.isTrue(Exit.isFailure(exit));
+    if (Exit.isFailure(exit)) assert.include(Cause.pretty(exit.cause), "TimeoutError");
+  }),
 );

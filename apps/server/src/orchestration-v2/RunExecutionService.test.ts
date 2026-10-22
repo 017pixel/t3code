@@ -2591,11 +2591,13 @@ it.effect.each(["failure", "defect", "interrupt-failure", "ownership-lost"] as c
     }),
 );
 
-it.effect("fails a run whose provider never answers the turn start", () =>
+it.effect("contains and fails a run whose provider never answers the turn start", () =>
   Effect.gen(function* () {
     const startRequested = yield* Deferred.make<void>();
+    const contained = yield* Ref.make(false);
     const termination = yield* captureRootRunTermination({
       key: "unanswered-start",
+      containUnansweredStart: Ref.set(contained, true),
       shouldFinalizeRun: () => Effect.succeed(true),
       events: () => Stream.never,
       startTurn: () =>
@@ -2606,6 +2608,7 @@ it.effect("fails a run whose provider never answers the turn start", () =>
 
     const { observed } = yield* Fiber.join(termination);
     assert.include(observed, "run:failed");
+    assert.isTrue(yield* Ref.get(contained));
   }),
 );
 
@@ -2738,6 +2741,7 @@ function captureRootRunTermination(input: {
   readonly refreshAfterTurn?: Effect.Effect<void>;
   readonly onSubscriptionClose?: Effect.Effect<void>;
   readonly shouldStartProviderTurn?: RunExecutionService.RunExecutionServiceV2StartRootRunInput["shouldStartProviderTurn"];
+  readonly containUnansweredStart?: Effect.Effect<void>;
   readonly appContext?: ReturnType<McpAppModelContext.McpAppModelContext["Service"]["forThread"]>;
   readonly ingestNormalized?: ProviderEventIngestor.ProviderEventIngestorV2["Service"]["ingestNormalized"];
   readonly beforeTerminalWrite?: (
@@ -2901,6 +2905,9 @@ function captureRootRunTermination(input: {
         attemptId: ids.attemptId,
         providerTurnOrdinal: 1,
         shouldFinalizeRun: input.shouldFinalizeRun,
+        ...(input.containUnansweredStart === undefined
+          ? {}
+          : { containUnansweredStart: input.containUnansweredStart }),
         ...(input.shouldStartProviderTurn === undefined
           ? {}
           : { shouldStartProviderTurn: input.shouldStartProviderTurn }),

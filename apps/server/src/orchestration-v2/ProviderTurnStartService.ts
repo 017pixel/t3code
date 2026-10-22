@@ -88,6 +88,8 @@ export interface ProviderTurnStartServiceV2Shape {
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly willRetry?: boolean;
+    /** Fails the still-starting run with this error instead of starting it. */
+    readonly failBeforeStart?: Error;
   }) => Effect.Effect<void, ProviderTurnStartError>;
 }
 
@@ -233,6 +235,7 @@ export const layer: Layer.Layer<
       readonly threadId: ThreadId;
       readonly runId: RunId;
       readonly willRetry?: boolean;
+      readonly failBeforeStart?: Error;
     }) {
       const { runId } = input;
       const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
@@ -386,6 +389,24 @@ export const layer: Layer.Layer<
           });
         },
       );
+      if (input.failBeforeStart !== undefined) {
+        yield* settleRunBeforeStart({
+          signal: "provider-turn-restart-failure",
+          status: "failed",
+          now: yield* DateTime.now,
+          providerInstanceId: run.providerInstanceId,
+          itemProviderThreadId: providerThread.id,
+          item: {
+            type: "error",
+            title: "Provider restart failed",
+            failure: makeProviderFailure({
+              cause: input.failBeforeStart,
+              class: "provider_error",
+            }),
+          },
+        });
+        return;
+      }
       if (message.attachments.length === 0 && message.text.trimStart().startsWith("/")) {
         const isEmptyCompaction =
           message.text.trim().toLowerCase() === "/compact" && !projection.hasConversation;
@@ -1327,6 +1348,16 @@ export const layer: Layer.Layer<
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
+        // Ending the session stops the process, so a turn it accepted without
+        // answering cannot keep editing the workspace. The next start reopens
+        // the session and resumes the native conversation.
+        containUnansweredStart: providerSessions
+          .release({
+            providerSessionId,
+            reason: "runtime_error",
+            detail: "The provider did not answer the turn start.",
+          })
+          .pipe(Effect.ignore({ log: true })),
         message: {
           messageId: message.id,
           text: userText,
