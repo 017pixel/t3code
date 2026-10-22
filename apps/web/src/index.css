@@ -1853,8 +1853,9 @@ code {
 }
 
 /* list-style-position: outside paints the marker past the padding box, so the
-   gutter must fit a single-digit marker like `1. ` (3ch) even in wide interface
-   fonts. ChatMarkdown's `ol` renderer widens it (via inline style) for lists
+   gutter must fit a single-digit marker like `1. `, which takes 3ch in a
+   monospace font. CSS cannot measure the marker, so proportional fonts get the
+   same 3ch. ChatMarkdown's `ol` renderer widens it (via inline style) for lists
    whose widest marker has multiple characters. Setting it here also resets a
    nested ol without its own widened marker so it doesn't inherit the outer
    one; `ch` resolves against each list's own font. */
