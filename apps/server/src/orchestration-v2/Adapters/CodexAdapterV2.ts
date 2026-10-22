@@ -690,7 +690,9 @@ const decodeCodexActivePermissionProfile = Schema.decodeUnknownOption(
   }),
 );
 
-function codexUserPermissionProfile(response: unknown): CodexUserPermissionProfile | undefined {
+export function codexUserPermissionProfile(
+  response: unknown,
+): CodexUserPermissionProfile | undefined {
   const decoded = decodeCodexActivePermissionProfile(response);
   if (Option.isNone(decoded)) return undefined;
   const { id } = decoded.value.activePermissionProfile;
@@ -1415,6 +1417,8 @@ function codexThreadRuntimeParams(input: {
 const decodeCodexThreadStartResponse = Schema.decodeUnknownEffect(
   CodexSchema.V2ThreadStartResponse,
 );
+
+const decodeCodexThreadForkResponse = Schema.decodeUnknownEffect(CodexSchema.V2ThreadForkResponse);
 
 const decodeCodexResumeMetadata = Schema.decodeUnknownEffect(
   Schema.Struct({ thread: Schema.Struct({ id: Schema.String, updatedAt: Schema.Number }) }),
@@ -6403,19 +6407,20 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ) {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
             const mcpSession = yield* mcpSessions.read(turnInput.threadId);
-            const permissionProfile = permissionProfilesByThread.get(threadId);
-            const turnStartParams = yield* buildCodexTurnStartParams({
-              nativeThreadId: threadId,
-              codexInput,
-              runtimePolicy: turnInput.runtimePolicy,
-              modelSelection: turnInput.modelSelection,
-              hasT3Mcp: mcpSession !== undefined,
-              browserToolsAvailable: mcpSession?.browserToolsAvailable ?? true,
-              deviceToolsAvailable: mcpSession?.capabilities?.has("device") ?? false,
-              omitServiceTier: adapterOptions.resolveRuntime !== undefined,
-              ...(turnInput.appContext === undefined ? {} : { appContext: turnInput.appContext }),
-              ...(permissionProfile === undefined ? {} : { permissionProfile }),
-            });
+            const buildParams = (permissionProfile: CodexUserPermissionProfile | undefined) =>
+              buildCodexTurnStartParams({
+                nativeThreadId: threadId,
+                codexInput,
+                runtimePolicy: turnInput.runtimePolicy,
+                modelSelection: turnInput.modelSelection,
+                hasT3Mcp: mcpSession !== undefined,
+                browserToolsAvailable: mcpSession?.browserToolsAvailable ?? true,
+                deviceToolsAvailable: mcpSession?.capabilities?.has("device") ?? false,
+                omitServiceTier: adapterOptions.resolveRuntime !== undefined,
+                ...(turnInput.appContext === undefined ? {} : { appContext: turnInput.appContext }),
+                ...(permissionProfile === undefined ? {} : { permissionProfile }),
+              });
+            const turnStartParams = yield* buildParams(permissionProfilesByThread.get(threadId));
             yield* Ref.update(pendingRootTurns, (current) => {
               const updated = new Map(current);
               updated.set(threadId, turnInput);
@@ -6428,7 +6433,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               else next.delete(threadId);
               return next;
             });
-            const started = yield* client.request("turn/start", turnStartParams);
+            const started = yield* client.request("turn/start", turnStartParams).pipe(
+              Effect.catchTags({
+                // The profile may have been renamed or removed from config.toml
+                // since Codex reported it; fall back to the legacy sandboxPolicy.
+                CodexAppServerRequestError: (error) => {
+                  if (turnStartParams.permissions === undefined) return Effect.fail(error);
+                  permissionProfilesByThread.delete(threadId);
+                  return buildParams(undefined).pipe(
+                    Effect.flatMap((params) => client.request("turn/start", params)),
+                  );
+                },
+              }),
+            );
             yield* registerRootTurn({
               turnInput,
               nativeTurnId: started.turn.id,
@@ -7525,7 +7542,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               const boundary = yield* resolveCodexForkBoundary(threadInput);
               const response = yield* ensureInitialized.pipe(
                 Effect.andThen(
-                  client.request("thread/fork", {
+                  client.raw.request("thread/fork", {
                     threadId,
                     ...(boundary.lastTurnId === undefined
                       ? {}
@@ -7540,6 +7557,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                         : { runtimePolicy: threadInput.runtimePolicy }),
                     }),
                   }),
+                ),
+                Effect.flatMap((raw) =>
+                  decodeCodexThreadForkResponse(raw).pipe(
+                    Effect.tap((response) =>
+                      Effect.sync(() => rememberPermissionProfile(response.thread.id, raw)),
+                    ),
+                  ),
                 ),
                 Effect.mapError(
                   (cause) =>

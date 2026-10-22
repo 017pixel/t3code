@@ -192,6 +192,41 @@ describe("CodexAdapterV2 runtime policy", () => {
     }),
   );
 
+  it.effect.each([
+    { runtimeMode: "approval-required", sandboxType: "readOnly" },
+    { runtimeMode: "full-access", sandboxType: "dangerFullAccess" },
+  ] as const)(
+    "sends $runtimeMode's own sandbox when the profile is for another sandbox",
+    ({ runtimeMode, sandboxType }) =>
+      Effect.gen(function* () {
+        const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+          nativeThreadId: `native-profile-${runtimeMode}`,
+          codexInput: [{ type: "text", text: "test" }],
+          runtimePolicy: { runtimeMode, interactionMode: "default", cwd: null },
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+          permissionProfile: { id: "env-protected", sandboxType: "workspaceWrite" },
+        });
+        assert.deepEqual(params.sandboxPolicy, { type: sandboxType });
+        assert.isUndefined(params.permissions);
+      }),
+  );
+
+  it("remembers no profile for Codex's built-in permission profiles", () => {
+    const sandbox = { type: "workspaceWrite", writableRoots: [], networkAccess: false };
+    for (const id of [":workspace", ":read-only"]) {
+      assert.isUndefined(
+        CodexAdapterV2.codexUserPermissionProfile({ activePermissionProfile: { id }, sandbox }),
+      );
+    }
+    assert.deepEqual(
+      CodexAdapterV2.codexUserPermissionProfile({
+        activePermissionProfile: { id: "env-protected" },
+        sandbox,
+      }),
+      { id: "env-protected", sandboxType: "workspaceWrite" },
+    );
+  });
+
   it.effect("sends MCP app model context as untrusted Codex context", () =>
     Effect.gen(function* () {
       const policy = { runtimeMode: "full-access", interactionMode: "default", cwd: null } as const;
@@ -535,6 +570,30 @@ function makeCodexReplayTurn(input: {
     completedAt: terminal ? 1782622450 : null,
     durationMs: null,
   };
+}
+
+/** Makes the preamble's thread/start response report a user permissions profile. */
+function withActivePermissionProfile(
+  entries: ReadonlyArray<CodexReplay.CodexAppServerReplayEntry>,
+  id: string,
+): Array<CodexReplay.CodexAppServerReplayEntry> {
+  return entries.map((entry) =>
+    entry.type === "emit_inbound" &&
+    entry.label === "thread/start" &&
+    Predicate.isObject(entry.frame) &&
+    Predicate.isObject(entry.frame.result)
+      ? {
+          ...entry,
+          frame: {
+            ...entry.frame,
+            result: {
+              ...entry.frame.result,
+              activePermissionProfile: { id, extends: ":workspace" },
+            },
+          },
+        }
+      : entry,
+  );
 }
 
 function codexReplayPreamble(input: {
@@ -1818,29 +1877,14 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               },
             },
           ];
-          const preamble = codexReplayPreamble({
-            nativeThreadId,
-            nativeTurnId: turnIds[0]!,
-            prompt: turnText(0),
-          })
-            .slice(0, -3)
-            .map((entry) =>
-              entry.type === "emit_inbound" &&
-              entry.label === "thread/start" &&
-              Predicate.isObject(entry.frame) &&
-              Predicate.isObject(entry.frame.result)
-                ? {
-                    ...entry,
-                    frame: {
-                      ...entry.frame,
-                      result: {
-                        ...entry.frame.result,
-                        activePermissionProfile: { id: "env-protected", extends: ":workspace" },
-                      },
-                    },
-                  }
-                : entry,
-            );
+          const preamble = withActivePermissionProfile(
+            codexReplayPreamble({
+              nativeThreadId,
+              nativeTurnId: turnIds[0]!,
+              prompt: turnText(0),
+            }).slice(0, -3),
+            "env-protected",
+          );
           const harness = yield* makeCodexReplayHarness(
             makeCodexReplayTranscript({
               scenario: "codex-permissions-profile-round-trip",
@@ -1888,6 +1932,94 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ),
         ),
       ),
+  );
+
+  it.effect("falls back to the legacy sandbox policy when Codex no longer knows the profile", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const nativeThreadId = "stale-profile-thread";
+        const nativeTurnId = "stale-profile-turn";
+        const prompt = "Use the renamed profile.";
+        const turnStart = (id: number, policy: Record<string, Schema.Json>) => ({
+          type: "expect_outbound" as const,
+          label: `turn/start ${id}`,
+          frame: {
+            id,
+            method: "turn/start",
+            params: {
+              threadId: nativeThreadId,
+              input: [{ type: "text", text: prompt }],
+              cwd: "/workspace",
+              model: "gpt-5.4",
+              approvalPolicy: "on-request",
+              approvalsReviewer: "auto_review",
+              ...policy,
+              summary: "detailed",
+            },
+          },
+        });
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: "codex-stale-permissions-profile",
+            entries: [
+              ...withActivePermissionProfile(
+                codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt }).slice(0, -3),
+                "env-protected",
+              ),
+              turnStart(3, { permissions: "env-protected" }),
+              {
+                type: "emit_inbound",
+                label: "turn/start rejected",
+                frame: {
+                  id: 3,
+                  error: {
+                    code: -32600,
+                    message:
+                      "failed to load configuration: default_permissions refers to undefined profile `env-protected`",
+                  },
+                },
+              },
+              turnStart(4, { sandboxPolicy: { type: "workspaceWrite" } }),
+              {
+                type: "emit_inbound",
+                label: "turn/start",
+                frame: {
+                  id: 4,
+                  result: { turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }) },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "turn/completed",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                  },
+                },
+              },
+            ],
+          }),
+        );
+
+        yield* harness.runtime.startTurn({
+          ...makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("stale-profile-1"),
+            text: prompt,
+          }),
+          runtimePolicy: { ...CODEX_TEST_RUNTIME_POLICY, runtimeMode: "auto" },
+        });
+        yield* harness.awaitTerminal(1);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
   );
 
   it.effect("preserves T3 context on the wire and restores it after compaction", () =>
