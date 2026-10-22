@@ -14,7 +14,7 @@ if scenario in ['S3','R2','R3']:
     config={'homePath':str(home),'binaryPath':str(fixture/'peer.mjs')}
 settings={'projectSettingsFolded':True,'providerInstances':{'codex':{'driver':'codex','displayName':'Codex (via cliproxy)' if scenario in ['S1','S2','R1'] else 'Codex (protocol fixture)','config':config},'claudeAgent':{'driver':'claudeAgent','enabled':False}}}
 if scenario in ['S2','R1']:
-    settings['usageLimitSources']={'evidence-proxy':{'kind':'cliproxy','url':'http://127.0.0.1:18317','managementKey':'public-evidence-dummy-key','enabled':True,'displayName':'Demo proxy source'}}
+    settings['usageLimitSources']={'evidence-proxy':{'kind':'cliproxy','url':'http://127.0.0.1:18317','managementKey':'public-evidence-dummy-key','enabled':True,'label':'Demo proxy source'}}
 (base/'settings.json').write_text(json.dumps(settings,indent=2)+'\n')
 control=pathlib.Path('/tmp/issue-11873-evidence/control.json');control.parent.mkdir(exist_ok=True)
 control.write_text(json.dumps({'scenario':scenario,'phase':'auth' if scenario=='R3' else 'success'}))
