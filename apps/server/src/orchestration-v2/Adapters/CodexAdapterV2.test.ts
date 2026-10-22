@@ -929,7 +929,8 @@ describe("CodexAdapterV2 session initialize", () => {
         assert.equal(result._tag, "Failure");
         if (result._tag === "Failure") {
           assert.equal(result.failure._tag, "ProviderAdapterEnsureThreadError");
-          const message = String(result.failure.cause);
+          const message = startFailureMessage(result.failure);
+          assert.include(message, "until it is reviewed (/tmp/codex-home/hooks.json)");
           assert.include(message, "`/hooks`");
           assert.notInclude(message, "codex /hooks");
           assert.include(message, "CODEX_HOME=/managed/codex-home");
@@ -956,6 +957,12 @@ describe("CodexAdapterV2 session initialize", () => {
                   path: "/tmp/codex-home/config.toml",
                   message: 'invalid type: string "soon", expected u64',
                 },
+                // Discovery text is arbitrary Codex output, so it must not
+                // grow the error without bound or push out the guidance.
+                ...Array.from({ length: 200 }, (_, index) => ({
+                  path: `/tmp/codex-home/hooks-${index}.json`,
+                  message: "unexpected token ".repeat(20),
+                })),
               ],
               warnings: [],
               hooks: [],
@@ -967,9 +974,12 @@ describe("CodexAdapterV2 session initialize", () => {
       const failed = yield* session.ensureThread("thread-hooks-discovery-errors").pipe(Effect.flip);
 
       assert.equal(failed._tag, "ProviderAdapterEnsureThreadError");
-      const message = String(failed.cause);
+      const message = startFailureMessage(failed);
       assert.include(message, "/tmp/codex-home/config.toml");
       assert.include(message, "expected u64");
+      assert.include(message, "…), so T3 Code cannot check whether a hook needs review.");
+      assert.include(message, "starts cleanly, then try again.");
+      assert.isBelow(message.length, 2_500);
       assert.notInclude(session.requests(), "thread/start");
     }).pipe(Effect.scoped, Effect.provide(hooksTestLayer)),
   );

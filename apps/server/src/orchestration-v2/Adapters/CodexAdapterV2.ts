@@ -1412,6 +1412,84 @@ function isCodexHooksListUnsupported(error: CodexErrors.CodexAppServerRequestErr
   );
 }
 
+const MAX_CODEX_HOOK_DISCOVERY_DETAILS_LENGTH = 2_000;
+const MAX_CODEX_HOOK_SOURCE_PATHS = 10;
+
+const codexHookReviewTarget = (cwd: string | null, homePath: string | undefined) =>
+  `\`codex\`${cwd === null ? "" : ` in ${cwd}`}${homePath ? ` with CODEX_HOME=${homePath}` : ""}`;
+
+// The user has to fix Codex's own config, so the bounded discovery text stays
+// in the message like DeviceBootError.diagnostics.
+class CodexHookDiscoveryError extends Schema.TaggedError<CodexHookDiscoveryError>()(
+  "CodexHookDiscoveryError",
+  {
+    cwd: Schema.NullOr(Schema.String),
+    homePath: Schema.optional(Schema.String),
+    errorCount: Schema.Number,
+    details: Schema.String.check(Schema.isMaxLength(MAX_CODEX_HOOK_DISCOVERY_DETAILS_LENGTH)),
+  },
+) {
+  static fromDiscoveryErrors(input: {
+    readonly cwd: string | null;
+    readonly homePath: string | undefined;
+    readonly errors: ReadonlyArray<{ readonly path: string; readonly message: string }>;
+  }): CodexHookDiscoveryError {
+    const details = input.errors.map((error) => `${error.path}: ${error.message}`).join("; ");
+    return new CodexHookDiscoveryError({
+      cwd: input.cwd,
+      ...(input.homePath ? { homePath: input.homePath } : {}),
+      errorCount: input.errors.length,
+      details:
+        details.length > MAX_CODEX_HOOK_DISCOVERY_DETAILS_LENGTH
+          ? `${details.slice(0, MAX_CODEX_HOOK_DISCOVERY_DETAILS_LENGTH - 1)}…`
+          : details,
+    });
+  }
+
+  override get message(): string {
+    return (
+      `Codex could not load its hook configuration (${this.details}), so T3 Code cannot check whether a hook needs review. ` +
+      `Fix the configuration, confirm ${codexHookReviewTarget(this.cwd, this.homePath)} starts cleanly, then try again.`
+    );
+  }
+}
+
+class CodexHookReviewRequiredError extends Schema.TaggedError<CodexHookReviewRequiredError>()(
+  "CodexHookReviewRequiredError",
+  {
+    cwd: Schema.NullOr(Schema.String),
+    homePath: Schema.optional(Schema.String),
+    hookCount: Schema.Number,
+    sourcePathCount: Schema.Number,
+    sourcePaths: Schema.Array(Schema.String).check(Schema.isMaxLength(MAX_CODEX_HOOK_SOURCE_PATHS)),
+  },
+) {
+  static fromPendingHooks(input: {
+    readonly cwd: string | null;
+    readonly homePath: string | undefined;
+    readonly hooks: ReadonlyArray<{ readonly sourcePath: string }>;
+  }): CodexHookReviewRequiredError {
+    const sourcePaths = [...new Set(input.hooks.map((hook) => hook.sourcePath))];
+    return new CodexHookReviewRequiredError({
+      cwd: input.cwd,
+      ...(input.homePath ? { homePath: input.homePath } : {}),
+      hookCount: input.hooks.length,
+      sourcePathCount: sourcePaths.length,
+      sourcePaths: sourcePaths.slice(0, MAX_CODEX_HOOK_SOURCE_PATHS),
+    });
+  }
+
+  override get message(): string {
+    const one = this.hookCount === 1;
+    const omitted = this.sourcePathCount - this.sourcePaths.length;
+    const sources = `${this.sourcePaths.join(", ")}${omitted > 0 ? `, and ${omitted} more` : ""}`;
+    return (
+      `Codex will not run ${one ? "an enabled hook" : `${this.hookCount} enabled hooks`} until ${one ? "it is" : "they are"} reviewed (${sources}). ` +
+      `Open ${codexHookReviewTarget(this.cwd, this.homePath)}, enter \`/hooks\` to review or disable ${one ? "it" : "them"}, then try again.`
+    );
+  }
+}
+
 const CodexChildSelection = Schema.Struct({
   thread: Schema.Struct({ id: Schema.String }),
   model: Schema.NullOr(Schema.String),
@@ -1878,20 +1956,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   isCodexHooksListUnsupported(error) ? Effect.succeed(null) : Effect.fail(error),
               }),
             );
-          const where = cwd === null ? "" : ` in ${cwd}`;
           const homePath = settings.homePath;
-          const home = homePath ? ` with CODEX_HOME=${homePath}` : "";
           // Codex lists no hooks for a config layer it cannot load, so an empty
           // list cannot prove that none need review.
           const discoveryErrors = listed?.data.flatMap((entry) => entry.errors ?? []) ?? [];
           if (discoveryErrors.length > 0) {
-            const details = discoveryErrors
-              .map((error) => `${error.path}: ${error.message}`)
-              .join("; ");
-            return yield* Effect.fail(
-              `Codex could not load its hook configuration (${details}), so T3 Code cannot check whether a hook needs review. ` +
-                `Fix the configuration, confirm \`codex\`${where}${home} starts cleanly, then try again.`,
-            );
+            return yield* CodexHookDiscoveryError.fromDiscoveryErrors({
+              cwd,
+              homePath,
+              errors: discoveryErrors,
+            });
           }
           const pending =
             listed?.data.flatMap((entry) =>
@@ -1902,12 +1976,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ),
             ) ?? [];
           if (pending.length === 0) return;
-          const one = pending.length === 1;
-          const sources = [...new Set(pending.map((hook) => hook.sourcePath))].join(", ");
-          return yield* Effect.fail(
-            `Codex will not run ${one ? "an enabled hook" : `${pending.length} enabled hooks`} until ${one ? "it is" : "they are"} reviewed (${sources}). ` +
-              `Open \`codex\`${where}${home}, enter \`/hooks\` to review or disable ${one ? "it" : "them"}, then try again.`,
-          );
+          return yield* CodexHookReviewRequiredError.fromPendingHooks({
+            cwd,
+            homePath,
+            hooks: pending,
+          });
         });
         const now = yield* DateTime.now;
         const session = providerSession({
