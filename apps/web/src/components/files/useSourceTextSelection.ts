@@ -343,7 +343,12 @@ class SourceTextSelection {
         this.caretKey = this.engaged && !isEditableTarget(event.target);
         return;
       }
-      if (event.key.toLowerCase() !== "a" || !(event.metaKey || event.ctrlKey) || event.altKey) {
+      if (
+        event.key.toLowerCase() !== "a" ||
+        !(event.metaKey || event.ctrlKey) ||
+        event.altKey ||
+        event.shiftKey
+      ) {
         return;
       }
       if (!this.engaged || isEditableTarget(event.target)) return;

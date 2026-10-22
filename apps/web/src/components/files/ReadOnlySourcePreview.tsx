@@ -1,3 +1,4 @@
+import type { FileContents } from "@pierre/diffs";
 import { File, type FileOptions, Virtualizer } from "@pierre/diffs/react";
 
 import { DiffWorkerPoolProvider } from "~/components/DiffWorkerPoolProvider";
@@ -41,7 +42,12 @@ export default function ReadOnlySourcePreview(props: {
             unsafeCSS: FILE_LINK_REVEAL_UNSAFE_CSS,
             onPostRender: (fileContainer, instance, phase) => {
               onPostRender?.(fileContainer, instance, phase);
-              onSelectionPostRender(fileContainer, phase, text);
+              // Pierre keeps drawing the previous file while a replacement
+              // highlights, so selection offsets follow the drawn text.
+              const rendered = (
+                instance as unknown as { getRenderedFile(): FileContents | undefined }
+              ).getRenderedFile();
+              onSelectionPostRender(fileContainer, phase, rendered?.contents ?? text);
             },
           }}
           className="min-h-full"
