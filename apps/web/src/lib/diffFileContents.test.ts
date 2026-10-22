@@ -79,6 +79,17 @@ describe("diff file contents loaders", () => {
     expect(displayedChange(fileDiff)).toEqual({ deleted: ["six\n"], added: ["SIX\n"] });
   });
 
+  it("hydrates ignored-whitespace patches when only context whitespace differs", async () => {
+    const fileDiff = parseFileDiff();
+    await hydrateLikePierre(
+      fileDiff,
+      workingTreeLoader(OLD_CONTENTS, NEW_CONTENTS.replace("four\n", "    four\n")),
+    );
+
+    expect(fileDiff.isPartial).toBe(false);
+    expect(displayedChange(fileDiff)).toEqual({ deleted: ["six\n"], added: ["SIX\n"] });
+  });
+
   it("keeps the patch when either side changed after the patch was generated", async () => {
     for (const [oldContents, newContents] of [
       [OLD_CONTENTS, `inserted\n${NEW_CONTENTS}`],

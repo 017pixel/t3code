@@ -49,9 +49,8 @@ type GetPullRequestDiffFileContents<E> = (request: {
   readonly input: PullRequestDiffFileContentsInput;
 }) => Promise<AtomCommandResult<PullRequestDiffFileContentsResult, E>>;
 
-// A partial diff's line arrays hold each hunk's side contiguously, in hunk order; the same lines
-// must sit at the hunk's start line in the loaded file. Lines keep their endings, as Pierre's
-// splitFileContents does.
+// Partial diffs omit gaps between hunks, so changed blocks need their compact line indices
+// translated back to source coordinates before validating the loaded files.
 function matchesPatchLines(fileDiff: FileDiffMetadata, oldContents: string, newContents: string) {
   if (!fileDiff.isPartial) return true;
   const oldLines = oldContents.split(/(?<=\n)/);
@@ -72,22 +71,27 @@ function matchesPatchLines(fileDiff: FileDiffMetadata, oldContents: string, newC
     }
     return true;
   };
-  return fileDiff.hunks.every(
-    (hunk) =>
-      sideMatches(
-        fileDiff.deletionLines,
-        hunk.deletionLineIndex,
-        oldLines,
-        hunk.deletionStart,
-        hunk.deletionCount,
-      ) &&
-      sideMatches(
-        fileDiff.additionLines,
-        hunk.additionLineIndex,
-        newLines,
-        hunk.additionStart,
-        hunk.additionCount,
-      ),
+  // Ignored whitespace can differ between the two files' context lines. Changed lines still
+  // come from their respective source files and must match at the patch's coordinates.
+  return fileDiff.hunks.every((hunk) =>
+    hunk.hunkContent.every(
+      (content) =>
+        content.type !== "change" ||
+        (sideMatches(
+          fileDiff.deletionLines,
+          content.deletionLineIndex,
+          oldLines,
+          hunk.deletionStart + content.deletionLineIndex - hunk.deletionLineIndex,
+          content.deletions,
+        ) &&
+          sideMatches(
+            fileDiff.additionLines,
+            content.additionLineIndex,
+            newLines,
+            hunk.additionStart + content.additionLineIndex - hunk.additionLineIndex,
+            content.additions,
+          )),
+    ),
   );
 }
 
