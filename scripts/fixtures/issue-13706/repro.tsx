@@ -50,6 +50,12 @@ function App() {
     const state = internal();
     const element = ref.current?.getScrollableNode() as HTMLElement;
     const target = state.scrollingTo;
+    const viewport = element.getBoundingClientRect();
+    const lastRow = element.querySelector<HTMLElement>(
+      `[data-row-id="${state.props.data.length - 1}"]`,
+    );
+    const rowBounds = lastRow?.getBoundingClientRect();
+    const labelBounds = lastRow?.querySelector("span")?.getBoundingClientRect();
     const result = {
       phase,
       ms: +(performance.now() - recordingState.current.started).toFixed(3),
@@ -64,6 +70,12 @@ function App() {
       domScroll: element.scrollTop,
       domHeight: element.scrollHeight,
       endDistance: element.scrollHeight - element.clientHeight - element.scrollTop,
+      lastRowBounds: rowBounds
+        ? { top: rowBounds.top, bottom: rowBounds.bottom, height: rowBounds.height }
+        : null,
+      lastLabelBounds: labelBounds ? { top: labelBounds.top, bottom: labelBounds.bottom } : null,
+      lastLabelVisible:
+        !!labelBounds && labelBounds.top >= viewport.top && labelBounds.bottom <= viewport.bottom,
     };
     recordingState.current.trace.push(result);
     if (output.current)
@@ -126,11 +138,42 @@ function App() {
       });
       sample("after-mutation");
     }, delayMs);
-    await delay(2400);
+    await delay(Math.max(1200, delayMs + 300));
     recording = false;
-    await nextFrame();
-    sample("settled");
-    return recordingState.current.trace;
+    const deadline = performance.now() + 10000;
+    let previous = "";
+    let stableSince = performance.now();
+    let stableFrames = 0;
+    // Native scroll events can lag the DOM under load; elapsed time alone is not completion.
+    while (performance.now() < deadline) {
+      await nextFrame();
+      const current = sample("settling");
+      const geometry = JSON.stringify([
+        current.total,
+        current.scroll,
+        current.domScroll,
+        current.domHeight,
+      ]);
+      if (
+        geometry === previous &&
+        !current.target &&
+        Math.abs(current.scroll - current.domScroll) <= 1
+      ) {
+        stableFrames++;
+        if (stableFrames >= 3 && performance.now() - stableSince >= 200) {
+          sample("settled");
+          return recordingState.current.trace;
+        }
+      } else {
+        stableSince = performance.now();
+        stableFrames = 0;
+      }
+      previous = geometry;
+    }
+    sample("unsettled");
+    throw new Error(
+      "DOM and dependency scroll did not stabilize; do not use this run as settled evidence.",
+    );
   };
   useEffect(() => {
     Object.assign(window, {
@@ -178,8 +221,11 @@ function App() {
         maintainVisibleContentPosition={mvcp}
         renderItem={({ item }) => (
           <div
+            data-row-id={item.id}
             style={{
               height: item.id === 149 ? lastHeight : 900,
+              display: "flex",
+              alignItems: "center",
               boxSizing: "border-box",
               borderBottom: `1px solid ${dark ? "#777" : "#333"}`,
               background: dark
@@ -191,7 +237,7 @@ function App() {
                   : "#eee",
             }}
           >
-            Row {item.id}
+            <span>Row {item.id}</span>
           </div>
         )}
       />
