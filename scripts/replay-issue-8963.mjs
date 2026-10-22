@@ -1,7 +1,5 @@
 import fixture from "./fixtures/issue-8963.json" with { type: "json" };
 
-export { fixture };
-
 // Supply T3 Browser-panel tools from the owning agent session. No separate browser
 // driver or server is created, and all mutations go through the app UI.
 // Begin on a fresh UI-created draft in Proof workspace with legacy Plan mode
