@@ -1719,7 +1719,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           const turnIds = ["profile-turn-1", "profile-turn-2", "profile-turn-3"];
           // Codex only keeps a named profile while the turn's legacy sandboxPolicy
           // equals its projection; selecting the profile by id restores its
-          // filesystem deny entries after a detour through Full access.
+          // filesystem deny entries after a detour through Full access. T3
+          // resumes the loaded thread before each turn whose runtime settings
+          // changed, and those responses report the thread's current state:
+          // no active profile once a legacy sandboxPolicy turn has run.
           const turnPolicies = {
             auto: {
               approvalPolicy: "on-request",
@@ -1758,7 +1761,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               type: "expect_outbound",
               label: `turn ${index + 1} (${turnModes[index]}) turn/start`,
               frame: {
-                id: 3 + index,
+                id: 3 + index * 2,
                 method: "turn/start",
                 params: {
                   threadId: nativeThreadId,
@@ -1774,7 +1777,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               type: "emit_inbound",
               label: `turn ${index + 1} turn/start`,
               frame: {
-                id: 3 + index,
+                id: 3 + index * 2,
                 result: {
                   turn: makeCodexReplayTurn({ id: turnIds[index]!, status: "inProgress" }),
                 },
@@ -1782,6 +1785,38 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             },
             turnEvent("turn/started", turnIds[index]!),
             turnEvent("turn/completed", turnIds[index]!),
+          ];
+          const resumeEntries = (
+            index: number,
+            sandbox: Schema.Json,
+          ): ReadonlyArray<CodexReplay.CodexAppServerReplayEntry> => [
+            {
+              type: "expect_outbound",
+              label: `turn ${index + 1} (${turnModes[index]}) thread/resume`,
+              frame: {
+                id: 2 + index * 2,
+                method: "thread/resume",
+                params: {
+                  threadId: nativeThreadId,
+                  excludeTurns: true,
+                  cwd: "/workspace",
+                  model: "gpt-5.4",
+                  config: CodexAdapterV2.CODEX_THREAD_CONFIG,
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: `turn ${index + 1} thread/resume`,
+              frame: {
+                id: 2 + index * 2,
+                result: {
+                  thread: { id: nativeThreadId, updatedAt: 1782622450 + index },
+                  activePermissionProfile: null,
+                  sandbox,
+                },
+              },
+            },
           ];
           const preamble = codexReplayPreamble({
             nativeThreadId,
@@ -1812,13 +1847,27 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               entries: [
                 ...preamble,
                 ...runTurnEntries(0),
+                ...resumeEntries(1, {
+                  type: "workspaceWrite",
+                  writableRoots: [],
+                  networkAccess: false,
+                }),
                 ...runTurnEntries(1),
+                ...resumeEntries(2, { type: "dangerFullAccess" }),
                 ...runTurnEntries(2),
               ],
             }),
           );
 
           for (const [index, runtimeMode] of turnModes.entries()) {
+            const runtimePolicy = { ...CODEX_TEST_RUNTIME_POLICY, runtimeMode };
+            if (index > 0) {
+              yield* harness.runtime.resumeThread({
+                providerThread: harness.providerThread,
+                modelSelection: CODEX_TEST_MODEL_SELECTION,
+                runtimePolicy,
+              });
+            }
             yield* harness.runtime.startTurn({
               ...makeCodexTestTurnInput({
                 threadId: harness.threadId,
@@ -1829,7 +1878,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               }),
               runOrdinal: index + 1,
               providerTurnOrdinal: index + 1,
-              runtimePolicy: { ...CODEX_TEST_RUNTIME_POLICY, runtimeMode },
+              runtimePolicy,
             });
             yield* harness.awaitTerminal(index + 1);
           }

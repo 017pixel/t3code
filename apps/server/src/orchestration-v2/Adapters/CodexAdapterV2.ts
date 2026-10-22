@@ -1885,10 +1885,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         const activeTurns = yield* Ref.make(new Map<string, ActiveCodexTurnContext>());
         const turnTokenUsageByThread = new Map<string, CodexTurnTokenUsageState>();
         const permissionProfilesByThread = new Map<string, CodexUserPermissionProfile>();
+        // Resuming a loaded thread reports its current state, which has no
+        // active profile after any legacy sandboxPolicy turn, so only a
+        // reported profile replaces the remembered one.
         const rememberPermissionProfile = (nativeThreadId: string, response: unknown) => {
           const profile = codexUserPermissionProfile(response);
-          if (profile === undefined) permissionProfilesByThread.delete(nativeThreadId);
-          else permissionProfilesByThread.set(nativeThreadId, profile);
+          if (profile !== undefined) permissionProfilesByThread.set(nativeThreadId, profile);
         };
         const usageStateForThread = (nativeThreadId: string) => {
           let state = turnTokenUsageByThread.get(nativeThreadId);
