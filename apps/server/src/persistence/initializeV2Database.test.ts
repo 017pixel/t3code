@@ -152,6 +152,15 @@ it.effect("re-seeds a migration-only V2 store when V1 gained threads after the c
     }).pipe(Effect.provide(layerImporter));
 
     assert.deepEqual(yield* startV2, ["thread-a"]);
+    // Opening a client records visits; they are not V2 work worth keeping a stale copy for.
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TEMP TABLE visit_event AS
+        SELECT * FROM orchestration_events WHERE application_event_version = 2 LIMIT 1`;
+      yield* sql`UPDATE visit_event
+        SET sequence = NULL, event_id = 'visit-event', event_type = 'thread.visited', stream_version = stream_version + 1000`;
+      yield* sql`INSERT INTO orchestration_events SELECT * FROM visit_event`;
+    }).pipe(Effect.provide(layerDatabase));
 
     const v1 = new NodeSqlite.DatabaseSync(sourcePath);
     try {

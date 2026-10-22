@@ -41,11 +41,12 @@ function hasNewerV1Shells(source: NodeSqlite.DatabaseSync, copy: NodeSqlite.Data
 }
 
 // V1 import and project baseline migrations write event ids prefixed with `migration:`.
+// Clients record visits as soon as they open V2, so read state alone is not V2 work.
 function hasNativeV2Events(copy: NodeSqlite.DatabaseSync) {
   return (
     copy
       .prepare(
-        "SELECT 1 FROM orchestration_events WHERE application_event_version = 2 AND substr(event_id, 1, 10) <> 'migration:' LIMIT 1",
+        "SELECT 1 FROM orchestration_events WHERE application_event_version = 2 AND substr(event_id, 1, 10) <> 'migration:' AND event_type NOT IN ('thread.visited', 'thread.marked-unread') LIMIT 1",
       )
       .get() !== undefined
   );
