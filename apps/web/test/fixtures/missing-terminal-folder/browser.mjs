@@ -72,13 +72,6 @@ export async function reset(environmentId, threadId = fixture.threadId) {
       surface.kind === "terminal" ? surface.terminalIds : [],
     ),
   ]);
-  for (const terminalId of ids) {
-    await command(terminalEnvironment.close, environmentId, {
-      threadId,
-      terminalId,
-      deleteHistory: true,
-    });
-  }
   drawer.clearTerminalUiState(ref);
   drawer.setTerminalHeight(ref, fixture.terminalHeight);
   useRightPanelStore.setState((state) => {
@@ -86,6 +79,14 @@ export async function reset(environmentId, threadId = fixture.threadId) {
     delete byThreadKey[key];
     return { byThreadKey };
   });
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  for (const terminalId of ids) {
+    await command(terminalEnvironment.close, environmentId, {
+      threadId,
+      terminalId,
+      deleteHistory: true,
+    });
+  }
   return {
     environmentId,
     threadId,
@@ -122,9 +123,10 @@ export async function observeSurfaces() {
   const create = GhosttyTerminalSurface.create;
   GhosttyTerminalSurface.create = async function (mount, options) {
     const id = surfaces.length;
+    surfaces.push(null);
     record("create:start", { id });
     const surface = await create.call(this, mount, options);
-    surfaces.push(surface);
+    surfaces[id] = surface;
     record("create:ready", { id });
     return surface;
   };
