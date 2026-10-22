@@ -1414,6 +1414,10 @@ function isCodexHooksListUnsupported(error: CodexErrors.CodexAppServerRequestErr
 
 const MAX_CODEX_HOOK_DISCOVERY_DETAILS_LENGTH = 2_000;
 const MAX_CODEX_HOOK_SOURCE_PATHS = 10;
+const MAX_CODEX_HOOK_SOURCE_PATH_LENGTH = 256;
+
+const truncateWithEllipsis = (text: string, maxLength: number) =>
+  text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 
 const codexHookReviewTarget = (cwd: string | null, homePath: string | undefined) =>
   `\`codex\`${cwd === null ? "" : ` in ${cwd}`}${homePath ? ` with CODEX_HOME=${homePath}` : ""}`;
@@ -1439,10 +1443,7 @@ class CodexHookDiscoveryError extends Schema.TaggedError<CodexHookDiscoveryError
       cwd: input.cwd,
       ...(input.homePath ? { homePath: input.homePath } : {}),
       errorCount: input.errors.length,
-      details:
-        details.length > MAX_CODEX_HOOK_DISCOVERY_DETAILS_LENGTH
-          ? `${details.slice(0, MAX_CODEX_HOOK_DISCOVERY_DETAILS_LENGTH - 1)}…`
-          : details,
+      details: truncateWithEllipsis(details, MAX_CODEX_HOOK_DISCOVERY_DETAILS_LENGTH),
     });
   }
 
@@ -1461,7 +1462,9 @@ class CodexHookReviewRequiredError extends Schema.TaggedError<CodexHookReviewReq
     homePath: Schema.optional(Schema.String),
     hookCount: Schema.Number,
     sourcePathCount: Schema.Number,
-    sourcePaths: Schema.Array(Schema.String).check(Schema.isMaxLength(MAX_CODEX_HOOK_SOURCE_PATHS)),
+    sourcePaths: Schema.Array(
+      Schema.String.check(Schema.isMaxLength(MAX_CODEX_HOOK_SOURCE_PATH_LENGTH)),
+    ).check(Schema.isMaxLength(MAX_CODEX_HOOK_SOURCE_PATHS)),
   },
 ) {
   static fromPendingHooks(input: {
@@ -1475,7 +1478,9 @@ class CodexHookReviewRequiredError extends Schema.TaggedError<CodexHookReviewReq
       ...(input.homePath ? { homePath: input.homePath } : {}),
       hookCount: input.hooks.length,
       sourcePathCount: sourcePaths.length,
-      sourcePaths: sourcePaths.slice(0, MAX_CODEX_HOOK_SOURCE_PATHS),
+      sourcePaths: sourcePaths
+        .slice(0, MAX_CODEX_HOOK_SOURCE_PATHS)
+        .map((path) => truncateWithEllipsis(path, MAX_CODEX_HOOK_SOURCE_PATH_LENGTH)),
     });
   }
 

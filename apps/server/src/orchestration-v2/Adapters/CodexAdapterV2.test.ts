@@ -938,6 +938,33 @@ describe("CodexAdapterV2 session initialize", () => {
         }
         assert.include(session.requests(), "hooks/list");
         assert.notInclude(session.requests(), "thread/start");
+
+        // Source paths are arbitrary Codex output, so neither their count nor
+        // their length may push the review guidance out of the error.
+        const longPath = (index: number) =>
+          `/tmp/codex-home/${"nested/".repeat(80)}hooks-${index}.json`;
+        const crowded = yield* openHooksSession(
+          `hooks-${trustStatus}-crowded`,
+          listedHooks([
+            codexHook({ trustStatus }),
+            ...Array.from({ length: 14 }, (_, index) =>
+              codexHook({ trustStatus, sourcePath: longPath(index) }),
+            ),
+          ]),
+        );
+        const crowdedFailure = yield* crowded
+          .ensureThread(`thread-hooks-${trustStatus}-crowded`)
+          .pipe(Effect.flip);
+        const crowdedMessage = startFailureMessage(crowdedFailure);
+        assert.include(
+          crowdedMessage,
+          "15 enabled hooks until they are reviewed (/tmp/codex-home/hooks.json, ",
+        );
+        assert.include(crowdedMessage, "…, and 5 more). Open `codex`");
+        assert.include(crowdedMessage, "enter `/hooks` to review or disable them, then try again.");
+        assert.notInclude(crowdedMessage, longPath(0));
+        assert.isBelow(crowdedMessage.length, 3_000);
+        assert.notInclude(crowded.requests(), "thread/start");
       }).pipe(Effect.scoped, Effect.provide(hooksTestLayer)),
   );
 
