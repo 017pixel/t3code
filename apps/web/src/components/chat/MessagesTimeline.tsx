@@ -540,7 +540,11 @@ const ConversationTimeline = memo(function ConversationTimeline({
       return;
     }
     if (latestRun.runId === previous.runId) {
-      if (previous.status === "running" && latestRun.status === "interrupted") {
+      if (
+        previous.status === "running" &&
+        latestRun.status === "interrupted" &&
+        !expandedRunIds.has(latestRun.runId)
+      ) {
         autoExpandedRunIdRef.current = latestRun.runId;
         setExpandedRunIds((existing) => {
           const next = new Set(existing);
@@ -564,7 +568,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       next.delete(previous.runId);
       return next;
     });
-  }, [latestRun, listIdentityKey]);
+  }, [expandedRunIds, latestRun, listIdentityKey]);
 
   // Imported turns and post-steer work fold under synthetic keys, not the entries' run ids.
   const findFoldRunIds = findActive
