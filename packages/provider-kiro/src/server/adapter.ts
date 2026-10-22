@@ -25,7 +25,9 @@ import {
   makeAcpAdapterV2,
   type AcpAdapterV2Flavor,
   type AcpAdapterV2RuntimeInput,
+  type AcpAdapterV2SubagentUpdate,
 } from "@t3tools/provider-acp/server/adapter";
+import type { AcpToolCallState } from "@t3tools/provider-acp/server/runtimeModel";
 import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
 import {
   ProviderAdapterDriverCreateError,
@@ -64,6 +66,11 @@ const KiroProviderCapabilitiesV2 = {
   tools: {
     ...AcpProviderCapabilitiesV2.tools,
     supportsMcpTools: true,
+  },
+  subagents: {
+    ...AcpProviderCapabilitiesV2.subagents,
+    supportsSubagents: true,
+    emitsSubagentLifecycle: true,
   },
 } satisfies OrchestrationV2ProviderCapabilities;
 
@@ -316,6 +323,52 @@ function makeKiroCloudConfigFilter() {
   };
 }
 
+const decodeKiroAgentSubtask = Schema.decodeUnknownOption(
+  Schema.Struct({
+    kiro: Schema.Struct({ agentSubtaskId: Schema.String, kind: Schema.optionalKey(Schema.String) }),
+  }),
+);
+const decodeKiroSubagentInput = Schema.decodeUnknownOption(
+  Schema.Struct({ name: Schema.String, prompt: Schema.String }),
+);
+
+/**
+ * Kiro runs a sub-agent inside the parent's session (live 2.29.1, reported by
+ * @tinuva, and 2.33.1). `invoke_sub_agent` is a tool call tagged
+ * `_meta.kiro.kind: "agent-subtask"`, and every frame the sub-agent then sends
+ * (its text, its tool calls, its `Subagent Response`) carries the same
+ * `_meta.kiro.agentSubtaskId`. Routing those frames to that id as their
+ * session gives the shared adapter the child session it projects into the
+ * sub-agent's thread.
+ */
+function normalizeKiroSessionUpdate(
+  notification: EffectAcpSchema.SessionNotification,
+): EffectAcpSchema.SessionNotification {
+  const { update } = notification;
+  const subtask = decodeKiroAgentSubtask("_meta" in update ? update._meta : undefined);
+  return Option.isSome(subtask) && subtask.value.kiro.kind !== "agent-subtask"
+    ? { ...notification, sessionId: subtask.value.kiro.agentSubtaskId }
+    : notification;
+}
+
+/** The `invoke_sub_agent` call; it completes with the sub-agent's final response. */
+function extractKiroSubagentUpdate(tool: AcpToolCallState): AcpAdapterV2SubagentUpdate | undefined {
+  const subtask = decodeKiroAgentSubtask(tool.data.meta);
+  if (Option.isNone(subtask) || subtask.value.kiro.kind !== "agent-subtask") return undefined;
+  const input = decodeKiroSubagentInput(tool.data.rawInput);
+  const status =
+    tool.status === "failed" ? "failed" : tool.status === "completed" ? "completed" : "running";
+  return {
+    nativeTaskId: tool.toolCallId,
+    childSessionId: subtask.value.kiro.agentSubtaskId,
+    prompt: Option.isSome(input) ? input.value.prompt : (tool.title ?? "Kiro sub-agent"),
+    title: Option.isSome(input) ? input.value.name : null,
+    model: null,
+    status,
+    result: typeof tool.data.rawOutput === "string" ? tool.data.rawOutput : null,
+  };
+}
+
 /**
  * Kiro's prompt errors carry a message meant for the user (live 2.27: -32000
  * "The model 'x' is not available. Please select a different model and try
@@ -352,6 +405,8 @@ function makeKiroAcpAdapterFlavor(options: KiroAdapterV2Options): AcpAdapterV2Fl
     makeRuntime,
     promptFailure: kiroPromptFailure,
     ignoreSessionUpdate: makeKiroCloudConfigFilter(),
+    normalizeSessionUpdate: normalizeKiroSessionUpdate,
+    extractSubagentUpdate: extractKiroSubagentUpdate,
     // See applyKiroModelSelection: `model` arrives after session/new.
     modelOptionArrivesLate: true,
     applyModelSelection: applyKiroModelSelection(

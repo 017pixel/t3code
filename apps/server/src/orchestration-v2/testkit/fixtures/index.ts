@@ -147,6 +147,7 @@ import { assertSubagentOutput } from "./subagent/codex_output.ts";
 import { assertClaudeSubagentOutput } from "./subagent/claude_output.ts";
 import { subagentInput } from "./subagent/input.ts";
 import { assertCursorSubagentOutput } from "./subagent/cursor_output.ts";
+import { assertKiroSubagentOutput } from "./subagent/kiro_output.ts";
 import { assertSubagentContinueOutput } from "./subagent_continue/codex_output.ts";
 import { subagentContinueInput } from "./subagent_continue/input.ts";
 import { assertSubagentV2Output } from "./subagent_v2/codex_output.ts";
@@ -969,6 +970,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         modelSelection: CURSOR_MODEL_SELECTION,
         runtimePolicyOverride: READ_ONLY_NEVER_POLICY,
         assertOutput: assertCursorSubagentOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("kiro"),
+        transcriptFile: new URL("./subagent/kiro_transcript.ndjson", import.meta.url),
+        modelSelection: KIRO_MODEL_SELECTION,
+        assertOutput: assertKiroSubagentOutput,
       },
     ],
   },
