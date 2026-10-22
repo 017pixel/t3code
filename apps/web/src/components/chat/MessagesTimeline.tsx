@@ -487,8 +487,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
     return disclosureAnchorKey === null || row.id === disclosureAnchorKey;
   };
 
+  const userExpandedRunIdsRef = useRef(new Set<RunId>());
   const onToggleTurnFold = (runId: RunId) => {
     suspendEndScrollMaintenanceForDisclosure(`turn-fold:${runId}`);
+    if (expandedRunIds.has(runId)) {
+      userExpandedRunIdsRef.current.delete(runId);
+    } else {
+      userExpandedRunIdsRef.current.add(runId);
+    }
     setExpandedRunIds((existing) => {
       const next = new Set(existing);
       if (next.has(runId)) {
@@ -528,9 +534,15 @@ const ConversationTimeline = memo(function ConversationTimeline({
   useEffect(() => {
     const { identity, run: previous } = previousLatestRunRef.current;
     previousLatestRunRef.current = { identity: listIdentityKey, run: latestRun };
-    if (identity !== listIdentityKey || !latestRun || previous?.runId === undefined) {
+    if (identity !== listIdentityKey) {
+      userExpandedRunIdsRef.current = new Set();
       return;
     }
+    if (!latestRun || previous?.runId === undefined) {
+      return;
+    }
+    // An in-session interrupt expands its turn so the user keeps their place; the
+    // next turn folds it again unless the user opened it themselves.
     if (latestRun.runId === previous.runId) {
       if (previous.status === "running" && latestRun.status === "interrupted") {
         setExpandedRunIds((existing) => {
@@ -539,6 +551,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
           return next;
         });
       }
+      return;
+    }
+    if (userExpandedRunIdsRef.current.has(previous.runId)) {
       return;
     }
     setExpandedRunIds((existing) => {

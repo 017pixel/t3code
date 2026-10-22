@@ -275,6 +275,63 @@ describe("MessagesTimeline turn folds", () => {
     expect(fold().getAttribute("aria-expanded")).toBe("true");
     expect(screen.text()).toContain("Interim progress note");
   });
+
+  it("folds an interrupted turn it expanded once the next run starts", async () => {
+    const props = baseProps();
+    const firstRun = RunId.make("run-1");
+    const secondRun = RunId.make("run-2");
+    const at = (second: number) => new Date(Date.parse(CREATED_AT) + second * 1000).toISOString();
+    const settled = [
+      message("First prompt", { runId: firstRun, inputIntent: "turn_start" }, "user-1"),
+      message(
+        "Interim progress note",
+        { role: "assistant", runId: firstRun, createdAt: at(2), updatedAt: at(2) },
+        "assistant-interim",
+      ),
+      message(
+        "Final reply",
+        { role: "assistant", runId: firstRun, createdAt: at(9), updatedAt: at(9) },
+        "assistant-final",
+      ),
+    ];
+    const timeline = (entries: Entry[], extra: Partial<TimelineProps>) => (
+      <MessagesTimeline {...props} timelineEntries={entries} {...extra} />
+    );
+    await using screen = await renderElement(
+      timeline(settled, {
+        isWorking: true,
+        activeTurnInProgress: true,
+        latestRun: { runId: firstRun, status: "running", startedAt: at(0), completedAt: null },
+      }),
+    );
+    await screen.rerender(
+      timeline(settled, {
+        latestRun: { runId: firstRun, status: "interrupted", startedAt: at(0), completedAt: at(9) },
+      }),
+    );
+    expect(screen.button(/^You stopped after/).getAttribute("aria-expanded")).toBe("true");
+
+    await screen.rerender(
+      timeline(
+        [
+          ...settled,
+          message(
+            "Follow-up",
+            { runId: secondRun, inputIntent: "turn_start", createdAt: at(20), updatedAt: at(20) },
+            "user-2",
+          ),
+        ],
+        {
+          isWorking: true,
+          activeTurnInProgress: true,
+          latestRun: { runId: secondRun, status: "running", startedAt: at(21), completedAt: null },
+        },
+      ),
+    );
+
+    expect(screen.button(/^Worked for/).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.text()).not.toContain("Interim progress note");
+  });
 });
 
 describe("MessagesTimeline automation prompts", () => {
