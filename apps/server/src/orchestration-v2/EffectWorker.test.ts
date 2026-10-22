@@ -86,6 +86,7 @@ function layerExecutorFor(input: {
   readonly continueAfterRestart?: boolean;
   readonly interrupt?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["interrupt"];
   readonly rollback?: CheckpointRollbackService.CheckpointRollbackServiceV2Shape["execute"];
+  readonly start?: ProviderTurnStartService.ProviderTurnStartServiceV2Shape["start"];
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const layerDependencies = Layer.mergeAll(
@@ -118,19 +119,21 @@ function layerExecutorFor(input: {
     Layer.succeed(
       ProviderTurnStartService.ProviderTurnStartServiceV2,
       ProviderTurnStartService.ProviderTurnStartServiceV2.of({
-        start: () =>
-          Effect.gen(function* () {
-            yield* record("start");
-            if (
-              input.failFirstStart !== undefined &&
-              (yield* Ref.getAndSet(input.failFirstStart, false))
-            ) {
-              return yield* new ProviderTurnStartService.ProviderTurnStartError({
-                runId,
-                cause: "simulated first start failure",
-              });
-            }
-          }),
+        start:
+          input.start ??
+          (() =>
+            Effect.gen(function* () {
+              yield* record("start");
+              if (
+                input.failFirstStart !== undefined &&
+                (yield* Ref.getAndSet(input.failFirstStart, false))
+              ) {
+                return yield* new ProviderTurnStartService.ProviderTurnStartError({
+                  runId,
+                  cause: "simulated first start failure",
+                });
+              }
+            })),
       }),
     ),
     Layer.succeed(
@@ -626,12 +629,13 @@ it.effect("a provider that never answers turn starts does not hold every worker"
       retry: () => Effect.succeed(true),
       fail: () => Effect.succeed(true),
     });
-    const layerExecutor = Layer.succeed(
-      EffectWorker.OrchestrationEffectExecutorV2,
-      EffectWorker.OrchestrationEffectExecutorV2.of({
-        // The shared Codex app-server stays alive but never answers thread/start.
-        execute: (effect) =>
-          effect.id === claude.id
+    const layerExecutor = layerExecutorFor({
+      events: yield* Ref.make<ReadonlyArray<string>>([]),
+      // The shared Codex app-server stays alive but never answers thread/start.
+      start: (input) =>
+        input.failBeforeStart !== undefined
+          ? Effect.void
+          : input.runId === RunId.make("run:claude")
             ? Deferred.succeed(claudeStarted, undefined)
             : Ref.updateAndGet(wedgedStarts, (count) => count + 1).pipe(
                 Effect.flatMap((count) =>
@@ -641,8 +645,7 @@ it.effect("a provider that never answers turn starts does not hold every worker"
                 ),
                 Effect.andThen(Effect.never),
               ),
-      }),
-    );
+    });
     const layerWorker = EffectWorker.layerWithOptions().pipe(
       Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
     );
@@ -739,5 +742,67 @@ it.effect.each(["timeout", "ordinary"] as const)(
       );
 
       assert.equal(yield* Ref.get(settled), failure === "timeout" ? "failed" : "retried");
+    }),
+);
+
+it.effect.each([
+  { type: "provider-turn.start", final: false },
+  { type: "provider-turn.start", final: true },
+  { type: "provider-turn.restart", final: false },
+  { type: "provider-turn.restart", final: true },
+] as const)(
+  "a $type that hits the worker backstop settles its run only when final=$final",
+  ({ type, final }) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const base = restartEffect(now, { type: "detach" });
+      const effect: EffectOutbox.OrchestrationEffectV2 = {
+        ...base,
+        attemptCount: final ? 5 : 1,
+        ...(type === "provider-turn.start"
+          ? { request: { type: "provider-turn.start", runId } }
+          : {}),
+      };
+      const events = yield* Ref.make<ReadonlyArray<string>>([]);
+      const outboxOutcome = yield* Ref.make<"retried" | "failed" | null>(null);
+      const layerOutbox = Layer.mock(EffectOutbox.EffectOutboxV2)({
+        claimNext: () => Effect.succeedSome(effect),
+        get: () => Effect.succeedSome(effect),
+        awaitCancellation: () => Effect.never,
+        clearCancellation: () => Effect.void,
+        retry: () => Ref.set(outboxOutcome, "retried").pipe(Effect.as(true)),
+        fail: () => Ref.set(outboxOutcome, "failed").pipe(Effect.as(true)),
+      });
+      const layerExecutor = layerExecutorFor({
+        events,
+        // The provider stays alive but never answers the turn start.
+        start: (input) =>
+          input.failBeforeStart === undefined
+            ? Effect.never
+            : Ref.update(events, (current) => [
+                ...current,
+                `fail-before-start:${input.runId}:${Cause.isTimeoutError(input.failBeforeStart)}`,
+              ]),
+      });
+
+      yield* Effect.gen(function* () {
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const fiber = yield* worker.runOnce.pipe(Effect.forkScoped);
+        yield* TestClock.adjust("12 minutes");
+        yield* Fiber.join(fiber);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          EffectWorker.layerWithOptions({ maxAttempts: 5 }).pipe(
+            Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
+          ),
+        ),
+      );
+
+      assert.equal(yield* Ref.get(outboxOutcome), final ? "failed" : "retried");
+      assert.deepEqual(
+        (yield* Ref.get(events)).filter((event) => event.startsWith("fail-before-start")),
+        final ? [`fail-before-start:${runId}:true`] : [],
+      );
     }),
 );

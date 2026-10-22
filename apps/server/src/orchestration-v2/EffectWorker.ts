@@ -5,7 +5,6 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import { identity } from "effect/Function";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
@@ -69,6 +68,19 @@ export class OrchestrationEffectExecutorV2 extends Context.Service<
   OrchestrationEffectExecutorV2Shape
 >()("t3/orchestration-v2/EffectWorker/OrchestrationEffectExecutorV2") {}
 
+// Backstop for provider turn control effects. Each provider call carries its
+// own tighter deadline; this catches unbounded work between them so a provider
+// that stopped answering cannot hold a worker forever.
+const PROVIDER_TURN_CONTROL_EFFECT_TIMEOUT = Duration.minutes(12);
+const PROVIDER_TURN_CONTROL_EFFECT_TYPES = [
+  "provider-turn.start",
+  "provider-turn.interrupt",
+  "provider-turn.steer",
+  "provider-turn.restart",
+] as const satisfies ReadonlyArray<EffectOutbox.OrchestrationEffectV2["request"]["type"]>;
+const isProviderTurnControl = (effect: EffectOutbox.OrchestrationEffectV2) =>
+  PROVIDER_TURN_CONTROL_EFFECT_TYPES.some((type) => type === effect.request.type);
+
 export const layerExecutor: Layer.Layer<
   OrchestrationEffectExecutorV2,
   never,
@@ -95,7 +107,7 @@ export const layerExecutor: Layer.Layer<
       yield* ThreadTitleRegenerationService.ThreadTitleRegenerationService;
     const threads = yield* ThreadManagementService.ThreadManagementService;
     const settings = yield* ServerSettings.ServerSettingsService;
-    return OrchestrationEffectExecutorV2.of({
+    const executor = OrchestrationEffectExecutorV2.of({
       execute: (effect, options) => {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
@@ -554,6 +566,41 @@ export const layerExecutor: Layer.Layer<
         }
       },
     });
+    return OrchestrationEffectExecutorV2.of({
+      execute: (effect, options) => {
+        if (!isProviderTurnControl(effect)) return executor.execute(effect, options);
+        const request = effect.request;
+        return executor.execute(effect, options).pipe(
+          Effect.timeout(PROVIDER_TURN_CONTROL_EFFECT_TIMEOUT),
+          Effect.catchTags({
+            TimeoutError: (cause) =>
+              // The timeout interrupted the start before it could settle its
+              // run, so the final attempt fails the run that is still starting.
+              (options?.willRetry !== true &&
+              (request.type === "provider-turn.start" || request.type === "provider-turn.restart")
+                ? providerTurnStart
+                    .start({
+                      threadId: effect.threadId,
+                      runId: request.runId,
+                      failBeforeStart: cause,
+                    })
+                    .pipe(Effect.ignore({ log: true }))
+                : Effect.void
+              ).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: request.type,
+                      cause,
+                    }),
+                  ),
+                ),
+              ),
+          }),
+        );
+      },
+    });
   }),
 );
 
@@ -583,19 +630,6 @@ export class OrchestrationEffectWorkerV2 extends Context.Service<
   OrchestrationEffectWorkerV2,
   OrchestrationEffectWorkerV2Shape
 >()("t3/orchestration-v2/EffectWorker/OrchestrationEffectWorkerV2") {}
-
-// Backstop for provider turn control effects. Each provider call carries its
-// own tighter deadline; this catches unbounded work between them so a provider
-// that stopped answering cannot hold a worker forever.
-const PROVIDER_TURN_CONTROL_EFFECT_TIMEOUT = Duration.minutes(12);
-const PROVIDER_TURN_CONTROL_EFFECT_TYPES = [
-  "provider-turn.start",
-  "provider-turn.interrupt",
-  "provider-turn.steer",
-  "provider-turn.restart",
-] as const satisfies ReadonlyArray<EffectOutbox.OrchestrationEffectV2["request"]["type"]>;
-const providerTurnControl = (effect: EffectOutbox.OrchestrationEffectV2) =>
-  PROVIDER_TURN_CONTROL_EFFECT_TYPES.some((type) => type === effect.request.type);
 
 // A steer that timed out may still have been accepted, and providers do not
 // deduplicate steering input, so a retry could deliver the message twice.
@@ -778,12 +812,7 @@ export const layerWithOptions = (
 
           const execution = executor
             .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
-            .pipe(
-              providerTurnControl(effect)
-                ? Effect.timeout(PROVIDER_TURN_CONTROL_EFFECT_TIMEOUT)
-                : identity,
-              Effect.as("executed" as const),
-            );
+            .pipe(Effect.as("executed" as const));
           const exit = yield* Effect.exit(Effect.raceFirst(execution, cancellation)).pipe(
             Effect.ensuring(outbox.clearCancellation(effect.id)),
           );
