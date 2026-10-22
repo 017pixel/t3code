@@ -153,7 +153,14 @@ export function installSyntheticEvents() {
     };
     window.__reset = async () => {
       const d = await import("/src/composerDraftStore.ts");
-      d.clearComposerDraftsEnvironment(location.pathname.split("/")[1]);
+      const [, route, id] = location.pathname.split("/");
+      const environmentId =
+        route === "draft"
+          ? d.useComposerDraftStore.getState().getDraftSession(decodeURIComponent(id))
+              ?.environmentId
+          : route;
+      if (!environmentId) throw new Error("Cannot resolve the active draft environment");
+      d.clearComposerDraftsEnvironment(environmentId);
       document.querySelector("[role=textbox][contenteditable=true]")?.focus();
     };
     window.__state = async () => {
