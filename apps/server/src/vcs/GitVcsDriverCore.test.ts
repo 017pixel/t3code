@@ -3274,6 +3274,66 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect(
+      "fetches a gitlink the source checkout lacks and keeps inactive submodules empty",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const pathService = yield* Path.Path;
+
+          const previousAllowedProtocol = process.env.GIT_ALLOW_PROTOCOL;
+          process.env.GIT_ALLOW_PROTOCOL = "file";
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              if (previousAllowedProtocol === undefined) {
+                delete process.env.GIT_ALLOW_PROTOCOL;
+              } else {
+                process.env.GIT_ALLOW_PROTOCOL = previousAllowedProtocol;
+              }
+            }),
+          );
+
+          const sharedRepo = yield* makeTmpDir("git-shared-");
+          yield* initRepoWithCommit(sharedRepo);
+          const skippedRepo = yield* makeTmpDir("git-skipped-");
+          yield* initRepoWithCommit(skippedRepo);
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          yield* git(cwd, ["submodule", "add", `file://${sharedRepo}`, "shared"]);
+          yield* git(cwd, ["submodule", "add", `file://${skippedRepo}`, "skipped"]);
+          yield* git(cwd, ["commit", "-m", "add submodules"]);
+
+          // Point the gitlink at a commit the populated source submodule never fetched.
+          yield* writeTextFile(sharedRepo, "NEWER.md", "# newer\n");
+          yield* git(sharedRepo, ["add", "."]);
+          yield* git(sharedRepo, ["commit", "-m", "newer"]);
+          const gitlink = (yield* git(sharedRepo, ["rev-parse", "HEAD"])).trim();
+          yield* git(cwd, ["update-index", "--cacheinfo", `160000,${gitlink},shared`]);
+          yield* git(cwd, ["commit", "-m", "bump shared"]);
+          yield* git(cwd, ["config", "submodule.active", "shared"]);
+          yield* git(cwd, ["config", "--unset", "submodule.skipped.active"]);
+          yield* git(cwd, ["config", "--unset", "submodule.skipped.url"]);
+
+          const worktreePath = pathService.join(yield* makeTmpDir("git-worktrees-"), "bumped");
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          yield* driver.createWorktree({
+            cwd,
+            path: worktreePath,
+            refName: initialBranch,
+            newRefName: "feature/bumped-submodule",
+          });
+
+          assert.equal(
+            (yield* git(pathService.join(worktreePath, "shared"), ["rev-parse", "HEAD"])).trim(),
+            gitlink,
+          );
+          assert.deepEqual(
+            yield* fileSystem.readDirectory(pathService.join(worktreePath, "skipped")),
+            [],
+          );
+        }),
+    );
+
     it.effect("still creates the worktree when submodule checkout fails", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;

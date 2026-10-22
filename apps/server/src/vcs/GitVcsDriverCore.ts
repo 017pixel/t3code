@@ -3708,6 +3708,51 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     },
   );
 
+  // `clone --reference` refuses a shallow repository, and a partial clone lacks
+  // objects its refs promise, so neither can lend a complete object set.
+  const SUBMODULE_REFERENCE_SCRIPT =
+    '[ "$(git rev-parse --is-shallow-repository)" = false ] && ' +
+    "! git config extensions.partialClone >/dev/null && " +
+    'printf "%s\\0%s\\0%s\\0" "$displaypath" "$sm_path" "$(git rev-parse --absolute-git-dir)" || :';
+
+  /**
+   * The checked-out submodules of `cwd`'s repository that can lend their
+   * objects, parents before children (`foreach` visits in pre-order).
+   */
+  const listSubmoduleReferences = (cwd: string) =>
+    runGitStdout("GitVcsDriver.createWorktree.listSubmoduleReferences", cwd, [
+      "rev-parse",
+      "--show-toplevel",
+    ]).pipe(
+      // `$displaypath` is relative to the working directory, not the root.
+      Effect.flatMap((topLevel) =>
+        runGitStdout("GitVcsDriver.createWorktree.listSubmoduleReferences", topLevel.trim(), [
+          "submodule",
+          "--quiet",
+          "foreach",
+          "--recursive",
+          SUBMODULE_REFERENCE_SCRIPT,
+        ]),
+      ),
+      Effect.map((stdout) => {
+        const fields = stdout.split("\0");
+        const references: Array<{ parent: string; path: string; gitDir: string }> = [];
+        for (let index = 0; index + 2 < fields.length; index += 3) {
+          const displayPath = fields[index]!;
+          const smPath = fields[index + 1]!;
+          const gitDir = fields[index + 2]!;
+          if (smPath === "" || gitDir === "" || !displayPath.endsWith(smPath)) continue;
+          references.push({
+            parent: displayPath.slice(0, -smPath.length),
+            path: smPath,
+            gitDir,
+          });
+        }
+        return references;
+      }),
+      Effect.orElseSucceed(() => []),
+    );
+
   const createWorktree: GitVcsDriver.GitVcsDriver["Service"]["createWorktree"] = Effect.fn(
     "createWorktree",
   )(function* (input, options) {
@@ -3804,19 +3849,64 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         yield* progress.onSubmodulesStarted();
       }
       const onSubmoduleLine = progress?.onSubmoduleLine;
-      yield* runGit(
-        "GitVcsDriver.createWorktree.updateSubmodules",
-        worktreePath,
-        submoduleMode.value === "recursive"
-          ? ["submodule", "update", "--init", "--recursive"]
-          : ["submodule", "update", "--init"],
-        onSubmoduleLine
-          ? {
-              env: { LC_ALL: "C" },
-              progress: { onStdoutLine: onSubmoduleLine, onStderrLine: onSubmoduleLine },
-            }
-          : {},
-      ).pipe(
+      const submoduleOptions: ExecuteGitOptions = onSubmoduleLine
+        ? {
+            env: { LC_ALL: "C" },
+            progress: { onStdoutLine: onSubmoduleLine, onStderrLine: onSubmoduleLine },
+          }
+        : {};
+      const references = yield* listSubmoduleReferences(input.cwd);
+      yield* Effect.gen(function* () {
+        // Each linked worktree clones its own submodule repositories. Borrow
+        // the objects the source checkout already has, one path at a time
+        // because `git submodule update` passes a single `--reference` to every
+        // clone, and dissociate so the clone survives the source being pruned.
+        // `init` without paths keeps `submodule.active`, and the update without
+        // `--init` skips anything left inactive. A failed borrow leaves its
+        // path to the full update below, which fetches whatever is missing.
+        for (const reference of references) {
+          if (submoduleMode.value === "top-level" && reference.parent !== "") continue;
+          const parent = path.join(worktreePath, reference.parent);
+          yield* runGit(
+            "GitVcsDriver.createWorktree.reuseSubmodule",
+            parent,
+            ["submodule", "init"],
+            submoduleOptions,
+          ).pipe(
+            Effect.andThen(
+              runGit(
+                "GitVcsDriver.createWorktree.reuseSubmodule",
+                parent,
+                [
+                  "submodule",
+                  "update",
+                  "--reference",
+                  reference.gitDir,
+                  "--dissociate",
+                  "--",
+                  reference.path,
+                ],
+                submoduleOptions,
+              ),
+            ),
+            Effect.catchTags({
+              GitCommandError: (cause) =>
+                Effect.logDebug("worktree submodule reuse failed; cloning it instead", {
+                  path: reference.parent + reference.path,
+                  cause,
+                }),
+            }),
+          );
+        }
+        yield* runGit(
+          "GitVcsDriver.createWorktree.updateSubmodules",
+          worktreePath,
+          submoduleMode.value === "recursive"
+            ? ["submodule", "update", "--init", "--recursive"]
+            : ["submodule", "update", "--init"],
+          submoduleOptions,
+        );
+      }).pipe(
         Effect.matchEffect({
           onFailure: (cause) =>
             Effect.logWarning("worktree submodule checkout failed; submodule paths are empty", {
