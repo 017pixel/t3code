@@ -1242,33 +1242,92 @@ describe("deriveWorkspaceMutationId", () => {
 });
 
 describe("deriveThreadPendingBackgroundTasks", () => {
-  it.each(["running", "waiting"])(
+  const base = makeThreadProjectionFixture();
+  const run = (ordinal: number, status: string) => ({
+    id: RunId.make(`run-${ordinal}`),
+    ordinal,
+    status,
+  });
+  const item = (ordinal: number, type: string, nativeId: string, input: string) => ({
+    id: TurnItemId.make(`item-${nativeId}`),
+    type,
+    status: "running",
+    title: null,
+    runId: RunId.make(`run-${ordinal}`),
+    nativeItemRef: { nativeId },
+    input,
+  });
+  const projection = (overrides: object) =>
+    ({ ...base, ...overrides }) as unknown as ReturnType<typeof makeThreadProjectionFixture>;
+
+  it.each(["queued", "preparing", "running"])(
     "keeps an earlier run's background shell while a %s follow-up run has a foreground command",
     (followUpStatus) => {
-      const base = makeThreadProjectionFixture();
-      const run = (ordinal: number, status: string) => ({
-        id: RunId.make(`run-${ordinal}`),
-        ordinal,
-        status,
-      });
-      const shell = (ordinal: number, command: string) => ({
-        id: TurnItemId.make(`shell-${ordinal}`),
-        type: "command_execution",
-        status: "running",
-        title: null,
-        runId: RunId.make(`run-${ordinal}`),
-        nativeItemRef: { nativeId: `native-shell-${ordinal}` },
-        input: command,
-      });
-      const projection = {
-        ...base,
-        runs: [run(1, "completed"), run(2, followUpStatus)],
-        turnItems: [shell(1, "sleep 600"), shell(2, "sleep 15")],
-      } as unknown as ReturnType<typeof makeThreadProjectionFixture>;
-
-      expect(deriveThreadPendingBackgroundTasks(projection)).toEqual([
-        { taskId: "native-shell-1", description: "sleep 600", kind: "command" },
-      ]);
+      expect(
+        deriveThreadPendingBackgroundTasks(
+          projection({
+            runs: [run(1, "completed"), run(2, followUpStatus)],
+            turnItems: [
+              item(1, "command_execution", "shell-1", "sleep 600"),
+              item(2, "command_execution", "shell-2", "sleep 15"),
+            ],
+          }),
+        ),
+      ).toEqual([{ taskId: "shell-1", description: "sleep 600", kind: "command" }]);
     },
   );
+
+  it("does not list a live run's child from the provider roster as background", () => {
+    // The roster is not run-tied, and Muse keys it by item id while the child's row uses the
+    // child session id, so the live run's child would reappear here.
+    expect(
+      deriveThreadPendingBackgroundTasks(
+        projection({
+          runs: [run(1, "completed"), run(2, "running")],
+          providerThreads: [
+            {
+              id: "provider-thread-1",
+              providerInstanceId: base.thread.providerInstanceId,
+              pendingBackgroundTasks: [
+                { taskId: "item-child-1", kind: "subagent" },
+                { taskId: "item-child-2", kind: "subagent" },
+              ],
+            },
+          ],
+          turnItems: [
+            { ...item(1, "subagent", "session-child-1", ""), prompt: "child 1" },
+            { ...item(2, "subagent", "session-child-2", ""), prompt: "child 2" },
+          ],
+        }),
+      ),
+    ).toEqual([{ taskId: "session-child-1", description: "child 1", kind: "subagent" }]);
+  });
+
+  it("keeps the provider roster while a follow-up run only waits in the queue", () => {
+    expect(
+      deriveThreadPendingBackgroundTasks(
+        projection({
+          runs: [run(1, "waiting"), run(2, "queued")],
+          providerThreads: [
+            {
+              id: "provider-thread-1",
+              providerInstanceId: base.thread.providerInstanceId,
+              pendingBackgroundTasks: [{ taskId: "task-1", kind: "background_task" }],
+            },
+          ],
+        }),
+      ),
+    ).toEqual([{ taskId: "task-1", kind: "background_task" }]);
+  });
+
+  it("lists a lone waiting run's background child, since waiting is post-terminal drain", () => {
+    expect(
+      deriveThreadPendingBackgroundTasks(
+        projection({
+          runs: [run(1, "waiting")],
+          turnItems: [{ ...item(1, "subagent", "child-1", ""), prompt: "child 1" }],
+        }),
+      ),
+    ).toEqual([{ taskId: "child-1", description: "child 1", kind: "subagent" }]);
+  });
 });

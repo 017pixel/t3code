@@ -1670,12 +1670,14 @@ export function presentThreadShellFromProjection(
   };
 }
 
-const LIVE_RUN_STATUSES = new Set(["queued", "preparing", "starting", "running", "waiting"]);
+// Excludes `waiting`: that is post-terminal checkpoint drain, so its agent turn is over.
+const LIVE_RUN_STATUSES = new Set(["queued", "preparing", "starting", "running"]);
 
 /**
  * Background work the provider still runs after an earlier run ended. It
  * stays listed while a later run is live; that live run's own items are its
- * foreground work, so they never count as background.
+ * foreground work, so they never count as background. The provider roster is
+ * not run-tied and can name an executing run's children, so it is ignored then.
  */
 export function deriveThreadPendingBackgroundTasks(projection: ThreadProjection | null) {
   if (projection === null) return [];
@@ -1686,13 +1688,17 @@ export function deriveThreadPendingBackgroundTasks(projection: ThreadProjection 
   const liveRunIds = new Set(
     projection.runs.filter((run) => LIVE_RUN_STATUSES.has(run.status)).map((run) => run.id),
   );
+  // A queued run can wait behind the roster's work; only a started run has children of its own.
+  const runIsExecuting = projection.runs.some(
+    (run) => run.status === "starting" || run.status === "running",
+  );
   const latestRun =
     usageLimitRunPresentedAsLatest(projection.runs, projection.turnItems, sessionError) ??
     latestUnheldRun(projection.runs.filter((run) => !liveRunIds.has(run.id)));
   return [
     ...derivePendingBackgroundWork({
       latestRun,
-      providerThreads: projection.providerThreads,
+      providerThreads: runIsExecuting ? [] : projection.providerThreads,
       turnItems: projection.turnItems.filter(
         (item) => item.runId === null || !liveRunIds.has(item.runId),
       ),
