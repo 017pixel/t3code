@@ -7,7 +7,8 @@
 //   node apps/web/scripts/seed-reasoning-preview-fixtures.mjs .t3/userdata/statev2.sqlite
 //
 // These are projection-only visual fixtures (orchestration_events is untouched).
-// Every other thread is archived so screenshots only show fixture content.
+// Every other thread is archived and every fixture thread is marked active, so
+// the sidebar and screenshots only show fixture content.
 import * as NodeSqlite from "node:sqlite";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -218,9 +219,10 @@ try {
     db.prepare(
       `UPDATE orchestration_v2_projection_threads
        SET title = ?, updated_at = ?, archived_at = NULL,
-           payload_json = json_set(payload_json, '$.title', ?, '$.updatedAt', ?, '$.archivedAt', NULL)
+           payload_json = json_set(payload_json, '$.title', ?, '$.updatedAt', ?, '$.archivedAt', NULL,
+             '$.settledOverride', 'active', '$.settledAt', NULL, '$.unsettledAt', ?)
        WHERE thread_id = ?`,
-    ).run(title, updatedAt, title, updatedAt, threadId);
+    ).run(title, updatedAt, title, updatedAt, updatedAt, threadId);
     console.log(`${name}\t${text.length}\t${threadId}`);
   });
   db.exec("COMMIT");
