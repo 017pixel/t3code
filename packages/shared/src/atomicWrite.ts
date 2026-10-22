@@ -34,6 +34,11 @@ const replacedMode = (fs: FileSystem.FileSystem, targetPath: string) =>
     ),
   );
 
+const isUnsupportedSync = (error: PlatformError.PlatformError) => {
+  const code = (error.reason.cause as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EINVAL" || code === "ENOTSUP" || code === "ENOSYS";
+};
+
 /**
  * A symlinked target is resolved first so the link survives and its destination is
  * rewritten, since renaming over the link itself would swap it for a regular file.
@@ -64,23 +69,29 @@ export const writeFileStringAtomically = (input: {
       const tempPath = path.join(tempDirectory, "contents.tmp");
 
       yield* fs.writeFileString(tempPath, input.contents);
-      // Windows modes carry only the read-only bit, which the rename below handles.
-      if (platform !== "win32") yield* fs.chmod(tempPath, yield* replacedMode(fs, targetPath));
-      // Without this a crash soon after the rename can leave the target empty. A sync
-      // flushes the file, not just its handle, and the handle closes before the rename,
-      // which Windows refuses while it is open.
+      // The handle opens before the chmod, which may drop write access, and closes
+      // before the rename, which Windows refuses while it is open. The sync flushes
+      // the contents and the mode, or a crash soon after the rename can leave the
+      // target empty. Windows modes carry only the read-only bit, which the rename
+      // below handles.
       yield* fs.open(tempPath, { flag: "r+" }).pipe(
+        Effect.tap(() =>
+          platform === "win32"
+            ? Effect.void
+            : replacedMode(fs, targetPath).pipe(Effect.flatMap((mode) => fs.chmod(tempPath, mode))),
+        ),
         Effect.flatMap((file) => file.sync),
         Effect.scoped,
       );
       if (platform !== "win32") {
         yield* fs.rename(tempPath, targetPath);
-        // Persists the rename. Windows cannot open a directory to sync it, and a
-        // filesystem that refuses must not fail a write that already landed.
+        // Persists the rename. Windows cannot open a directory to sync it. Only a
+        // filesystem that cannot sync a directory at all is let through: the rename
+        // is visible, but a failed sync means it may not survive a crash.
         return yield* fs.open(targetDirectory, { flag: "r" }).pipe(
           Effect.flatMap((directory) => directory.sync),
           Effect.scoped,
-          Effect.ignore({ log: true }),
+          Effect.catchIf(isUnsupportedSync, (error) => Effect.logWarning(error)),
         );
       }
 

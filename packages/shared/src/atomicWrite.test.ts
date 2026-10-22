@@ -131,22 +131,28 @@ it.layer(NodeServices.layer)("writeFileStringAtomically", (it) => {
     }),
   );
 
-  it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
-    "keeps the permissions of the file it replaces",
-    () =>
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-atomic-write-" });
-        const filePath = path.join(root, "settings.json");
-        yield* fs.writeFileString(filePath, "before");
-        yield* fs.chmod(filePath, 0o600);
+  // Read-only and write-only targets replace fine in a writable directory, so the
+  // narrowed mode lands only after the temp file is open for writing.
+  it.effect.each(
+    HostProcess.Platform.defaultValue() === "win32"
+      ? []
+      : ["644", "600", "444", "400", "200", "000"],
+  )("keeps the %s permissions of the file it replaces", (octal) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-atomic-write-" });
+      const filePath = path.join(root, "settings.json");
+      const mode = Number.parseInt(octal, 8);
+      yield* fs.writeFileString(filePath, "before");
+      yield* fs.chmod(filePath, mode);
 
-        yield* writeFileStringAtomically({ filePath, contents: "after" });
+      yield* writeFileStringAtomically({ filePath, contents: "after" });
 
-        assert.strictEqual(yield* fs.readFileString(filePath), "after");
-        assert.strictEqual(((yield* fs.stat(filePath)).mode & 0o777).toString(8), "600");
-      }),
+      assert.strictEqual((yield* fs.stat(filePath)).mode & 0o777, mode);
+      yield* fs.chmod(filePath, 0o600);
+      assert.strictEqual(yield* fs.readFileString(filePath), "after");
+    }),
   );
 
   it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
@@ -216,6 +222,72 @@ it.layer(NodeServices.layer)("writeFileStringAtomically", (it) => {
       );
     }),
   );
+  it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "fails when the directory cannot be synced after the rename",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-atomic-write-" });
+        const filePath = path.join(root, "settings.json");
+        const syncFailure = PlatformError.systemError({
+          _tag: "Unknown",
+          module: "FileSystem",
+          method: "sync",
+          pathOrDescriptor: root,
+          cause: Object.assign(new Error("EIO, fsync"), { code: "EIO" }),
+        });
+        const failingDirectorySync = FileSystem.make({
+          ...fs,
+          open: (openedPath, options) =>
+            fs
+              .open(openedPath, options)
+              .pipe(
+                Effect.map((file): FileSystem.File =>
+                  openedPath === root
+                    ? Object.create(file, { sync: { value: Effect.fail(syncFailure) } })
+                    : file,
+                ),
+              ),
+        });
+
+        const failure = yield* writeFileStringAtomically({ filePath, contents: "after" }).pipe(
+          Effect.provideService(FileSystem.FileSystem, failingDirectorySync),
+          Effect.flip,
+        );
+
+        assert.strictEqual(failure, syncFailure);
+        assert.strictEqual(yield* fs.readFileString(filePath), "after");
+      }),
+  );
+
+  it.effect("succeeds when the write lands but its temp directory cannot be removed", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-atomic-write-" });
+      const filePath = path.join(root, "settings.json");
+      const unremovable = FileSystem.make({
+        ...fs,
+        remove: (removedPath) =>
+          Effect.fail(
+            PlatformError.systemError({
+              _tag: "PermissionDenied",
+              module: "FileSystem",
+              method: "remove",
+              pathOrDescriptor: removedPath,
+            }),
+          ),
+      });
+
+      yield* writeFileStringAtomically({ filePath, contents: "after" }).pipe(
+        Effect.provideService(FileSystem.FileSystem, unremovable),
+      );
+
+      assert.strictEqual(yield* fs.readFileString(filePath), "after");
+      assert.strictEqual((yield* fs.readDirectory(root)).length, 2);
+    }),
+  );
 });
 
 // Retries stat the real target between waits, and that I/O finishes outside the
@@ -273,60 +345,4 @@ it.effect("surfaces an unreadable link instead of writing over it", () =>
       ),
     ),
   ),
-);
-
-it.effect("succeeds when the write lands but its temp directory cannot be removed", () =>
-  Effect.gen(function* () {
-    const renamed: Array<string> = [];
-    const removed: Array<string> = [];
-    const fileSystem = FileSystem.layerNoop({
-      readLink: (path) =>
-        Effect.fail(
-          PlatformError.systemError({
-            _tag: "NotFound",
-            module: "FileSystem",
-            method: "readLink",
-            pathOrDescriptor: path,
-          }),
-        ),
-      makeDirectory: () => Effect.void,
-      makeTempDirectory: () => Effect.succeed("/home/settings.json.abc123"),
-      stat: (path) =>
-        Effect.fail(
-          PlatformError.systemError({
-            _tag: "NotFound",
-            module: "FileSystem",
-            method: "stat",
-            pathOrDescriptor: path,
-          }),
-        ),
-      chmod: () => Effect.void,
-      writeFileString: () => Effect.void,
-      open: () => Effect.succeed({ sync: Effect.void } as FileSystem.File),
-      rename: (_from, to) => Effect.sync(() => void renamed.push(to)),
-      remove: (path) =>
-        Effect.sync(() => void removed.push(path)).pipe(
-          Effect.andThen(
-            Effect.fail(
-              PlatformError.systemError({
-                _tag: "PermissionDenied",
-                module: "FileSystem",
-                method: "remove",
-                pathOrDescriptor: path,
-              }),
-            ),
-          ),
-        ),
-    });
-
-    const result = yield* Effect.exit(
-      writeFileStringAtomically({ filePath: "/home/settings.json", contents: "after" }).pipe(
-        Effect.provide(Layer.mergeAll(Path.layer, fileSystem)),
-      ),
-    );
-
-    assert.deepStrictEqual(result, Exit.void);
-    assert.deepStrictEqual(renamed, ["/home/settings.json"]);
-    assert.deepStrictEqual(removed, ["/home/settings.json.abc123"]);
-  }),
 );
