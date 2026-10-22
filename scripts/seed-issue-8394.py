@@ -42,6 +42,8 @@ with c:
                 row['workspace_root'] = str(Path(__file__).resolve().parents[1])
             keys = list(row)
             c.execute('insert or replace into ' + table + ' (' + ','.join(keys) + ') values (' + ','.join('?' for _ in keys) + ')', list(row.values()))
+# A fresh 0700 directory, so a planted symlink in shared /tmp cannot redirect the write.
+fixture_path = os.path.join(tempfile.mkdtemp(prefix='issue-8394-evidence-'), 'fixture.md')
 fixtures = {
 'S1': '1. test\n5. test\n8. test\n15. test',
 'S2': '1. a\n1. b\n1. c\n\nnext\n\n0. a\n0. b',
@@ -60,7 +62,7 @@ fixtures = {
 'R4settled': '1. test\n5. test\n8. test\n15. test\n\nDigit boundary\n\n9. nine\n10. ten\n\n```text\nsynthetic streamed code\n```',
 'R3automation': '[Triggered by schedule task: synthetic]\n\nSynthetic automation\n\n1. test\n5. test\n8. test\n15. test',
 'R5': '1. test\n5. test\n8. test\n15. test\n\n[fixture.md](t3-context://v1/mention/issue8394_file)',
-'S10file': '[Open synthetic Markdown fixture](/tmp/issue-8394-evidence/fixture.md)',
+'S10file': '[Open synthetic Markdown fixture](' + fixture_path + ')',
 'R3': '1. test\n5. test\n8. test\n15. test\n\n' + ('Synthetic long message paragraph with 15 target.\n\n' * 100),
 }
 with c:
@@ -80,7 +82,7 @@ with c:
         if label == 'R3automation':
             payload['createdBy'] = 'agent'
         if label == 'R5':
-            payload['context'] = {'version': 1, 'records': [{'version': 1, 'contextId': 'issue8394_file', 'kind': 'mention', 'label': 'fixture.md', 'path': '/tmp/issue-8394-evidence/fixture.md'}]}
+            payload['context'] = {'version': 1, 'records': [{'version': 1, 'contextId': 'issue8394_file', 'kind': 'mention', 'label': 'fixture.md', 'path': fixture_path}]}
         if label == 'R4stream':
             payload['streaming'] = True
             row['streaming'] = 1
@@ -113,7 +115,8 @@ with c:
         ir.update(turn_item_id=iid, type='reasoning', ordinal=ip['ordinal'], payload_json=json.dumps(ip))
         keys = list(ir)
         c.execute('insert or replace into orchestration_v2_projection_turn_items ('+','.join(keys)+') values ('+','.join('?' for _ in keys)+')', list(ir.values()))
-Path('/tmp/issue-8394-evidence').mkdir(parents=True, exist_ok=True)
-Path('/tmp/issue-8394-evidence/fixture.md').write_text('1. test\n5. test\n8. test\n15. test\n\n<ol start="3"><li>first</li><li value="100">second</li><li>third</li></ol>\n')
+with open(fixture_path, 'x') as f:
+    f.write('1. test\n5. test\n8. test\n15. test\n\n<ol start="3"><li>first</li><li value="100">second</li><li>third</li></ol>\n')
 print('Backup:', backup_path)
+print('Fixture:', fixture_path)
 print('Thread:', source['thread_id'])
