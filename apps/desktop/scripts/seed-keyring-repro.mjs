@@ -17,7 +17,9 @@ const targetId = (
 const token = (await NodeFSP.readFile(tokenFile, "utf8")).trim().split("\n").at(-1);
 const home = NodePath.resolve(desktopHome);
 const targets = await (await fetch("http://127.0.0.1:9339/json/list")).json();
-const ws = new WebSocket(targets[0].webSocketDebuggerUrl);
+const mainTarget = targets.find((target) => target.type === "node" && target.webSocketDebuggerUrl);
+if (!mainTarget) throw new Error("No Node main-process inspector target on port 9339");
+const ws = new WebSocket(mainTarget.webSocketDebuggerUrl);
 await new Promise((accept, reject) => {
   ws.addEventListener("open", accept, { once: true });
   ws.addEventListener("error", reject, { once: true });
@@ -36,7 +38,12 @@ const expression = `(() => {
   const path = process.getBuiltinModule('path');
   const os = process.getBuiltinModule('os');
   const home = ${JSON.stringify(home)};
-  if (path.resolve(process.env.T3CODE_HOME || '') !== home || home === path.join(os.homedir(), '.t3') || !process.env.XDG_CONFIG_HOME || !process.env.XDG_DATA_HOME) {
+  // Desktop config trims XDG values and falls back to the real defaults when blank.
+  const isolated = (name, fallback) => {
+    const value = process.env[name] || '';
+    return value === value.trim() && path.isAbsolute(value) && path.resolve(value) !== path.join(os.homedir(), fallback);
+  };
+  if (path.resolve(process.env.T3CODE_HOME || '') !== home || home === path.join(os.homedir(), '.t3') || !isolated('XDG_CONFIG_HOME', '.config') || !isolated('XDG_DATA_HOME', '.local/share')) {
     throw new Error('Requires matching isolated T3CODE_HOME and isolated XDG directories');
   }
   const E = process.getBuiltinModule('module').createRequire(process.cwd() + '/fixture.cjs')('electron');
