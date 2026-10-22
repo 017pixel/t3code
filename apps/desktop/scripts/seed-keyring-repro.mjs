@@ -38,12 +38,26 @@ const expression = `(() => {
   const path = process.getBuiltinModule('path');
   const os = process.getBuiltinModule('os');
   const home = ${JSON.stringify(home)};
+  // Compare real paths so a symlink alias of a live directory cannot pass; a missing
+  // destination resolves through its nearest existing ancestor.
+  const canonical = (value) => {
+    const rest = [];
+    for (let dir = path.resolve(value); ; dir = path.dirname(dir)) {
+      try {
+        return path.join(fs.realpathSync.native(dir), ...rest);
+      } catch (error) {
+        if (error.code !== 'ENOENT' || fs.lstatSync(dir, { throwIfNoEntry: false }) || dir === path.dirname(dir)) throw error;
+        rest.unshift(path.basename(dir));
+      }
+    }
+  };
   // Desktop config trims XDG values and falls back to the real defaults when blank.
   const isolated = (name, fallback) => {
     const value = process.env[name] || '';
-    return value === value.trim() && path.isAbsolute(value) && path.resolve(value) !== path.join(os.homedir(), fallback);
+    return value === value.trim() && path.isAbsolute(value) && canonical(value) !== canonical(path.join(os.homedir(), fallback));
   };
-  if (path.resolve(process.env.T3CODE_HOME || '') !== home || home === path.join(os.homedir(), '.t3') || !isolated('XDG_CONFIG_HOME', '.config') || !isolated('XDG_DATA_HOME', '.local/share')) {
+  const t3Home = process.env.T3CODE_HOME || '';
+  if (!t3Home || canonical(t3Home) !== canonical(home) || canonical(home) === canonical(path.join(os.homedir(), '.t3')) || !isolated('XDG_CONFIG_HOME', '.config') || !isolated('XDG_DATA_HOME', '.local/share')) {
     throw new Error('Requires matching isolated T3CODE_HOME and isolated XDG directories');
   }
   const E = process.getBuiltinModule('module').createRequire(process.cwd() + '/fixture.cjs')('electron');
