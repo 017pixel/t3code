@@ -9,6 +9,7 @@ import {
   OrchestratorMcpTarget,
   type OrchestrationV2ThreadShell,
   type ScheduledTask,
+  type ScheduledTaskUpsertInput,
   ScheduledTaskId,
   ProjectId,
   ProviderDriverKind,
@@ -1156,6 +1157,141 @@ describe("OrchestratorMcpService provider resolution", () => {
         }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
       }),
   );
+
+  describe("scheduled task targets", () => {
+    const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
+    const opus = "claude-opus-5-5";
+    const claude: ServerProvider = {
+      ...providerSnapshot({
+        instanceId: claudeInstanceId,
+        driver: ProviderDriverKind.make("claudeAgent"),
+      }),
+      models: [
+        {
+          slug: opus,
+          name: opus,
+          isCustom: false,
+          capabilities: {
+            optionDescriptors: [
+              {
+                id: "effort",
+                label: "Effort",
+                type: "select",
+                options: [
+                  { id: "high", label: "High", isDefault: true },
+                  { id: "xhigh", label: "Extra high" },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const xhighTarget = {
+      providerInstanceId: claudeInstanceId,
+      model: opus,
+      options: [{ id: "effort", value: "xhigh" }],
+    };
+    const existing: ScheduledTask = {
+      id: ScheduledTaskId.make("scheduled-task:target"),
+      title: "Nightly",
+      prompt: "Do the nightly thing",
+      enabled: false,
+      schedule: { type: "fixed_time", timeOfDay: "09:00" },
+      projectId,
+      threadId: null,
+      workspaceStrategy: { type: "root" },
+      modelSelection: { instanceId: claudeInstanceId, model: opus },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdBy: "agent",
+      creationSource: "mcp",
+      createdAt: "2026-10-05T00:00:00.000Z",
+      updatedAt: "2026-10-05T00:00:00.000Z",
+      nextRunAt: null,
+      lastRunAt: null,
+      lastRunStatus: "never",
+      lastRunError: null,
+      runCount: 0,
+    };
+    const service = (upserts: Ref.Ref<ReadonlyArray<ScheduledTaskUpsertInput>>) =>
+      layerOrchestratorService.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            Layer.mock(ThreadManagementService.ThreadManagementService)({
+              getThreadRecords: () =>
+                Effect.succeed(parentProjection([], { instanceId: claudeInstanceId, model: opus })),
+            }),
+            ServerSettings.layerTest(),
+            providerRegistryLayer([claude]),
+            adapterRegistryLayer([claudeInstanceId]),
+            Layer.mock(ProjectService.ProjectService)({
+              getById: () =>
+                Effect.succeedSome({ id: projectId, defaultModelSelection: null } as never),
+            }),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+            Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+              list: () => Effect.succeed({ tasks: [existing] }),
+              upsert: (input) =>
+                Ref.update(upserts, (all) => [...all, input]).pipe(
+                  Effect.as({ task: { ...existing, ...input, id: existing.id } as ScheduledTask }),
+                ),
+            }),
+          ),
+        ),
+      );
+
+    it.effect("schedule_task stores the effort a target sets", () =>
+      Effect.gen(function* () {
+        const upserts = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const input = {
+          prompt: "Do the nightly thing",
+          schedule: { type: "fixed_time", timeOfDay: "09:00" } as const,
+          enabled: false,
+          bindToCurrentThread: false,
+          target: xhighTarget,
+        };
+        yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.flatMap((mcp) => mcp.scheduleTask(scope, input)),
+          Effect.provide(service(upserts)),
+        );
+        assert.deepEqual(
+          (yield* Ref.get(upserts)).map((upsert) => upsert.modelSelection),
+          [
+            {
+              instanceId: claudeInstanceId,
+              model: opus,
+              options: [{ id: "effort", value: "xhigh" }],
+            },
+          ],
+          "schedule_task dropped the effort option from its target",
+        );
+      }),
+    );
+
+    it.effect("update_scheduled_task stores the effort a target sets", () =>
+      Effect.gen(function* () {
+        const upserts = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const input = { scheduledTaskId: existing.id, target: xhighTarget };
+        yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.flatMap((mcp) => mcp.updateScheduledTask(scope, input)),
+          Effect.provide(service(upserts)),
+        );
+        assert.deepEqual(
+          (yield* Ref.get(upserts)).map((upsert) => upsert.modelSelection),
+          [
+            {
+              instanceId: claudeInstanceId,
+              model: opus,
+              options: [{ id: "effort", value: "xhigh" }],
+            },
+          ],
+          "update_scheduled_task dropped the effort option from its target",
+        );
+      }),
+    );
+  });
 
   describe("listed models", () => {
     const opencodeInstanceId = ProviderInstanceId.make("opencode");
