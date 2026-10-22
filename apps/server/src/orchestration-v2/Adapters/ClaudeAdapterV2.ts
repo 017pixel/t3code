@@ -9972,7 +9972,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   new ProviderAdapter.ProviderAdapterProtocolError({
                     driver: CLAUDE_PROVIDER,
                     detail: "Failed to allocate a Claude prompt uuid.",
-                    payload: cause,
+                    cause,
                   }),
               ),
             );
