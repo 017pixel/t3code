@@ -487,13 +487,11 @@ const ConversationTimeline = memo(function ConversationTimeline({
     return disclosureAnchorKey === null || row.id === disclosureAnchorKey;
   };
 
-  const userExpandedRunIdsRef = useRef(new Set<RunId>());
+  const autoExpandedRunIdRef = useRef<RunId | null>(null);
   const onToggleTurnFold = (runId: RunId) => {
     suspendEndScrollMaintenanceForDisclosure(`turn-fold:${runId}`);
-    if (expandedRunIds.has(runId)) {
-      userExpandedRunIdsRef.current.delete(runId);
-    } else {
-      userExpandedRunIdsRef.current.add(runId);
+    if (autoExpandedRunIdRef.current === runId) {
+      autoExpandedRunIdRef.current = null;
     }
     setExpandedRunIds((existing) => {
       const next = new Set(existing);
@@ -535,16 +533,15 @@ const ConversationTimeline = memo(function ConversationTimeline({
     const { identity, run: previous } = previousLatestRunRef.current;
     previousLatestRunRef.current = { identity: listIdentityKey, run: latestRun };
     if (identity !== listIdentityKey) {
-      userExpandedRunIdsRef.current = new Set();
+      autoExpandedRunIdRef.current = null;
       return;
     }
     if (!latestRun || previous?.runId === undefined) {
       return;
     }
-    // An in-session interrupt expands its turn so the user keeps their place; the
-    // next turn folds it again unless the user opened it themselves.
     if (latestRun.runId === previous.runId) {
       if (previous.status === "running" && latestRun.status === "interrupted") {
+        autoExpandedRunIdRef.current = latestRun.runId;
         setExpandedRunIds((existing) => {
           const next = new Set(existing);
           next.add(latestRun.runId);
@@ -553,9 +550,12 @@ const ConversationTimeline = memo(function ConversationTimeline({
       }
       return;
     }
-    if (userExpandedRunIdsRef.current.has(previous.runId)) {
+    // An in-session interrupt expands its turn so the user keeps their place; the
+    // next turn folds only that expansion, never one the user, a citation, or find opened.
+    if (autoExpandedRunIdRef.current !== previous.runId) {
       return;
     }
+    autoExpandedRunIdRef.current = null;
     setExpandedRunIds((existing) => {
       if (!existing.has(previous.runId)) {
         return existing;
