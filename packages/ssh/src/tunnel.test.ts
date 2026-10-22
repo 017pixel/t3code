@@ -260,6 +260,82 @@ describe("ssh tunnel scripts", () => {
     }),
   );
 
+  it.effect.each([
+    {
+      name: "agent signing failure",
+      stderr:
+        'sign_and_send_pubkey: signing failed for ED25519 "/tmp/key" from agent: agent refused operation\nubuntu@127.0.0.1: Permission denied (publickey,password,keyboard-interactive).',
+      expectedPrompts: 0,
+    },
+    {
+      name: "agent communication failure",
+      stderr:
+        "error fetching identities: communication with agent failed\nubuntu@127.0.0.1: Permission denied (publickey,password).",
+      expectedPrompts: 0,
+    },
+    {
+      name: "publickey-only denial",
+      stderr: "ubuntu@127.0.0.1: Permission denied (publickey).",
+      expectedPrompts: 0,
+    },
+    {
+      name: "password denial",
+      stderr: "ubuntu@127.0.0.1: Permission denied (publickey,password).",
+      expectedPrompts: 1,
+    },
+    {
+      name: "keyboard-interactive denial",
+      stderr: "ubuntu@127.0.0.1: Permission denied (publickey,keyboard-interactive).",
+      expectedPrompts: 1,
+    },
+  ])("prompts for a password only when ssh can use one: $name", ({ stderr, expectedPrompts }) =>
+    Effect.gen(function* () {
+      let prompts = 0;
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.succeed(
+          commandArgs(command).includes("-G")
+            ? makeSuccessfulProcess("")
+            : {
+                ...makeSuccessfulProcess(""),
+                exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(255)),
+                stderr: Stream.make(new TextEncoder().encode(stderr)),
+              },
+        ),
+      );
+      const layer = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Layer.succeed(HttpClient.HttpClient, hangingHttpClient),
+        Layer.succeed(NetService.NetService, testNetService),
+        Layer.succeed(
+          SshAuth.SshPasswordPrompt,
+          SshAuth.SshPasswordPrompt.of({
+            isAvailable: true,
+            request: () =>
+              Effect.sync(() => {
+                prompts++;
+                return null;
+              }),
+          }),
+        ),
+        SshTunnel.SshEnvironmentManager.layer({ resolveCliRunner: Effect.succeed(ARCHIVE) }),
+      );
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        const result = yield* Effect.result(
+          manager.ensureEnvironment({
+            alias: "devbox",
+            hostname: "127.0.0.1",
+            username: "ubuntu",
+            port: null,
+          }),
+        );
+        assert.isTrue(Result.isFailure(result));
+        assert.equal(prompts, expectedPrompts);
+      }).pipe(Effect.provide(layer), Effect.scoped);
+    }),
+  );
+
   it.effect.each(["local tunnel", "remote server"] as const)(
     "waits for %s shutdown before reconnecting the same target",
     (stalledStep) =>
