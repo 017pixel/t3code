@@ -17,6 +17,7 @@ import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublish
 import * as DesktopBrowserHost from "../preview/DesktopBrowserHost.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
+import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
@@ -50,18 +51,57 @@ interface LayerPoolOptions {
   readonly resolvePrimary?: DesktopBackendConfiguration.DesktopBackendConfiguration["Service"]["resolvePrimary"];
   readonly spawner?: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly httpClient?: HttpClient.HttpClient;
-  readonly errorBoxes?: Array<{ readonly title: string; readonly content: string }>;
+  readonly entryExists?: boolean;
+  readonly native?: NativeSpy;
 }
+
+interface NativeSpy {
+  readonly errorBoxes: Array<{ readonly title: string; readonly content: string }>;
+  readonly messageBoxes: Array<Electron.MessageBoxOptions>;
+  readonly copied: Array<string>;
+  // Resolves to the clicked button index; defaults to "Copy Diagnostics".
+  readonly messageBoxResponse: Effect.Effect<number>;
+}
+
+const makeNativeSpy = (messageBoxResponse = Effect.succeed(0)): NativeSpy => ({
+  errorBoxes: [],
+  messageBoxes: [],
+  copied: [],
+  messageBoxResponse,
+});
+
+const BACKEND_LOG_PATH = "/logs/server-primary.log";
+
+const exitingProcess = (onSpawn: () => void) =>
+  ChildProcessSpawner.make(() =>
+    Effect.sync(() => {
+      onSpawn();
+      return ChildProcessSpawner.makeHandle({
+        pid: ChildProcessSpawner.ProcessId(123),
+        stdout: Stream.empty,
+        stderr: Stream.empty,
+        all: Stream.empty,
+        exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
+        isRunning: Effect.succeed(false),
+        kill: () => Effect.void,
+        stdin: Sink.drain,
+        getInputFd: () => Sink.drain,
+        getOutputFd: () => Stream.empty,
+        unref: Effect.succeed(Effect.void),
+      });
+    }),
+  );
 
 function layerPool(
   labelRef: Ref.Ref<string>,
   options: LayerPoolOptions = {},
 ): Layer.Layer<DesktopBackendPool.DesktopBackendPool> {
-  const errorBoxes = options.errorBoxes;
+  const native = options.native;
+  const entryExists = options.entryExists ?? true;
   return DesktopBackendPool.layer.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
-        FileSystem.layerNoop({ exists: () => Effect.succeed(true) }),
+        FileSystem.layerNoop({ exists: () => Effect.succeed(entryExists) }),
         Layer.succeed(
           ChildProcessSpawner.ChildProcessSpawner,
           options.spawner ??
@@ -74,6 +114,7 @@ function layerPool(
         Layer.succeed(DesktopObservability.DesktopBackendOutputLogFactory, {
           forInstance: () =>
             Effect.succeed({
+              filePath: BACKEND_LOG_PATH,
               beginSession: () => Effect.void,
               writeOutputChunk: () => Effect.void,
               persistFailureSnapshot: () => Effect.void,
@@ -101,15 +142,31 @@ function layerPool(
         } satisfies DesktopBackendConfiguration.DesktopBackendConfiguration["Service"]),
         DesktopAppSettings.layerTest(),
         DesktopWslEnvironment.layerTest(),
-        errorBoxes === undefined
-          ? ElectronDialog.layer
-          : Layer.succeed(ElectronDialog.ElectronDialog, {
-              ...ElectronDialog.make,
-              showErrorBox: (title, content) =>
-                Effect.sync(() => {
-                  errorBoxes.push({ title, content });
-                }),
-            }),
+        native === undefined
+          ? Layer.merge(ElectronDialog.layer, ElectronShell.layer)
+          : Layer.merge(
+              Layer.succeed(ElectronDialog.ElectronDialog, {
+                ...ElectronDialog.make,
+                showErrorBox: (title, content) =>
+                  Effect.sync(() => {
+                    native.errorBoxes.push({ title, content });
+                  }),
+                showMessageBox: (options) =>
+                  Effect.sync(() => {
+                    native.messageBoxes.push(options);
+                  }).pipe(
+                    Effect.andThen(native.messageBoxResponse),
+                    Effect.map((response) => ({ response, checkboxChecked: false })),
+                  ),
+              }),
+              Layer.succeed(ElectronShell.ElectronShell, {
+                ...ElectronShell.make,
+                copyText: (text) =>
+                  Effect.sync(() => {
+                    native.copied.push(text);
+                  }),
+              }),
+            ),
         ElectronApp.layer,
         Layer.succeed(DesktopWindow.DesktopWindow, {
           createMain: Effect.die("unexpected window create"),
@@ -181,7 +238,7 @@ describe("DesktopBackendPool", () => {
   );
 
   it.effect("shows a visible error when the primary backend crashes before it is ready", () => {
-    const errorBoxes: Array<{ readonly title: string; readonly content: string }> = [];
+    const native = makeNativeSpy();
     let spawnCount = 0;
     return Effect.scoped(
       Effect.gen(function* () {
@@ -194,33 +251,124 @@ describe("DesktopBackendPool", () => {
         assert.isFalse((yield* primary.snapshot).ready);
         // The renderer is served by this backend, so only a native dialog can
         // tell the user why the window stays blank.
-        assert.equal(errorBoxes.length, 1);
-        assert.include(errorBoxes[0]!.content, "code=1");
+        assert.equal(native.messageBoxes.length, 1);
+        assert.include(native.messageBoxes[0]!.detail, "code=1");
+        assert.equal(native.copied.length, 1);
+        assert.include(native.copied[0], "code=1");
+        assert.include(native.copied[0], BACKEND_LOG_PATH);
       }).pipe(
         Effect.provide(
           Layer.merge(
             layerPool(Ref.makeUnsafe("Windows"), {
               resolvePrimary: Effect.succeed(primaryConfig),
-              spawner: ChildProcessSpawner.make(() =>
-                Effect.sync(() => {
-                  spawnCount += 1;
-                  return ChildProcessSpawner.makeHandle({
-                    pid: ChildProcessSpawner.ProcessId(123),
-                    stdout: Stream.empty,
-                    stderr: Stream.empty,
-                    all: Stream.empty,
-                    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
-                    isRunning: Effect.succeed(false),
-                    kill: () => Effect.void,
-                    stdin: Sink.drain,
-                    getInputFd: () => Sink.drain,
-                    getOutputFd: () => Stream.empty,
-                    unref: Effect.succeed(Effect.void),
-                  });
-                }),
-              ),
+              spawner: exitingProcess(() => {
+                spawnCount += 1;
+              }),
               httpClient: HttpClient.make(() => Effect.never),
-              errorBoxes,
+              native,
+            }),
+            TestClock.layer(),
+          ),
+        ),
+      ),
+    );
+  });
+
+  it.effect("keeps restarting while the failure dialog is open", () => {
+    const native = makeNativeSpy(Effect.never);
+    let spawnCount = 0;
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pool = yield* DesktopBackendPool.DesktopBackendPool;
+        const primary = yield* pool.primary;
+        yield* primary.start;
+        yield* TestClock.adjust(Duration.minutes(1));
+
+        assert.equal(native.messageBoxes.length, 1);
+        assert.isAbove(spawnCount, 4);
+      }).pipe(
+        Effect.provide(
+          Layer.merge(
+            layerPool(Ref.makeUnsafe("Windows"), {
+              resolvePrimary: Effect.succeed(primaryConfig),
+              spawner: exitingProcess(() => {
+                spawnCount += 1;
+              }),
+              httpClient: HttpClient.make(() => Effect.never),
+              native,
+            }),
+            TestClock.layer(),
+          ),
+        ),
+      ),
+    );
+  });
+
+  it.effect("still surfaces crashes that follow a bounded preflight fallback", () => {
+    const native = makeNativeSpy();
+    let resolveCount = 0;
+    let spawnCount = 0;
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pool = yield* DesktopBackendPool.DesktopBackendPool;
+        const primary = yield* pool.primary;
+        yield* primary.start;
+        yield* TestClock.adjust(Duration.minutes(2));
+
+        assert.isAbove(spawnCount, 1);
+        // The preflight fallback reports itself; the crash loop after it needs its own report.
+        assert.equal(native.errorBoxes.length, 1);
+        assert.equal(native.messageBoxes.length, 1);
+        assert.include(native.messageBoxes[0]!.detail, "code=1");
+      }).pipe(
+        Effect.provide(
+          Layer.merge(
+            layerPool(Ref.makeUnsafe("Windows"), {
+              resolvePrimary: Effect.sync(() => {
+                resolveCount += 1;
+                return resolveCount <= 4
+                  ? {
+                      ...primaryConfig,
+                      preflightFailure: Option.some({
+                        reason: "WSL unreachable",
+                        fatal: false,
+                        retryLimit: 4,
+                      }),
+                    }
+                  : primaryConfig;
+              }),
+              spawner: exitingProcess(() => {
+                spawnCount += 1;
+              }),
+              httpClient: HttpClient.make(() => Effect.never),
+              native,
+            }),
+            TestClock.layer(),
+          ),
+        ),
+      ),
+    );
+  });
+
+  it.effect("surfaces a missing server entry once", () => {
+    const native = makeNativeSpy();
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pool = yield* DesktopBackendPool.DesktopBackendPool;
+        const primary = yield* pool.primary;
+        yield* primary.start;
+        yield* TestClock.adjust(Duration.minutes(2));
+
+        assert.isAbove((yield* primary.snapshot).restartAttempt, 3);
+        assert.equal(native.messageBoxes.length, 1);
+        assert.include(native.copied[0], "missing server entry at /server/bin.mjs");
+      }).pipe(
+        Effect.provide(
+          Layer.merge(
+            layerPool(Ref.makeUnsafe("Windows"), {
+              resolvePrimary: Effect.succeed(primaryConfig),
+              entryExists: false,
+              native,
             }),
             TestClock.layer(),
           ),
