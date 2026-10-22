@@ -188,7 +188,7 @@ export function ServerUpdatesAction({
   const sessionStates = useAtomValue(
     environmentSessionStatesAtom(environmentIdsKey(eligible.map((target) => target.environmentId))),
   );
-  const permitted = eligible.filter((_, index) => !isUpdatePermissionDenied(sessionStates[index]!));
+  const permitted = eligible.filter((_, index) => canUpdateServer(sessionStates[index]!));
   const denied = eligible.filter((_, index) => isUpdatePermissionDenied(sessionStates[index]!));
   const descriptionId = useId();
   const handleUpdate = async () => {

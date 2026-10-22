@@ -278,12 +278,34 @@ describe("ServerUpdatesAction", () => {
     expect(explanation(screen)).toMatch(/pair/i);
   });
 
+  it.each([
+    { name: "loading", session: AsyncResult.initial() },
+    { name: "failed", session: AsyncResult.failure(Cause.fail(new Error("Offline"))) },
+  ])(
+    "disables Update all when a denied target is mixed with a $name session",
+    async ({ session }) => {
+      using _state = setup();
+      setSession(AsyncResult.success(legacyPairedSession));
+      testState.sessionAtoms.set("batch-a" as EnvironmentId, Atom.make(session));
+      await using screen = await mount(targets.slice(0, 2));
+
+      expect(button(screen, "Update all")!.disabled).toBe(true);
+      expect(explanation(screen)).toContain("Office can't be updated");
+      expect(explanation(screen)).not.toContain("Laptop can't be updated");
+      await click(screen, "Update all");
+      expect(testState.updateServer).not.toHaveBeenCalled();
+    },
+  );
+
   it("does not ask to pair again when a mixed batch is pending", async () => {
     using _state = setup();
     const denied = Atom.make<SessionResult>(AsyncResult.success(legacyPairedSession));
     testState.sessionAtoms.set("batch-b" as EnvironmentId, denied);
-    const update = Promise.withResolvers<ReturnType<typeof success>>();
-    testState.updateServer.mockReturnValue(update.promise);
+    let resolveUpdate!: (result: ReturnType<typeof success>) => void;
+    const update = new Promise<ReturnType<typeof success>>((resolve) => {
+      resolveUpdate = resolve;
+    });
+    testState.updateServer.mockReturnValue(update);
     await using screen = await mount(targets.slice(0, 2));
 
     try {
@@ -300,8 +322,8 @@ describe("ServerUpdatesAction", () => {
       );
     } finally {
       await act(async () => {
-        update.resolve(success());
-        await update.promise;
+        resolveUpdate(success());
+        await update;
       });
     }
     expect(button(screen, "Update all")!.disabled).toBe(false);
