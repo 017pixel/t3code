@@ -1,6 +1,5 @@
 import * as NodeSqlite from "node:sqlite";
 
-import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -40,15 +39,48 @@ function hasNewerV1Shells(source: NodeSqlite.DatabaseSync, copy: NodeSqlite.Data
   });
 }
 
-// V1 import and project baseline migrations write event ids prefixed with `migration:`.
-// Clients record visits as soon as they open V2, so read state alone is not V2 work.
-function hasNativeV2Events(copy: NodeSqlite.DatabaseSync) {
+function hasTable(database: NodeSqlite.DatabaseSync, table: string) {
   return (
-    copy
-      .prepare(
-        "SELECT 1 FROM orchestration_events WHERE application_event_version = 2 AND substr(event_id, 1, 10) <> 'migration:' AND event_type NOT IN ('thread.visited', 'thread.marked-unread') LIMIT 1",
-      )
-      .get() !== undefined
+    database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !==
+    undefined
+  );
+}
+
+function tableIds(database: NodeSqlite.DatabaseSync, table: string, column: string) {
+  if (!hasTable(database, table)) return new Set<unknown>();
+  return new Set(
+    database
+      .prepare(`SELECT ${column} AS id FROM ${table}`)
+      .all()
+      .map((row) => row.id),
+  );
+}
+
+function hasIdsBeyond(
+  copy: NodeSqlite.DatabaseSync,
+  source: NodeSqlite.DatabaseSync,
+  table: string,
+  column: string,
+) {
+  const sourceIds = tableIds(source, table, column);
+  return [...tableIds(copy, table, column)].some((id) => !sourceIds.has(id));
+}
+
+// Judged by content, not events: the server writes its own events (auto-settle, PR sync) within
+// a minute of starting, and scheduled tasks are stored without events. Imported threads and
+// messages keep their V1 ids, so rows beyond the copied legacy tables were created in V2.
+function hasV2Work(source: NodeSqlite.DatabaseSync, copy: NodeSqlite.DatabaseSync) {
+  const hasRow = (query: string) => copy.prepare(query).get() !== undefined;
+  return (
+    (hasTable(copy, "orchestration_v2_projection_threads") &&
+      (hasRow(
+        "SELECT 1 FROM orchestration_v2_projection_threads WHERE thread_id NOT IN (SELECT thread_id FROM projection_threads) LIMIT 1",
+      ) ||
+        hasRow(
+          "SELECT 1 FROM orchestration_v2_projection_messages WHERE message_id NOT IN (SELECT message_id FROM projection_thread_messages) LIMIT 1",
+        ))) ||
+    hasIdsBeyond(copy, source, "projection_projects", "project_id") ||
+    hasIdsBeyond(copy, source, "scheduled_tasks", "task_id")
   );
 }
 
@@ -58,7 +90,7 @@ function inspectStaleCopy(sourcePath: string, destinationPath: string) {
     const copy = new NodeSqlite.DatabaseSync(destinationPath, { readOnly: true });
     try {
       if (!hasNewerV1Shells(source, copy)) return "current" as const;
-      return hasNativeV2Events(copy) ? ("diverged" as const) : ("stale" as const);
+      return hasV2Work(source, copy) ? ("diverged" as const) : ("stale" as const);
     } finally {
       copy.close();
     }
@@ -76,36 +108,8 @@ export const initializeV2Database = Effect.fn("initializeV2Database")(function* 
   const directory = path.dirname(destinationPath);
   const sourcePath = path.join(directory, "state.sqlite");
   yield* Effect.gen(function* () {
+    if (yield* fs.exists(destinationPath)) return;
     if (!(yield* fs.exists(sourcePath))) return;
-    if (yield* fs.exists(destinationPath)) {
-      // A copy nobody worked in can come from a preview or rollback while the user kept using V1.
-      const state = yield* Effect.try(() => inspectStaleCopy(sourcePath, destinationPath)).pipe(
-        Effect.orElseSucceed(() => "current" as const),
-      );
-      if (state === "current") return;
-      if (state === "diverged") {
-        yield* Effect.logWarning(
-          "The V1 database has newer projects or threads, but they are not imported because the V2 database already holds V2 work",
-          { sourcePath, destinationPath },
-        );
-        return;
-      }
-      const backupBase = `${destinationPath}.stale-${yield* Clock.currentTimeMillis}`;
-      let backupPath = backupBase;
-      for (let attempt = 1; yield* fs.exists(backupPath); attempt++) {
-        backupPath = `${backupBase}-${attempt}`;
-      }
-      yield* fs.rename(destinationPath, backupPath);
-      for (const suffix of ["-wal", "-shm"]) {
-        if (yield* fs.exists(destinationPath + suffix)) {
-          yield* fs.rename(destinationPath + suffix, backupPath + suffix);
-        }
-      }
-      yield* Effect.logWarning(
-        "The V2 database predates newer V1 data and holds no V2 work; moved it aside and copied V1 again",
-        { backupPath },
-      );
-    }
     const temporaryDirectory = yield* fs.makeTempDirectoryScoped({
       directory,
       prefix: ".v2-import-",
@@ -131,4 +135,49 @@ export const initializeV2Database = Effect.fn("initializeV2Database")(function* 
     Effect.scoped,
     Effect.mapError((cause) => new V2DatabaseImportError({ sourcePath, destinationPath, cause })),
   );
+});
+
+/**
+ * Replaces a V2 copy nobody worked in when V1 changed after it was taken, as after a preview or a
+ * rollback while the user kept using V1. Moving the database aside is only safe while holding
+ * server ownership, so CLI processes that open persistence never call this.
+ */
+export const replaceStaleV2Database = Effect.fn("replaceStaleV2Database")(function* (
+  destinationPath: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const sourcePath = path.join(path.dirname(destinationPath), "state.sqlite");
+  yield* Effect.gen(function* () {
+    if (!(yield* fs.exists(sourcePath)) || !(yield* fs.exists(destinationPath))) return;
+    const state = yield* Effect.try(() => inspectStaleCopy(sourcePath, destinationPath)).pipe(
+      Effect.orElseSucceed(() => "current" as const),
+    );
+    if (state === "current") return;
+    if (state === "diverged") {
+      yield* Effect.logWarning(
+        "The V1 database has newer projects or threads, but they are not imported because the V2 database already holds V2 work",
+        { sourcePath, destinationPath },
+      );
+      return;
+    }
+    // A previous backup was also a copy without V2 work, so one backup is enough.
+    const backupPath = `${destinationPath}.stale`;
+    for (const suffix of ["", "-wal", "-shm"]) {
+      yield* fs.remove(backupPath + suffix, { force: true });
+    }
+    // The main file goes last so a crash never leaves a fresh copy beside an orphaned WAL.
+    for (const suffix of ["-wal", "-shm", ""]) {
+      if (yield* fs.exists(destinationPath + suffix)) {
+        yield* fs.rename(destinationPath + suffix, backupPath + suffix);
+      }
+    }
+    yield* Effect.logWarning(
+      "The V2 database predates newer V1 data and holds no V2 work; moved it aside and copied V1 again",
+      { backupPath },
+    );
+  }).pipe(
+    Effect.mapError((cause) => new V2DatabaseImportError({ sourcePath, destinationPath, cause })),
+  );
+  yield* initializeV2Database(destinationPath);
 });
