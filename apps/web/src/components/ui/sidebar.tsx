@@ -113,6 +113,10 @@ function SidebarProvider({
   if (openMobile && !mobileSheetMounted) {
     setMobileSheetMounted(true);
   }
+  // Widening mid-close unmounts the sheet before its close completes.
+  if (!isMobile && !openMobile && mobileSheetMounted) {
+    setMobileSheetMounted(false);
+  }
 
   const [_open, _setOpen] = React.useState(defaultOpen);
   const open = openProp ?? _open;
