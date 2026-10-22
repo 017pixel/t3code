@@ -1,4 +1,3 @@
-import { discardComposerDraft } from "../../lib/discardComposerDraft";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import { SquarePenIcon, XIcon } from "lucide-react";
 import {
@@ -144,6 +143,7 @@ export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   routeDraftId: string | null;
   onNavigateToDraft: (draftId: DraftId) => void;
   onDraftContextMenu: (draftId: DraftId, position: { x: number; y: number }) => void;
+  onDiscardDraft: (draftId: DraftId) => void;
 }) {
   const draftThreadsByThreadKey = useComposerDraftStore((store) => store.draftThreadsByThreadKey);
   const draftsByThreadKey = useComposerDraftStore((store) => store.draftsByThreadKey);
@@ -207,7 +207,7 @@ export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
             projectDisplayName={props.projectDisplayNameByKey.get(projectKey) ?? null}
             isActive={draftId === props.routeDraftId}
             onNavigate={props.onNavigateToDraft}
-            onDiscard={discardComposerDraft}
+            onDiscard={props.onDiscardDraft}
             onContextMenu={props.onDraftContextMenu}
           />
         );

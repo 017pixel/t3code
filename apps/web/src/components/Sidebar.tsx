@@ -1389,6 +1389,7 @@ export default function Sidebar() {
     contextDragKeyRef.current = null;
     endThreadContextDrag();
     if (started) {
+      listPressGuardRef.current?.forget();
       listMotionRef.current?.release();
       setDragState(null);
     }
@@ -1669,6 +1670,7 @@ export default function Sidebar() {
   // so a new layout key alone also triggers it.
   const listMotionPass = { layoutKey: listMotionLayoutKey, animate: listMotionAnimate };
   useLayoutEffect(() => {
+    listPressGuardRef.current?.rowsChanged();
     listMotionRef.current?.update(listMotionPass.animate);
   }, [listMotionPass]);
   const handleThreadDragOver = (event: DragOverEvent) => {
@@ -2189,6 +2191,11 @@ export default function Sidebar() {
     },
   );
 
+  const discardDraft = useStableCallback((draftId: DraftId) => {
+    listPressGuardRef.current?.trust();
+    discardComposerDraft(draftId);
+  });
+
   const handleDraftContextMenu = useStableCallback(
     (draftId: DraftId, position: { x: number; y: number }) => {
       void (async () => {
@@ -2233,7 +2240,7 @@ export default function Sidebar() {
             // The menu can stay open while the draft sends; discarding a
             // promoting draft would strand the send.
             const current = useComposerDraftStore.getState().getDraftSession(draftId);
-            if (current && !current.promotedTo) discardComposerDraft(draftId);
+            if (current && !current.promotedTo) discardDraft(draftId);
             return;
           }
         }
@@ -2973,6 +2980,7 @@ export default function Sidebar() {
                           routeDraftId={routeDraftIdForRows}
                           onNavigateToDraft={navigateToDraft}
                           onDraftContextMenu={handleDraftContextMenu}
+                          onDiscardDraft={discardDraft}
                         />,
                       ];
                       for (const item of sidebarListItems) {
@@ -3105,7 +3113,10 @@ export default function Sidebar() {
                       <li className="list-none">
                         <button
                           type="button"
-                          onClick={showMoreSettled}
+                          onClick={() => {
+                            listPressGuardRef.current?.trust();
+                            showMoreSettled();
+                          }}
                           className="flex h-9 w-full cursor-pointer items-center gap-2.5 rounded-md px-2.5 text-left text-sm text-sidebar-muted-foreground/55 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
                         >
                           <PlusIcon aria-hidden className="size-4 shrink-0" />

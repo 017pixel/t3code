@@ -91,9 +91,13 @@ describe("sidebar stale press guard", () => {
   function list() {
     const stack = new DisposableStack();
     const node = document.createElement("ul");
+    // The default pointer point, (10, 10), rests on whichever row is first.
+    node.style.cssText =
+      "position: fixed; inset: 0 auto auto 0; margin: 0; padding: 0; width: 200px";
     const rows = ["alpha", "beta", "gamma"].map((name) => {
       const row = node.appendChild(document.createElement("li"));
       row.textContent = name;
+      row.style.cssText = "display: block; height: 20px";
       return row;
     });
     document.body.append(node);
@@ -133,6 +137,7 @@ describe("sidebar stale press guard", () => {
     alpha!.addEventListener("click", () => {
       guard.trust();
       alpha!.remove();
+      guard.rowsChanged();
     });
     alpha!.dispatchEvent(pointer("pointermove", { pointerType: "mouse", buttons: 0 }));
     press(alpha!);
@@ -165,6 +170,7 @@ describe("sidebar stale press guard", () => {
     alpha!.addEventListener("click", () => {
       guard.trust();
       alpha!.remove();
+      guard.rowsChanged();
     });
     alpha!.dispatchEvent(pointer("pointermove", { pointerType: "mouse", buttons: 0 }));
     press(alpha!);
@@ -175,5 +181,69 @@ describe("sidebar stale press guard", () => {
     press(gamma!);
 
     expect(clicked).toEqual(["alpha", "beta", "gamma"]);
+  });
+
+  // regression: the user's own settle must not disarm the guard for a remote shift before any press
+  it("swallows a remote shift that follows the user's own settle before any press", () => {
+    const { stack, guard, rows, clicked, press } = list();
+    using _list = stack;
+    const [alpha, beta, gamma] = rows;
+    alpha!.addEventListener("click", () => {
+      guard.trust();
+      alpha!.remove();
+      guard.rowsChanged();
+    });
+    alpha!.dispatchEvent(pointer("pointermove", { pointerType: "mouse", buttons: 0 }));
+    press(alpha!);
+    beta!.remove();
+    guard.rowsChanged();
+
+    press(gamma!);
+    press(gamma!);
+
+    expect(clicked).toEqual(["alpha", "gamma"]);
+  });
+
+  function scrolledList() {
+    const { stack, guard, rows, clicked, press } = list();
+    const scroller = document.createElement("div");
+    scroller.style.cssText = "height: 40px; overflow: auto";
+    document.body.append(scroller);
+    stack.defer(() => scroller.remove());
+    const node = rows[0]!.parentElement!;
+    node.style.position = "static";
+    scroller.append(node);
+    scroller.scrollTop = scroller.scrollHeight;
+    return { stack, guard, rows, clicked, press, scroller };
+  }
+
+  // regression: the browser clamping scrollTop after a remote removal is not the user scrolling
+  it("swallows a remote removal that clamps the list's scroll position", async () => {
+    const { stack, rows, clicked, press, scroller } = scrolledList();
+    using _list = stack;
+    const [alpha, beta, gamma] = rows;
+    gamma!.dispatchEvent(pointer("pointermove", { pointerType: "mouse", buttons: 0 }));
+    const clamped = new Promise((resolve) =>
+      scroller.addEventListener("scroll", resolve, { once: true }),
+    );
+    alpha!.remove();
+    await clamped;
+
+    press(beta!);
+    press(beta!);
+
+    expect(clicked).toEqual(["beta"]);
+  });
+
+  it("trusts the row the user's own wheel scrolls under the mouse", () => {
+    const { stack, rows, clicked, press } = scrolledList();
+    using _list = stack;
+    const [, beta, gamma] = rows;
+    gamma!.dispatchEvent(pointer("pointermove", { pointerType: "mouse", buttons: 0 }));
+    gamma!.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -20 }));
+
+    press(beta!);
+
+    expect(clicked).toEqual(["beta"]);
   });
 });
