@@ -161,7 +161,12 @@ function makeTestAdapter(input: {
             : { canReuseContextUsage: input.canReuseContextUsage }),
           ...(input.backgroundWork === undefined
             ? {}
-            : { hasPendingBackgroundWorkForThread: () => Ref.get(input.backgroundWork!) }),
+            : {
+                // Like Claude: native subagents are visible only to the session-wide
+                // probe, never to the per-thread roster probe.
+                hasPendingBackgroundWork: Ref.get(input.backgroundWork),
+                hasPendingBackgroundWorkForThread: () => Effect.succeed(false),
+              }),
           ensureThread: (threadInput) =>
             Effect.gen(function* () {
               const createdAt = yield* DateTime.now;
@@ -2267,7 +2272,6 @@ describe("orchestration v2 provider switching", () => {
         yield* Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-          const eventSink = yield* EventSink.EventSinkV2;
           const send = (ordinal: number, modelSelection: ModelSelection, attempt = "") =>
             orchestrator.dispatch({
               type: "message.dispatch",
@@ -2304,22 +2308,9 @@ describe("orchestration v2 provider switching", () => {
           assert.equal(firstSession?.status, "ready");
 
           if (backgroundRunning) {
-            yield* eventSink.write({
-              events: [
-                {
-                  id: EventId.make("handoff-releases-session:background-roster"),
-                  type: "provider-thread.updated",
-                  threadId: handoffThreadId,
-                  occurredAt: yield* DateTime.now,
-                  payload: {
-                    ...afterFirst.providerThreads[0]!,
-                    pendingBackgroundTasks: [
-                      { taskId: "agent", description: "Background agent", kind: "subagent" },
-                    ],
-                  },
-                },
-              ],
-            });
+            // Native subagents live only in the adapter's roster, so the projection's
+            // pendingBackgroundTasks stays empty while the probe still reports work.
+            assert.deepEqual(afterFirst.providerThreads[0]?.pendingBackgroundTasks ?? [], []);
             const refused = yield* send(2, secondSelection, ":refused").pipe(Effect.flip);
             assert.include(String(refused.cause), "still running background agents or commands");
             const unchanged = yield* orchestrator.getThreadProjection(handoffThreadId);

@@ -5636,31 +5636,41 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         session.status !== "error",
     );
     // Detaching ends the provider process, and background agents and shells
-    // run inside it. Refuse the switch while one still reports work.
-    for (const providerThread of projection.providerThreads) {
-      const detaching = sessionsToDetach.find(
-        (session) => session.id === providerThread.providerSessionId,
-      );
-      if (detaching === undefined || (providerThread.pendingBackgroundTasks?.length ?? 0) === 0) {
-        continue;
-      }
+    // run inside it. Refuse the switch while one still reports work. Ask the
+    // adapter even with an empty projected roster: Claude's native subagents
+    // never reach pendingBackgroundTasks, and only its session-wide probe sees
+    // them. A session shared across threads is checked per thread instead.
+    for (const detaching of sessionsToDetach) {
       const session = yield* providerSessions
         .get(detaching.id)
         .pipe(Effect.orElseSucceed(() => Option.none()));
-      if (Option.isNone(session) || session.value.hasPendingBackgroundWorkForThread === undefined) {
+      if (Option.isNone(session)) {
         continue;
       }
-      const stillRunning = yield* session.value
-        .hasPendingBackgroundWorkForThread(providerThread)
-        // A failed probe cannot confirm that the work ended.
-        .pipe(Effect.catchCause(() => Effect.succeed(true)));
-      if (stillRunning) {
-        return yield* new OrchestratorDispatchError({
-          commandId: command.commandId,
-          commandType: command.type,
-          cause:
-            "The previous provider is still running background agents or commands, and switching would end them. Wait for them to finish, or press Stop, then send the message again.",
-        });
+      const runtime = session.value;
+      const probes =
+        !detaching.capabilities.sessions.supportsMultipleProviderThreadsPerSession &&
+        runtime.hasPendingBackgroundWork !== undefined
+          ? [runtime.hasPendingBackgroundWork]
+          : projection.providerThreads.flatMap((providerThread) =>
+              providerThread.providerSessionId === detaching.id &&
+              runtime.hasPendingBackgroundWorkForThread !== undefined
+                ? [runtime.hasPendingBackgroundWorkForThread(providerThread)]
+                : [],
+            );
+      for (const probe of probes) {
+        const stillRunning = yield* probe.pipe(
+          // A failed probe cannot confirm that the work ended.
+          Effect.catchCause(() => Effect.succeed(true)),
+        );
+        if (stillRunning) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause:
+              "The previous provider is still running background agents or commands, and switching would end them. Wait for them to finish, or press Stop, then send the message again.",
+          });
+        }
       }
     }
 
