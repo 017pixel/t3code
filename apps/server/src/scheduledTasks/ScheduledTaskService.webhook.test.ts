@@ -14,6 +14,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as EffectScheduler from "effect/Scheduler";
 import * as Schema from "effect/Schema";
@@ -1113,6 +1114,42 @@ it.effect(
       { workers },
     );
   },
+);
+
+it.effect("an accepted delivery queued behind a run still launches after a restart", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const gate = yield* Deferred.make<void>();
+    const { task, deliveryId } = yield* withService(
+      ({ service, launches }) =>
+        Effect.gen(function* () {
+          const { task } = yield* service.upsert(yield* webhookTaskInput());
+          yield* service.triggerWebhook(requestFor(task));
+          yield* Queue.take(launches);
+          const queued = yield* service.triggerWebhook(requestFor(task));
+          assert.equal(queued._tag === "accepted" && queued.outcome, "accepted");
+          return { task, deliveryId: queued._tag === "accepted" ? queued.deliveryId : "" };
+        }),
+      { gate, sql },
+    );
+    const commandId = `scheduled-task:${task.id}:webhook:${deliveryId}`;
+    const workers = new Map<string, Effect.Effect<void>>();
+    yield* withService(
+      ({ launches }) =>
+        Effect.gen(function* () {
+          const launched = yield* Effect.gen(function* () {
+            while ((yield* Queue.take(launches)).commandId !== commandId);
+          }).pipe(Effect.timeoutOption("1 minute"), Effect.forkChild);
+          yield* workers.get("webhook-coalescing")!;
+          yield* TestClock.adjust("1 minute");
+          assert.isTrue(
+            Option.isSome(yield* Fiber.join(launched)),
+            "the accepted delivery was never launched after the restart",
+          );
+        }),
+      { sql, workers },
+    );
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
 
 it.effect("guards bad-signature floods separately from valid run admission", () =>
