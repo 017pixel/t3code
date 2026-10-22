@@ -129,33 +129,34 @@ export const fixPath = Effect.fn("fixPath")(function* (options?: {
   );
 });
 
-const readLoginShellOutput = (shell: string) =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const child = yield* spawner.spawn(
-        ChildProcess.make(
-          shell,
-          ["-ilc", buildEnvironmentCaptureCommand(shell, LOGIN_SHELL_ENV_NAMES)],
-          {
-            stdin: "ignore",
-            stdout: "pipe",
-            stderr: "ignore",
-            // A profile that traps SIGTERM would otherwise hold the scope open
-            // past the timeout while cleanup waits for the exit.
-            forceKillAfter: "1 second",
-          },
-        ),
-      );
-      const [stdout, exitCode] = yield* Effect.all(
-        [Stream.mkString(Stream.decodeText(child.stdout)), child.exitCode],
-        { concurrency: 2 },
-      );
-      return exitCode === 0 ? stdout : "";
-    }),
-  ).pipe(
-    Effect.timeoutOption(LOGIN_SHELL_TIMEOUT),
+const readLoginShellOutput = Effect.fn("readLoginShellOutput")(
+  function* (shell: string) {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const child = yield* spawner.spawn(
+      ChildProcess.make(
+        shell,
+        ["-ilc", buildEnvironmentCaptureCommand(shell, LOGIN_SHELL_ENV_NAMES)],
+        {
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "ignore",
+          // A profile that traps SIGTERM would otherwise hold the scope open
+          // past the timeout while cleanup waits for the exit.
+          forceKillAfter: "1 second",
+        },
+      ),
+    );
+    const [stdout, exitCode] = yield* Effect.all(
+      [Stream.mkString(Stream.decodeText(child.stdout)), child.exitCode],
+      { concurrency: 2 },
+    );
+    return exitCode === 0 ? stdout : "";
+  },
+  Effect.scoped,
+  Effect.timeoutOption(LOGIN_SHELL_TIMEOUT),
+  (effect, shell) =>
     Effect.flatMap(
+      effect,
       Option.match({
         onSome: Effect.succeed,
         onNone: () =>
@@ -164,7 +165,7 @@ const readLoginShellOutput = (shell: string) =>
           ).pipe(Effect.as("")),
       }),
     ),
-  );
+);
 
 /**
  * Re-reads PATH from the login shell so tools installed after startup become
