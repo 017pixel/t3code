@@ -34,6 +34,8 @@ import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 const INITIAL_RESTART_DELAY = Duration.millis(500);
 const MAX_RESTART_DELAY = Duration.seconds(10);
 const MAX_PREFLIGHT_FAILURE_ATTEMPTS = 5;
+// About 3.5s of back-to-back exits without readiness.
+const REPEATED_START_FAILURE_ATTEMPTS = 3;
 const DEFAULT_BACKEND_READINESS_TIMEOUT = Duration.minutes(1);
 const DEFAULT_BACKEND_READINESS_INTERVAL = Duration.millis(100);
 const DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT = Duration.seconds(1);
@@ -243,6 +245,11 @@ export interface BackendInstanceSpec {
   readonly onShutdown?: () => Effect.Effect<void>;
   readonly onPreflightFailed?: (failure: PreflightFailure) => Effect.Effect<boolean>;
   readonly onStateDirOwned?: () => Effect.Effect<void>;
+  // Fires once per streak of exits without readiness; restarts continue.
+  readonly onRepeatedStartFailure?: (failure: {
+    readonly reason: string;
+    readonly logFilePath: string | undefined;
+  }) => Effect.Effect<void>;
 }
 
 interface ActiveBackendRun {
@@ -874,6 +881,15 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
                   return;
                 }
                 yield* scheduleRestart(reason);
+                const { restartAttempt } = yield* Ref.get(state);
+                if (restartAttempt === REPEATED_START_FAILURE_ATTEMPTS) {
+                  yield* (
+                    spec.onRepeatedStartFailure?.({
+                      reason,
+                      logFilePath: backendOutputLog.filePath,
+                    }) ?? Effect.void
+                  ).pipe(Effect.ignore);
+                }
               }
             }),
           );

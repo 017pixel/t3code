@@ -176,6 +176,13 @@ export const layer = Layer.effect(
         ),
       onShutdown: () => desktopWindow.handleBackendNotReady,
       onPreflightFailed: handlePrimaryPreflightFailure,
+      onRepeatedStartFailure: ({ reason, logFilePath }) =>
+        electronDialog.showErrorBox(
+          "T3 Code's backend couldn't start",
+          `The local backend keeps exiting before it is ready (${reason}).\n\n${
+            logFilePath === undefined ? "" : `Backend output is logged to:\n${logFilePath}\n\n`
+          }T3 Code will keep retrying in the background. If the window stays blank, quit and reopen T3 Code after checking the log.`,
+        ),
       onStateDirOwned: () =>
         electronDialog
           .showErrorBox(
