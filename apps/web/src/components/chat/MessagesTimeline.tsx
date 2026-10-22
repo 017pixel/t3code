@@ -58,6 +58,7 @@ import { AssistantSelectionToolbar } from "./AssistantSelectionToolbar";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
 import { type AssistantCitationRequest } from "./AssistantCitationSource";
 import { useAssistantCitationTarget, type CitationHistoryPage } from "./useAssistantCitationTarget";
+import { useTimelineSelectionRowKeys } from "./useTimelineSelectionRowKeys";
 import {
   resolveTimelineIsAtEnd,
   resolveTimelineMinimapHasPersistentGutter,
@@ -665,8 +666,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
     setFullscreenAppRowId((current) => (fullscreen ? rowId : current === rowId ? null : current));
   };
   const alwaysRenderIndices = restoringAlwaysRender?.indices ?? [];
+  const selectedRowKeys = useTimelineSelectionRowKeys(
+    timelineViewportElement,
+    rows,
+    listIdentityKey,
+  );
   const alwaysRenderKeys = [
     ...(citationAlwaysRender?.keys ?? []),
+    ...selectedRowKeys,
     ...(fullscreenAppRowId === null ? [] : [fullscreenAppRowId]),
   ];
   const alwaysRender =

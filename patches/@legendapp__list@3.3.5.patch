@@ -1619,7 +1619,7 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..d7cbe1cb43449cc29822b2646deabbdd
      }
    }
 diff --git a/react.js b/react.js
-index 914d2dafaafa001c9ab6791a0a0581659295e333..199aae77b3620b7c4bb2ecd96b82978c0430059a 100644
+index 914d2dafaafa001c9ab6791a0a0581659295e333..be40ae11766712592d74c44b3bb161b637e57aef 100644
 --- a/react.js
 +++ b/react.js
 @@ -4702,7 +4702,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
@@ -1687,7 +1687,7 @@ index 914d2dafaafa001c9ab6791a0a0581659295e333..199aae77b3620b7c4bb2ecd96b82978c
      }
    }, [ctx, containerLayoutEpoch]);
    return children;
-@@ -5651,6 +5673,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
+@@ -5651,6 +5673,32 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
  });
  
  // src/utils/reordering.ts
@@ -1703,10 +1703,36 @@ index 914d2dafaafa001c9ab6791a0a0581659295e333..199aae77b3620b7c4bb2ecd96b82978c
 +    container.appendChild(element);
 +  }
 +}
++// T3 patch: moving a node collapses any selection boundary inside it, so the containers holding the
++// selection's anchor and focus stay put and the rest are sorted around them.
++function getSelectionEndPositions(elements, currentPositions) {
++  const selection = typeof window !== "undefined" ? window.getSelection() : null;
++  if (!selection || selection.isCollapsed) return [];
++  const ends = [];
++  for (const node of [selection.anchorNode, selection.focusNode]) {
++    const pos = node ? elements.findIndex((element) => element.contains(node)) : -1;
++    if (pos !== -1 && !ends.includes(pos) && ends.every((end) => end < pos === currentPositions[end] < currentPositions[pos])) {
++      ends.push(pos);
++    }
++  }
++  return ends;
++}
  function sortDOMElements(container, indexByElement) {
    const elements = Array.from(container.children);
    if (elements.length <= 1) return elements;
-@@ -5690,9 +5724,9 @@ function sortDOMElements(container, indexByElement) {
+@@ -5674,7 +5722,10 @@ function sortDOMElements(container, indexByElement) {
+     targetPositions.set(item[0], index);
+   });
+   const currentPositions = elements.map((el) => targetPositions.get(el));
+-  const lis = findLIS(currentPositions);
++  const selectionEnds = getSelectionEndPositions(elements, currentPositions);
++  const isStableCandidate = (i) => selectionEnds.every((end) => i === end || i < end === currentPositions[i] < currentPositions[end]);
++  const candidates = currentPositions.map((_, i) => i).filter(isStableCandidate);
++  const lis = findLIS(candidates.map((i) => currentPositions[i])).map((k) => candidates[k]);
+   const stableIndices = new Set(lis);
+   for (let targetPos = 0; targetPos < items.length; targetPos++) {
+     const element = items[targetPos][0];
+@@ -5690,9 +5741,9 @@ function sortDOMElements(container, indexByElement) {
          }
        }
        if (nextStableElement) {
@@ -1718,7 +1744,7 @@ index 914d2dafaafa001c9ab6791a0a0581659295e333..199aae77b3620b7c4bb2ecd96b82978c
        }
      }
    }
-@@ -6446,8 +6480,8 @@ function ScrollAdjust() {
+@@ -6446,8 +6497,8 @@ function ScrollAdjust() {
                window.getComputedStyle(contentNode)[axis.paddingEndProp]
              );
              const temporaryPaddingEnd = `${(currentPaddingEnd || 0) + pad}px`;
@@ -1729,7 +1755,7 @@ index 914d2dafaafa001c9ab6791a0a0581659295e333..199aae77b3620b7c4bb2ecd96b82978c
              scrollBy();
              if (resetPaddingRafRef.current !== void 0) {
 diff --git a/react.mjs b/react.mjs
-index 95465f2ab89ce41a10553f58af83618f7310e83c..a123bd3e9df510100d44dfae1f59b87e2e456cfc 100644
+index 95465f2ab89ce41a10553f58af83618f7310e83c..39c051cf2444f001f4895863db6dd31628211b19 100644
 --- a/react.mjs
 +++ b/react.mjs
 @@ -4681,7 +4681,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
@@ -1797,7 +1823,7 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..a123bd3e9df510100d44dfae1f59b87e
      }
    }, [ctx, containerLayoutEpoch]);
    return children;
-@@ -5630,6 +5652,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
+@@ -5630,6 +5652,32 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
  });
  
  // src/utils/reordering.ts
@@ -1813,10 +1839,36 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..a123bd3e9df510100d44dfae1f59b87e
 +    container.appendChild(element);
 +  }
 +}
++// T3 patch: moving a node collapses any selection boundary inside it, so the containers holding the
++// selection's anchor and focus stay put and the rest are sorted around them.
++function getSelectionEndPositions(elements, currentPositions) {
++  const selection = typeof window !== "undefined" ? window.getSelection() : null;
++  if (!selection || selection.isCollapsed) return [];
++  const ends = [];
++  for (const node of [selection.anchorNode, selection.focusNode]) {
++    const pos = node ? elements.findIndex((element) => element.contains(node)) : -1;
++    if (pos !== -1 && !ends.includes(pos) && ends.every((end) => end < pos === currentPositions[end] < currentPositions[pos])) {
++      ends.push(pos);
++    }
++  }
++  return ends;
++}
  function sortDOMElements(container, indexByElement) {
    const elements = Array.from(container.children);
    if (elements.length <= 1) return elements;
-@@ -5669,9 +5703,9 @@ function sortDOMElements(container, indexByElement) {
+@@ -5653,7 +5701,10 @@ function sortDOMElements(container, indexByElement) {
+     targetPositions.set(item[0], index);
+   });
+   const currentPositions = elements.map((el) => targetPositions.get(el));
+-  const lis = findLIS(currentPositions);
++  const selectionEnds = getSelectionEndPositions(elements, currentPositions);
++  const isStableCandidate = (i) => selectionEnds.every((end) => i === end || i < end === currentPositions[i] < currentPositions[end]);
++  const candidates = currentPositions.map((_, i) => i).filter(isStableCandidate);
++  const lis = findLIS(candidates.map((i) => currentPositions[i])).map((k) => candidates[k]);
+   const stableIndices = new Set(lis);
+   for (let targetPos = 0; targetPos < items.length; targetPos++) {
+     const element = items[targetPos][0];
+@@ -5669,9 +5720,9 @@ function sortDOMElements(container, indexByElement) {
          }
        }
        if (nextStableElement) {
@@ -1828,7 +1880,7 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..a123bd3e9df510100d44dfae1f59b87e
        }
      }
    }
-@@ -6425,8 +6459,8 @@ function ScrollAdjust() {
+@@ -6425,8 +6476,8 @@ function ScrollAdjust() {
                window.getComputedStyle(contentNode)[axis.paddingEndProp]
              );
              const temporaryPaddingEnd = `${(currentPaddingEnd || 0) + pad}px`;
