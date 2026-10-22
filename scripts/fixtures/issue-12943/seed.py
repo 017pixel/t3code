@@ -1,6 +1,7 @@
 import argparse
 import datetime
 import json
+import pathlib
 import sqlite3
 
 
@@ -8,7 +9,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument("database", help="Stopped, isolated development statev2.sqlite")
 parser.add_argument("thread_id", help="Existing empty thread in that database")
 args = parser.parse_args()
-database = sqlite3.connect(args.database)
+database_path = pathlib.Path(args.database).resolve()
+if database_path.is_relative_to((pathlib.Path.home() / ".t3" / "userdata").resolve()):
+    raise SystemExit("Use a copied development database, never live T3 state")
+database = sqlite3.connect(database_path.as_uri() + "?mode=rw", uri=True)
 if not database.execute(
     "SELECT 1 FROM orchestration_v2_projection_threads WHERE thread_id = ?", (args.thread_id,)
 ).fetchone():
