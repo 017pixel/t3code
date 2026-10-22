@@ -1041,6 +1041,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
     endMiddleButtonPanRef.current?.();
     let lastY = event.clientY;
     const pan = (move: PointerEvent) => {
+      // A release outside the window never reaches us; the next move shows it.
+      if ((move.buttons & 4) === 0) return end();
       const scrollNode = listRef.current?.getScrollableNode();
       if (scrollNode) scrollNode.scrollTop -= move.clientY - lastY;
       lastY = move.clientY;
@@ -1068,6 +1070,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       window.removeEventListener("mouseup", release, true);
       window.removeEventListener("pointerup", settle, true);
       window.removeEventListener("pointercancel", end, true);
+      window.removeEventListener("blur", end);
       endMiddleButtonPanRef.current = null;
     };
     window.addEventListener("pointermove", pan, true);
@@ -1075,6 +1078,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     window.addEventListener("mouseup", release, true);
     window.addEventListener("pointerup", settle, true);
     window.addEventListener("pointercancel", end, true);
+    window.addEventListener("blur", end);
     endMiddleButtonPanRef.current = end;
   };
 

@@ -376,6 +376,36 @@ describe("MessagesTimeline middle button", () => {
 
     expect(scroller.scrollTop).toBeCloseTo(start - 120, 0);
   });
+
+  // The release can land outside the browser window, where no pointerup reaches us.
+  it.each([
+    ["the window loses focus", () => window.dispatchEvent(new Event("blur"))],
+    ["the pointer returns without the middle button", () => {}],
+  ])("stops panning once %s", async (_case, leave) => {
+    using _platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux x86_64");
+    const listRef = createRef<LegendListRef | null>();
+    const entries = Array.from({ length: 40 }, (_, index) =>
+      message(`Line ${index}\n\n${"Filler text. ".repeat(40)}`, {}, `message-${index}`),
+    );
+    await using screen = await renderTimeline(entries, { listRef });
+    const scroller = listRef.current!.getScrollableNode() as HTMLElement;
+    await vi.waitFor(() => expect(scroller.scrollTop).toBeGreaterThan(400));
+    const start = scroller.scrollTop;
+    const target = screen.container.querySelector("[data-timeline-root]")!;
+
+    middleButton(target, "down", 300);
+    leave();
+    await act(async () => {
+      target.dispatchEvent(
+        new PointerEvent("pointermove", { bubbles: true, buttons: 0, clientY: 420 }),
+      );
+      target.dispatchEvent(
+        new PointerEvent("pointermove", { bubbles: true, buttons: 4, clientY: 540 }),
+      );
+    });
+
+    expect(scroller.scrollTop).toBe(start);
+  });
 });
 
 describe("compact reasoning math", () => {
