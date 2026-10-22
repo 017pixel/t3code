@@ -162,6 +162,7 @@ const withService = <A, E>(
   }) => Effect.Effect<A, E, never>,
   options: {
     readonly onFrame?: () => void;
+    readonly beforeFrame?: () => Effect.Effect<void>;
     readonly frameGate?: {
       readonly started: Deferred.Deferred<void>;
       readonly release: Deferred.Deferred<void>;
@@ -179,7 +180,9 @@ const withService = <A, E>(
     const launches = yield* Queue.unbounded<LaunchInput>();
     const secretsByRef = new Map<string, string>();
     const layerDependencies = Layer.mergeAll(
-      options.frameGate === undefined && options.onFrame === undefined
+      options.frameGate === undefined &&
+        options.onFrame === undefined &&
+        options.beforeFrame === undefined
         ? NodePlatformCrypto.layer
         : Layer.effect(
             Crypto.Crypto,
@@ -190,6 +193,8 @@ const withService = <A, E>(
                 randomBytes: (size: number) =>
                   Effect.suspend(() => {
                     if (size === 6) options.onFrame?.();
+                    if (size === 6 && options.beforeFrame !== undefined)
+                      return options.beforeFrame().pipe(Effect.andThen(crypto.randomBytes(size)));
                     return size === 6 && options.frameGate !== undefined
                       ? Deferred.succeed(options.frameGate.started, undefined).pipe(
                           Effect.andThen(Deferred.await(options.frameGate.release)),
@@ -1172,6 +1177,87 @@ it.effect("an immediate delivery queued behind a run is not shown as an open win
           yield* Deferred.succeed(gate, undefined);
         }),
       { gate },
+    );
+  }),
+);
+
+it.effect("a replaced task's old drain leaves the new incarnation's delivery alone", () =>
+  Effect.gen(function* () {
+    const firstRun = yield* Deferred.make<void>();
+    const secondRun = yield* Deferred.make<void>();
+    const newDrainPreparing = yield* Deferred.make<void>();
+    const releaseNewDrain = yield* Deferred.make<void>();
+    const oldDrainDecided = yield* Deferred.make<void>();
+    const releaseOldDrain = yield* Deferred.make<void>();
+    const drainsDone = yield* Deferred.make<void>();
+    let frames = 0;
+    let drainEnds = 0;
+    let firstCommandId: string | undefined;
+    // Ends of the drain span: the old drain stops first, then the new one.
+    const tracer = Tracer.make({
+      span: (options) => {
+        const span = new Tracer.NativeSpan(options);
+        const end = span.end.bind(span);
+        span.end = (...args) => {
+          end(...args);
+          if (span.name !== "ScheduledTaskService.dispatchPendingWebhook") return;
+          drainEnds++;
+          if (drainEnds === 1) Deferred.doneUnsafe(oldDrainDecided, Effect.void);
+          if (drainEnds === 2) Deferred.doneUnsafe(drainsDone, Effect.void);
+        };
+        return span;
+      },
+    });
+    yield* withService(
+      ({ service, launches }) =>
+        Effect.gen(function* () {
+          const { task: first } = yield* service.upsert(yield* webhookTaskInput());
+          yield* service.triggerWebhook(requestFor(first));
+          yield* Queue.take(launches);
+          yield* service.delete({ id: first.id });
+          const { task } = yield* service.upsert(yield* webhookTaskInput());
+          const accepted = yield* service.triggerWebhook(requestFor(task));
+          const deliveryId = accepted._tag === "accepted" ? accepted.deliveryId : "";
+          yield* Deferred.await(newDrainPreparing);
+          // The old run ends while the new drain holds the second delivery.
+          yield* Deferred.succeed(firstRun, undefined);
+          yield* Deferred.await(oldDrainDecided);
+          yield* Deferred.succeed(releaseNewDrain, undefined);
+          assert.equal(
+            (yield* Queue.take(launches)).commandId,
+            `scheduled-task:${task.id}:webhook:${deliveryId}`,
+          );
+          yield* Deferred.succeed(releaseOldDrain, undefined);
+          yield* Deferred.succeed(secondRun, undefined);
+          yield* Deferred.await(drainsDone);
+          const { delivery } = yield* service.getWebhookDelivery({
+            id: task.id,
+            deliveryId: ScheduledTaskWebhookDeliveryId.make(deliveryId),
+          });
+          assert.equal(delivery.outcome, "accepted");
+          assert.isTrue(Option.isNone(yield* Queue.poll(launches)));
+        }).pipe(Effect.withTracer(tracer)),
+      {
+        gateForTask: (input) => {
+          firstCommandId ??= input.commandId;
+          return input.commandId === firstCommandId ? firstRun : secondRun;
+        },
+        workers: new Map(),
+        beforeFrame: () => {
+          frames++;
+          if (frames === 4)
+            return Deferred.succeed(newDrainPreparing, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseNewDrain)),
+            );
+          // Trigger and drain each render a frame, so only an old drain that
+          // took the new delivery reaches a fifth.
+          if (frames === 5)
+            return Deferred.succeed(oldDrainDecided, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseOldDrain)),
+            );
+          return Effect.void;
+        },
+      },
     );
   }),
 );

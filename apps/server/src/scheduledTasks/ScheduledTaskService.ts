@@ -1649,6 +1649,8 @@ export const layer = Layer.effect(
         const permit = yield* webhookPermit(taskId);
         const dispatch = Effect.gen(function* () {
           while (true) {
+            // A delete-and-recreate swaps the permit; the new incarnation's drain owns its rows.
+            if ((yield* Ref.get(webhookPermits)).get(taskId) !== permit) return;
             const [entry] = yield* sql<{
               delivery_id: string;
               task_json: string;
