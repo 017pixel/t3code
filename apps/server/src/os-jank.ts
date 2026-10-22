@@ -141,6 +141,9 @@ const readLoginShellOutput = (shell: string) =>
             stdin: "ignore",
             stdout: "pipe",
             stderr: "ignore",
+            // A profile that traps SIGTERM would otherwise hold the scope open
+            // past the timeout while cleanup waits for the exit.
+            forceKillAfter: "1 second",
           },
         ),
       );
@@ -150,7 +153,18 @@ const readLoginShellOutput = (shell: string) =>
       );
       return exitCode === 0 ? stdout : "";
     }),
-  ).pipe(Effect.timeoutOption(LOGIN_SHELL_TIMEOUT), Effect.map(Option.getOrElse(() => "")));
+  ).pipe(
+    Effect.timeoutOption(LOGIN_SHELL_TIMEOUT),
+    Effect.flatMap(
+      Option.match({
+        onSome: Effect.succeed,
+        onNone: () =>
+          Effect.logWarning(
+            `Timed out reading PATH from login shell ${shell} after ${Duration.format(LOGIN_SHELL_TIMEOUT)}.`,
+          ).pipe(Effect.as("")),
+      }),
+    ),
+  );
 
 /**
  * Re-reads PATH from the login shell so tools installed after startup become

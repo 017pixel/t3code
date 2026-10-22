@@ -1,5 +1,5 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
-import { assert, it } from "@effect/vitest";
+import { afterEach, assert, beforeEach, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -34,6 +34,20 @@ import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.
 import * as ServerSourceControlHost from "./ServerSourceControlHost.ts";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
 import { fixPath } from "../os-jank.ts";
+
+// Every discover refreshes these from the login shell into process.env.
+const REFRESHED_ENV_NAMES = ["PATH", "SHELL", "JAVA_HOME", "__MISE_DIFF"] as const;
+let savedEnv: Partial<Record<(typeof REFRESHED_ENV_NAMES)[number], string>> = {};
+beforeEach(() => {
+  savedEnv = Object.fromEntries(REFRESHED_ENV_NAMES.map((name) => [name, process.env[name]]));
+});
+afterEach(() => {
+  for (const name of REFRESHED_ENV_NAMES) {
+    const value = savedEnv[name];
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+});
 
 const layerSourceControlProviderRegistryTest = (input: {
   readonly bitbucket: Partial<BitbucketApi.BitbucketApi["Service"]>;
@@ -461,23 +475,7 @@ it.effect("rescans with tools the login shell gained after the server started", 
       mode: 0o755,
     });
 
-    const originalShell = process.env.SHELL;
-    const originalPath = process.env.PATH;
-    yield* Effect.acquireRelease(
-      Effect.sync(() => {
-        process.env.SHELL = loginShell;
-      }),
-      () =>
-        Effect.sync(() => {
-          for (const [name, value] of [
-            ["SHELL", originalShell],
-            ["PATH", originalPath],
-          ] as const) {
-            if (value === undefined) delete process.env[name];
-            else process.env[name] = value;
-          }
-        }),
-    );
+    process.env.SHELL = loginShell;
     yield* fixPath();
 
     // The user installs a tool after launch; their login shell now finds it.
