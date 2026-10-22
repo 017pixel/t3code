@@ -4261,12 +4261,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           id: ProviderThreadId.make(`${threadId}:current`),
           updatedAt: now,
         };
-        yield* orchestrator.dispatch({
-          type: "thread.model-selection.set",
-          commandId: CommandId.make(`${threadId}:select-current`),
-          threadId,
-          modelSelection: currentSelection,
-        });
+        // Provider selection only changes between turns, so hold the queue past the active run.
         yield* eventSink.write({
           events: [
             {
@@ -4278,6 +4273,24 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
               payload: { ...active, status: "completed", completedAt: now },
             },
             {
+              id: EventId.make(`${threadId}:held`),
+              type: "run.updated",
+              threadId,
+              runId: queued.id,
+              occurredAt: now,
+              payload: { ...queued, queueHeld: true },
+            },
+          ],
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.model-selection.set",
+          commandId: CommandId.make(`${threadId}:select-current`),
+          threadId,
+          modelSelection: currentSelection,
+        });
+        yield* eventSink.write({
+          events: [
+            {
               id: EventId.make(`${threadId}:conversation`),
               type: "provider-thread.updated",
               threadId,
@@ -4288,7 +4301,11 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         });
         const expectedThreadId =
           creationSource === "provider" ? queued.providerThreadId : current.id;
-        yield* orchestrator.resumeQueuedRuns;
+        yield* orchestrator.dispatch({
+          type: "queue.resume",
+          commandId: CommandId.make(`${threadId}:resume`),
+          threadId,
+        });
         const after = yield* orchestrator.getThreadProjection(threadId);
         const delivered = after.runs.find((run) => run.id === queued.id)!;
         assert.equal(delivered.status, "starting");
