@@ -17,10 +17,14 @@ const canonical = async (path) => {
   }
 };
 const resolved = await canonical(base);
-if (resolved === (await canonical(NodePath.join(NodeOS.homedir(), ".t3"))))
-  throw new Error("Refusing the live T3 home");
-await NodeFSP.mkdir(resolved, { recursive: true });
+const live = NodePath.join(NodeOS.homedir(), ".t3");
+if (resolved === (await canonical(live))) throw new Error("Refusing the live T3 home");
 const userdata = NodePath.join(resolved, "userdata");
+const file = NodePath.join(userdata, "settings.json");
+// A linked userdata directory or settings file can still alias the live settings.
+if ((await canonical(file)) === (await canonical(NodePath.join(live, "userdata", "settings.json"))))
+  throw new Error("Refusing the live T3 settings");
+await NodeFSP.mkdir(resolved, { recursive: true });
 const readJson = async (file) => {
   try {
     return JSON.parse(await NodeFSP.readFile(file, "utf8"));
@@ -40,7 +44,6 @@ if (runtime.pid) {
   }
   if (running) throw new Error("Stop the isolated server before seeding settings");
 }
-const file = NodePath.join(userdata, "settings.json");
 const settings = await readJson(file);
 settings.providerInstances ??= {};
 settings.providerInstances.acpRegistry_minimax_code = {
