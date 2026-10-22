@@ -2,6 +2,7 @@ import * as NodeNet from "node:net";
 
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NetService from "@t3tools/shared/Net";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -265,6 +266,54 @@ describe("ssh tunnel scripts", () => {
     }),
   );
 
+  it.effect("waits for the tunnel session before reporting the environment ready", () =>
+    Effect.gen(function* () {
+      const httpChecked = yield* Deferred.make<void>();
+      const sessionReady = yield* Deferred.make<void>();
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.succeed(
+          commandArgs(command).includes("-L")
+            ? {
+                ...makeRunningProcess(() => undefined),
+                stdout: Stream.fromEffect(Deferred.await(sessionReady)).pipe(
+                  Stream.map(() => new TextEncoder().encode("t3-ssh-tunnel-session-ready\n")),
+                ),
+              }
+            : makeSuccessfulProcess('{"remotePort":3773}\n'),
+        ),
+      );
+      const httpClient = HttpClient.make((request) =>
+        Deferred.succeed(httpChecked, undefined).pipe(
+          Effect.as(HttpClientResponse.fromWeb(request, new Response("", { status: 200 }))),
+        ),
+      );
+      const layer = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Layer.succeed(HttpClient.HttpClient, httpClient),
+        Layer.succeed(NetService.NetService, testNetService),
+        SshAuth.SshPasswordPrompt.disabledLayer,
+        SshTunnel.SshEnvironmentManager.layer({ resolveCliRunner: Effect.succeed(ARCHIVE) }),
+      );
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        const ensure = yield* Effect.forkChild(
+          manager.ensureEnvironment({
+            alias: "devbox",
+            hostname: "devbox",
+            username: null,
+            port: null,
+          }),
+        );
+        yield* Deferred.await(httpChecked);
+        yield* TestClock.adjust(Duration.zero);
+        assert.isUndefined(ensure.pollUnsafe());
+        yield* Deferred.succeed(sessionReady, undefined);
+        yield* Fiber.join(ensure);
+      }).pipe(Effect.provide(layer), Effect.scoped);
+    }),
+  );
+
   it.effect.each(["local tunnel", "remote server"] as const)(
     "waits for %s shutdown before reconnecting the same target",
     (stalledStep) =>
@@ -515,7 +564,8 @@ const forwardedAgentLayer = (input: {
       const real = yield* ChildProcessSpawner.ChildProcessSpawner;
       return ChildProcessSpawner.make((command) =>
         real.spawn(
-          command._tag === "StandardCommand" && command.command === "ssh"
+          command._tag === "StandardCommand" &&
+            (command.command === "ssh" || command.command === "ssh.exe")
             ? ChildProcess.make(process.execPath, [input.fakeSsh, ...command.args], command.options)
             : command,
         ),
@@ -555,64 +605,68 @@ const forwardedAgentLayer = (input: {
   );
 };
 
-describe("managed server forwarded agent", () => {
-  const target = { alias: "devbox", hostname: "devbox", username: null, port: null };
+// The fake sshd needs sh, process-group signals, and Unix socket agent paths.
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+  "managed server forwarded agent",
+  () => {
+    const target = { alias: "devbox", hostname: "devbox", username: null, port: null };
 
-  // Reproduces https://git.cafe/pingdotgg/t3code/issues/11872: the managed
-  // server kept the launch connection's agent socket, which sshd deletes as
-  // soon as the launch command exits, so git over SSH failed on the remote.
-  it.live(
-    "keeps the forwarded agent reachable from the managed server while connected and across reconnect",
-    () =>
+    // Reproduces https://git.cafe/pingdotgg/t3code/issues/11872: the managed
+    // server kept the launch connection's agent socket, which sshd deletes as
+    // soon as the launch command exits, so git over SSH failed on the remote.
+    it.live(
+      "keeps the forwarded agent reachable from the managed server while connected and across reconnect",
+      () =>
+        Effect.gen(function* () {
+          const harness = yield* makeForwardedAgentHarness("yes").pipe(
+            Effect.provide(NodeServices.layer),
+          );
+          const staleBaseUrls = new Set<string>();
+          yield* Effect.gen(function* () {
+            const manager = yield* SshTunnel.SshEnvironmentManager;
+            const first = yield* manager.ensureEnvironment(target);
+            const launched = yield* harness.readServer;
+            const agentAfterLaunch = yield* canConnectToSocket(launched.authSock);
+
+            // A dropped local forward makes the next ensure reconnect and reuse
+            // the still-running server.
+            staleBaseUrls.add(first.httpBaseUrl);
+            const second = yield* manager.ensureEnvironment(target);
+            const reused = yield* harness.readServer;
+            const agentAfterReconnect = yield* canConnectToSocket(reused.authSock);
+
+            assert.notEqual(second.httpBaseUrl, first.httpBaseUrl);
+            assert.deepEqual(
+              {
+                sameServer: reused.pid === launched.pid,
+                agentAfterLaunch,
+                agentAfterReconnect,
+              },
+              { sameServer: true, agentAfterLaunch: true, agentAfterReconnect: true },
+              `managed server SSH_AUTH_SOCK=${String(reused.authSock)}`,
+            );
+          }).pipe(Effect.provide(forwardedAgentLayer({ ...harness, staleBaseUrls })));
+        }).pipe(Effect.scoped),
+    );
+
+    it.live("forwards no agent when the SSH config does not enable ForwardAgent", () =>
       Effect.gen(function* () {
-        const harness = yield* makeForwardedAgentHarness("yes").pipe(
+        const harness = yield* makeForwardedAgentHarness("no").pipe(
           Effect.provide(NodeServices.layer),
         );
-        const staleBaseUrls = new Set<string>();
         yield* Effect.gen(function* () {
           const manager = yield* SshTunnel.SshEnvironmentManager;
-          const first = yield* manager.ensureEnvironment(target);
-          const launched = yield* harness.readServer;
-          const agentAfterLaunch = yield* canConnectToSocket(launched.authSock);
-
-          // A dropped local forward makes the next ensure reconnect and reuse
-          // the still-running server.
-          staleBaseUrls.add(first.httpBaseUrl);
-          const second = yield* manager.ensureEnvironment(target);
-          const reused = yield* harness.readServer;
-          const agentAfterReconnect = yield* canConnectToSocket(reused.authSock);
-
-          assert.notEqual(second.httpBaseUrl, first.httpBaseUrl);
-          assert.deepEqual(
-            {
-              sameServer: reused.pid === launched.pid,
-              agentAfterLaunch,
-              agentAfterReconnect,
-            },
-            { sameServer: true, agentAfterLaunch: true, agentAfterReconnect: true },
-            `managed server SSH_AUTH_SOCK=${String(reused.authSock)}`,
-          );
-        }).pipe(Effect.provide(forwardedAgentLayer({ ...harness, staleBaseUrls })));
+          yield* manager.ensureEnvironment(target);
+          assert.isNull((yield* harness.readServer).authSock);
+          const connections = yield* harness.readConnections;
+          assert.isFalse(connections.some((connection) => connection.forwardAgent));
+        }).pipe(
+          Effect.provide(forwardedAgentLayer({ ...harness, staleBaseUrls: new Set<string>() })),
+        );
       }).pipe(Effect.scoped),
-  );
-
-  it.live("forwards no agent when the SSH config does not enable ForwardAgent", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeForwardedAgentHarness("no").pipe(
-        Effect.provide(NodeServices.layer),
-      );
-      yield* Effect.gen(function* () {
-        const manager = yield* SshTunnel.SshEnvironmentManager;
-        yield* manager.ensureEnvironment(target);
-        assert.isNull((yield* harness.readServer).authSock);
-        const connections = yield* harness.readConnections;
-        assert.isFalse(connections.some((connection) => connection.forwardAgent));
-      }).pipe(
-        Effect.provide(forwardedAgentLayer({ ...harness, staleBaseUrls: new Set<string>() })),
-      );
-    }).pipe(Effect.scoped),
-  );
-});
+    );
+  },
+);
 
 // On macOS, Node can bind 127.0.0.1:<port> while another process (such as the
 // desktop app with network access on) listens on *:<port>. Linux refuses that
