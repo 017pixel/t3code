@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
 
 // Transparent CLI observer: retain only user text blocks, never env, auth, or control frames.
 const executable = process.env.T3_CLAUDE_OBSERVER_EXECUTABLE;
@@ -8,7 +8,9 @@ const output = process.env.T3_CLAUDE_OBSERVER_OUTPUT;
 if (!executable || !output?.startsWith("/tmp/")) {
   throw new Error("Set T3_CLAUDE_OBSERVER_EXECUTABLE and /tmp T3_CLAUDE_OBSERVER_OUTPUT");
 }
-const child = spawn(executable, process.argv.slice(2), { stdio: ["pipe", "inherit", "inherit"] });
+const child = NodeChildProcess.spawn(executable, process.argv.slice(2), {
+  stdio: ["pipe", "inherit", "inherit"],
+});
 let pending = "";
 process.stdin.on("data", (chunk) => {
   child.stdin.write(chunk);
@@ -24,7 +26,7 @@ process.stdin.on("data", (chunk) => {
         typeof blocks === "string"
           ? [blocks]
           : blocks?.filter((b) => b.type === "text").map((b) => b.text);
-      appendFileSync(
+      NodeFS.appendFileSync(
         output,
         JSON.stringify({ at: new Date().toISOString(), pid: process.pid, texts }) + "\n",
         { mode: 0o600 },
