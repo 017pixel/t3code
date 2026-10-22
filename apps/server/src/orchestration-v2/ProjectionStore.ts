@@ -6007,9 +6007,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 LIMIT 1
               ) AS latest_user_authored_message_at
             FROM orchestration_v2_projection_threads t
+            -- The newest run not waiting in a held queue, matching latestUnheldRun.
             LEFT JOIN orchestration_v2_projection_runs r ON r.run_id = (
               SELECT latest.run_id FROM orchestration_v2_projection_runs latest
               WHERE latest.thread_id = t.thread_id
+                AND NOT (
+                  latest.status = 'queued'
+                  AND json_extract(latest.payload_json, '$.queueHeld') IS 1
+                )
               ORDER BY latest.ordinal DESC, latest.run_id DESC
               LIMIT 1
             )

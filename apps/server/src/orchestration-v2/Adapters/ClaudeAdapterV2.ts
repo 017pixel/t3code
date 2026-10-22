@@ -6859,6 +6859,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     `terminal-failure:${input.context.providerTurnId}`,
                   ),
                   status: reportedStatus,
+                  ...(input.completedTurnFailure === undefined ? {} : { childTurnsContinue: true }),
                   failure: reportedFailure ?? makeProviderFailure({ class: "provider_error" }),
                   ...(providerRetry === undefined
                     ? {}

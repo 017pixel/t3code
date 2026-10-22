@@ -72,6 +72,7 @@ const createRun = Effect.fn(function* (
   threadId: ThreadId,
   status: OrchestrationV2Run["status"] = "completed",
   ordinal = 1,
+  extra: Partial<OrchestrationV2Run> = {},
 ) {
   const store = yield* ProjectionStore.ProjectionStoreV2;
   const runId = RunId.make(`run:${threadId}:${ordinal}`);
@@ -96,6 +97,7 @@ const createRun = Effect.fn(function* (
       completedAt: ["completed", "rolled_back", "failed"].includes(status) ? old : null,
       checkpointId: null,
       contextHandoffId: null,
+      ...extra,
     },
   });
   return runId;
@@ -388,18 +390,24 @@ it.effect.each([
       });
       const denied = yield* failRun("denied", "permission_denied");
       const unrelated = yield* failRun("unrelated", "other_failure");
+      // A message sent during the denied run queues behind it and is held when it fails.
+      const deniedWithHeldSuccessor = yield* failRun("denied-held", "permission_denied");
+      yield* createRun(deniedWithHeldSuccessor, "queued", 2, { queueHeld: true });
 
       const candidates = yield* store.getSettlementCandidates();
-      const resolve = (threadId: ThreadId) =>
+      const resolve = (threadId: ThreadId, merged: boolean) =>
         resolveAutoSettlementAt({
           thread: candidates.find((thread) => thread.id === threadId)!,
-          pullRequest: null,
+          pullRequest: merged ? { state: "merged", mergedAt: DateTime.formatIso(old) } : null,
           nowMs: DateTime.toEpochMillis(now),
           autoSettleAfterDays: 7,
           autoSettleOnMerge: true,
         });
-      assert.isNull(resolve(denied));
-      assert.equal(DateTime.formatIso(resolve(unrelated)!), DateTime.formatIso(old));
+      for (const merged of [false, true]) {
+        assert.isNull(resolve(denied, merged));
+        assert.isNull(resolve(deniedWithHeldSuccessor, merged));
+        assert.equal(DateTime.formatIso(resolve(unrelated, merged)!), DateTime.formatIso(old));
+      }
     }).pipe(Effect.provide(testLayer)),
 );
 
