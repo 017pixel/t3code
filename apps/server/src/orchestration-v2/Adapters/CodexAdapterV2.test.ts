@@ -523,6 +523,45 @@ function makeCodexReplayTurn(input: {
   };
 }
 
+const errorCauseChainText = (error: unknown): string =>
+  error instanceof Error ? `${error.message} ${errorCauseChainText(error.cause)}` : String(error);
+
+const codexReplayThreadResult = (input: {
+  readonly nativeThreadId: string;
+  readonly forkedFromId: string | null;
+}) => ({
+  thread: {
+    id: input.nativeThreadId,
+    sessionId: input.nativeThreadId,
+    forkedFromId: input.forkedFromId,
+    preview: "",
+    ephemeral: false,
+    modelProvider: "openai",
+    createdAt: 1782622440,
+    updatedAt: 1782622440,
+    status: { type: "idle" },
+    path: `/tmp/${input.nativeThreadId}.jsonl`,
+    cwd: "/workspace",
+    cliVersion: "0.144.0",
+    source: "vscode",
+    threadSource: null,
+    agentNickname: null,
+    agentRole: null,
+    gitInfo: null,
+    name: null,
+    turns: [],
+  },
+  model: "gpt-5.4",
+  modelProvider: "openai",
+  serviceTier: null,
+  cwd: "/workspace",
+  instructionSources: [],
+  approvalPolicy: "on-request",
+  approvalsReviewer: "user",
+  sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false },
+  reasoningEffort: "medium",
+});
+
 function codexReplayPreamble(input: {
   readonly nativeThreadId: string;
   readonly nativeTurnId: string;
@@ -747,6 +786,12 @@ describe("CodexAdapterV2 session initialize", () => {
             modelSelection: CODEX_TEST_MODEL_SELECTION,
             runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
           }),
+        forkThread: (sourceProviderThread: OrchestrationV2ProviderThread, targetThreadId: string) =>
+          runtime.forkThread({
+            sourceProviderThread,
+            targetThreadId: ThreadId.make(targetThreadId),
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+          }),
         initializeRequests: () => initializeRequests,
         requests: () => requests,
       };
@@ -922,6 +967,79 @@ describe("CodexAdapterV2 session initialize", () => {
 
       assert.equal(failed._tag, "ProviderAdapterEnsureThreadError");
       assert.notInclude(session.requests(), "thread/start");
+    }).pipe(Effect.scoped, Effect.provide(hooksTestLayer)),
+  );
+
+  // regression: #5024 a native fork is also a new Codex thread, so it must not
+  // start while an enabled hook still needs review.
+  it.effect.each([
+    { name: "an untrusted enabled hook", hook: codexHook({ trustStatus: "untrusted" }) },
+    { name: "a modified enabled hook", hook: codexHook({ trustStatus: "modified" }) },
+    { name: "a trusted hook", hook: codexHook({}) },
+    {
+      name: "a disabled untrusted hook",
+      hook: codexHook({ trustStatus: "untrusted", enabled: false }),
+    },
+  ])("forks a thread only when hooks are reviewed, given $name", ({ name, hook }) =>
+    Effect.gen(function* () {
+      const scenario = `hooks-fork-${name.replaceAll(/\W+/g, "-")}`;
+      const blocked = hook.enabled && hook.trustStatus !== "trusted";
+      // The source thread starts before the hook needs review.
+      let hooksList = listedHooks([]);
+      const session = yield* openReplaySession(
+        makeCodexReplayTranscript({
+          scenario,
+          entries: [
+            ...replayPreamble(scenario).slice(0, 5),
+            ...(blocked
+              ? []
+              : ([
+                  {
+                    type: "expect_outbound",
+                    label: "thread/fork",
+                    frame: {
+                      id: 3,
+                      method: "thread/fork",
+                      params: { threadId: scenario, config: CodexAdapterV2.CODEX_THREAD_CONFIG },
+                    },
+                  },
+                  {
+                    type: "emit_inbound",
+                    label: "thread/fork",
+                    frame: {
+                      id: 3,
+                      result: codexReplayThreadResult({
+                        nativeThreadId: `${scenario}-fork`,
+                        forkedFromId: scenario,
+                      }),
+                    },
+                  },
+                ] satisfies Array<CodexReplay.CodexAppServerReplayEntry>)),
+          ],
+        }),
+        undefined,
+        Effect.suspend(() => hooksList),
+      );
+      const source = yield* session.ensureThread(`thread-${scenario}`);
+      hooksList = listedHooks([hook]);
+
+      const result = yield* session
+        .forkThread(source, `thread-${scenario}-fork`)
+        .pipe(Effect.result);
+
+      if (blocked) {
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") {
+          assert.equal(result.failure._tag, "ProviderAdapterForkThreadError");
+          assert.include(errorCauseChainText(result.failure), "`/hooks`");
+        }
+        assert.notInclude(session.requests(), "thread/fork");
+      } else {
+        assert.equal(result._tag, "Success");
+        if (result._tag === "Success") {
+          assert.equal(result.success.nativeThreadRef?.nativeId, `${scenario}-fork`);
+        }
+      }
     }).pipe(Effect.scoped, Effect.provide(hooksTestLayer)),
   );
 
@@ -5360,45 +5478,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         ),
       ),
   );
-
-  const codexReplayThreadResult = (input: {
-    readonly nativeThreadId: string;
-    readonly forkedFromId: string | null;
-  }) => ({
-    thread: {
-      id: input.nativeThreadId,
-      sessionId: input.nativeThreadId,
-      forkedFromId: input.forkedFromId,
-      preview: "",
-      ephemeral: false,
-      modelProvider: "openai",
-      createdAt: 1782622440,
-      updatedAt: 1782622440,
-      status: { type: "idle" },
-      path: `/tmp/${input.nativeThreadId}.jsonl`,
-      cwd: "/workspace",
-      cliVersion: "0.144.0",
-      source: "vscode",
-      threadSource: null,
-      agentNickname: null,
-      agentRole: null,
-      gitInfo: null,
-      name: null,
-      turns: [],
-    },
-    model: "gpt-5.4",
-    modelProvider: "openai",
-    serviceTier: null,
-    cwd: "/workspace",
-    instructionSources: [],
-    approvalPolicy: "on-request",
-    approvalsReviewer: "user",
-    sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false },
-    reasoningEffort: "medium",
-  });
-
-  const errorCauseChainText = (error: unknown): string =>
-    error instanceof Error ? `${error.message} ${errorCauseChainText(error.cause)}` : String(error);
 
   const codexReplaySourceTurn = (input: {
     readonly id: string;

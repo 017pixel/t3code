@@ -7526,6 +7526,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               const threadId = yield* getNativeThreadId(threadInput.sourceProviderThread);
               const boundary = yield* resolveCodexForkBoundary(threadInput);
               const response = yield* ensureInitialized.pipe(
+                Effect.andThen(requireReviewedHooks(threadInput.runtimePolicy?.cwd ?? null)),
                 Effect.andThen(
                   client.request("thread/fork", {
                     threadId,
