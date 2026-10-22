@@ -349,6 +349,60 @@ it.effect.each([
   }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect.each([
+  ["sql", layerSql],
+  ["memory", ProjectionStore.layerMemory],
+] as const)(
+  "%s: a run failed by a permission denial stays out of auto-settlement",
+  ([, testLayer]) =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const failRun = Effect.fn(function* (name: string, code: string) {
+        const threadId = yield* createThread(name);
+        const runId = yield* createRun(threadId, "failed");
+        yield* store.apply({
+          id: EventId.make(`event:error:${runId}`),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: old,
+          payload: {
+            id: TurnItemId.make(`error:${runId}`),
+            threadId,
+            runId,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            type: "error",
+            status: "failed",
+            title: null,
+            startedAt: old,
+            completedAt: old,
+            updatedAt: old,
+            failure: { class: "permission_error", message: name, code, retryable: false },
+          },
+        });
+        return threadId;
+      });
+      const denied = yield* failRun("denied", "permission_denied");
+      const unrelated = yield* failRun("unrelated", "other_failure");
+
+      const candidates = yield* store.getSettlementCandidates();
+      const resolve = (threadId: ThreadId) =>
+        resolveAutoSettlementAt({
+          thread: candidates.find((thread) => thread.id === threadId)!,
+          pullRequest: null,
+          nowMs: DateTime.toEpochMillis(now),
+          autoSettleAfterDays: 7,
+          autoSettleOnMerge: true,
+        });
+      assert.isNull(resolve(denied));
+      assert.equal(DateTime.formatIso(resolve(unrelated)!), DateTime.formatIso(old));
+    }).pipe(Effect.provide(testLayer)),
+);
+
 const pullRequestLink = (number: number) => ({
   host: "github.com",
   repository: "owner/repository",

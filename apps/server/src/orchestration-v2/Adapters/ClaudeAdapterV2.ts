@@ -2621,6 +2621,32 @@ function webSearchResultsFromClaudeOutput(
 }
 
 const CLAUDE_PERMISSION_DENIAL_NOTICE_LIMIT = 5;
+const CLAUDE_PERMISSION_DENIAL_REASON_LIMIT = 400;
+
+// Slices before stripping: stripVTControlCharacters is superlinear on long
+// unterminated escape sequences.
+function claudePermissionDenialReason(text: string): string | undefined {
+  const reason = NodeUtil.stripVTControlCharacters(
+    text.slice(0, CLAUDE_PERMISSION_DENIAL_REASON_LIMIT * 2),
+  )
+    .trim()
+    .slice(0, CLAUDE_PERMISSION_DENIAL_REASON_LIMIT);
+  return reason === "" ? undefined : reason;
+}
+
+function claudeDenialCountText(count: number): string {
+  return `Claude Code denied ${count === 1 ? "1 tool call" : `${count} tool calls`} this turn`;
+}
+
+function claudeToolResultErrorText(toolResult: ClaudeToolResultContentBlock): string | undefined {
+  if (toolResult.type !== "tool_result" || toolResult.is_error !== true) return undefined;
+  const content = toolResult.content;
+  if (typeof content === "string") return content;
+  for (const block of content ?? []) {
+    if (block.type === "text") return block.text;
+  }
+  return undefined;
+}
 
 function summarizeClaudeToolRequest(toolName: string, input: ClaudeNativeToolInput): string {
   const command = firstStringInputField(input, ["command", "cmd", "script"]);
@@ -3462,6 +3488,8 @@ interface ActiveClaudeTurnContext {
   // The result's permission_denials also lists calls canUseTool denied; only
   // the ones the CLI denied on its own (deny rules, auto mode) need a notice.
   readonly t3DeniedToolUseIds: Set<string>;
+  // Keyed by tool_use_id. Older CLIs and hook denials send no
+  // permission_denied frame, so an errored tool_result's text is the fallback.
   readonly permissionDenialReasons: Map<string, string>;
 }
 
@@ -6625,13 +6653,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               denial.tool_name,
               claudeNativeToolInputFromRecord(denial.tool_input),
             );
-            const reason = context.permissionDenialReasons.get(denial.tool_use_id);
-            return reason === undefined ? `- ${summary}` : `- ${summary} (${reason})`;
+            const reason =
+              context.permissionDenialReasons.get(denial.tool_use_id) ?? "no reason given";
+            return `- ${summary} (${reason})`;
           });
           const omitted = denials.length - lines.length;
           const title = "Claude Code denied permission for a tool call";
           const message = [
-            `${title}. Change the thread's permission mode or the project's permission rules to allow it.`,
+            `${claudeDenialCountText(denials.length)}:`,
             ...lines,
             ...(omitted > 0 ? [`- and ${omitted} more`] : []),
           ].join("\n");
@@ -6673,7 +6702,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly failure?: OrchestrationV2ProviderFailure;
           readonly threadDisposition?: "reusable" | "broken";
           readonly result?: SDKResultMessage;
+          // Reports a natively completed turn as failed without ending the
+          // background work it launched; that work still runs in the CLI.
+          readonly completedTurnFailure?: OrchestrationV2ProviderFailure;
         }) {
+          const reportedStatus = input.completedTurnFailure === undefined ? input.status : "failed";
+          const reportedFailure = input.completedTurnFailure ?? input.failure;
           yield* reasoningDeltas.flushTurn(input.context.nativeTurnId);
           if (input.context.compaction?.status === "running") {
             yield* emitProviderEvent({
@@ -6790,7 +6824,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             updated.delete(input.context.providerTurnId);
             return [retry, updated] as const;
           });
-          if (providerRetry !== undefined && input.status !== "failed") {
+          if (providerRetry !== undefined && reportedStatus !== "failed") {
             yield* emitProviderEvent({
               type: "turn_item.updated",
               driver: CLAUDE_PROVIDER,
@@ -6804,7 +6838,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 itemOrdinal: providerRetry.itemOrdinal,
                 failure: providerRetry.failure,
                 retry: providerRetry.retry,
-                status: input.status,
+                status: reportedStatus,
                 startedAt: providerRetry.startedAt,
                 updatedAt: input.completedAt,
               }),
@@ -6813,7 +6847,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
 
           const threadDisposition = input.threadDisposition ?? "reusable";
           const terminalEvent: ProviderAdapter.ProviderAdapterV2Event =
-            input.status === "failed"
+            reportedStatus === "failed"
               ? {
                   type: "turn.terminal",
                   driver: CLAUDE_PROVIDER,
@@ -6824,8 +6858,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     input.context,
                     `terminal-failure:${input.context.providerTurnId}`,
                   ),
-                  status: input.status,
-                  failure: input.failure ?? makeProviderFailure({ class: "provider_error" }),
+                  status: reportedStatus,
+                  failure: reportedFailure ?? makeProviderFailure({ class: "provider_error" }),
                   ...(providerRetry === undefined
                     ? {}
                     : {
@@ -6840,7 +6874,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   providerThreadId: input.context.input.providerThread.id,
                   providerTurnId: input.context.providerTurnId,
                   runOrdinal: input.context.input.runOrdinal,
-                  status: input.status,
+                  status: reportedStatus,
                   failure: null,
                   threadDisposition,
                 };
@@ -6852,7 +6886,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 providerTurn: {
                   ...providerTurnPayload({
                     context: input.context,
-                    status: input.status,
+                    status: reportedStatus,
                     completedAt: input.completedAt,
                   }),
                   turnTokenUsage: normalizeClaudeTurnTokenUsage(
@@ -7916,11 +7950,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }
 
           if (message.type === "system" && message.subtype === "permission_denied") {
-            const reason = NodeUtil.stripVTControlCharacters(
-              message.decision_reason ?? message.message,
-            ).trim();
-            if (reason !== "") {
-              context.permissionDenialReasons.set(message.tool_use_id, reason.slice(0, 400));
+            const reason = claudePermissionDenialReason(message.decision_reason ?? message.message);
+            if (reason !== undefined) {
+              context.permissionDenialReasons.set(message.tool_use_id, reason);
             }
             return;
           }
@@ -8372,6 +8404,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }
 
           for (const { toolResult, output } of claudeToolResultEntriesFromMessage(message)) {
+            if (!context.permissionDenialReasons.has(toolResult.tool_use_id)) {
+              const errorText = claudeToolResultErrorText(toolResult);
+              const reason =
+                errorText === undefined ? undefined : claudePermissionDenialReason(errorText);
+              if (reason !== undefined) {
+                context.permissionDenialReasons.set(toolResult.tool_use_id, reason);
+              }
+            }
             const subagent = yield* resolveSubagentByToolUseId(context, toolResult.tool_use_id);
             const runHandles = parseClaudeWorkflowRunHandles(claudeNativeToolOutputValue(output));
             if (subagent !== undefined && runHandles !== undefined) {
@@ -8664,27 +8704,31 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               : limitedCompaction !== null
                 ? "failed"
                 : terminalStatusFromResult(message, failureHint);
-            // A turn the CLI blocked must not read as finished work: failing it
-            // keeps the thread from settling and wakes a snooze. Real
-            // interrupts and failures keep their own status and reason.
+            // A turn the CLI blocked must not read as finished work: the
+            // failure wakes a snooze and keeps the thread out of
+            // auto-settlement. Real interrupts and failures keep their own
+            // status and reason.
             const deniedByCli = resultStatus === "completed" && cliDenials.length > 0;
-            const terminalFailure = deniedByCli
-              ? makeProviderFailure({
-                  class: "permission_error",
-                  message:
-                    "Claude Code denied a tool call this turn, so Claude could not finish it.",
-                  code: "permission_denied",
-                  retryable: false,
-                })
-              : resultFailure?.class === "usage_limit"
+            const terminalFailure =
+              resultFailure?.class === "usage_limit"
                 ? { ...resultFailure, resetAt: resetAt ?? resultFailure.resetAt ?? null }
                 : resultFailure;
             yield* finalizeActiveTurn({
               context,
-              status: deniedByCli ? "failed" : resultStatus,
+              status: resultStatus,
               completedAt,
               result: message,
               ...(terminalFailure === null ? {} : { failure: terminalFailure }),
+              ...(deniedByCli
+                ? {
+                    completedTurnFailure: makeProviderFailure({
+                      class: "permission_error",
+                      message: `${claudeDenialCountText(cliDenials.length)}.`,
+                      code: "permission_denied",
+                      retryable: false,
+                    }),
+                  }
+                : {}),
             });
           }
         });
