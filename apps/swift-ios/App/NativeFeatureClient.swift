@@ -51,6 +51,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
     private let aggregateIdleRefreshInterval: Duration
     private let aggregateFailureRefreshInterval: Duration
     private let aggregateRefreshSleep: @Sendable (Duration) async throws -> Void
+    private let aggregateRefreshNow: @Sendable () -> ContinuousClock.Instant
     private let environmentShellTimeoutInterval: TimeInterval
     private let threadSnapshotTimeoutInterval: TimeInterval
     private let catchUpDelay: @Sendable () async throws -> Void
@@ -165,6 +166,9 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         aggregateRefreshSleep: @escaping @Sendable (Duration) async throws -> Void = {
             try await Task.sleep(for: $0)
         },
+        aggregateRefreshNow: @escaping @Sendable () -> ContinuousClock.Instant = {
+            ContinuousClock.now
+        },
         environmentShellTimeoutInterval: TimeInterval = 6,
         threadSnapshotTimeoutInterval: TimeInterval = 8,
         catchUpDelay: @escaping @Sendable () async throws -> Void = {
@@ -214,6 +218,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         self.aggregateIdleRefreshInterval = aggregateIdleRefreshInterval
         self.aggregateFailureRefreshInterval = aggregateFailureRefreshInterval
         self.aggregateRefreshSleep = aggregateRefreshSleep
+        self.aggregateRefreshNow = aggregateRefreshNow
         self.environmentShellTimeoutInterval = environmentShellTimeoutInterval
         self.threadSnapshotTimeoutInterval = threadSnapshotTimeoutInterval
         self.catchUpDelay = catchUpDelay
@@ -5008,13 +5013,14 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
         let idleInterval = aggregateIdleRefreshInterval
         let failureInterval = aggregateFailureRefreshInterval
         let sleep = aggregateRefreshSleep
+        let now = aggregateRefreshNow
         let loadEnvironments = aggregateEnvironmentLoader
         aggregateRefreshID = refreshID
         aggregateRefreshTask = Task { [weak self] in
             let (events, eventSink) = AsyncStream.makeStream(of: AggregateRefreshEvent.self)
             var tickID = 0
             var tickTask: Task<Void, Never>?
-            var tickInterval = fastInterval
+            var tickDeadline = now() + fastInterval
             var loadTasks: [String: Task<Void, Never>] = [:]
             var cycleEnvironmentIDs: Set<String> = []
             var cycleNeedsFastRefresh = false
@@ -5028,7 +5034,7 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
             func scheduleTick(after interval: Duration) {
                 tickTask?.cancel()
                 tickID &+= 1
-                tickInterval = interval
+                tickDeadline = now() + interval
                 let id = tickID
                 tickTask = Task {
                     do {
@@ -5151,7 +5157,9 @@ final class NativeFeatureClient: FeatureClient, FeatureDeviceManaging,
                         if succeeded || cycleEnvironmentIDs.isEmpty {
                             scheduleTick(after: cycleNeedsFastRefresh ? fastInterval : idleInterval)
                         }
-                    } else if needsFastRefresh, tickInterval > fastInterval {
+                    } else if needsFastRefresh, now() + fastInterval < tickDeadline {
+                        // Only ever pull the pending refresh earlier, never
+                        // push it past the deadline it already has.
                         scheduleTick(after: fastInterval)
                     }
                 }

@@ -1448,6 +1448,9 @@ final class NativeMultiEnvironmentTests: XCTestCase {
         aggregateRefreshSleep: @escaping @Sendable (Duration) async throws -> Void = {
             try await Task.sleep(for: $0)
         },
+        aggregateRefreshNow: @escaping @Sendable () -> ContinuousClock.Instant = {
+            ContinuousClock.now
+        },
         aggregateEnvironmentLoader: @escaping @Sendable (EnvironmentRuntime) async throws -> [Environment] = {
             try await $0.environments()
         }
@@ -1565,6 +1568,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
                 aggregateIdleRefreshInterval: aggregateIdleRefreshInterval,
                 aggregateFailureRefreshInterval: aggregateFailureRefreshInterval,
                 aggregateRefreshSleep: aggregateRefreshSleep,
+                aggregateRefreshNow: aggregateRefreshNow,
                 aggregateEnvironmentLoader: aggregateEnvironmentLoader
             )
         )
@@ -1782,6 +1786,63 @@ struct NativePassiveThreadRefreshTests {
         await fixture.client.disconnect()
     }
 
+    @Test(
+        "A late changed answer never postpones the scheduled refresh",
+        .timeLimit(.minutes(1))
+    )
+    func lateChangedAnswerDoesNotPostponeScheduledRefresh() async throws {
+        let refreshSleep = ControllableAggregateRefreshSleep()
+        let refreshClock = ManualAggregateRefreshClock()
+        let fixture = try await NativeMultiEnvironmentTests.makeFixture(
+            includeThirdEnvironment: true,
+            aggregateRefreshSleep: {
+                try await refreshSleep.sleep(for: $0)
+            },
+            aggregateRefreshNow: {
+                refreshClock.now()
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let initial = try await fixture.client.initialSnapshot()
+        let thread = try #require(
+            initial.threads.first(where: { $0.environmentID == "three" })
+        )
+        let updatedTitle = "Work from a slow computer"
+        let eventProbe = ThreadTitleEventProbe(
+            events: fixture.client.events(),
+            threadID: thread.id,
+            title: updatedTitle
+        )
+        eventProbe.start()
+
+        _ = await refreshSleep.waitUntilRequested(count: 1)
+        await fixture.transport.setShell(
+            multiEnvironmentShell(
+                projectID: "project-three",
+                threadID: "thread-three",
+                title: updatedTitle,
+                providerID: "codex",
+                modelID: "gpt-5.6-sol"
+            ),
+            host: "three.example"
+        )
+        await fixture.transport.holdNextShellRead(host: "three.example")
+        await refreshSleep.resume()
+        await fixture.transport.waitForHeldShellRead()
+        // The unchanged peer answers first and schedules the idle refresh at 10s.
+        let idleCadence = await refreshSleep.waitUntilRequested(count: 2)
+        #expect(idleCadence == .seconds(10))
+
+        // A fast refresh from 5.8s would land at 10.8s, after the one already due.
+        refreshClock.advance(by: .milliseconds(5_800))
+        await fixture.transport.releaseShellRead()
+        await eventProbe.waitUntilObserved()
+        await refreshSleep.resume()
+        let nextCadence = await refreshSleep.waitUntilRequested(count: 3)
+        #expect(nextCadence == .seconds(10))
+        await fixture.client.disconnect()
+    }
+
     @Test("A failed passive environment backs off without slowing an active peer")
     func failedPassiveEnvironmentBacksOffWithoutSlowingActivePeer() async throws {
         let refreshSleep = ControllableAggregateRefreshSleep()
@@ -1809,9 +1870,18 @@ struct NativePassiveThreadRefreshTests {
         )
         await fixture.transport.setReachable(false, host: "three.example")
 
+        var events = fixture.client.events().makeAsyncIterator()
         let firstCadence = await refreshSleep.waitUntilRequested(count: 1)
         #expect(firstCadence == .seconds(5))
         await refreshSleep.resume()
+        // The peer's answer alone can schedule the next refresh, so wait
+        // until the offline read has reported back before counting reads.
+        while let event = await events.next() {
+            if case let .snapshot(snapshot) = event,
+               snapshot.environments.first(where: { $0.id == "three" })?.connectionState == .disconnected {
+                break
+            }
+        }
         let secondCadence = await refreshSleep.waitUntilRequested(count: 2)
         #expect(secondCadence == .seconds(5))
         // Discovery is cached for 60 seconds. The offline read fails at the shell endpoint.
@@ -2083,10 +2153,11 @@ private actor ControllableAggregateRefreshSleep {
         count: Int,
         continuation: CheckedContinuation<Duration, Never>
     )] = []
-    private var sleepContinuation: CheckedContinuation<Void, Never>?
+    private var sleepContinuations: [Int: CheckedContinuation<Void, Never>] = [:]
 
     func sleep(for cadence: Duration) async throws {
         requestedCadences.append(cadence)
+        let id = requestedCadences.count
         let satisfied = requestWaiters.filter { requestedCadences.count >= $0.count }
         requestWaiters.removeAll { requestedCadences.count >= $0.count }
         satisfied.forEach {
@@ -2097,11 +2168,12 @@ private actor ControllableAggregateRefreshSleep {
                 if Task.isCancelled {
                     continuation.resume()
                 } else {
-                    sleepContinuation = continuation
+                    sleepContinuations[id] = continuation
                 }
             }
         } onCancel: {
-            Task { await self.resume() }
+            // A cancelled sleep releases only itself, never the sleep that replaced it.
+            Task { await self.resume(id: id) }
         }
         try Task.checkCancellation()
     }
@@ -2113,9 +2185,28 @@ private actor ControllableAggregateRefreshSleep {
         }
     }
 
+    /// Fires the newest pending sleep, the one the refresh loop is waiting on.
     func resume() {
-        sleepContinuation?.resume()
-        sleepContinuation = nil
+        guard let id = sleepContinuations.keys.max() else { return }
+        resume(id: id)
+    }
+
+    private func resume(id: Int) {
+        sleepContinuations.removeValue(forKey: id)?.resume()
+    }
+}
+
+private final class ManualAggregateRefreshClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private let start = ContinuousClock.now
+    private var offset = Duration.zero
+
+    func now() -> ContinuousClock.Instant {
+        lock.withLock { start + offset }
+    }
+
+    func advance(by duration: Duration) {
+        lock.withLock { offset += duration }
     }
 }
 
