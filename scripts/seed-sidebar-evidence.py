@@ -32,6 +32,12 @@ def main():
         parser.error("The isolated database must be a copy, never a symlink.")
     if not db.is_file():
         parser.error("Initialize an empty isolated home with the server first.")
+    try:
+        is_live_db = db.samefile(Path.home() / ".t3/userdata/statev2.sqlite")
+    except FileNotFoundError:
+        is_live_db = False
+    if is_live_db:
+        parser.error("The isolated database must be a copy, never a hardlink.")
     runtime_file = base / "userdata/server-runtime.json"
     if runtime_file.is_file():
         runtime = json.loads(runtime_file.read_text())
