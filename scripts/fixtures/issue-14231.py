@@ -12,6 +12,8 @@ import tempfile
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('home', type=Path)
+parser.add_argument('--variant', help='Seed only this additional named variant, e.g. replacement-1440-light')
+parser.add_argument('--only', choices=['repro', 'multi', 'baseline', 'empty', 'short'])
 args = parser.parse_args()
 home = args.home.resolve()
 if home == (Path.home() / '.t3').resolve() or not (home / 'userdata/statev2.sqlite').is_file():
@@ -35,7 +37,7 @@ multi = [
     dict(id='confirm', header='Confirm', question='Choose the release target. A custom answer is unavailable.', options=[dict(label='Nightly', description='Preview release', value='nightly'), dict(label='Stable', description='Regular release', value='stable')], multiSelect=False, allowCustomAnswer=False),
 ]
 fixtures = [('repro', 'Question composer reproduction', [question], 24), ('multi', 'Question navigation proof', multi, 24), ('baseline', 'Composer baseline proof', None, 24), ('empty', 'Empty question boundary', [], 24), ('short', 'Short history proof', [question], 1)]
-fixtures = [(suffix + variant, title, questions, count) for variant in ['', '-1440-light', '-1440-dark', '-390-light', '-390-dark'] for suffix, title, questions, count in fixtures]
+fixtures = [(suffix + variant, title, questions, count) for variant in (['-' + args.variant] if args.variant else ['', '-1440-light', '-1440-dark', '-390-light', '-390-dark']) for suffix, title, questions, count in fixtures if args.only is None or suffix == args.only]
 with c:
     insert('projection_projects', dict(project_id=project, title='Synthetic question proof', workspace_root=str(workspace), scripts_json=[], created_at=now, updated_at=now, deleted_at=None, default_model_selection_json=model, default_thread_env_mode=None, favicon_path=None, auto_pull=0, project_icon_json=None))
     for suffix, title, questions, count in fixtures:
@@ -66,4 +68,4 @@ with c:
             insert('orchestration_v2_projection_runtime_requests', dict(runtime_request_id=reqid, thread_id=tid, node_id=nid, provider_turn_id=None, kind='user_input', status='pending', created_at=now, resolved_at=None, payload_json=request))
             item = dict(createdBy='user', creationSource='web', id=f'{tid}-question', threadId=tid, runId=rid, nodeId=nid, providerThreadId=None, providerTurnId=None, nativeItemRef=None, parentItemId=None, ordinal=count, status='completed', title=None, startedAt=now, completedAt=now, updatedAt=now, type='user_input_request', requestId=reqid, questions=questions)
             insert('orchestration_v2_projection_turn_items', dict(turn_item_id=item['id'], thread_id=tid, run_id=rid, node_id=nid, provider_thread_id=None, provider_turn_id=None, parent_item_id=None, ordinal=count, type=item['type'], status='completed', updated_at=now, payload_json=item))
-print('Seeded five synthetic fixtures in', home)
+print(f'Seeded {len(fixtures)} synthetic fixture threads in {home}')
