@@ -194,6 +194,63 @@ describe("readAntigravityUsage", () => {
       }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("keeps the Antigravity model that only a step's retry copy names", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const dir = yield* tempDir;
+      const counts = [...protoNumber(2, 100), ...protoNumber(3, 40)];
+      yield* seedDatabase(path.join(dir, "retry-model.db"), (db) =>
+        Effect.gen(function* () {
+          yield* db.exec("CREATE TABLE steps (idx INTEGER, metadata BLOB)");
+          yield* db.run("INSERT INTO steps VALUES (?, ?)", [
+            0,
+            new Uint8Array([
+              ...protoBytes(9, counts),
+              ...protoBytes(28, protoBytes(2, [...protoNumber(1, 1026), ...counts])),
+            ]),
+          ]);
+        }),
+      );
+      const result = yield* readAntigravityUsage(dir, 0);
+      assert.deepStrictEqual(result.errors, []);
+      assert.deepStrictEqual(
+        records(result).map((record) => record.model),
+        ["claude-opus-4-6"],
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps id-less Antigravity calls with equal counters but different models apart", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const dir = yield* tempDir;
+      const usage = (model: number) => [
+        ...protoNumber(1, model),
+        ...protoNumber(2, 100),
+        ...protoNumber(3, 40),
+      ];
+      yield* seedDatabase(path.join(dir, "different-models.db"), (db) =>
+        Effect.gen(function* () {
+          yield* createTables(db);
+          yield* db.run("INSERT INTO steps VALUES (?, ?)", [
+            0,
+            new Uint8Array(protoBytes(9, usage(1026))),
+          ]);
+          yield* db.run("INSERT INTO gen_metadata VALUES (?, ?)", [
+            0,
+            new Uint8Array(protoBytes(1, protoBytes(4, usage(246)))),
+          ]);
+        }),
+      );
+      const result = yield* readAntigravityUsage(dir, 0);
+      assert.deepStrictEqual(result.errors, []);
+      assert.deepStrictEqual(
+        records(result).map((record) => record.model),
+        ["claude-opus-4-6", "gemini-2.5-pro"],
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("uses the matching Antigravity generation model for each model-less step", () =>
     Effect.gen(function* () {
       const path = yield* Path.Path;

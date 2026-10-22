@@ -154,6 +154,8 @@ function metadata(bytes: Uint8Array, step: boolean): Metadata {
       counters(parsed) === counters(main) &&
       usageIds(parsed).every((id) => mainIds.includes(id))
     ) {
+      // The retry copy can be the only one that names the model.
+      if (numberAt(main, 1) === 0 && numberAt(parsed, 1) !== 0) main.set(1, parsed.get(1)!);
       continue;
     }
     usages.push(parsed);
@@ -281,6 +283,9 @@ const readDatabase = Effect.fn("readDatabase")(function* (
   }).pipe(sql.withTransaction);
 });
 
+const compatibleModels = (left: string, right: string) =>
+  left === right || left === "antigravity-unknown" || right === "antigravity-unknown";
+
 function usageCandidates(
   sessionId: string,
   generations: ReadonlyArray<{ idx: number; entry: Metadata }>,
@@ -341,7 +346,13 @@ function usageCandidates(
             if (pending === undefined)
               unpairedSteps.set(key, { indices: [records.length], next: 0 });
             else pending.indices.push(records.length);
-          } else if (pending !== undefined && pending.next < pending.indices.length) {
+          } else if (
+            pending !== undefined &&
+            pending.next < pending.indices.length &&
+            compatibleModels(records[pending.indices[pending.next]!]!.record.model, record.model)
+          ) {
+            // A step with another model is a different call; it stays queued for a later
+            // generation rather than being skipped, so neither call is ever dropped.
             const paired = records[pending.indices[pending.next++]!]!;
             if (
               timestampQuality > paired.timestampQuality ||
