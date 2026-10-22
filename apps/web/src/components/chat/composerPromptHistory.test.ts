@@ -1,4 +1,4 @@
-import { ScheduledTaskId } from "@t3tools/contracts";
+import { ComposerContextId, ScheduledTaskId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -114,6 +114,43 @@ describe("buildComposerPromptHistoryEntries", () => {
       { id: "m4", role: "user", text: "from server", createdBy: "agent", creationSource: "server" },
     ]);
     expect(typed).toEqual([{ id: "m1", prompt: "typed" }]);
+  });
+
+  it("keeps a literal review comment block typed into a message sent with structured context", () => {
+    // Structured messages carry review comments as records, so a trailing block in their text is
+    // something the user typed. Legacy wire messages appended the generated block to the text.
+    const text =
+      'Explain this example [app.ts](t3-context://v1/mention/ctx-1)\n\n<review_comment filePath="src/app.ts">Keep this configurable.</review_comment>';
+    // The production caller passes full ChatMessages, which carry `context`.
+    const structured = {
+      id: "structured",
+      role: "user",
+      text,
+      context: {
+        version: 1,
+        records: [
+          {
+            version: 1,
+            contextId: ComposerContextId.make("ctx-1"),
+            label: "app.ts",
+            kind: "mention",
+            path: "src/app.ts",
+          },
+        ],
+      },
+    };
+    const recalled = buildComposerPromptHistoryEntries([
+      structured,
+      { id: "legacy", role: "user", text },
+    ]);
+    expect(recalled).toEqual([
+      {
+        id: "structured",
+        prompt:
+          'Explain this example\n\n<review_comment filePath="src/app.ts">Keep this configurable.</review_comment>',
+      },
+      { id: "legacy", prompt: "Explain this example" },
+    ]);
   });
 });
 
