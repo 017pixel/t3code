@@ -31,7 +31,10 @@ import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
-import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import {
+  withCheckpointRestoreReservation,
+  withWorkspaceLease,
+} from "../workspace/workspaceLease.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
@@ -988,23 +991,25 @@ effectIt.effect.each([
       const order: Array<string> = [];
       const releaseRestore = yield* Deferred.make<void>();
       const restoreEntered = yield* Deferred.make<void>();
+      const fileSystem = FileSystem.makeNoop({
+        exists: () => Effect.succeed(true),
+        realPath: (candidate) =>
+          Effect.succeed((realPaths as Record<string, string>)[candidate] ?? candidate),
+      });
       const harness = makeLocalCommandHarness({
         text: "Continue",
         ...(worktreePath === undefined ? {} : { worktreePath }),
-        fileSystem: FileSystem.makeNoop({
-          exists: () => Effect.succeed(true),
-          realPath: (candidate) =>
-            Effect.succeed((realPaths as Record<string, string>)[candidate] ?? candidate),
-        }),
+        fileSystem,
         failReadsAfterRunning: true,
       });
       const open = harness.open.getMockImplementation()!;
       harness.open.mockImplementation(() =>
         Effect.sync(() => order.push("provider session opened")).pipe(Effect.andThen(open())),
       );
-      // The same lease CheckpointRollbackServiceV2.execute holds around its
+      // The reservation CheckpointRollbackServiceV2.execute holds around its
       // isolation check, provider rollback, and git restore of `restorePath`.
-      const restore = yield* withWorkspaceLease(
+      const restore = yield* withCheckpointRestoreReservation(
+        fileSystem,
         restorePath,
         Deferred.succeed(restoreEntered, undefined).pipe(
           Effect.andThen(Deferred.await(releaseRestore)),

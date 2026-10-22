@@ -1,4 +1,6 @@
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import type * as FileSystem from "effect/FileSystem";
 import * as Semaphore from "effect/Semaphore";
 
 const leases = new Map<string, { semaphore: Semaphore.Semaphore; users: number }>();
@@ -20,3 +22,67 @@ export const withWorkspaceLease = <A, E, R>(
       ),
     );
   });
+
+// A restore rewrites files under its directory, so it must exclude provider
+// startup in any overlapping workspace: symlink aliases, parents, and children.
+// Kept apart from withWorkspaceLease because that lease is non-reentrant and
+// restores call Git work that leases the project root.
+interface Reservation {
+  readonly cwd: string;
+  readonly kind: "restore" | "turn-start";
+}
+
+const reservations = new Set<Reservation>();
+let reservationReleased = Deferred.makeUnsafe<void>();
+
+const contains = (parent: string, child: string) =>
+  child === parent ||
+  child.startsWith(parent.endsWith("/") ? parent : `${parent}/`) ||
+  child.startsWith(parent.endsWith("\\") ? parent : `${parent}\\`);
+
+const conflicts = (a: Reservation, b: Reservation) =>
+  (a.kind === "restore" || b.kind === "restore") &&
+  (contains(a.cwd, b.cwd) || contains(b.cwd, a.cwd));
+
+const reserve = (reservation: Reservation): Effect.Effect<void> =>
+  Effect.suspend(() => {
+    for (const held of reservations) {
+      if (conflicts(held, reservation)) {
+        return Deferred.await(reservationReleased).pipe(Effect.andThen(reserve(reservation)));
+      }
+    }
+    reservations.add(reservation);
+    return Effect.void;
+  });
+
+const release = (reservation: Reservation) =>
+  Effect.sync(() => {
+    if (!reservations.delete(reservation)) return;
+    const released = reservationReleased;
+    reservationReleased = Deferred.makeUnsafe<void>();
+    Deferred.doneUnsafe(released, Effect.void);
+  });
+
+const withReservation =
+  (kind: Reservation["kind"]) =>
+  <A, E, R>(
+    fileSystem: FileSystem.FileSystem,
+    cwd: string,
+    effect: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E, R> =>
+    fileSystem.realPath(cwd).pipe(
+      Effect.orElseSucceed(() => cwd),
+      Effect.flatMap((canonical) => {
+        const reservation: Reservation = { cwd: canonical, kind };
+        return reserve(reservation).pipe(
+          Effect.andThen(effect),
+          Effect.ensuring(release(reservation)),
+        );
+      }),
+    );
+
+/** Exclusive over every overlapping workspace while checkpoint files are restored. */
+export const withCheckpointRestoreReservation = withReservation("restore");
+
+/** Waits out overlapping restores; turn startups never wait on each other. */
+export const withTurnStartReservation = withReservation("turn-start");
