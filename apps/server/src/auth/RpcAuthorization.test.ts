@@ -6,14 +6,12 @@ import {
   AuthSettingsWriteScope,
   DEFAULT_SERVER_SETTINGS,
   ProviderInstanceId,
+  ProjectId,
+  IssueTrackerKind,
   ThreadId,
   AuthOrchestrationOperateScope,
-  ORCHESTRATION_V2_WS_METHODS,
   AuthOrchestrationReadScope,
   AuthSourceControlWriteScope,
-  AuthPreviewOperateScope,
-  AuthRelayReadScope,
-  AuthRelayWriteScope,
   AuthTerminalReadScope,
   AuthTerminalOperateScope,
   WS_METHODS,
@@ -22,6 +20,7 @@ import {
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 import * as RpcTest from "effect/rpc/RpcTest";
 
 import {
@@ -36,27 +35,6 @@ describe("RPC authorization scopes", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
   });
 
-  it("requires operate access to stop a workflow", () => {
-    expect(requiredScopeForRpcMethod(ORCHESTRATION_V2_WS_METHODS.stopWorkflow)).toBe(
-      AuthOrchestrationOperateScope,
-    );
-  });
-
-  it("authorizes background policy reporting and observation deliberately", () => {
-    expect(requiredScopeForRpcMethod(WS_METHODS.serverReportClientActivity)).toBe(
-      AuthOrchestrationReadScope,
-    );
-    expect(requiredScopeForRpcMethod(WS_METHODS.serverReportHostPowerState)).toBe(
-      AuthEnvironmentMaintainScope,
-    );
-    expect(requiredScopeForRpcMethod(WS_METHODS.serverGetBackgroundPolicy)).toBe(
-      AuthOrchestrationReadScope,
-    );
-    expect(requiredScopeForRpcMethod(WS_METHODS.subscribeBackgroundPolicy)).toBe(
-      AuthOrchestrationReadScope,
-    );
-  });
-
   it("keeps webhook delivery logs, which hold request bodies, behind operate scope", () => {
     for (const method of [
       WS_METHODS.scheduledTasksListWebhookDeliveries,
@@ -64,141 +42,6 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.scheduledTasksRotateWebhookToken,
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
-    }
-  });
-
-  it("allows relay status reads without granting relay installation access", () => {
-    expect(requiredScopeForRpcMethod(WS_METHODS.cloudGetRelayClientStatus)).toBe(
-      AuthRelayReadScope,
-    );
-    expect(requiredScopeForRpcMethod(WS_METHODS.cloudInstallRelayClient)).toBe(AuthRelayWriteScope);
-  });
-
-  it("requires permission to operate on a thread before uploading feedback", () => {
-    expect(requiredScopeForRpcMethod(WS_METHODS.providerUploadFeedback)).toBe(
-      AuthOrchestrationOperateScope,
-    );
-  });
-
-  it("requires write access to import agent session history", () => {
-    expect(requiredScopeForRpcMethod(WS_METHODS.agentSessionsScan)).toBe(
-      AuthOrchestrationReadScope,
-    );
-    expect(requiredScopeForRpcMethod(WS_METHODS.agentSessionsImport)).toBe(
-      AuthOrchestrationOperateScope,
-    );
-  });
-
-  it("separates ACP Registry discovery from provisioning", () => {
-    expect(requiredScopeForRpcMethod(WS_METHODS.serverSearchAcpRegistry)).toBe(
-      AuthOrchestrationReadScope,
-    );
-    expect(requiredScopeForRpcMethod(WS_METHODS.serverPrepareAcpRegistryAgent)).toBe(
-      AuthProvidersManageScope,
-    );
-    expect(requiredScopeForRpcMethod(WS_METHODS.serverUninstallAcpRegistryManagedBinary)).toBe(
-      AuthProvidersManageScope,
-    );
-    expect(requiredScopeForRpcMethod(WS_METHODS.serverAcceptAcpRegistryUrlAuth)).toBe(
-      AuthProvidersManageScope,
-    );
-    expect(requiredScopeForRpcMethod(WS_METHODS.serverListAcpRegistrySessions)).toBe(
-      AuthOrchestrationReadScope,
-    );
-    expect(requiredScopeForRpcMethod(WS_METHODS.serverImportAcpRegistrySession)).toBe(
-      AuthOrchestrationOperateScope,
-    );
-    expect(requiredScopeForRpcMethod(WS_METHODS.serverLogoutAcpRegistry)).toBe(
-      AuthProvidersManageScope,
-    );
-  });
-
-  it("reads the reviewer menu under the same scope as the pull request it belongs to", () => {
-    // The candidate list is a read like the detail beside it, and asking somebody for a review is
-    // a write like every other pull request operation.
-    expect(requiredScopeForRpcMethod(WS_METHODS.pullRequestsChecks)).toBe(
-      AuthOrchestrationReadScope,
-    );
-    expect(requiredScopeForRpcMethod(WS_METHODS.pullRequestsReviewerCandidates)).toBe(
-      requiredScopeForRpcMethod(WS_METHODS.pullRequestsDetail),
-    );
-    expect(requiredScopeForRpcMethod(WS_METHODS.pullRequestsRequestReviewers)).toBe(
-      requiredScopeForRpcMethod(WS_METHODS.pullRequestsComment),
-    );
-  });
-
-  it("reads issues under the orchestration read scope and writes them like pull requests", () => {
-    for (const method of [
-      WS_METHODS.issuesList,
-      WS_METHODS.issuesDetail,
-      WS_METHODS.issuesComments,
-      WS_METHODS.issuesTemplates,
-      WS_METHODS.issuesCandidates,
-    ]) {
-      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
-    }
-    for (const method of [
-      WS_METHODS.issuesCreate,
-      WS_METHODS.issuesComment,
-      WS_METHODS.issuesUpdate,
-      WS_METHODS.issuesSetState,
-      WS_METHODS.issuesReact,
-    ]) {
-      expect(requiredScopeForRpcMethod(method)).toBe(AuthSourceControlWriteScope);
-    }
-  });
-
-  it("treats a standalone tracker credential as a setting", () => {
-    expect(requiredScopeForRpcMethod(WS_METHODS.issueTrackersList)).toBe(
-      AuthOrchestrationReadScope,
-    );
-    for (const method of [WS_METHODS.issueTrackersConnect, WS_METHODS.issueTrackersBindProject]) {
-      expect(requiredScopeForRpcMethod(method)).toBe(AuthSettingsWriteScope);
-    }
-  });
-
-  it("requires source control writes to start, retry, or cancel project clones", () => {
-    for (const method of [
-      WS_METHODS.projectCloneStart,
-      WS_METHODS.projectCloneRetry,
-      WS_METHODS.projectCloneCancel,
-    ]) {
-      expect(requiredScopeForRpcMethod(method)).toBe(AuthSourceControlWriteScope);
-    }
-    expect(requiredScopeForRpcMethod(WS_METHODS.subscribeProjectClones)).toBe(
-      AuthOrchestrationReadScope,
-    );
-  });
-
-  it("separates viewing pull request file progress from writing it", () => {
-    expect(requiredScopeForRpcMethod(WS_METHODS.pullRequestsFilesViewed)).toBe(
-      AuthOrchestrationReadScope,
-    );
-    expect(requiredScopeForRpcMethod(WS_METHODS.pullRequestsSetFilesViewed)).toBe(
-      AuthSourceControlWriteScope,
-    );
-  });
-
-  it("separates preview control from observation", () => {
-    for (const method of [
-      WS_METHODS.previewOpen,
-      WS_METHODS.previewNavigate,
-      WS_METHODS.previewResize,
-      WS_METHODS.previewRefresh,
-      WS_METHODS.previewClose,
-      WS_METHODS.previewReportStatus,
-      WS_METHODS.previewAdjust,
-      WS_METHODS.previewClearProfile,
-      WS_METHODS.previewReportProfiles,
-    ]) {
-      expect(requiredScopeForRpcMethod(method)).toBe(AuthPreviewOperateScope);
-    }
-    for (const method of [
-      WS_METHODS.previewList,
-      WS_METHODS.subscribePreviewEvents,
-      WS_METHODS.subscribeDiscoveredLocalServers,
-    ]) {
-      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
     }
   });
 
@@ -261,10 +104,6 @@ describe("RPC scope middleware", () => {
       scopes: [AuthOrchestrationReadScope, AuthEnvironmentMaintainScope],
       missing: AuthDiagnosticsReadScope,
     },
-    {
-      scopes: [AuthOrchestrationReadScope, AuthDiagnosticsReadScope],
-      missing: AuthEnvironmentMaintainScope,
-    },
   ])("rejects telemetry retry without $missing before its handler runs", ({ scopes, missing }) =>
     Effect.gen(function* () {
       const handled: Array<string> = [];
@@ -291,6 +130,57 @@ describe("RPC scope middleware", () => {
     }).pipe(Effect.scoped),
   );
 });
+
+it.effect("allows issue reads but requires a source-control grant before commenting", () =>
+  Effect.gen(function* () {
+    const tested = [WS_METHODS.issuesList, WS_METHODS.issuesComment] as const;
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, (typeof tested)[number]> =>
+          !(tested as ReadonlyArray<string>).includes(tag),
+      ),
+    );
+    const comments: string[] = [];
+    const handlers = Layer.mergeAll(
+      group.toLayerHandler(WS_METHODS.issuesList, () =>
+        Effect.succeed({ entries: [], trackers: [], errors: [], viewers: {}, nextCursors: {} }),
+      ),
+      group.toLayerHandler(WS_METHODS.issuesComment, ({ body }) =>
+        Effect.sync(() => {
+          comments.push(body);
+        }),
+      ),
+    );
+    const reader = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(Layer.merge(handlers, RpcAuthorization.layer([AuthOrchestrationReadScope]))),
+    );
+    const comment = {
+      projectId: ProjectId.make("web"),
+      tracker: IssueTrackerKind.make("github"),
+      scope: "acme/web",
+      key: "42",
+      body: "Repro attached.",
+    };
+
+    expect((yield* reader[WS_METHODS.issuesList]({ state: "open" })).entries).toEqual([]);
+    expect(yield* reader[WS_METHODS.issuesComment](comment).pipe(Effect.flip)).toMatchObject({
+      _tag: "EnvironmentAuthorizationError",
+      requiredPermission: AuthSourceControlWriteScope,
+    });
+    expect(comments).toEqual([]);
+
+    const writer = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.merge(
+          handlers,
+          RpcAuthorization.layer([AuthOrchestrationReadScope, AuthSourceControlWriteScope]),
+        ),
+      ),
+    );
+    yield* writer[WS_METHODS.issuesComment](comment);
+    expect(comments).toEqual(["Repro attached."]);
+  }).pipe(Effect.scoped),
+);
 
 describe("settings mutation authorization", () => {
   const group = WsRpcGroup.omit(
@@ -397,6 +287,59 @@ it.effect("requires task permission before attaching a prepared worktree to a th
     expect(handled).toBe(false);
   }).pipe(Effect.scoped),
 );
+
+describe("thread context authorization", () => {
+  const group = WsRpcGroup.omit(
+    ...[...WsRpcGroup.requests.keys()].filter(
+      (
+        tag,
+      ): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof WS_METHODS.gitRunStackedAction> =>
+        tag !== WS_METHODS.gitRunStackedAction,
+    ),
+  );
+
+  it.effect.each(["commit", "create_pr", "commit_push_pr"] as const)(
+    "%s needs thread read permission only when generating a PR from a thread",
+    (action) =>
+      Effect.gen(function* () {
+        const handled: string[] = [];
+        const handler = group.toLayerHandler(WS_METHODS.gitRunStackedAction, ({ actionId }) =>
+          Stream.fromEffect(Effect.sync(() => handled.push(actionId))).pipe(Stream.drain),
+        );
+        const client = yield* RpcTest.makeClient(group).pipe(
+          Effect.provide(
+            Layer.merge(handler, RpcAuthorization.layer([AuthSourceControlWriteScope])),
+          ),
+        );
+        const input = { actionId: "without-thread", cwd: "/repo", action };
+        const withThread = { ...input, actionId: "with-thread", threadId: ThreadId.make("thread") };
+        yield* Stream.runDrain(client[WS_METHODS.gitRunStackedAction](input));
+        if (action === "create_pr" || action === "commit_push_pr") {
+          expect(
+            yield* Stream.runDrain(client[WS_METHODS.gitRunStackedAction](withThread)).pipe(
+              Effect.flip,
+            ),
+          ).toMatchObject({ requiredPermission: AuthOrchestrationReadScope });
+          expect(handled).toEqual(["without-thread"]);
+        } else {
+          yield* Stream.runDrain(client[WS_METHODS.gitRunStackedAction](withThread));
+          expect(handled).toEqual(["without-thread", "with-thread"]);
+        }
+        const reader = yield* RpcTest.makeClient(group).pipe(
+          Effect.provide(
+            Layer.merge(
+              handler,
+              RpcAuthorization.layer([AuthSourceControlWriteScope, AuthOrchestrationReadScope]),
+            ),
+          ),
+        );
+        yield* Stream.runDrain(
+          reader[WS_METHODS.gitRunStackedAction]({ ...withThread, actionId: "allowed" }),
+        );
+        expect(handled.at(-1)).toBe("allowed");
+      }).pipe(Effect.scoped),
+  );
+});
 
 it.effect("separates host file URLs from readable attachment URLs", () =>
   Effect.gen(function* () {

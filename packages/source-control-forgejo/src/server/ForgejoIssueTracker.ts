@@ -419,21 +419,6 @@ export const make: Effect.Effect<IssueTrackerApi, never, ForgejoCli.ForgejoCli> 
             );
       },
 
-      getViewerPermissions: (input) =>
-        issueTarget("getViewerPermissions", input).pipe(
-          Effect.flatMap(({ path }) =>
-            Effect.all(
-              [
-                getIssue(input, "getViewerPermissions", path),
-                getRepository(input, "getViewerPermissions"),
-                getViewer(input, "getViewerPermissions"),
-              ],
-              { concurrency: 3 },
-            ),
-          ),
-          Effect.map(([issue, repository, viewer]) => permissions(repository, issue, viewer)),
-        ),
-
       create: (input) =>
         // Labels are written by id, so the names are resolved against the repository's own first.
         readArray(

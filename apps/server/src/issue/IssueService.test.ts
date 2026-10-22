@@ -2,9 +2,17 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
+import { HttpClient, HttpClientResponse } from "effect/http";
+import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
+import * as GitHubCredentials from "@t3tools/source-control-github/server/GitHubCredentials";
+import * as GitHubQuota from "@t3tools/source-control-github/server/GitHubQuota";
+import * as GitHubRest from "@t3tools/source-control-github/server/GitHubRest";
+import * as GitHubIssueTracker from "@t3tools/source-control-github/server/GitHubIssueTracker";
 import {
   IssueTrackerKind,
   type IssueTrackerProjectBinding,
+  SourceControlProviderKind,
   type OrchestrationProjectShell,
   type ProjectId,
 } from "@t3tools/contracts";
@@ -16,6 +24,8 @@ import {
 } from "@t3tools/issue-tracker-core/server/IssueTracker";
 
 import * as IssueTrackerBindings from "../persistence/IssueTrackerBindings.ts";
+import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
+
 import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as IssueService from "./IssueService.ts";
@@ -61,7 +71,7 @@ function project(input: {
     ...(input.repository
       ? {
           repositoryIdentity: {
-            canonicalKey: `${host}/${input.repository}`,
+            canonicalKey: normalizeGitRemoteUrl(`https://${host}/${input.repository}.git`),
             locator: {
               source: "git-remote" as const,
               remoteName: "origin",
@@ -127,7 +137,6 @@ function fakeTracker(overrides: Partial<IssueTrackerApi> = {}): IssueTrackerApi 
     listIssues: () => Effect.succeed({ items: [], nextCursor: null }),
     getIssue: (input) => Effect.succeed(issue(input.key)),
     getComments: () => Effect.succeed({ comments: [], nextCursor: null }),
-    getViewerPermissions: () => Effect.die("unused"),
     comment: () => Effect.void,
     update: () => Effect.void,
     setState: () => Effect.void,
@@ -140,31 +149,37 @@ function makeService(input: {
   readonly trackers: ReadonlyArray<IssueTrackerApi>;
   readonly bindings?: Record<string, IssueTrackerProjectBinding>;
 }) {
-  return IssueService.make.pipe(
+  return IssueService.IssueService.pipe(
     Effect.provide(
-      Layer.mergeAll(
-        Layer.mock(IssueTrackerBindings.IssueTrackerBindingsRepository)({
-          list: Effect.succeed(
-            new Map(
-              Object.entries(input.bindings ?? {}).map(([id, binding]) => [
-                id as ProjectId,
-                binding,
-              ]),
+      IssueService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(IssueTrackerBindings.IssueTrackerBindingsRepository)({
+              list: Effect.succeed(
+                new Map(
+                  Object.entries(input.bindings ?? {}).map(([id, binding]) => [
+                    id as ProjectId,
+                    binding,
+                  ]),
+                ),
+              ),
+            }),
+            Layer.succeed(
+              IssueTrackerRegistry.IssueTrackerRegistry,
+              IssueTrackerRegistry.fromTrackers(input.trackers),
             ),
+            Layer.mock(ProjectService.ProjectService)({
+              listShells: () => Effect.succeed(input.projects),
+              getShell: (projectId) =>
+                Effect.succeed(
+                  Option.fromNullishOr(input.projects.find((p) => p.id === projectId)),
+                ),
+            }),
+            Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
+              resolve: () => Effect.succeed(null),
+            }),
           ),
-        }),
-        Layer.succeed(
-          IssueTrackerRegistry.IssueTrackerRegistry,
-          IssueTrackerRegistry.fromTrackers(input.trackers),
         ),
-        Layer.mock(ProjectService.ProjectService)({
-          listShells: () => Effect.succeed(input.projects),
-          getShell: (projectId) =>
-            Effect.succeed(Option.fromNullishOr(input.projects.find((p) => p.id === projectId))),
-        }),
-        Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
-          resolve: () => Effect.succeed(null),
-        }),
       ),
     ),
   );
@@ -181,7 +196,12 @@ describe("resolveGitHostBinding", () => {
           repository: "acme/Web App/_git/web",
         }),
       ),
-    ).toEqual({ tracker: "azure-devops", host: "dev.azure.com", scope: "acme/Web App" });
+    ).toEqual({
+      canonicalKey: "dev.azure.com/acme/web app",
+      tracker: "azure-devops",
+      host: "dev.azure.com",
+      scope: "acme/Web App",
+    });
     expect(
       IssueService.resolveGitHostBinding(
         project({ id: "p", provider: "azure-devops", host: "dev.azure.com", repository: "web" }),
@@ -214,8 +234,11 @@ describe("IssueService", () => {
       expect(detail).toMatchObject({ writable: false, scope: "other/backend", key: "7" });
 
       yield* service.comment({ ...own, body: "ok" });
-      const refused = yield* Effect.flip(service.comment({ ...external, body: "no" }));
-      expect(refused).toMatchObject({ _tag: "IssueOperationError", reason: "read-only" });
+      const refused = yield* service.comment({ ...external, body: "no" }).pipe(Effect.result);
+      expect(refused).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "IssueOperationError", reason: "read-only" },
+      });
       expect(writes).toEqual(["acme/web#1"]);
 
       // Another host is not reachable through this project's credentials at all.
@@ -226,6 +249,71 @@ describe("IssueService", () => {
       });
     }),
   );
+
+  it.effect("posts a comment while background requests to GitHub are paused", () => {
+    const requests: string[] = [];
+    return Effect.gen(function* () {
+      const limits = yield* SourceControlRateLimit.SourceControlRateLimit;
+      const key = { provider: SourceControlProviderKind.make("github"), host: "github.com" };
+      yield* limits
+        .recordRateLimit({ ...key, lease: 0 })
+        .pipe(Effect.provideService(SourceControlRateLimit.CredentialScope, "test"));
+      const tracker = yield* GitHubIssueTracker.make;
+      expect(
+        yield* Effect.flip(tracker.getViewer({ cwd: "/w/web", host: key.host })),
+      ).toMatchObject({ reason: "rate-limited" });
+      const service = yield* makeService({
+        projects: [project({ id: "web", repository: "acme/web" })],
+        trackers: [tracker],
+      });
+      yield* service.comment({
+        projectId: "web" as ProjectId,
+        tracker: GITHUB,
+        scope: "acme/web",
+        key: "42",
+        body: "Repro attached.",
+      });
+      expect(requests).toEqual([
+        "POST https://api.github.com/graphql",
+        "POST https://api.github.com/repos/acme/web/issues/42/comments",
+      ]);
+    }).pipe(
+      Effect.provide(
+        GitHubRest.layer.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              SourceControlRateLimit.layer,
+              GitHubQuota.layer,
+              Layer.mock(GitHubCredentials.GitHubCredentials)({
+                get: (host) =>
+                  Effect.succeed({
+                    host,
+                    token: Redacted.make("test-token"),
+                    source: "gh" as const,
+                    fingerprint: "test",
+                  }),
+              }),
+              Layer.succeed(
+                HttpClient.HttpClient,
+                HttpClient.make((request) => {
+                  requests.push(`${request.method} ${request.url}`);
+                  const body = request.url.endsWith("/graphql")
+                    ? JSON.stringify({ data: { repository: { issue: { id: "I_42" } } } })
+                    : "{}";
+                  return Effect.succeed(
+                    HttpClientResponse.fromWeb(
+                      request,
+                      new Response(body, { headers: { "content-type": "application/json" } }),
+                    ),
+                  );
+                }),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  });
 
   it.effect("refuses what the tracker did not declare before calling it", () =>
     Effect.gen(function* () {
@@ -262,15 +350,22 @@ describe("IssueService", () => {
     }),
   );
 
-  it.effect("lists each repository once and reports unusable trackers per host", () =>
+  it.effect("deduplicates and pages repositories despite partial failures", () =>
     Effect.gen(function* () {
       const listed: string[] = [];
+      let failContinuation = true;
       const service = yield* makeService({
         projects: [
-          project({ id: "web", repository: "acme/web" }),
+          project({ id: "web", repository: "Acme/Web" }),
           project({ id: "web-worktree", repository: "acme/web" }),
           project({ id: "api", repository: "acme/api" }),
-          project({ id: "gitlab", repository: "acme/gl", provider: "gitlab", host: "gitlab.com" }),
+          project({ id: "docs", repository: "acme/docs" }),
+          project({
+            id: "gitlab",
+            repository: "acme/gl",
+            provider: "gitlab",
+            host: "gitlab.com",
+          }),
           project({ id: "plain" }),
         ],
         trackers: [
@@ -285,8 +380,21 @@ describe("IssueService", () => {
                     reason: "failed",
                     detail: "boom",
                   });
+                if (input.scope === "acme/docs")
+                  return { items: [issue("3", "2026-07-04T00:00:00Z")], nextCursor: null };
+                if (input.cursor === "next" && failContinuation) {
+                  failContinuation = false;
+                  return yield* new IssueTrackerError({
+                    tracker: GITHUB,
+                    operation: "listIssues",
+                    reason: "failed",
+                    detail: "try again",
+                  });
+                }
+                if (input.cursor === "next")
+                  return { items: [issue("4", "2026-07-01T00:00:00Z")], nextCursor: null };
                 return {
-                  items: [issue("2", "2026-07-05T00:00:00Z"), issue("1")],
+                  items: [issue("1"), issue("2", "2026-07-05T00:00:00Z")],
                   nextCursor: "next",
                 };
               }),
@@ -294,16 +402,20 @@ describe("IssueService", () => {
         ],
       });
       const result = yield* service.list({ state: "open" });
-      expect(listed.sort()).toEqual(["acme/api", "acme/web"]);
+      expect(listed.sort()).toEqual(["Acme/Web", "acme/api", "acme/docs"]);
       expect(result.entries.map((entry) => [entry.projectId, entry.key])).toEqual([
         ["web", "2"],
+        ["docs", "3"],
         ["web", "1"],
       ]);
-      expect(result.nextCursors).toEqual({ "github.com acme/web": "next" });
+      expect(
+        result.entries.filter((entry) => entry.projectId === "web").map((entry) => entry.scope),
+      ).toEqual(["Acme/Web", "Acme/Web"]);
+      expect(result.nextCursors).toEqual({ "github.com Acme/Web": "next" });
       expect(result.errors).toEqual([{ projectId: "api", projectTitle: "api", message: "boom" }]);
       expect(result.viewers).toEqual({ "github.com": "julius" });
       expect(result.trackers).toEqual([
-        expect.objectContaining({ host: "github.com", projectCount: 3, configured: true }),
+        expect.objectContaining({ host: "github.com", projectCount: 4, configured: true }),
         expect.objectContaining({
           host: "gitlab.com",
           tracker: "gitlab",
@@ -315,11 +427,18 @@ describe("IssueService", () => {
 
       // A continuation only reads the scopes it names.
       listed.length = 0;
-      const next = yield* service.list({
+      const failed = yield* service.list({
         state: "open",
-        cursors: { "github.com acme/web": "next" },
+        cursors: result.nextCursors,
       });
-      expect(listed).toEqual(["acme/web"]);
+      expect(listed).toEqual(["Acme/Web"]);
+      expect(failed.nextCursors).toEqual(result.nextCursors);
+      expect(failed.errors).toEqual([
+        { projectId: "web", projectTitle: "web", message: "try again" },
+      ]);
+      const next = yield* service.list({ state: "open", cursors: failed.nextCursors });
+      expect(next.entries.map((entry) => [entry.projectId, entry.key])).toEqual([["web", "4"]]);
+      expect(next.nextCursors).toEqual({});
       expect(next.errors).toEqual([]);
     }),
   );

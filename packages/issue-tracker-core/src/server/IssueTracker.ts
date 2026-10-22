@@ -124,14 +124,6 @@ export interface IssueTrackerApi {
     input: IssueTarget & { readonly cursor: string },
   ) => Effect.Effect<IssueCommentsPage, IssueTrackerError>;
 
-  /**
-   * The same permissions `getIssue` carries, asked freshly before a write so access taken away
-   * since the page loaded is what decides. A tracker with nothing to say makes no request.
-   */
-  readonly getViewerPermissions: (
-    input: IssueTarget,
-  ) => Effect.Effect<IssueViewerPermissions, IssueTrackerError>;
-
   /** Only called when `capabilities.create` is true. */
   readonly create?: (
     input: IssueScopeTarget & {

@@ -425,8 +425,6 @@ export const make: Effect.Effect<IssueTrackerApi, never, GitLabCli.GitLabCli> = 
             );
       },
 
-      getViewerPermissions: () => Effect.succeed(VIEWER_PERMISSIONS),
-
       create: (input) =>
         assigneeIds("create", input.assignees).pipe(
           Effect.flatMap((assignee_ids) =>

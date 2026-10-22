@@ -303,6 +303,27 @@ export const make: Effect.Effect<StandaloneIssueTrackerApi, never, LinearApi.Lin
       return identifier === null ? Effect.fail(notFound(operation)) : Effect.succeed(identifier);
     };
 
+    /**
+     * The issue a write names, refused unless it sits in the bound team: an identifier from
+     * another team, or one that moved away, still resolves in Linear.
+     */
+    const requireTeamIssue = Effect.fn("LinearIssueTracker.requireTeamIssue")(function* (
+      operation: string,
+      input: { readonly scope: string; readonly key: string },
+    ) {
+      const identifier = yield* requireIdentifier(operation, input.key);
+      const issue = yield* linear.getIssue(identifier, 0);
+      if (issue === null) return yield* notFound(operation);
+      const team = input.scope.trim().toUpperCase();
+      if (issue.team.key !== team) {
+        return yield* failed(
+          operation,
+          `${issue.identifier} belongs to Linear team ${issue.team.key}, not ${team}.`,
+        );
+      }
+      return issue;
+    });
+
     const requireTeam = (operation: string, scope: string) =>
       linear.getTeam(scope.trim().toUpperCase()).pipe(
         Effect.filterOrFail(
@@ -432,8 +453,6 @@ export const make: Effect.Effect<StandaloneIssueTrackerApi, never, LinearApi.Lin
           };
         }),
 
-      getViewerPermissions: () => Effect.succeed(VIEWER_PERMISSIONS),
-
       create: (input) =>
         Effect.gen(function* () {
           const scope = yield* requireTeam("create", input.scope);
@@ -451,15 +470,13 @@ export const make: Effect.Effect<StandaloneIssueTrackerApi, never, LinearApi.Lin
 
       comment: (input) =>
         Effect.gen(function* () {
-          const identifier = yield* requireIdentifier("comment", input.key);
-          const issue = yield* linear.getIssue(identifier, 0);
-          if (issue === null) return yield* notFound("comment");
+          const issue = yield* requireTeamIssue("comment", input);
           yield* linear.createComment({ issueId: issue.id, body: input.body });
         }),
 
       update: (input) =>
         Effect.gen(function* () {
-          const identifier = yield* requireIdentifier("update", input.key);
+          const { identifier } = yield* requireTeamIssue("update", input);
           const patch: Record<string, unknown> = {};
           if (input.title !== undefined) patch.title = input.title;
           if (input.body !== undefined) patch.description = input.body;
@@ -475,7 +492,7 @@ export const make: Effect.Effect<StandaloneIssueTrackerApi, never, LinearApi.Lin
 
       setState: (input) =>
         Effect.gen(function* () {
-          const identifier = yield* requireIdentifier("setState", input.key);
+          const { identifier } = yield* requireTeamIssue("setState", input);
           const scope = yield* requireTeam("setState", input.scope);
           const states = scope.team.states.nodes.toSorted(
             (a, b) => (a.position ?? 0) - (b.position ?? 0),
@@ -493,20 +510,10 @@ export const make: Effect.Effect<StandaloneIssueTrackerApi, never, LinearApi.Lin
 
       setReaction: (input) =>
         Effect.gen(function* () {
-          const identifier = yield* requireIdentifier("setReaction", input.key);
+          const issue = yield* requireTeamIssue("setReaction", input);
           const emoji = EMOJI_BY_CONTENT[input.content];
           const target =
-            input.subjectId === undefined
-              ? yield* linear
-                  .getIssue(identifier, 0)
-                  .pipe(
-                    Effect.flatMap((issue) =>
-                      issue === null
-                        ? Effect.fail(notFound("setReaction"))
-                        : Effect.succeed({ issueId: issue.id }),
-                    ),
-                  )
-              : { commentId: input.subjectId };
+            input.subjectId === undefined ? { issueId: issue.id } : { commentId: input.subjectId };
           if (input.reacted) {
             yield* linear.createReaction({ ...target, emoji });
             return;

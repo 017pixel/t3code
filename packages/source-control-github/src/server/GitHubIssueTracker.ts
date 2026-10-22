@@ -1,15 +1,6 @@
-/**
- * GitHub's issue tracker, over the same `GitHubApi` the pull request reads use: one credential,
- * one quota reserve, one rate-limit pause per host.
- *
- * Reads go through GraphQL, which is the only API that answers the viewer's standing, the
- * timeline and reactions. Writes to the issue's own fields go through REST `PATCH`, which takes
- * the whole label and assignee sets in one call, the way the port asks for them.
- *
- * @module source-control-github/server/GitHubIssueTracker
- */
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
+import { GraphQLClient, GraphQLClientError, GraphQLGroup } from "effect/graphql";
 import {
   IssueTrackerKind,
   type IssueCapabilities,
@@ -20,32 +11,19 @@ import {
   type IssueTrackerApi,
 } from "@t3tools/issue-tracker-core/server/IssueTracker";
 
-import * as GitHubApi from "./GitHubApi.ts";
-import {
-  ADD_REACTION_GRAPHQL_MUTATION,
-  gitHubReactionContent,
-  REMOVE_REACTION_GRAPHQL_MUTATION,
-} from "./gitHubPullRequestJson.ts";
+import * as GitHubRest from "./GitHubRest.ts";
+import { readIssueTemplates } from "./gitHubIssueTemplates.ts";
+import * as GitHubRequestPolicy from "./GitHubRequestPolicy.ts";
+import * as GitHubGraphQlClient from "./gitHubGraphQlClient.ts";
+import { IssuesGraphQLGroup } from "./issues.graphql.ts";
+import { AddReaction, RemoveReaction } from "./pullRequestMutations.graphql.ts";
+import { gitHubReactionContent } from "./gitHubPullRequestJson.ts";
 import {
   decodeCreatedIssueJson,
-  decodeIssueCandidatesJson,
-  decodeIssueCommentScopeJson,
-  decodeIssueCommentsJson,
-  decodeIssueDetailJson,
-  decodeIssueNodeIdJson,
-  decodeIssueSearchJson,
-  decodeIssueTemplatesJson,
-  decodeIssueViewerPermissionsJson,
-  decodeViewerLoginJson,
-  ISSUE_CANDIDATES_GRAPHQL_QUERY,
-  ISSUE_COMMENT_SCOPE_GRAPHQL_QUERY,
-  ISSUE_COMMENTS_GRAPHQL_QUERY,
-  ISSUE_DETAIL_GRAPHQL_QUERY,
-  ISSUE_NODE_ID_GRAPHQL_QUERY,
-  ISSUE_TEMPLATES_GRAPHQL_QUERY,
-  ISSUE_VIEWER_PERMISSIONS_GRAPHQL_QUERY,
-  issueSearchGraphQlQuery,
-  SEARCH_MAX_ROWS,
+  toIssueCandidates,
+  toIssueComments,
+  toIssueDetail,
+  toIssueSearch,
 } from "./gitHubIssueJson.ts";
 
 const KIND = IssueTrackerKind.make("github");
@@ -68,28 +46,8 @@ const CAPABILITIES: IssueCapabilities = {
   closeReasons: ["completed", "not-planned"],
 };
 
-/** Where a repository configures the rest of its issue chooser, as GitHub spells the path. */
-const TEMPLATE_CONFIG_PATH = ".github/ISSUE_TEMPLATE/config.yml";
+const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_.-]+$/;
 
-/** What a repository selector may hold before it goes into a search query as itself. */
-const SEARCH_REPOSITORY = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
-
-/** The GraphQL and REST APIs take owner and name apart, so `owner/repo` is split here. */
-function parseRepository(scope: string): { readonly owner: string; readonly name: string } {
-  const parts = scope.trim().split("/").filter(Boolean);
-  return { owner: parts.at(-2) ?? "", name: parts.at(-1) ?? "" };
-}
-
-/** An issue key is its number; anything else names no GitHub issue. */
-function parseNumber(key: string): number | null {
-  return /^[1-9]\d*$/.test(key) ? Number(key) : null;
-}
-
-/**
- * The reader's words as quoted search terms. Outside quotes GitHub reads `is:closed` as a
- * qualifier, so text typed into a box could widen the listing it narrows; inside them it is only
- * text. Each word is quoted on its own so the words still match apart, not only as a phrase.
- */
 function searchTerms(query: string): ReadonlyArray<string> {
   return query
     .split(/\s+/)
@@ -113,7 +71,6 @@ function searchQuery(input: {
 }): string {
   const qualifier = INVOLVEMENT_QUALIFIER[input.involvement];
   return [
-    // The search index holds pull requests as issues; `is:issue` keeps them out.
     "is:issue",
     `repo:${input.scope.trim()}`,
     ...(input.state === "all" ? [] : [`is:${input.state}`]),
@@ -123,14 +80,14 @@ function searchQuery(input: {
   ].join(" ");
 }
 
-/** The REST close reasons, which the capability names in the contract's own spelling. */
 const CLOSE_REASON: Record<string, "completed" | "not_planned"> = {
   completed: "completed",
   "not-planned": "not_planned",
 };
 
-/** The tags that mean GitHub is out of reach for this account rather than one request failing. */
-function reasonFor(error: GitHubApi.GitHubApiError): IssueTrackerError["reason"] {
+function reasonFor(
+  error: GitHubRequestPolicy.GitHubApiError | GraphQLClientError.GraphQLClientError,
+): IssueTrackerError["reason"] {
   switch (error._tag) {
     case "GitHubCliMissingError":
       return "missing-tool";
@@ -148,359 +105,319 @@ function reasonFor(error: GitHubApi.GitHubApiError): IssueTrackerError["reason"]
   }
 }
 
-export const make: Effect.Effect<IssueTrackerApi, never, GitHubApi.GitHubApi> = Effect.gen(
-  function* () {
-    const api = yield* GitHubApi.GitHubApi;
+const FAILURE_DETAIL: Record<IssueTrackerError["reason"], string> = {
+  "missing-tool": "GitHub CLI is not installed.",
+  unauthenticated: "GitHub authentication is unavailable. Sign in and retry.",
+  "rate-limited": "GitHub API rate limit exceeded.",
+  "not-found": "GitHub could not find the requested issue.",
+  failed: "The GitHub issue request failed.",
+};
 
-    const fail = (operation: string) => (error: GitHubApi.GitHubApiError) =>
+const group = GraphQLGroup.merge(
+  IssuesGraphQLGroup,
+  GraphQLGroup.make(AddReaction, RemoveReaction),
+).middleware(GitHubGraphQlClient.GitHubGraphQlAuth);
+
+export const make = Effect.gen(function* () {
+  const api = yield* GitHubRest.GitHubRest;
+  const client = yield* GraphQLClient.make(group).pipe(Effect.provide(GitHubGraphQlClient.layer));
+
+  const fail =
+    (operation: string) =>
+    (error: GitHubRequestPolicy.GitHubApiError | GraphQLClientError.GraphQLClientError) =>
       new IssueTrackerError({
         tracker: KIND,
         operation,
         reason: reasonFor(error),
-        detail: error.message,
+        detail: GraphQLClientError.isGraphQLClientError(error)
+          ? `GitHub returned an unreadable ${operation} response.`
+          : FAILURE_DETAIL[reasonFor(error)],
         ...("retryAt" in error && error.retryAt !== undefined ? { retryAt: error.retryAt } : {}),
         cause: error,
       });
 
-    const unreadable = (operation: string, cause: unknown) =>
-      new IssueTrackerError({
-        tracker: KIND,
-        operation,
-        reason: "failed",
-        detail: `GitHub returned an unreadable ${operation} response.`,
-        cause,
-      });
+  const invalid = (operation: string, detail: string, reason: "failed" | "not-found" = "failed") =>
+    new IssueTrackerError({ tracker: KIND, operation, reason, detail });
 
-    const notFound = (operation: string) =>
-      new IssueTrackerError({
-        tracker: KIND,
-        operation,
-        reason: "not-found",
-        detail: "GitHub could not find the requested issue.",
-      });
+  const notFound = (operation: string) =>
+    invalid(operation, "GitHub could not find the requested issue.", "not-found");
 
-    /** A GraphQL read whose answer is decoded, reporting a failure against the read that made it. */
-    const graphqlRead = <A>(input: {
-      readonly host: string;
-      readonly operation: string;
-      readonly query: string;
-      readonly variables?: Readonly<Record<string, unknown>>;
-      readonly decode: (raw: string) => Result.Result<A, unknown>;
-    }): Effect.Effect<A, IssueTrackerError> =>
-      api
-        .graphql({
-          host: input.host,
-          operation: input.operation,
-          query: input.query,
-          ...(input.variables === undefined ? {} : { variables: input.variables }),
-        })
-        .pipe(
-          Effect.mapError(fail(input.operation)),
-          Effect.flatMap((raw) => {
-            const decoded = input.decode(raw.trim());
-            return Result.isSuccess(decoded)
-              ? Effect.succeed(decoded.success)
-              : Effect.fail(unreadable(input.operation, decoded.failure));
-          }),
-        );
+  const repository = Effect.fnUntraced(function* (scope: string, operation: string) {
+    if (!REPOSITORY.test(scope) || scope.endsWith("/.") || scope.endsWith("/..")) {
+      return yield* invalid(operation, "A repository was named that GitHub cannot address.");
+    }
+    const [owner = "", name = ""] = scope.split("/");
+    return { owner, name };
+  });
 
-    const mutate = (input: {
-      readonly host: string;
-      readonly operation: string;
-      readonly query: string;
-      readonly variables: Readonly<Record<string, unknown>>;
-    }) => api.graphql(input).pipe(Effect.asVoid, Effect.mapError(fail(input.operation)));
+  const issue = Effect.fnUntraced(function* (
+    input: { readonly scope: string; readonly key: string },
+    operation: string,
+  ) {
+    const repo = yield* repository(input.scope, operation);
+    const number = Number(input.key);
+    if (!/^[1-9]\d*$/.test(input.key) || !Number.isSafeInteger(number) || number > 2_147_483_647) {
+      return yield* notFound(operation);
+    }
+    return { ...repo, number, path: `repos/${repo.owner}/${repo.name}/issues/${number}` };
+  });
 
-    /** The issue as REST addresses it, or a not-found for a key that names no number. */
-    const restIssue = (
-      input: { readonly scope: string; readonly key: string },
-      operation: string,
-    ): Effect.Effect<
-      {
-        readonly owner: string;
-        readonly name: string;
-        readonly number: number;
-        readonly path: string;
-      },
-      IssueTrackerError
-    > => {
-      const number = parseNumber(input.key);
-      const { owner, name } = parseRepository(input.scope);
-      return number === null
-        ? Effect.fail(notFound(operation))
-        : Effect.succeed({ owner, name, number, path: `repos/${owner}/${name}/issues/${number}` });
-    };
-
-    /** Every write to an issue's own fields is one `PATCH`; only its body differs. */
-    const patchIssue = (
-      input: { readonly host: string; readonly scope: string; readonly key: string },
-      operation: string,
-      body: Record<string, unknown>,
+  const graphql =
+    (host: string, operation: string) =>
+    <A, E extends GitHubRequestPolicy.GitHubApiError | GraphQLClientError.GraphQLClientError, R>(
+      effect: Effect.Effect<A, E, R>,
     ) =>
-      restIssue(input, operation).pipe(
-        Effect.flatMap(({ path }) =>
-          api
-            .rest({ host: input.host, operation, method: "PATCH", path, body })
-            .pipe(Effect.asVoid, Effect.mapError(fail(operation))),
-        ),
-      );
+      effect.pipe(GitHubGraphQlClient.call({ host, operation }), Effect.mapError(fail(operation)));
 
-    /**
-     * A client-given comment id is trusted to be whatever node it names, which can hang off any
-     * issue on the host; the mutation would write wherever it belongs unless this agrees first.
-     */
-    const commentBelongsToIssue = (input: {
-      readonly host: string;
-      readonly scope: string;
-      readonly key: string;
-      readonly commentId: string;
-      readonly operation: string;
-    }) =>
-      restIssue(input, input.operation).pipe(
-        Effect.flatMap(({ owner, name, number }) =>
-          graphqlRead({
-            host: input.host,
-            operation: input.operation,
-            query: ISSUE_COMMENT_SCOPE_GRAPHQL_QUERY,
-            variables: { owner, name, number, commentId: input.commentId },
-            decode: decodeIssueCommentScopeJson,
-          }),
+  const verifiedIssue = Effect.fnUntraced(function* (
+    input: { readonly host: string; readonly scope: string; readonly key: string },
+    operation: string,
+  ) {
+    const target = yield* issue(input, operation);
+    const { owner, name, number } = target;
+    // REST issue endpoints also accept pull requests; resolve an Issue before writing.
+    const result = yield* client
+      .IssueNodeId({ owner, name, number })
+      .pipe(graphql(input.host, operation));
+    const id = result.repository?.issue?.id;
+    if (id === undefined) return yield* notFound(operation);
+    return { ...target, id };
+  });
+
+  const patchIssue = (
+    input: { readonly host: string; readonly scope: string; readonly key: string },
+    operation: string,
+    body: Record<string, unknown>,
+  ) =>
+    verifiedIssue(input, operation).pipe(
+      Effect.flatMap(({ path }) =>
+        api
+          .rest({ host: input.host, operation, method: "PATCH", path, body })
+          .pipe(Effect.asVoid, Effect.mapError(fail(operation))),
+      ),
+    );
+
+  return {
+    kind: KIND,
+    capabilities: CAPABILITIES,
+
+    getViewer: (input) =>
+      client.IssueViewer({}).pipe(
+        graphql(input.host, "getViewer"),
+        Effect.map(({ viewer }) => viewer.login),
+      ),
+
+    listIssues: (input) =>
+      repository(input.scope, "listIssues").pipe(
+        Effect.flatMap(() =>
+          client
+            .IssueSearch({
+              q: searchQuery(input),
+              cursor: input.cursor,
+              rows: Math.min(Math.max(Math.trunc(input.limit), 1), 100),
+            })
+            .pipe(graphql(input.host, "listIssues"), Effect.map(toIssueSearch)),
         ),
-        Effect.flatMap((belongs) =>
-          belongs
-            ? Effect.succeed(input.commentId)
+      ),
+
+    getIssue: Effect.fn("GitHubIssueTracker.getIssue")(function* (input) {
+      const { owner, name, number } = yield* issue(input, "getIssue");
+      const result = yield* client
+        .IssueDetail({ owner, name, number })
+        .pipe(graphql(input.host, "getIssue"));
+      const detail = toIssueDetail(result);
+      const raw = result.repository?.issue;
+      if (detail === null || raw == null) return yield* notFound("getIssue");
+      // Editing replaces these sets. Finish their pages before handing them to a client.
+      let labels = raw.labels;
+      let assignees = raw.assignees;
+      const seen = new Set<string>();
+      const allLabels = [...detail.labels];
+      const allAssignees = [...detail.assignees];
+      while (labels?.pageInfo.hasNextPage === true || assignees.pageInfo.hasNextPage) {
+        const labelsCursor = labels?.pageInfo.hasNextPage ? labels.pageInfo.endCursor : null;
+        const assigneesCursor = assignees.pageInfo.hasNextPage
+          ? assignees.pageInfo.endCursor
+          : null;
+        const key = `${labelsCursor ?? ""} ${assigneesCursor ?? ""}`;
+        if (
+          (labels?.pageInfo.hasNextPage && labelsCursor === null) ||
+          (assignees.pageInfo.hasNextPage && assigneesCursor === null) ||
+          seen.has(key)
+        ) {
+          return yield* invalid(
+            "getIssue",
+            "GitHub did not return complete issue labels or assignees.",
+          );
+        }
+        seen.add(key);
+        const page = yield* client
+          .IssueCollections({ owner, name, number, labelsCursor, assigneesCursor })
+          .pipe(graphql(input.host, "getIssue"));
+        const next = page.repository?.issue;
+        if (next == null) return yield* notFound("getIssue");
+        if (labels?.pageInfo.hasNextPage) {
+          labels = next.labels;
+          if (next.labels === null) {
+            return yield* invalid("getIssue", "GitHub did not return complete issue labels.");
+          }
+          allLabels.push(
+            ...(next.labels.nodes ?? []).flatMap((node) =>
+              node === null ? [] : [{ name: node.name, color: node.color }],
+            ),
+          );
+        }
+        if (assignees.pageInfo.hasNextPage) {
+          assignees = next.assignees;
+          allAssignees.push(
+            ...(next.assignees.nodes ?? []).flatMap((node) =>
+              node === null
+                ? []
+                : [{ login: node.login, name: node.name, avatarUrl: node.avatarUrl }],
+            ),
+          );
+        }
+      }
+      return { ...detail, labels: allLabels, assignees: allAssignees };
+    }),
+
+    getComments: (input) =>
+      issue(input, "getComments").pipe(
+        Effect.flatMap(({ owner, name, number }) =>
+          client
+            .IssueComments({ owner, name, number, cursor: input.cursor })
+            .pipe(graphql(input.host, "getComments")),
+        ),
+        Effect.flatMap((result) =>
+          result.repository?.issue == null
+            ? Effect.fail(notFound("getComments"))
+            : Effect.succeed(toIssueComments(result)),
+        ),
+      ),
+
+    create: (input) =>
+      repository(input.scope, "create").pipe(
+        Effect.flatMap(({ owner, name }) =>
+          api
+            .rest({
+              host: input.host,
+              operation: "create",
+              method: "POST",
+              path: `repos/${owner}/${name}/issues`,
+              body: {
+                title: input.title,
+                body: input.body,
+                labels: input.labels,
+                assignees: input.assignees,
+              },
+            })
+            .pipe(Effect.mapError(fail("create"))),
+        ),
+        Effect.flatMap((response) => {
+          const decoded = decodeCreatedIssueJson(response.body);
+          return Result.isSuccess(decoded)
+            ? Effect.succeed({
+                key: String(decoded.success.number),
+                displayKey: `#${decoded.success.number}`,
+                url: decoded.success.url,
+              })
             : Effect.fail(
                 new IssueTrackerError({
                   tracker: KIND,
-                  operation: input.operation,
+                  operation: "create",
                   reason: "failed",
-                  detail: "The comment does not belong to the selected issue.",
+                  detail: "GitHub returned an unreadable create response.",
+                  cause: decoded.failure,
                 }),
-              ),
-        ),
-      );
-
-    return {
-      kind: KIND,
-      capabilities: CAPABILITIES,
-
-      getViewer: (input) =>
-        graphqlRead({
-          host: input.host,
-          operation: "getViewer",
-          query: "query { viewer { login } }",
-          decode: decodeViewerLoginJson,
+              );
         }),
+      ),
 
-      listIssues: (input) => {
-        if (!SEARCH_REPOSITORY.test(input.scope.trim())) {
-          // A name holding a space could end the `repo:` qualifier and start one of its own, so
-          // an unaddressable one refuses the read rather than being escaped into something GitHub
-          // might still read.
-          return Effect.fail(
-            new IssueTrackerError({
-              tracker: KIND,
-              operation: "listIssues",
-              reason: "failed",
-              detail: "A repository was named that GitHub cannot address.",
-            }),
+    comment: (input) =>
+      verifiedIssue(input, "comment").pipe(
+        Effect.flatMap(({ path }) =>
+          api
+            .rest({
+              host: input.host,
+              operation: "comment",
+              method: "POST",
+              path: `${path}/comments`,
+              body: { body: input.body },
+            })
+            .pipe(Effect.asVoid, Effect.mapError(fail("comment"))),
+        ),
+      ),
+
+    update: (input) =>
+      patchIssue(input, "update", {
+        ...(input.title === undefined ? {} : { title: input.title }),
+        ...(input.body === undefined ? {} : { body: input.body }),
+        ...(input.labels === undefined ? {} : { labels: input.labels }),
+        ...(input.assignees === undefined ? {} : { assignees: input.assignees }),
+      }),
+
+    setState: (input) =>
+      patchIssue(input, "setState", {
+        state: input.state,
+        ...(input.state === "closed" && input.closeReason !== undefined
+          ? { state_reason: CLOSE_REASON[input.closeReason] }
+          : {}),
+      }),
+
+    setReaction: Effect.fn("GitHubIssueTracker.setReaction")(function* (input) {
+      let subjectId: string;
+      if (input.subjectId === undefined) {
+        const target = yield* verifiedIssue(input, "setReaction");
+        subjectId = target.id;
+      } else {
+        const { owner, name, number } = yield* issue(input, "setReaction");
+        // Node ids are global: prove the comment belongs to this issue before writing.
+        const result = yield* client
+          .IssueCommentScope({ owner, name, number, commentId: input.subjectId })
+          .pipe(graphql(input.host, "setReaction"));
+        const expected = result.repository?.issue?.id;
+        if (
+          expected === undefined ||
+          result.node?.__typename !== "IssueComment" ||
+          result.node.issue.id !== expected
+        ) {
+          return yield* invalid(
+            "setReaction",
+            "The comment does not belong to the selected issue.",
           );
         }
-        return graphqlRead({
-          host: input.host,
-          operation: "listIssues",
-          query: issueSearchGraphQlQuery(Math.min(input.limit, SEARCH_MAX_ROWS)),
-          variables:
-            input.cursor === undefined
-              ? { q: searchQuery(input) }
-              : { q: searchQuery(input), cursor: input.cursor },
-          decode: decodeIssueSearchJson,
-        });
-      },
+        subjectId = input.subjectId;
+      }
+      const variables = { subjectId, content: gitHubReactionContent(input.content) };
+      yield* (
+        input.reacted
+          ? client.AddReaction(variables).pipe(Effect.asVoid)
+          : client.RemoveReaction(variables).pipe(Effect.asVoid)
+      ).pipe(graphql(input.host, "setReaction"));
+    }),
 
-      getIssue: (input) =>
-        restIssue(input, "getIssue").pipe(
-          Effect.flatMap(({ owner, name, number }) =>
-            graphqlRead({
-              host: input.host,
-              operation: "getIssue",
-              query: ISSUE_DETAIL_GRAPHQL_QUERY,
-              variables: { owner, name, number },
-              decode: decodeIssueDetailJson,
-            }),
-          ),
-          Effect.filterOrFail(
-            (detail) => detail !== null,
-            () => notFound("getIssue"),
-          ),
+    listTemplates: (input) =>
+      repository(input.scope, "listTemplates").pipe(
+        Effect.flatMap(({ owner, name }) =>
+          client.IssueTemplates({ owner, name }).pipe(graphql(input.host, "listTemplates")),
         ),
-
-      getComments: (input) =>
-        restIssue(input, "getComments").pipe(
-          Effect.flatMap(({ owner, name, number }) =>
-            graphqlRead({
-              host: input.host,
-              operation: "getComments",
-              query: ISSUE_COMMENTS_GRAPHQL_QUERY,
-              variables: { owner, name, number, cursor: input.cursor },
-              decode: decodeIssueCommentsJson,
-            }),
-          ),
+        Effect.flatMap(({ repository }) =>
+          repository === null
+            ? Effect.fail(notFound("listTemplates"))
+            : readIssueTemplates(repository),
         ),
+      ),
 
-      getViewerPermissions: (input) =>
-        restIssue(input, "getViewerPermissions").pipe(
-          Effect.flatMap(({ owner, name, number }) =>
-            graphqlRead({
-              host: input.host,
-              operation: "getViewerPermissions",
-              query: ISSUE_VIEWER_PERMISSIONS_GRAPHQL_QUERY,
-              variables: { owner, name, number },
-              decode: decodeIssueViewerPermissionsJson,
-            }),
-          ),
+    listCandidates: (input) =>
+      repository(input.scope, "listCandidates").pipe(
+        Effect.flatMap(({ owner, name }) =>
+          client.IssueCandidates({ owner, name }).pipe(graphql(input.host, "listCandidates")),
         ),
-
-      create: (input) => {
-        const { owner, name } = parseRepository(input.scope);
-        return api
-          .rest({
-            host: input.host,
-            operation: "create",
-            method: "POST",
-            path: `repos/${owner}/${name}/issues`,
-            body: {
-              title: input.title,
-              body: input.body,
-              labels: input.labels,
-              assignees: input.assignees,
-            },
-          })
-          .pipe(
-            Effect.mapError(fail("create")),
-            Effect.flatMap((response) => {
-              const decoded = decodeCreatedIssueJson(response.body);
-              return Result.isSuccess(decoded)
-                ? Effect.succeed({
-                    key: String(decoded.success.number),
-                    displayKey: `#${decoded.success.number}`,
-                    url: decoded.success.url,
-                  })
-                : Effect.fail(unreadable("create", decoded.failure));
-            }),
-          );
-      },
-
-      comment: (input) =>
-        restIssue(input, "comment").pipe(
-          Effect.flatMap(({ path }) =>
-            api
-              .rest({
-                host: input.host,
-                operation: "comment",
-                method: "POST",
-                path: `${path}/comments`,
-                body: { body: input.body },
-              })
-              .pipe(Effect.asVoid, Effect.mapError(fail("comment"))),
-          ),
+        Effect.flatMap(({ repository }) =>
+          repository === null
+            ? Effect.fail(notFound("listCandidates"))
+            : Effect.succeed(toIssueCandidates(repository)),
         ),
-
-      update: (input) =>
-        patchIssue(input, "update", {
-          ...(input.title === undefined ? {} : { title: input.title }),
-          ...(input.body === undefined ? {} : { body: input.body }),
-          ...(input.labels === undefined ? {} : { labels: input.labels }),
-          ...(input.assignees === undefined ? {} : { assignees: input.assignees }),
-        }),
-
-      setState: (input) =>
-        patchIssue(input, "setState", {
-          state: input.state,
-          ...(input.state === "closed" && input.closeReason !== undefined
-            ? { state_reason: CLOSE_REASON[input.closeReason] }
-            : {}),
-        }),
-
-      setReaction: (input) =>
-        (input.subjectId === undefined
-          ? restIssue(input, "setReaction").pipe(
-              Effect.flatMap(({ owner, name, number }) =>
-                graphqlRead({
-                  host: input.host,
-                  operation: "setReaction",
-                  query: ISSUE_NODE_ID_GRAPHQL_QUERY,
-                  variables: { owner, name, number },
-                  decode: decodeIssueNodeIdJson,
-                }),
-              ),
-            )
-          : commentBelongsToIssue({
-              ...input,
-              commentId: input.subjectId,
-              operation: "setReaction",
-            })
-        ).pipe(
-          Effect.flatMap((subjectId) =>
-            mutate({
-              host: input.host,
-              operation: "setReaction",
-              query: input.reacted
-                ? ADD_REACTION_GRAPHQL_MUTATION
-                : REMOVE_REACTION_GRAPHQL_MUTATION,
-              variables: { subjectId, content: gitHubReactionContent(input.content) },
-            }),
-          ),
-        ),
-
-      listTemplates: (input) => {
-        const { owner, name } = parseRepository(input.scope);
-        return Effect.all(
-          [
-            graphqlRead({
-              host: input.host,
-              operation: "listTemplates",
-              query: ISSUE_TEMPLATES_GRAPHQL_QUERY,
-              variables: { owner, name },
-              decode: decodeIssueTemplatesJson,
-            }),
-            // Only an explicit `blank_issues_enabled: false` takes the blank issue away; a missing
-            // config, or one this account may not read, leaves it where GitHub puts it.
-            api
-              .rest({
-                host: input.host,
-                operation: "listTemplateConfig",
-                accept: "application/vnd.github.raw",
-                path: `repos/${owner}/${name}/contents/${TEMPLATE_CONFIG_PATH}`,
-              })
-              .pipe(
-                Effect.map(
-                  (response) => !/^\s*blank_issues_enabled\s*:\s*false\s*$/m.test(response.body),
-                ),
-                Effect.catch((error) =>
-                  error._tag === "GitHubApiRateLimitError" ||
-                  error._tag === "SourceControlRateLimitPausedError"
-                    ? Effect.fail(fail("listTemplateConfig")(error))
-                    : Effect.succeed(true),
-                ),
-              ),
-          ],
-          { concurrency: 2 },
-        ).pipe(
-          Effect.map(([templates, blankIssuesEnabled]) => ({ templates, blankIssuesEnabled })),
-        );
-      },
-
-      listCandidates: (input) => {
-        const { owner, name } = parseRepository(input.scope);
-        return graphqlRead({
-          host: input.host,
-          operation: "listCandidates",
-          query: ISSUE_CANDIDATES_GRAPHQL_QUERY,
-          variables: { owner, name },
-          decode: decodeIssueCandidatesJson,
-        });
-      },
-    };
-  },
-);
+      ),
+  } satisfies IssueTrackerApi;
+});

@@ -100,6 +100,7 @@ export const LinearIssue = Schema.Struct({
   completedAt: Schema.NullOr(Schema.String),
   canceledAt: Schema.NullOr(Schema.String),
   state: LinearWorkflowState,
+  team: Schema.Struct({ key: Schema.String }),
   creator: Schema.NullOr(LinearUser),
   assignee: Schema.NullOr(LinearUser),
   labels: Schema.Struct({ nodes: Schema.Array(LinearLabel) }),
@@ -168,6 +169,7 @@ const COMMENT_FIELDS = `id body createdAt url user { ${USER_FIELDS} } reactions 
 const ISSUE_FIELDS = `
   id identifier number title url description createdAt updatedAt completedAt canceledAt
   state { ${STATE_FIELDS} }
+  team { key }
   creator { ${USER_FIELDS} }
   assignee { ${USER_FIELDS} }
   labels { nodes { ${LABEL_FIELDS} } }

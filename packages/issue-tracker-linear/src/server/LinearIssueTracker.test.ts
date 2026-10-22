@@ -42,11 +42,21 @@ const issue = (
   completedAt: null,
   canceledAt: null,
   state: state("In Progress", "started"),
+  team: { key: identifier.split("-")[0] },
   creator: JULIUS,
   assignee: THEO,
   labels: { nodes: [{ id: "lbl_bug", name: "Bug", color: "#f00" }] },
   ...overrides,
 });
+
+/** An issue as the detail query answers it, with nothing hanging off it. */
+const bareDetail = (identifier: string) =>
+  issue(identifier, {
+    comments: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+    reactions: [],
+    attachments: { nodes: [] },
+    history: { nodes: [] },
+  });
 
 /** Answers each GraphQL document by its operation name, the way Linear would. */
 function fakeLinear(
@@ -233,7 +243,7 @@ describe("LinearIssueTracker", () => {
     }),
   );
 
-  it.effect("closes through the team's completed state and reports a missing key", () =>
+  it.effect("closes through the team's completed state, without a key or outside the team", () =>
     Effect.gen(function* () {
       const updates: Array<Record<string, unknown>> = [];
       const { tracker } = fakeLinear(
@@ -298,12 +308,18 @@ describe("LinearIssueTracker", () => {
           },
           issueLabels: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
         }),
+        T3Issue: (variables) => ({ issue: bareDetail(String(variables.id)) }),
         T3IssueUpdate: (variables) => {
           updates.push(variables);
           return { issueUpdate: { success: true } };
         },
       });
       const live = yield* connected.tracker;
+      // An identifier from another team resolves in Linear, so the team is checked before writing.
+      const foreign = yield* Effect.flip(
+        live.setState({ ...target, key: "OPS-3", state: "closed" }),
+      );
+      expect(foreign.detail).toContain("OPS");
       yield* live.setState({ ...target, key: "ENG-1", state: "closed", closeReason: "canceled" });
       yield* live.setState({ ...target, key: "ENG-1", state: "closed" });
       yield* live.setState({ ...target, key: "ENG-1", state: "open" });
