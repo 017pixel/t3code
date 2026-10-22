@@ -520,18 +520,11 @@ describe("V2 thread find", () => {
       }).pipe(Effect.provide(layerTest)),
   );
 
-  it.effect.each([
-    ["SQL", layerTest],
-    ["memory", ProjectionStore.layerMemory],
-  ] as const)("%s search finds an async answer that started a later run", ([name, layer]) =>
+  const findsLateAnswer = <E, R>(
+    apply: (events: readonly OrchestrationV2DomainEvent[]) => Effect.Effect<void, E, R>,
+  ) =>
     Effect.gen(function* () {
       const projection = yield* ProjectionStore.ProjectionStoreV2;
-      const apply =
-        name === "SQL"
-          ? commit
-          : (events: readonly OrchestrationV2DomainEvent[]) =>
-              Effect.forEach(events, projection.apply, { discard: true });
-      if (name === "SQL") yield* createProject(projectId);
       const queuedRun = RunId.make("run:queued");
       const answerRun = RunId.make("run:answer");
       yield* apply([
@@ -569,8 +562,25 @@ describe("V2 thread find", () => {
         runId: answerRun,
         occurrence: 0,
       });
-    }).pipe(Effect.provide(layer)),
-  );
+    });
+
+  it.effect.each([
+    [
+      "SQL",
+      () =>
+        createProject(projectId).pipe(
+          Effect.andThen(findsLateAnswer(commit)),
+          Effect.provide(layerTest),
+        ),
+    ],
+    [
+      "memory",
+      () =>
+        Effect.flatMap(ProjectionStore.ProjectionStoreV2, (projection) =>
+          findsLateAnswer((events) => Effect.forEach(events, projection.apply, { discard: true })),
+        ).pipe(Effect.provide(ProjectionStore.layerMemory)),
+    ],
+  ] as const)("%s search finds an async answer that started a later run", ([, test]) => test());
 
   it.effect(
     "searches inherited fork history through the fork boundary, using source item identities",
