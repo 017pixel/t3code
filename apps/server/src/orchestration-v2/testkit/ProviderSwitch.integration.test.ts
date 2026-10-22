@@ -117,6 +117,7 @@ function makeTestAdapter(input: {
   readonly holdFirstTurn?: Deferred.Deferred<void>;
   readonly releaseFirstTurn?: Deferred.Deferred<void>;
   readonly backgroundWork?: Ref.Ref<boolean>;
+  readonly closedSessions?: Ref.Ref<ReadonlyArray<string>>;
 }): ProviderAdapter.ProviderAdapterV2["Service"] {
   return {
     instanceId: input.instanceId,
@@ -126,6 +127,12 @@ function makeTestAdapter(input: {
     openSession: (sessionInput) =>
       Effect.gen(function* () {
         const events = yield* PubSub.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+        if (input.closedSessions !== undefined) {
+          const closedSessions = input.closedSessions;
+          yield* Effect.addFinalizer(() =>
+            Ref.update(closedSessions, (ids) => [...ids, sessionInput.providerSessionId]),
+          );
+        }
         const now = yield* DateTime.now;
         const providerSession: OrchestrationV2ProviderSession = {
           id: sessionInput.providerSessionId,
@@ -2230,6 +2237,7 @@ describe("orchestration v2 provider switching", () => {
         const cwd = yield* checkpointWorkspace("handoff-releases-session");
         const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
         const backgroundWork = yield* Ref.make(backgroundRunning);
+        const closedSessions = yield* Ref.make<ReadonlyArray<string>>([]);
         const secondSelection: ModelSelection = {
           ...CLAUDE_MODEL_SELECTION,
           instanceId: ProviderInstanceId.make("claude-second-account"),
@@ -2244,6 +2252,7 @@ describe("orchestration v2 provider switching", () => {
             responseByRunOrdinal: { 1: "First account complete" },
             capturedTurns,
             backgroundWork,
+            closedSessions,
           }),
           makeTestAdapter({
             instanceId: secondSelection.instanceId,
@@ -2315,6 +2324,7 @@ describe("orchestration v2 provider switching", () => {
             assert.include(String(refused.cause), "still running background agents or commands");
             const unchanged = yield* orchestrator.getThreadProjection(handoffThreadId);
             assert.lengthOf(unchanged.runs, 1);
+            assert.deepEqual(yield* Ref.get(closedSessions), []);
             assert.equal(unchanged.thread.providerInstanceId, CLAUDE_MODEL_SELECTION.instanceId);
             assert.deepEqual(
               unchanged.providerSessions.map((session) => [session.id, session.status]),
@@ -2341,6 +2351,8 @@ describe("orchestration v2 provider switching", () => {
             projection.providerSessions.map((session) => session.providerInstanceId),
             [secondSelection.instanceId],
           );
+          // The detached event alone hides the session; the runtime must also close.
+          assert.deepEqual(yield* Ref.get(closedSessions), [firstSession!.id]);
         }).pipe(
           Effect.provide(
             ProviderReplayHarness.layerWithRegistry(
