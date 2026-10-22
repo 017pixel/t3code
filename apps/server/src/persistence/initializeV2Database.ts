@@ -74,14 +74,52 @@ function hasV2Work(source: NodeSqlite.DatabaseSync, copy: NodeSqlite.DatabaseSyn
   return (
     (hasTable(copy, "orchestration_v2_projection_threads") &&
       (hasRow(
-        "SELECT 1 FROM orchestration_v2_projection_threads WHERE thread_id NOT IN (SELECT thread_id FROM projection_threads) LIMIT 1",
+        "SELECT 1 FROM orchestration_v2_projection_threads AS v2 WHERE NOT EXISTS (SELECT 1 FROM projection_threads AS v1 WHERE v1.thread_id = v2.thread_id) LIMIT 1",
       ) ||
         hasRow(
-          "SELECT 1 FROM orchestration_v2_projection_messages WHERE message_id NOT IN (SELECT message_id FROM projection_thread_messages) LIMIT 1",
+          "SELECT 1 FROM orchestration_v2_projection_messages AS v2 WHERE NOT EXISTS (SELECT 1 FROM projection_thread_messages AS v1 WHERE v1.message_id = v2.message_id) LIMIT 1",
         ))) ||
     hasIdsBeyond(copy, source, "projection_projects", "project_id") ||
-    hasIdsBeyond(copy, source, "scheduled_tasks", "task_id")
+    hasIdsBeyond(copy, source, "scheduled_tasks", "task_id") ||
+    hasV2Revocations(source, copy)
   );
+}
+
+const CLOSABLE_AUTH_TABLES = [
+  { table: "auth_sessions", id: "session_id", closed: "revoked_at IS NOT NULL" },
+  {
+    table: "auth_pairing_links",
+    id: "id",
+    closed: "revoked_at IS NOT NULL OR consumed_at IS NOT NULL",
+  },
+] as const;
+
+// A re-copy would restore V1's open row, letting a device revoked in V2 connect again.
+function hasV2Revocations(source: NodeSqlite.DatabaseSync, copy: NodeSqlite.DatabaseSync) {
+  return CLOSABLE_AUTH_TABLES.some(({ table, id, closed }) => {
+    if (!hasTable(source, table) || !hasTable(copy, table)) return false;
+    const openInV1 = new Set(
+      source
+        .prepare(`SELECT ${id} AS id FROM ${table} WHERE NOT (${closed})`)
+        .all()
+        .map((row) => row.id),
+    );
+    return copy
+      .prepare(`SELECT ${id} AS id FROM ${table} WHERE ${closed}`)
+      .all()
+      .some((row) => openInV1.has(row.id));
+  });
+}
+
+// Leaves the main file complete, so moving it alone moves the whole database.
+function checkpointCopy(destinationPath: string) {
+  const copy = new NodeSqlite.DatabaseSync(destinationPath);
+  try {
+    const result = copy.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+    if (result?.busy !== 0) throw new Error("The V2 database is in use by another process");
+  } finally {
+    copy.close();
+  }
 }
 
 function inspectStaleCopy(sourcePath: string, destinationPath: string) {
@@ -161,16 +199,29 @@ export const replaceStaleV2Database = Effect.fn("replaceStaleV2Database")(functi
       );
       return;
     }
-    // A previous backup was also a copy without V2 work, so one backup is enough.
     const backupPath = `${destinationPath}.stale`;
-    for (const suffix of ["", "-wal", "-shm"]) {
-      yield* fs.remove(backupPath + suffix, { force: true });
-    }
-    // The main file goes last so a crash never leaves a fresh copy beside an orphaned WAL.
-    for (const suffix of ["-wal", "-shm", ""]) {
-      if (yield* fs.exists(destinationPath + suffix)) {
-        yield* fs.rename(destinationPath + suffix, backupPath + suffix);
+    const moved = yield* Effect.gen(function* () {
+      yield* Effect.try(() => checkpointCopy(destinationPath));
+      // A previous backup was also a copy without V2 work, so one backup is enough.
+      for (const suffix of ["", "-wal", "-shm"]) {
+        yield* fs.remove(backupPath + suffix, { force: true });
       }
+      // The main file goes first: after the checkpoint it holds everything, so a failed rename
+      // moves nothing.
+      yield* fs.rename(destinationPath, backupPath);
+    }).pipe(
+      Effect.as(true),
+      Effect.catch((cause) =>
+        Effect.logWarning(
+          "The V2 database predates newer V1 data, but it could not be moved aside; keeping it",
+          { destinationPath, cause },
+        ).pipe(Effect.as(false)),
+      ),
+    );
+    if (!moved) return;
+    // Checkpointed sidecars are empty, so one left behind cannot corrupt the fresh copy.
+    for (const suffix of ["-wal", "-shm"]) {
+      yield* fs.rename(destinationPath + suffix, backupPath + suffix).pipe(Effect.ignore);
     }
     yield* Effect.logWarning(
       "The V2 database predates newer V1 data and holds no V2 work; moved it aside and copied V1 again",

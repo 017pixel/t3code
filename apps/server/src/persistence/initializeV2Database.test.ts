@@ -131,6 +131,8 @@ const makeStaleCopy = Effect.fn(function* (name: string) {
     VALUES ('project-a', 'Project A', '/tmp/project-a', '[]', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`;
     yield* sql`INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, created_at, updated_at)
     VALUES ('thread-a', 'project-a', 'First V1 thread', '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', 'default', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`;
+    yield* sql`INSERT INTO auth_sessions (session_id, subject, scopes, method, issued_at, expires_at)
+    VALUES ('session-a', 'phone', '[]', 'browser-session-cookie', '2026-01-01T00:00:00.000Z', '2027-01-01T00:00:00.000Z')`;
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: sourcePath })));
 
   const services = ServerConfig.layerTest(directory, directory).pipe(
@@ -208,14 +210,8 @@ it.effect("re-seeds a V2 store without V2 work when V1 gained threads after the 
 
     assert.deepEqual(yield* startV2, ["thread-a", "thread-b"]);
     assert.deepEqual(yield* startV2, ["thread-a", "thread-b"]);
-    assert.deepEqual(
-      backups(directory).filter((name) => !name.endsWith("-wal") && !name.endsWith("-shm")),
-      ["statev2.sqlite.stale"],
-    );
-    assert.notEqual(
-      NodeFS.readFileSync(NodePath.join(directory, "statev2.sqlite.stale-wal"), "utf8"),
-      "older backup",
-    );
+    // The checkpoint leaves no sidecars to move, and the older backup's are gone.
+    assert.deepEqual(backups(directory), ["statev2.sqlite.stale"]);
     const backup = new NodeSqlite.DatabaseSync(NodePath.join(directory, "statev2.sqlite.stale"), {
       readOnly: true,
     });
@@ -230,38 +226,60 @@ it.effect("re-seeds a V2 store without V2 work when V1 gained threads after the 
   }).pipe(Effect.scoped),
 );
 
-it.effect("keeps a V2 store with V2 messages even when V1 gained threads after the copy", () =>
+it.effect("re-seeds a V2 store without V2 work when V1 only updated an existing thread", () =>
   Effect.gen(function* () {
-    const { directory, startV2, inV2 } = yield* makeStaleCopy("messages");
-    yield* inV2(
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        yield* sql`INSERT INTO orchestration_v2_projection_messages (message_id, thread_id, role, streaming, created_at, updated_at, payload_json)
-            VALUES ('v2-message', 'thread-a', 'user', 0, '2026-01-03T00:00:00.000Z', '2026-01-03T00:00:00.000Z', '{}')`;
-      }),
-    );
-    yield* addNewerV1Thread(directory);
+    const { directory, startV2, inV2 } = yield* makeStaleCopy("updated");
+    const v1 = new NodeSqlite.DatabaseSync(NodePath.join(directory, "state.sqlite"));
+    try {
+      v1.exec(
+        `UPDATE projection_threads SET title = 'Renamed in V1', updated_at = '2026-01-02T00:00:00.000Z'`,
+      );
+    } finally {
+      v1.close();
+    }
 
     assert.deepEqual(yield* startV2, ["thread-a"]);
-    assert.deepEqual(backups(directory), []);
+    assert.include(backups(directory), "statev2.sqlite.stale");
+    const rows = yield* inV2(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        return yield* sql`SELECT title FROM projection_threads`;
+      }),
+    );
+    assert.deepEqual(
+      rows.map((row) => row.title),
+      ["Renamed in V1"],
+    );
   }).pipe(Effect.scoped),
 );
 
-it.effect("keeps a V2 store with a V2 scheduled task even when V1 gained threads", () =>
-  Effect.gen(function* () {
-    const { directory, startV2, inV2 } = yield* makeStaleCopy("scheduled");
-    yield* inV2(
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        yield* sql`INSERT INTO scheduled_tasks (task_id, title, prompt, enabled, schedule_json, project_id, workspace_strategy_json, model_selection_json, runtime_mode, interaction_mode, created_by, creation_source, created_at, updated_at, last_run_status, run_count)
-            VALUES ('v2-task', 'Daily', 'Check CI', 1, '{}', 'project-a', '{}', '{}', 'full-access', 'default', 'user', 'ui', '2026-01-03T00:00:00.000Z', '2026-01-03T00:00:00.000Z', 'never', 0)`;
-      }),
-    );
-    yield* addNewerV1Thread(directory);
+const v2Work = {
+  "a V2 thread without messages": `INSERT INTO orchestration_v2_projection_threads (thread_id, project_id, title, default_provider, runtime_mode, interaction_mode, created_at, updated_at, payload_json)
+    VALUES ('v2-thread', 'project-a', 'V2 thread', 'codex', 'full-access', 'default', '2026-01-03T00:00:00.000Z', '2026-01-03T00:00:00.000Z', '{}')`,
+  "V2 messages": `INSERT INTO orchestration_v2_projection_messages (message_id, thread_id, role, streaming, created_at, updated_at, payload_json)
+    VALUES ('v2-message', 'thread-a', 'user', 0, '2026-01-03T00:00:00.000Z', '2026-01-03T00:00:00.000Z', '{}')`,
+  "a V2 scheduled task": `INSERT INTO scheduled_tasks (task_id, title, prompt, enabled, schedule_json, project_id, workspace_strategy_json, model_selection_json, runtime_mode, interaction_mode, created_by, creation_source, created_at, updated_at, last_run_status, run_count)
+    VALUES ('v2-task', 'Daily', 'Check CI', 1, '{}', 'project-a', '{}', '{}', 'full-access', 'default', 'user', 'ui', '2026-01-03T00:00:00.000Z', '2026-01-03T00:00:00.000Z', 'never', 0)`,
+  "a session revoked in V2": `UPDATE auth_sessions SET revoked_at = '2026-01-03T00:00:00.000Z' WHERE session_id = 'session-a'`,
+};
 
-    assert.deepEqual(yield* startV2, ["thread-a"]);
-    assert.deepEqual(backups(directory), []);
-  }).pipe(Effect.scoped),
+it.effect.each(Object.entries(v2Work))(
+  "keeps a V2 store with %s even when V1 gained threads after the copy",
+  ([, statement]) =>
+    Effect.gen(function* () {
+      const { directory, startV2, inV2 } = yield* makeStaleCopy("kept");
+      yield* inV2(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql.unsafe(statement);
+        }),
+      );
+      yield* addNewerV1Thread(directory);
+
+      const threads = yield* startV2;
+      assert.notInclude(threads, "thread-b");
+      assert.deepEqual(backups(directory), []);
+    }).pipe(Effect.scoped),
 );
 
 it.effect("includes committed WAL data and does not publish a failed snapshot", () => {

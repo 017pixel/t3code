@@ -7,6 +7,8 @@ transcripts imported as needed. You do not need to run an import command.
 V1 continues using its original database while V2 uses the copy. The database import can run while
 V1 is open. Opening V2 again resumes your V2 history. If you kept using V1 before doing any work in
 V2, V2 copies V1 again on its next launch and keeps the previous copy as `statev2.sqlite.stale`.
+The new copy replaces other changes made in V2 before then, such as renames, archives, and new
+device pairings.
 Once V2 holds your own threads, messages, projects, or scheduled tasks, changes in either version do
 not sync to the other. Settings, attachments, and workspace files remain shared.
 
