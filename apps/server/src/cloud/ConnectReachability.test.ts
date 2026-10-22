@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - reads the user guide to check its anchors.
 import * as NodeFS from "node:fs";
 
-import { T3_CONNECT_TROUBLESHOOTING_SECTIONS } from "@t3tools/contracts";
+import { T3_CONNECT_TROUBLESHOOTING_SECTIONS, connectReachableMcpUrl } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 
 import { classifyReachability, type ReachabilityFacts } from "./ConnectReachability.ts";
@@ -58,6 +58,17 @@ describe("classifyReachability", () => {
         checkedAt,
       ),
     ).toMatchObject({ cause: "dns_failed" });
+  });
+
+  it("gives the MCP URL on the host the running tunnel answered on", () => {
+    const result = classifyReachability(
+      facts({ endpoint: { kind: "status", status: 200 } }),
+      checkedAt,
+    );
+    expect(result).toMatchObject({ status: "reachable", hostname: "env.example.test" });
+    expect(result.status === "reachable" && connectReachableMcpUrl(result)).toBe(
+      "https://env.example.test/mcp",
+    );
   });
 
   it("waits on a connector that has not connected while the edge answers", () => {

@@ -11,6 +11,7 @@ import {
   AuthRelayWriteScope,
   type EnvironmentId,
   connectReachabilityHelpUrl,
+  connectReachableMcpUrl,
   formatConnectReachable,
   resolveEnvironmentMachineKind,
 } from "@t3tools/contracts";
@@ -48,6 +49,7 @@ import {
   supportsServerUpdateThreadContinuation,
 } from "~/versionSkew";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
+import { usePrimaryCloudLinkState } from "~/cloud/primaryCloudLinkState";
 import { useCloudLinkController } from "~/cloud/useCloudLinkController";
 import { environmentCatalog } from "~/connection/catalog";
 import { readEnvironmentScope } from "~/state/session";
@@ -105,6 +107,45 @@ function savedBackendStatus(environment: EnvironmentPresentation): {
   }
 }
 
+function useCopyMcpUrl() {
+  return useCopyToClipboard<{ url: string }>({
+    target: "MCP URL",
+    onCopy: ({ url }) => {
+      toastManager.add({
+        type: "success",
+        title: "MCP URL copied",
+        description: `Add it to an agent, e.g. claude mcp add --transport http t3 ${url}`,
+      });
+    },
+    onError: (error) => {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not copy MCP URL",
+          description: error.message,
+        }),
+      );
+    },
+  }).copyToClipboard;
+}
+
+/**
+ * This machine's T3 Connect MCP URL, from the host its running tunnel answered on. Shown only
+ * after a passing check, so it never hands out an address nothing serves.
+ */
+export function PrimaryMcpUrlMenuItem() {
+  const { data } = usePrimaryCloudLinkState();
+  const copyMcpUrl = useCopyMcpUrl();
+  const reachability =
+    data && data.managedTunnelActive !== false && data.linkRevoked !== true
+      ? data.reachability
+      : undefined;
+  const mcpUrl = reachability?.status === "reachable" ? connectReachableMcpUrl(reachability) : null;
+  return mcpUrl ? (
+    <MenuItem onClick={() => copyMcpUrl(mcpUrl, { url: mcpUrl })}>Copy MCP URL</MenuItem>
+  ) : null;
+}
+
 export function SavedBackendListRow({
   environment,
   removingEnvironmentId,
@@ -144,25 +185,7 @@ export function SavedBackendListRow({
   const copyTraceId = (traceId: string) => {
     copyTraceIdToClipboard(traceId, { traceId });
   };
-  const { copyToClipboard: copyMcpUrl } = useCopyToClipboard<{ url: string }>({
-    target: "MCP URL",
-    onCopy: ({ url }) => {
-      toastManager.add({
-        type: "success",
-        title: "MCP URL copied",
-        description: `Add it to an agent, e.g. claude mcp add --transport http t3 ${url}`,
-      });
-    },
-    onError: (error) => {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not copy MCP URL",
-          description: error.message,
-        }),
-      );
-    },
-  });
+  const copyMcpUrl = useCopyMcpUrl();
   const versionMismatch = resolveServerConfigVersionMismatch(environment.serverConfig);
   const serverUpdateState = useAtomValue(serverEnvironment.updateStateAtom(environmentId));
   const resumingServerUpdate =
