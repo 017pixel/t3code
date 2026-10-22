@@ -13,6 +13,6 @@ NodeFS.writeFileSync(
   `${root}/apps/web/issue-13706.html`,
   '<!doctype html><html><head><meta charset="utf-8"><title>Issue 13706 dependency harness</title></head><body style="margin:0"><div id="root"></div><script type="module" src="/src/issue-13706-repro.tsx"></script></body></html>\n',
 );
-console.log(
-  "Materialized synthetic dependency harness at /issue-13706.html; no database accessed.",
+process.stdout.write(
+  "Materialized synthetic dependency harness at /issue-13706.html; no database accessed.\n",
 );

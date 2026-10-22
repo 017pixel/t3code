@@ -22,6 +22,9 @@
       // Windows verify script with esbuild through a path knip does not trace, and
       // electron-builder loads the macOS signer by path.
       "entry": [
+        // The manual browser harness is copied into a web worktree, not imported.
+        "materialize-issue-13706.ts",
+        "fixtures/issue-13706/repro.tsx",
         "knip-schemas.ts",
         "mobile-native-client.ts",
         "setup-worktree.ts",
