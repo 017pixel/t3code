@@ -112,6 +112,7 @@ export function installSyntheticEvents() {
       const input = document.querySelector("input[type=file]");
       const dt = new DataTransfer();
       files.forEach((f) => dt.items.add(f));
+      const descriptor = Object.getOwnPropertyDescriptor(input, "files");
       Object.defineProperty(input, "files", { configurable: true, value: dt.files });
       __evidence.events.push({
         entry,
@@ -119,7 +120,12 @@ export function installSyntheticEvents() {
         syntheticMetadata: true,
         files: files.map((f) => ({ name: f.name, type: f.type, size: f.size })),
       });
-      input.dispatchEvent(new Event("change", { bubbles: true }));
+      try {
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      } finally {
+        if (descriptor) Object.defineProperty(input, "files", descriptor);
+        else delete input.files;
+      }
     };
     window.__drop = (files) => {
       const dt = new DataTransfer();
@@ -216,7 +222,14 @@ export function overrideNextPickerMime() {
         const dt = new DataTransfer();
         for (const f of original)
           dt.items.add(new File([f], f.name, { type: "image/x-adobe-dng", lastModified: 0 }));
-        Object.defineProperty(e.target, "files", { configurable: true, value: dt.files });
+        const input = e.target;
+        const descriptor = Object.getOwnPropertyDescriptor(input, "files");
+        Object.defineProperty(input, "files", { configurable: true, value: dt.files });
+        // Bubble handlers copy the FileList synchronously before preparing attachments.
+        queueMicrotask(() => {
+          if (descriptor) Object.defineProperty(input, "files", descriptor);
+          else delete input.files;
+        });
         __evidence.events.push({
           atMs: Math.round(performance.now() - __evidence.started),
           entry: "picker",
