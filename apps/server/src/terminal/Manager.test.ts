@@ -457,6 +457,49 @@ it.layer(
     }),
   );
 
+  // Which client owns the shared PTY size is left open by the issue, so this only asserts
+  // that every attached renderer is told the grid the PTY actually has.
+  it.effect("tells every attached stream the shared PTY size when attaches disagree", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const wideEvents: TerminalAttachStreamEvent[] = [];
+      const narrowEvents: TerminalAttachStreamEvent[] = [];
+      const stopWide = yield* manager.attachStream(openInput({ cols: 130, rows: 15 }), (event) =>
+        Effect.sync(() => {
+          wideEvents.push(event);
+        }),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(stopWide));
+      const stopNarrow = yield* manager.attachStream(openInput({ cols: 54, rows: 15 }), (event) =>
+        Effect.sync(() => {
+          narrowEvents.push(event);
+        }),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(stopNarrow));
+
+      const spawned = ptyAdapter.spawnInputs[0]!;
+      const ptySize = ptyAdapter.processes[0]!.resizeCalls.at(-1) ?? {
+        cols: spawned.cols,
+        rows: spawned.rows,
+      };
+      const lastReportedSize = (events: ReadonlyArray<TerminalAttachStreamEvent>) => {
+        for (const event of events.toReversed()) {
+          const source: Record<string, unknown> =
+            event.type === "snapshot" ? event.snapshot : event;
+          if (typeof source.cols === "number" && typeof source.rows === "number") {
+            return { cols: source.cols, rows: source.rows };
+          }
+        }
+        return null;
+      };
+
+      expect({
+        wide: lastReportedSize(wideEvents),
+        narrow: lastReportedSize(narrowEvents),
+      }).toEqual({ wide: ptySize, narrow: ptySize });
+    }),
+  );
+
   it.effect("resumed attaches after close never respawn until the terminal is reopened", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();
