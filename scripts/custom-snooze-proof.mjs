@@ -1,5 +1,5 @@
-import http from "node:http";
-import net from "node:net";
+import * as NodeHttp from "node:http";
+import * as NodeNet from "node:net";
 
 // Full-app fixture: proxy the real Vite server, installing deterministic browser
 // Date and Intl defaults before modules load. Native Chrome input locale is unchanged.
@@ -165,7 +165,7 @@ Object.assign(proof, {
 });
 `;
 
-const server = http.createServer((request, response) => {
+const server = NodeHttp.createServer((request, response) => {
   if (request.url === "/__proof/fixture.js") {
     response.writeHead(200, { "content-type": "text/javascript" });
     response.end(fixture);
@@ -177,7 +177,7 @@ const server = http.createServer((request, response) => {
     origin: `http://localhost:${upstreamPort}`,
   };
   delete headers["accept-encoding"];
-  const upstream = http.request(
+  const upstream = NodeHttp.request(
     {
       hostname: upstreamHost,
       port: upstreamPort,
@@ -214,7 +214,7 @@ const server = http.createServer((request, response) => {
   request.pipe(upstream);
 });
 server.on("upgrade", (request, socket, head) => {
-  const upstream = net.connect(upstreamPort, upstreamHost, () => {
+  const upstream = NodeNet.connect(upstreamPort, upstreamHost, () => {
     upstream.write(
       `${request.method} ${request.url} HTTP/1.1\r\n` +
         Object.entries({
