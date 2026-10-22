@@ -38,7 +38,7 @@ else:
 patch = subprocess.check_output([
     'git', '-C', str(root), 'diff', '--find-renames', '--no-color',
     '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/',
-    '--minimal', '--patch', 'HEAD', '--',
+    '--minimal', '--patch', 'HEAD', '--', *base['paths'],
 ])
 print(json.dumps({
     'schema': 1, 'scenario': scenario, 'cell': cell, 'base': base,

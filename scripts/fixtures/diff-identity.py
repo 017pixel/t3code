@@ -43,8 +43,19 @@ if not (root / '.git').exists():
     git('commit', '-m', 'Deterministic diff identity baseline')
     git('tag', 'fixture-base')
 assert git('config', 'fixture.diffIdentity').strip() == b'1', 'Not a generated fixture repository'
-git('reset', '--hard', 'fixture-base')
-git('clean', '-fd')
+# Restore only generator-owned paths so unrelated work in DIR survives reruns.
+baseline = git('ls-tree', '-z', '--name-only', 'fixture-base').decode().split('\0')[:-1]
+created = [f'{prefix}-{i}.txt' for i in range(seed['copies']) for prefix in ('b-added', 'e-renamed')] + [seed['longPath']]
+git('rm', '-qf', '--cached', '--ignore-unmatch', '--', *created)
+for name in created:
+    if (root / name).is_symlink() or (root / name).exists():
+        (root / name).unlink()
+git('checkout', 'fixture-base', '--', *baseline)
+owned = baseline + created
+def stage():
+    present = [name for name in owned if os.path.lexists(root / name)]
+    git('rm', '-qf', '--cached', '--ignore-unmatch', '--', *[name for name in owned if name not in present])
+    git('add', '-A', '--', *present)
 if variant == 'duplicate':
     (root / 'g-type-replacement.txt').unlink()
     (root / 'g-type-replacement.txt').symlink_to('h-unique-neighbor.txt')
@@ -59,8 +70,8 @@ elif variant != 'zero':
     (root / 'f-old-changed-rename.txt').rename(root / seed['longPath'])
     with (root / seed['longPath']).open('a') as stream:
         stream.write('changed rename sentinel\n')
-git('add', '-A')
-args = ['diff', '--find-renames', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', '--minimal', '--patch', 'HEAD', '--']
+stage()
+args = ['diff', '--find-renames', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', '--minimal', '--patch', 'HEAD', '--', *owned]
 if variant.isdigit():
     target = int(variant)
     name = 'b-added-5.txt'
@@ -70,12 +81,12 @@ if variant.isdigit():
     # Extending an existing line changes only its byte length, not hunk metadata.
     with (root / name).open('a') as stream:
         stream.write('p' * (padding - 1) + '\n')
-    git('add', '-A')
+    stage()
     delta = target - len(git(*args))
     data = (root / name).read_text()
     adjusted = data[:-1] + 'q' * delta + '\n' if delta >= 0 else data[:delta-1] + '\n'
     write(name, adjusted)
-    git('add', '-A')
+    stage()
     assert len(git(*args)) == target
 patch = git(*args)
-print(json.dumps({'schema': 1, 'variant': variant, 'baseline': git('rev-parse', 'HEAD').decode().strip(), 'seedSha256': hashlib.sha256(seed_path.read_bytes()).hexdigest(), 'patchBytes': len(patch), 'patchSha256': hashlib.sha256(patch).hexdigest(), 'stat': git('diff', '--find-renames', '--numstat', 'HEAD').decode(), 'status': git('diff', '--find-renames', '--summary', 'HEAD').decode()}, indent=2))
+print(json.dumps({'schema': 1, 'variant': variant, 'baseline': git('rev-parse', 'HEAD').decode().strip(), 'seedSha256': hashlib.sha256(seed_path.read_bytes()).hexdigest(), 'patchBytes': len(patch), 'patchSha256': hashlib.sha256(patch).hexdigest(), 'stat': git('diff', '--find-renames', '--numstat', 'HEAD', '--', *owned).decode(), 'paths': owned, 'status': git('diff', '--find-renames', '--summary', 'HEAD', '--', *owned).decode()}, indent=2))
