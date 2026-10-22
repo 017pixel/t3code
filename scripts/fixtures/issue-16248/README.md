@@ -6,13 +6,12 @@ Start an empty isolated home once to migrate it, with project bootstrap disabled
 vp run dev --home-dir /tmp/minimap-proof --auto-bootstrap-project-from-cwd=false
 ```
 
-Stop that server, then seed and validate:
+Stop that server, then seed:
 
 ```sh
 python3 scripts/fixtures/issue-16248/seed.py /tmp/minimap-proof --workspace /tmp/minimap-workspace
 python3 scripts/fixtures/issue-16248/seed.py /tmp/minimap-proof --workspace /tmp/minimap-workspace --counts 1 --assistant-only
 python3 scripts/fixtures/issue-16248/seed.py /tmp/minimap-proof --workspace /tmp/minimap-workspace --counts 600 --history
-node scripts/fixtures/issue-16248/validate.ts /tmp/minimap-proof/userdata/statev2.sqlite
 ```
 
 Restart normally and use its startup pairing URL. Read `userdata/environment-id`;
