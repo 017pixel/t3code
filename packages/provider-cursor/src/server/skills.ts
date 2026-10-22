@@ -164,6 +164,11 @@ const discoverSkillsInRoot = Effect.fn("discoverCursorSkillsInRoot")(function* (
       resolvedDirectory === rootDirectory ||
       resolvedDirectory.startsWith(`${rootDirectory}${path.sep}`);
 
+    if (input.budget.remainingStats === 0) {
+      input.budget.exhausted = true;
+      return;
+    }
+    input.budget.remainingStats -= 1;
     const skillPath = path.join(directory, "SKILL.md");
     const skillInfo = yield* orUndefined(fileSystem.stat(skillPath), input.budget);
     if (skillInfo?.type === "File") {

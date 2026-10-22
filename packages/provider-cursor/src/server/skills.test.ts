@@ -217,9 +217,9 @@ describe("Cursor skills", () => {
           ? Effect.succeed(Array.from({ length: 200_000 }, (_, index) => `file-${index}`))
           : Effect.succeed([]),
       stat: (path) => {
+        stats += 1;
         if (path === root) return Effect.succeed({ type: "Directory" } as FileSystem.File.Info);
         if (path.startsWith(`${root}/file-`)) {
-          stats += 1;
           return Effect.succeed({ type: "File" } as FileSystem.File.Info);
         }
         return Effect.fail(
@@ -234,7 +234,11 @@ describe("Cursor skills", () => {
       Effect.runPromise,
     );
 
-    expect(result._tag).toBe("Failure");
+    expect(result).toMatchObject({
+      _tag: "Failure",
+      failure: { reason: "scan-budget-exhausted" },
+    });
+    expect(stats).toBeGreaterThanOrEqual(100_000);
     expect(stats).toBeLessThanOrEqual(100_000);
   });
 
