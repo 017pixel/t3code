@@ -1031,6 +1031,53 @@ const ConversationTimeline = memo(function ConversationTimeline({
   );
   const listExtraData = { identity: listIdentityKey, rowCount: rows.length, sharedState };
 
+  const endMiddleButtonPanRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => endMiddleButtonPanRef.current?.(), []);
+  // X11/Wayland paste PRIMARY into the focused editable on a middle release,
+  // even one that lands outside the timeline, so a press that starts here pans
+  // the list instead and cancels the press and release wherever they land.
+  const startMiddleButtonPan = (event: React.PointerEvent) => {
+    if (event.button !== 1 || !isMiddleClickPastePlatform()) return;
+    endMiddleButtonPanRef.current?.();
+    let lastY = event.clientY;
+    const pan = (move: PointerEvent) => {
+      const scrollNode = listRef.current?.getScrollableNode();
+      if (scrollNode) scrollNode.scrollTop -= move.clientY - lastY;
+      lastY = move.clientY;
+    };
+    const cancel = (mouse: MouseEvent) => {
+      if (mouse.button === 1) mouse.preventDefault();
+    };
+    const release = (mouse: MouseEvent) => {
+      if (mouse.button !== 1) return;
+      mouse.preventDefault();
+      end();
+    };
+    // The compatibility mouseup follows pointerup in the same task; if it is
+    // never dispatched, stop listening once that task is done.
+    let releaseTimer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (pointer: PointerEvent) => {
+      if (pointer.button !== 1) return;
+      window.removeEventListener("pointermove", pan, true);
+      releaseTimer ??= setTimeout(end);
+    };
+    const end = () => {
+      clearTimeout(releaseTimer);
+      window.removeEventListener("pointermove", pan, true);
+      window.removeEventListener("mousedown", cancel, true);
+      window.removeEventListener("mouseup", release, true);
+      window.removeEventListener("pointerup", settle, true);
+      window.removeEventListener("pointercancel", end, true);
+      endMiddleButtonPanRef.current = null;
+    };
+    window.addEventListener("pointermove", pan, true);
+    window.addEventListener("mousedown", cancel, true);
+    window.addEventListener("mouseup", release, true);
+    window.addEventListener("pointerup", settle, true);
+    window.addEventListener("pointercancel", end, true);
+    endMiddleButtonPanRef.current = end;
+  };
+
   const forwardMinimapWheel = (event: WheelEvent) => {
     const scrollNode = listRef.current?.getScrollableNode();
     if (scrollNode) forwardWheelToTimeline(event, scrollNode);
@@ -1044,12 +1091,19 @@ const ConversationTimeline = memo(function ConversationTimeline({
     footer === null
   ) {
     if (hideEmptyPlaceholder) {
-      return <div className="h-full min-h-0 bg-background" data-timeline-loading="true" />;
+      return (
+        <div
+          className="h-full min-h-0 bg-background"
+          data-timeline-loading="true"
+          onPointerDown={startMiddleButtonPan}
+        />
+      );
     }
     return (
       <div
         className="flex h-full items-center justify-center ps-(--chat-lane-inset-start) pe-(--chat-lane-inset-end)"
         style={{ paddingBottom: emptyPlaceholderInset }}
+        onPointerDown={startMiddleButtonPan}
       >
         <p className="text-sm text-muted-foreground/30">
           Send a message to start the conversation.
@@ -1065,6 +1119,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
           ref={setTimelineViewportElement}
           className="relative h-full min-h-0"
           data-assistant-citation-viewport="true"
+          onPointerDown={startMiddleButtonPan}
         >
           {onCiteAssistantText && citationThreadRef ? (
             <AssistantSelectionToolbar
@@ -1140,6 +1195,11 @@ const ConversationTimeline = memo(function ConversationTimeline({
     </MarkdownFindContext>
   );
 });
+
+/** Matches the terminal: only X11/Wayland desktops paste PRIMARY on middle click. */
+function isMiddleClickPastePlatform(): boolean {
+  return /linux|bsd/i.test(navigator.platform);
+}
 
 function TimelineHistoryControl(props: MessagesTimelineHistoryControls) {
   if (!props.hasMoreHistory && props.error === null) {

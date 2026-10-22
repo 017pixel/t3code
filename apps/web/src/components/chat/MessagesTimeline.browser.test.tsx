@@ -347,6 +347,15 @@ describe("MessagesTimeline middle button", () => {
     if (!cancelsPaste) expect(press.defaultPrevented).toBe(false);
   });
 
+  // A new draft shows the blank loading surface before history settles.
+  it("cancels the primary-selection paste on the blank loading surface", async () => {
+    using _platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux x86_64");
+    await using screen = await renderTimeline([], { hideEmptyPlaceholder: true });
+    const blank = screen.container.querySelector("[data-timeline-loading]")!;
+    middleButton(blank, "down", 300);
+    expect(middleButton(document.body, "up", 300).defaultPrevented).toBe(true);
+  });
+
   it("pans the timeline while the middle button is held on Linux", async () => {
     using _platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux x86_64");
     const listRef = createRef<LegendListRef | null>();
