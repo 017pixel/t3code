@@ -90,7 +90,7 @@ import {
 } from "@t3tools/client-runtime/work-log/presentation";
 import { resolveWorkGroupScrollAnchor } from "@t3tools/client-runtime/work-log/scroll-anchor";
 import { notificationChildThreadId } from "@t3tools/client-runtime/state/thread-execution";
-import type { MarkdownImageRenderer } from "../../native/SelectableMarkdownText";
+import type { MarkdownImageRequest } from "../../native/SelectableMarkdownText";
 import type { FilePreviewSource } from "../../components/FilePreviewModal";
 import { FilePreviewGallery } from "../../components/FilePreviewGallery";
 import { ThreadMarkdownImage } from "./ThreadMarkdownImage";
@@ -495,10 +495,13 @@ interface ThreadWorkLogProps {
   readonly onCopyRow: (rowId: string, value: string) => void;
   /** `groupId` is the group a lone call stands in for; it opens and closes with the row. */
   readonly onToggleRow: (rowId: string, anchorKey: string, groupId?: string) => void;
-  readonly renderImage: MarkdownImageRenderer;
+  readonly renderImage: ViewedImageRenderer;
   readonly renderReasoning: (text: string) => ReactNode;
   readonly onPressPreview: (source: FilePreviewSource) => void;
 }
+
+/** `itemId` is the Read that viewed the image; each Read shows the file as it was then signed. */
+export type ViewedImageRenderer = (image: MarkdownImageRequest, itemId: string) => ReactNode;
 
 export function ThreadWorkLog(props: ThreadWorkLogProps) {
   const renderRow = (row: ThreadFeedActivity) => (
@@ -1190,7 +1193,10 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
           ) : null}
           {viewedImagePath ? (
             <View className="pb-1.5">
-              {props.renderImage({ href: viewedImagePath, alt: null, title: null })}
+              {props.renderImage(
+                { href: viewedImagePath, alt: null, title: null },
+                row.workEntry.id,
+              )}
             </View>
           ) : null}
           <FilePreviewGallery

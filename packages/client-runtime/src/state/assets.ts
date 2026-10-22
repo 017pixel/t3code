@@ -129,6 +129,8 @@ export function assetUrlStateFromResult(
   };
 }
 
+export type AssetUrlQueryInput = AssetCreateUrlInput & { readonly signingKey?: string };
+
 export function createAssetEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, E>,
   localMediaEnvironment?: Atom.Atom<{
@@ -136,7 +138,12 @@ export function createAssetEnvironmentAtoms<R, E>(
     readonly httpBaseUrl: string;
   } | null>,
 ) {
-  const execute = Effect.fn("assets.createUrl")(function* (input: AssetCreateUrlInput) {
+  // `signingKey` only splits the client cache: holders of one key share a
+  // signed URL, and a new key mints a fresh one.
+  const execute = Effect.fn("assets.createUrl")(function* ({
+    signingKey: _signingKey,
+    ...input
+  }: AssetUrlQueryInput) {
     const result = yield* request(WS_METHODS.assetsCreateUrl, input).pipe(Effect.result);
     if (Result.isSuccess(result)) return result.success;
     const error = result.failure;

@@ -320,6 +320,7 @@ export const ChatMarkdownAssetImage = memo(function ChatMarkdownAssetImage(props
   readonly alt: string;
   readonly copyMarkdown?: string;
   readonly srcFragment?: string;
+  readonly signingKey?: string | undefined;
   readonly standalone?: boolean | undefined;
   readonly maxHeightRem?: number | undefined;
   readonly style?: CSSProperties | undefined;
@@ -334,8 +335,8 @@ export const ChatMarkdownAssetImage = memo(function ChatMarkdownAssetImage(props
   readonly workspaceMutationId?: string | null | undefined;
   readonly onImageExpand?: ((preview: ExpandedImagePreview) => void) | undefined;
 }) {
-  const assetUrl = useAssetUrlState(props.environmentId, props.resource);
-  const refreshAssetUrl = useAssetUrlRefresh(props.environmentId, props.resource);
+  const assetUrl = useAssetUrlState(props.environmentId, props.resource, props.signingKey);
+  const refreshAssetUrl = useAssetUrlRefresh(props.environmentId, props.resource, props.signingKey);
   const connectionReady = usePreparedConnection(props.environmentId)._tag === "Some";
   const resource = props.resource;
   const refreshToken = JSON.stringify([props.environmentId, resource, props.workspaceMutationId]);

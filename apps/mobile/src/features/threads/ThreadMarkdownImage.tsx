@@ -244,11 +244,12 @@ export function ThreadMarkdownImage(props: {
   >;
   readonly alt: string | null;
   readonly srcFragment?: string;
+  readonly signingKey?: string;
   readonly actionsSource?: MediaActionsSource;
   readonly onPressPreview: (source: FilePreviewSource) => void;
 }) {
   const withGallery = useFilePreviewGallery();
-  const assetUrl = useAssetUrlState(props.environmentId, props.resource);
+  const assetUrl = useAssetUrlState(props.environmentId, props.resource, props.signingKey);
 
   return (
     <ThreadMarkdownImageView

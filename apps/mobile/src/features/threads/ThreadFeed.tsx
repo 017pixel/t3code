@@ -217,6 +217,7 @@ import {
   ThreadWorkGroupToggle,
   ThreadThinkingRow,
   ThreadWorkLog,
+  type ViewedImageRenderer,
   WORK_GROUP_TOGGLE_HEIGHT,
 } from "./thread-work-log";
 import { appendPendingThreadMessages, type PendingThreadFeedEntry } from "./pending-thread-feed";
@@ -1146,7 +1147,7 @@ function renderFeedEntry(
     readonly onPressVideo: (attachment: ChatFileAttachment, sourceIdentifier: string) => void;
     readonly markdownLinkHandlers: MarkdownLinkHandlers;
     readonly renderMarkdownImage: MarkdownImageRenderer;
-    readonly renderViewedImage: MarkdownImageRenderer;
+    readonly renderViewedImage: ViewedImageRenderer;
     readonly renderReasoning: (text: string) => ReactNode;
     readonly iconSubtleColor: string | import("react-native").ColorValue;
     readonly screenColor: string;
@@ -2355,10 +2356,11 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       />
     );
   };
-  const renderViewedImage: MarkdownImageRenderer = (image) => {
+  const renderViewedImage: ViewedImageRenderer = (image, itemId) => {
     const viewedImage = resolveViewedImageAsset(image.href, {
       threadId: props.threadId,
       workspaceRoot: props.workspaceRoot,
+      itemId,
     });
     const media = viewedImage
       ? resolveMarkdownMediaPreview(image.href, {
@@ -2375,6 +2377,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         resource={viewedImage.resource}
         alt={viewedImage.alt}
         srcFragment={viewedImage.srcFragment}
+        signingKey={viewedImage.signingKey}
         actionsSource={
           actionsSource && "resource" in actionsSource
             ? { ...actionsSource, resource: viewedImage.resource }

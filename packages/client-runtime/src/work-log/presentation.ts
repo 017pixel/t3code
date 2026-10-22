@@ -504,6 +504,8 @@ export interface ViewedImageAsset {
   readonly resource: Extract<AssetResource, { readonly _tag: "media-file" }>;
   readonly alt: string;
   readonly srcFragment: string;
+  /** A file can be overwritten between Reads, so each Read signs its own URL. */
+  readonly signingKey: string;
 }
 
 export function resolveViewedImageAsset(
@@ -511,6 +513,7 @@ export function resolveViewedImageAsset(
   input: {
     readonly threadId: ThreadId;
     readonly workspaceRoot?: string | null | undefined;
+    readonly itemId: string;
   },
 ): ViewedImageAsset | null {
   const imageSource = classifyMarkdownImageSource(source, input.workspaceRoot ?? ".");
@@ -526,7 +529,12 @@ export function resolveViewedImageAsset(
     resolvedFilePath,
   });
   if (media === null || media.access !== "environment") return null;
-  return { resource: media.resource, alt: media.name, srcFragment: media.srcFragment };
+  return {
+    resource: media.resource,
+    alt: media.name,
+    srcFragment: media.srcFragment,
+    signingKey: input.itemId,
+  };
 }
 
 function toolGroupActionCount(
