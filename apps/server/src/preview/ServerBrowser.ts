@@ -672,8 +672,19 @@ const make = Effect.gen(function* () {
     for (const viewer of tab.viewers) viewer.push({ _tag: end });
     void tab.control.close().catch(constVoid);
     if (tab.desktop) void tab.desktop.close().catch(constVoid);
-    else void tab.page.close().catch(constVoid);
-    if (tab.isolatedContext) void tab.page.context().close().catch(constVoid);
+    else {
+      const page = tab.page;
+      // `runBeforeUnload` returns before the page closes, so closing an isolated context
+      // must wait for it. A pending dialog would block `beforeunload` from running at all.
+      const closed = page.isClosed()
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => page.once("close", () => resolve()));
+      void page
+        .close({ runBeforeUnload: tab.dialog === null })
+        .catch(() => page.close())
+        .catch(constVoid);
+      if (tab.isolatedContext) void closed.then(() => page.context().close()).catch(constVoid);
+    }
     void tab.recording?.encoder.close().catch(constVoid);
     void NodeFSP.rm(downloadDir(tab), { recursive: true, force: true }).catch(constVoid);
     reportLiveTabs();
@@ -871,6 +882,11 @@ const make = Effect.gen(function* () {
       });
     });
     page.on("dialog", (dialog) => {
+      // Closing is already decided, so an unsaved-changes guard must not keep the page open.
+      if (tab.closing && dialog.type() === "beforeunload") {
+        void dialog.accept().catch(constVoid);
+        return;
+      }
       tab.dialog = dialog;
       broadcastControl(tab);
     });

@@ -729,18 +729,11 @@ it.live("closing a tab with an unsaved-changes guard still closes it", () =>
       expect(contextRequests).toEqual([{ profileId: "profile-work", isolated: false }]);
       const page = contexts[0]!.page;
       page.beforeUnload = "guard";
-      const closed = new Promise<void>((resolve) => page.once("close", () => resolve()));
       yield* broker.invoke({ scope, tabId, operation: "close", input: {} });
+      // The mock raises the dialog inside `close`, so an unanswered guard leaves the page open here.
       expect(page.beforeUnloadDialog).not.toBeNull();
-      // Without this bound, a close stuck behind the unanswered dialog only fails at the suite timeout.
-      yield* Effect.promise(() => closed).pipe(
-        Effect.timeoutOrElse({
-          duration: "2 seconds",
-          orElse: () =>
-            Effect.die(new Error("The tab stayed open behind its beforeunload dialog.")),
-        }),
-      );
       expect(page.beforeUnloadDialog!.accept).toHaveBeenCalledTimes(1);
+      expect(page.isClosed()).toBe(true);
       expect(page.unloadEvents).toEqual(["beforeunload", "pagehide", "visibilitychange"]);
     }),
   ).pipe(Effect.provide(layer)),
