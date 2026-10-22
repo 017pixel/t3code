@@ -354,7 +354,13 @@ describe("server ownership", () => {
       yield* Effect.scoped(
         Effect.gen(function* () {
           const successor = yield* ServerOwnership.acquireServerOwnership(statePath);
-          afterRead = successor.publish({ ...state, pid: state.pid + 1 }).pipe(Effect.orDie);
+          afterRead = successor
+            .publish({ ...state, pid: state.pid + 1 })
+            .pipe(
+              Effect.orDie,
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.provideService(Path.Path, path),
+            );
           yield* Scope.close(oldScope, Exit.void);
           const remaining = yield* ServerRuntimeState.readPersistedServerRuntimeState(statePath);
           assert.equal(Option.getOrThrow(remaining).pid, state.pid + 1);

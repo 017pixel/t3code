@@ -247,7 +247,7 @@ export const acquireServerOwnership = Effect.fn("acquireServerOwnership")(functi
           Option.isSome(state) && state.value.ownerId === ownerId
             ? verify(lockFile).pipe(
                 Effect.andThen(clearPersistedServerRuntimeState(statePath)),
-                Effect.catchTag("ServerOwnershipLostError", () => Effect.void),
+                Effect.catchTags({ ServerOwnershipLostError: () => Effect.void }),
               )
             : Effect.void,
         ),
