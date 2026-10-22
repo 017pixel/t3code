@@ -1009,6 +1009,12 @@ export const make = Effect.gen(function* () {
           return;
         }
       }
+      // A splash closed during a stalled boot would otherwise leave the Dock dead
+      // until the next readiness timeout.
+      if (yield* waitingForBackend) {
+        yield* showConnectingSplash;
+        return;
+      }
       yield* createMainIfBackendReady;
     }).pipe(Effect.withSpan("desktop.window.activate")),
     createMainIfBackendReady,

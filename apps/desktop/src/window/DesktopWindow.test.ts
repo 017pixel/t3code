@@ -1019,6 +1019,20 @@ describe("DesktopWindow", () => {
       }),
   );
 
+  it.effect("reopens the connecting splash on activate while the local backend is starting", () =>
+    Effect.gen(function* () {
+      const splash = makeFakeBrowserWindow();
+      const scenario = yield* makeSplashScenario([splash.window]);
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.activate;
+        assert.equal(yield* Ref.get(scenario.createCalls), 1);
+        assert.isTrue(Option.isNone(yield* Ref.get(scenario.mainWindow)));
+      }).pipe(Effect.provide(scenario.layer));
+    }),
+  );
+
   it.effect(
     "retries opening the real main on activate when a failed post-readiness open left only the splash",
     () =>
