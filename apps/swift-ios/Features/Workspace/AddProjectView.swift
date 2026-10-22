@@ -899,7 +899,11 @@ public struct AddProjectView: View {
 
         errorMessage = nil
         isSubmitting = true
-        defer { isSubmitting = false }
+        defer {
+            isSubmitting = false
+            // The base directory may have arrived while this lookup blocked reseeding.
+            reseedLateBaseDirectory()
+        }
         do {
             let result = try await projectClient.lookupProjectRepository(
                 environmentID: environment.id,
