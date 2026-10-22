@@ -76,15 +76,12 @@ let nextAgentRequestId = 1;
 const pendingClientRequestIds = new Map<string, string | number>();
 const pendingAgentRequestMethods = new Map<string, string>();
 
-/**
- * The test reads the status while this process may still be writing it, so a
- * write lands whole: an in-place rewrite truncates the file first, and a read
- * in that window decodes an empty file.
- */
+// The test reads status while this agent may still be running; rename makes each
+// write atomic so a reader never sees a truncated file.
 function writeStatus(failure?: unknown): void {
-  const pendingPath = `${replayStatusPath}.${process.pid}.pending`;
+  const temporaryStatusPath = `${replayStatusPath}.${process.pid}.tmp`;
   NodeFS.writeFileSync(
-    pendingPath,
+    temporaryStatusPath,
     JSON.stringify({
       scenario: transcript.scenario,
       cursor,
@@ -93,7 +90,7 @@ function writeStatus(failure?: unknown): void {
     }),
     "utf8",
   );
-  NodeFS.renameSync(pendingPath, replayStatusPath);
+  NodeFS.renameSync(temporaryStatusPath, replayStatusPath);
 }
 
 function stableStringify(value: unknown): string {
@@ -165,11 +162,6 @@ function stopWithFailure(detail: string, actual?: unknown): void {
   process.stdin.pause();
 }
 
-function advance(): void {
-  cursor += 1;
-  writeStatus();
-}
-
 function send(message: JsonRpcMessage): void {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
@@ -209,58 +201,59 @@ function materializeInbound(value: unknown): unknown {
   );
 }
 
-function emitInbound(recorded: LogicalFrame): void {
+function inboundMessage(recorded: LogicalFrame): JsonRpcMessage | undefined {
   const frame = materializeInbound(recorded) as LogicalFrame;
   switch (frame.kind) {
     case "notification":
-      send({
+      return {
         jsonrpc: "2.0",
         method: frame.method,
         ...(frame.params === undefined ? {} : { params: frame.params }),
-      });
-      return;
+      };
     case "request": {
       const id = nextAgentRequestId;
       nextAgentRequestId += 1;
       pendingAgentRequestMethods.set(String(id), frame.method);
-      send({
+      return {
         jsonrpc: "2.0",
         id,
         method: frame.method,
         ...(frame.params === undefined ? {} : { params: frame.params }),
         headers: [],
-      });
-      return;
+      };
     }
     case "response": {
       const id = pendingClientRequestId(frame.method);
       if (id === undefined) {
         stopWithFailure(`No pending client request for ${frame.method}`, frame);
-        return;
+        return undefined;
       }
       pendingClientRequestIds.delete(frame.method);
-      send({
+      return {
         jsonrpc: "2.0",
         id,
         ...(frame.result === undefined ? {} : { result: frame.result }),
         ...(frame.error === undefined ? {} : { error: frame.error }),
-      });
+      };
     }
   }
 }
 
+// T3 may kill the agent after its last reply. Record the batch, including trailing
+// runtime exits, before publishing any frames.
 function flushInbound(): void {
+  const messages: Array<JsonRpcMessage> = [];
   while (!stopped) {
     const entry = transcript.entries[cursor];
-    if (entry === undefined || entry.type === "expect_outbound") return;
+    if (entry === undefined || entry.type === "expect_outbound") break;
     if (entry.type === "runtime_exit") {
       if (entry.status !== "success" && entry.status !== "cancelled") {
         stopWithFailure(`Recorded runtime exit was ${entry.status ?? "unknown"}`, entry.error);
-        return;
+        break;
       }
-      advance();
+      cursor += 1;
       // Frames after a mid-transcript exit belong to the next process.
-      if (cursor < transcript.entries.length) return;
+      if (cursor < transcript.entries.length) break;
       continue;
     }
     const frame = entry.frame as LogicalFrame;
@@ -271,12 +264,15 @@ function flushInbound(): void {
       typeof frame.method !== "string"
     ) {
       stopWithFailure("Invalid emit_inbound logical ACP frame", entry.frame);
-      return;
+      break;
     }
-    emitInbound(frame);
-    if (stopped) return;
-    advance();
+    const message = inboundMessage(frame);
+    if (message === undefined) break;
+    messages.push(message);
+    cursor += 1;
   }
+  if (!stopped) writeStatus();
+  messages.forEach(send);
 }
 
 function handleMessage(message: JsonRpcMessage): void {
@@ -288,6 +284,7 @@ function handleMessage(message: JsonRpcMessage): void {
   }
   const entry = transcript.entries[cursor];
   if (entry?.type !== "expect_outbound" || !matchesExpected(entry.frame, actual)) {
+    stopWithFailure("Unexpected outbound ACP frame", actual);
     if (actual.kind === "request" && message.id !== undefined && message.id !== null) {
       send({
         jsonrpc: "2.0",
@@ -295,7 +292,6 @@ function handleMessage(message: JsonRpcMessage): void {
         error: { code: -32603, message: "ACP replay frame mismatch" },
       });
     }
-    stopWithFailure("Unexpected outbound ACP frame", actual);
     return;
   }
   if (actual.kind === "request" && message.id !== undefined && message.id !== null) {
@@ -303,11 +299,10 @@ function handleMessage(message: JsonRpcMessage): void {
   } else if (actual.kind === "response" && message.id !== undefined && message.id !== null) {
     pendingAgentRequestMethods.delete(String(message.id));
   }
-  advance();
+  cursor += 1;
   flushInbound();
 }
 
-writeStatus();
 flushInbound();
 
 const input = NodeReadline.createInterface({ input: process.stdin, crlfDelay: Infinity });

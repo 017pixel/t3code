@@ -403,12 +403,9 @@ export type KiroAdapterV2DriverEnv =
   | ProviderEventLoggers.ProviderEventLoggers
   | ProviderHost.ProviderHost;
 
-/**
- * `defaultModel` reads Kiro's id for "Kiro default" from the provider
- * snapshot; without one (the bare V2 adapter registry) it is `auto`.
- */
+/** `defaultModel` reads Kiro's id for "Kiro default" from the provider snapshot. */
 export const makeKiroAdapterV2Driver = (
-  defaultModel?: Effect.Effect<string>,
+  defaultModel: Effect.Effect<string>,
 ): ProviderAdapterDriver<KiroSettings, KiroAdapterV2DriverEnv> => ({
   driverKind: KIRO_PROVIDER,
   configSchema: KiroSettings,
@@ -424,7 +421,7 @@ export const makeKiroAdapterV2Driver = (
         settings: { ...input.config, enabled: input.enabled },
         environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
         selfInvocation,
-        ...(defaultModel === undefined ? {} : { defaultModel }),
+        defaultModel,
         nativeLogging: (threadId) =>
           makeNativeLogger({
             nativeEventLogger: providerEventLoggers.native,
@@ -447,5 +444,3 @@ export const makeKiroAdapterV2Driver = (
       ),
   ),
 });
-
-export const KiroAdapterV2Driver = makeKiroAdapterV2Driver();
