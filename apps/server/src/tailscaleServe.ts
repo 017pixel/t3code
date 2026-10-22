@@ -25,7 +25,7 @@ const remedyFor = (cause: TailscaleCommandError, manualCommand: string) => {
     cause._tag === "TailscaleCommandExitError" ? cause.stderrDiagnostic : undefined;
   switch (diagnostic) {
     case "permission-denied":
-      return "Run `sudo tailscale set --operator=$USER` to let this user configure Serve.";
+      return "On Linux, run `sudo tailscale set --operator=$USER` to let this user configure Serve.";
     case "not-logged-in":
       return "Run `tailscale up` to log in.";
     default:
@@ -77,9 +77,9 @@ export const layer = (options: {
       let lastFailure: string | undefined;
       const attempt = ensureTailscaleServe({ localPort, servePort, localHost }).pipe(
         Effect.tap(() => Ref.set(configured, true)),
-        // An interrupted attempt could still have configured Serve, and then
-        // shutdown would leave it on.
-        Effect.uninterruptible,
+        // An interrupted attempt may have configured Serve anyway. Turning off
+        // a port that was never served is harmless, so assume it did.
+        Effect.onInterrupt(() => Ref.set(configured, true)),
         Effect.tap(() => Effect.logInfo("Tailscale Serve configured", { localPort, servePort })),
         Effect.tapError((cause) => {
           const key = failureKey(cause);
@@ -93,10 +93,6 @@ export const layer = (options: {
         }),
       );
 
-      yield* attempt.pipe(
-        Effect.catch(() =>
-          attempt.pipe(Effect.retry(retrySchedule), Effect.forkScoped, Effect.asVoid),
-        ),
-      );
+      yield* attempt.pipe(Effect.retry(retrySchedule), Effect.forkScoped);
     }),
   );

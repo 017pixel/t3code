@@ -18,13 +18,17 @@ const encoder = new TextEncoder();
 
 // Stands in for the tailscale CLI: `serve --bg` is refused until the daemon
 // accepts it (operator permission granted, or Tailscale.app finished starting).
-const makeFakeTailscale = (refusedServeAttempts: number) => {
+// With `hangs`, the attempt after the refusals never answers.
+const makeFakeTailscale = (refusedServeAttempts: number, hangs = false) => {
   const state = { serveAttempts: 0, configured: false, disables: 0 };
   const handle = (args: ReadonlyArray<string>) => {
     if (args[0] === "serve" && args[1] === "--bg") {
       state.serveAttempts += 1;
       if (state.serveAttempts <= refusedServeAttempts) {
         return { code: 1, stderr: "Access denied: serve config denied" };
+      }
+      if (hangs) {
+        return undefined;
       }
       state.configured = true;
       return { code: 0 };
@@ -42,13 +46,16 @@ const makeFakeTailscale = (refusedServeAttempts: number) => {
     return Effect.succeed(
       ChildProcessSpawner.makeHandle({
         pid: ChildProcessSpawner.ProcessId(1),
-        exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(result.code)),
+        exitCode:
+          result === undefined
+            ? Effect.never
+            : Effect.succeed(ChildProcessSpawner.ExitCode(result.code)),
         isRunning: Effect.succeed(false),
         kill: () => Effect.void,
         unref: Effect.succeed(Effect.void),
         stdin: Sink.drain,
         stdout: Stream.empty,
-        stderr: Stream.make(encoder.encode(result.stderr ?? "")),
+        stderr: Stream.make(encoder.encode(result?.stderr ?? "")),
         all: Stream.empty,
         getInputFd: () => Sink.drain,
         getOutputFd: () => Stream.empty,
@@ -58,8 +65,8 @@ const makeFakeTailscale = (refusedServeAttempts: number) => {
   return { state, spawner };
 };
 
-const startTailscaleServe = Effect.fn(function* (refusedServeAttempts: number) {
-  const fake = makeFakeTailscale(refusedServeAttempts);
+const startTailscaleServe = Effect.fn(function* (refusedServeAttempts: number, hangs = false) {
+  const fake = makeFakeTailscale(refusedServeAttempts, hangs);
   const parked = yield* Deferred.make<void>();
   const scope = yield* Scope.make();
   yield* Layer.buildWithScope(
@@ -93,6 +100,30 @@ describe("TailscaleServe", () => {
     }),
   );
 
+  it.effect("keeps retrying with backoff capped at 30 seconds", () =>
+    Effect.gen(function* () {
+      // Attempts fall at 0, 1, 3, 7, 15 and 31 s, then every 30 s.
+      const { state } = yield* startTailscaleServe(8);
+      let elapsedMs = 0;
+      const attemptsAt = Effect.fn(function* (ms: number) {
+        yield* TestClock.adjust(ms - elapsedMs);
+        elapsedMs = ms;
+        return state.serveAttempts;
+      });
+
+      assert.equal(yield* attemptsAt(999), 1, "retried before the first backoff delay");
+      assert.equal(yield* attemptsAt(1_000), 2);
+      assert.equal(yield* attemptsAt(30_999), 5);
+      assert.equal(yield* attemptsAt(31_000), 6);
+      assert.equal(yield* attemptsAt(60_999), 6, "backoff not capped at 30 seconds");
+      assert.equal(yield* attemptsAt(61_000), 7);
+      assert.equal(yield* attemptsAt(91_000), 8);
+      assert.isFalse(state.configured);
+      assert.equal(yield* attemptsAt(121_000), 9);
+      assert.isTrue(state.configured);
+    }),
+  );
+
   it.effect("disables Serve on shutdown after a later attempt succeeded", () =>
     Effect.gen(function* () {
       const { state, scope } = yield* startTailscaleServe(1);
@@ -117,6 +148,20 @@ describe("TailscaleServe", () => {
       assert.isAbove(attemptsBeforeShutdown, 1);
       assert.equal(state.serveAttempts, attemptsBeforeShutdown);
       assert.equal(state.disables, 0);
+    }),
+  );
+
+  it.effect("shuts down without waiting for an attempt that never answers", () =>
+    Effect.gen(function* () {
+      const { state, scope } = yield* startTailscaleServe(1, true);
+      yield* TestClock.adjust("1 second");
+      assert.equal(state.serveAttempts, 2);
+
+      // The clock stays put, so this would hang if shutdown waited for the
+      // CLI timeout.
+      yield* Scope.close(scope, Exit.void);
+
+      assert.equal(state.disables, 1);
     }),
   );
 });
