@@ -185,6 +185,7 @@ import {
 } from "./CommandPalette.logic";
 import { resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
 import { CommandPaletteContent } from "./CommandPaletteContent";
+import { ProjectFavicon } from "./ProjectFavicon";
 import {
   selectCommandPaletteClientSettings,
   useEnvironmentLookups,
@@ -880,14 +881,28 @@ function OpenCommandPaletteDialog(props: {
     if (scratchTargetEnvironmentId === null) return projectItems;
 
     const noProjectIndex = pickerProjects[0] !== undefined && isScratch(pickerProjects[0]) ? 0 : 1;
+    // The scratch home is created on first use, so it may not exist yet.
+    const scratchProject = pickerProjects.find(
+      (project) => project.environmentId === scratchTargetEnvironmentId && isScratch(project),
+    );
     return [
       ...projectItems.slice(0, noProjectIndex),
       {
         kind: "action" as const,
         value: "new-thread-in:no-project",
-        searchTerms: ["no project", "without project", "none"],
-        title: "No project",
-        icon: <MessageSquareDashedIcon className={ITEM_ICON_CLASS} />,
+        searchTerms: [
+          "no project",
+          "without project",
+          "none",
+          ...(scratchProject ? [scratchProject.displayName] : []),
+        ],
+        title: scratchProject?.displayName ?? "No project",
+        icon:
+          scratchProject?.projectIcon || scratchProject?.faviconPath ? (
+            <ProjectFavicon project={scratchProject} className={ITEM_ICON_CLASS} />
+          ) : (
+            <MessageSquareDashedIcon className={ITEM_ICON_CLASS} />
+          ),
         shortcutCommand: "chat.newWithoutProject" as const,
         run: () => startScratchThread(scratchTargetEnvironmentId),
       },
