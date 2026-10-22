@@ -5557,6 +5557,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             "running" | "completed" | "failed" | "cancelled"
           >;
           readonly reopen?: boolean;
+          // A resume while the root is idle has no run of its own to adopt it.
+          readonly keepRun?: boolean;
           readonly nativeOutcome?: Extract<
             SDKMessage,
             { readonly type: "system"; readonly subtype: "task_notification" }
@@ -5679,6 +5681,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             }),
             status: input.status,
             ...(input.reopen === true &&
+            input.keepRun !== true &&
             input.status === "running" &&
             existingSubagent !== undefined
               ? { runId: input.context.input.runId }
@@ -7531,6 +7534,34 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             (yield* Ref.get(activeTurn)) ??
             (yield* settledTurnForSubagentFrame(liveQuery.nativeThreadId, message));
           if (context === null) {
+            // A completed subagent that Claude resumes on its own re-emits
+            // task_started under its launch call. Buffered, it would wait for a
+            // wake turn that never comes, and hold every frame behind it.
+            if (
+              message.type === "system" &&
+              message.subtype === "task_started" &&
+              !isClaudeNonSubagentTask(message) &&
+              message.tool_use_id !== undefined
+            ) {
+              const registered = (yield* Ref.get(sessionSubagentsByTaskId)).get(message.task_id);
+              const settled = settledTurnByNativeThread.get(liveQuery.nativeThreadId);
+              if (
+                registered !== undefined &&
+                settled !== undefined &&
+                registered.task.status !== "running" &&
+                registered.runToolUseId === message.tool_use_id
+              ) {
+                yield* updateClaudeSubagentNode({
+                  context: settled,
+                  taskId: message.task_id,
+                  toolUseId: message.tool_use_id,
+                  status: "running",
+                  reopen: true,
+                  keepRun: true,
+                });
+                return;
+              }
+            }
             yield* applyWorkflowProgressWithoutTurn(message);
             // task_notification must buffer wake evidence while still tracked
             // on the roster; clearing first would drop the wake pin.

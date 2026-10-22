@@ -8429,6 +8429,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* Queue.take(harness.terminalReceipts);
         assert.equal(latestSubagent()?.status, "completed");
+        const threadUpdates = () =>
+          harness.events.filter((event) => event.type === "provider_thread.updated").length;
+        const threadUpdatesBeforeResume = threadUpdates();
 
         // The subagent's own shell finishes and Claude resumes it.
         yield* harness.offerAndWait(
@@ -8446,6 +8449,17 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         })) {
           yield* harness.offerAndWait(frame);
         }
+        // An empty roster emits a thread update even while idle; events are
+        // ordered, so once it is recorded every earlier event is too.
+        const barrier = claudeSdkFrame({
+          type: "system",
+          subtype: "background_tasks_changed",
+          tasks: [],
+          uuid: "00000000-0000-4000-8000-000000016108",
+          session_id: WAKE_NATIVE_SESSION,
+        });
+        yield* harness.offerAndWait(barrier);
+        yield* harness.until(() => threadUpdates() > threadUpdatesBeforeResume);
 
         const resumed = latestSubagent();
         assert.equal(resumed?.status, "running");
@@ -8456,6 +8470,19 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           [routing.childThreadId],
         );
         assert.equal(harness.continuationRequests.length, 1);
+        assert.equal(resumed?.runId, "run-attempt-claude-self-resume-1");
+
+        yield* harness.offerAndWait(
+          makeSubagentNotificationFrame({
+            taskId: TASK_ID,
+            toolUseId: TOOL_USE_ID,
+            summary: "DONE",
+            uuid: "00000000-0000-4000-8000-000000016107",
+          }),
+        );
+        yield* Queue.take(harness.continuationReceipts);
+        yield* harness.until(() => latestSubagent()?.result === "DONE");
+        assert.equal(latestSubagent()?.status, "completed");
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
