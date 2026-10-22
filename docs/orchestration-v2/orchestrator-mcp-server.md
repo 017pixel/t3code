@@ -457,6 +457,7 @@ returned unchanged, and a thread with no active provider turn returns
 `delete_scheduled_task` manage recurring work in the app scheduler. A schedule
 runs its prompt on an interval, at a fixed time in the server's local time
 zone, or on each qualifying webhook request, even when no turn is active.
+Without a signature, anyone with the webhook URL can trigger a run.
 Signature checks, filters, and dedupe can skip a webhook request. For a task
 in the caller's project, runs post into the calling thread by default, so an
 orchestrator sees every trigger. With `bindToCurrentThread: false`, or for a
