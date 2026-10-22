@@ -2506,7 +2506,7 @@ it.effect("tells a held detail reader about a check change only when the refresh
         }),
       ],
     });
-    const nextNotice = <A>(then: Effect.Effect<A, unknown>) =>
+    const nextNotice = <A, E>(then: Effect.Effect<A, E>) =>
       service.subscribeRefreshes.pipe(
         Stream.take(1),
         Stream.mapEffect(() => then),
