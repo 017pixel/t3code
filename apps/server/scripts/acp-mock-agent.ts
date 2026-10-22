@@ -760,9 +760,12 @@ const program = Effect.gen(function* () {
             content: { type: "text", text: "replay-tail" },
           },
         });
+        // Answer with the configuration as of the load, like an agent whose
+        // response was built before later selections landed.
+        const loadedConfigOptions = configOptions();
         yield* Effect.sleep(loadSessionDelayMs);
         return {
-          configOptions: configOptions(),
+          configOptions: loadedConfigOptions,
         };
       }
       if (emitLoadReplay) {
