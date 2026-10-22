@@ -39,11 +39,12 @@ const makeSuccessfulProcess = (stdout: string) => {
   });
 };
 
+// A tunnel reports its agent-holding session as ready on stdout.
 const makeRunningProcess = (onKill: () => void) => {
   let finish: ((exitCode: ChildProcessSpawner.ExitCode) => void) | null = null;
   return ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(123),
-    stdout: Stream.empty,
+    stdout: Stream.make(new TextEncoder().encode("t3-ssh-tunnel-session-ready\n")),
     stderr: Stream.empty,
     all: Stream.empty,
     exitCode: Effect.callback<ChildProcessSpawner.ExitCode>((resume) => {
@@ -168,7 +169,7 @@ describe("ssh tunnel scripts", () => {
       );
       const spawner = ChildProcessSpawner.make((command) =>
         Effect.succeed(
-          commandArgs(command).includes("-N")
+          commandArgs(command).includes("-L")
             ? {
                 ...makeSuccessfulProcess(""),
                 exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
@@ -214,7 +215,7 @@ describe("ssh tunnel scripts", () => {
       const diagnostic = "Permission denied (publickey)";
       const spawner = ChildProcessSpawner.make((command) =>
         Effect.succeed(
-          commandArgs(command).includes("-N")
+          commandArgs(command).includes("-L")
             ? {
                 ...makeSuccessfulProcess(""),
                 exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(255)),
@@ -290,7 +291,7 @@ describe("ssh tunnel scripts", () => {
               }
               return makeSuccessfulProcess("");
             }
-            if (args.includes("-N")) {
+            if (args.includes("-L")) {
               const tunnel = makeRunningProcess(() => undefined);
               if (isTarget && ++tunnels === 1 && stalledStep === "local tunnel") {
                 return {
