@@ -12,7 +12,11 @@ import {
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { planProjectRemoval } from "@t3tools/client-runtime/state/projects";
 import { AsyncResult } from "effect/reactivity";
-import { type EnvironmentId, type ProjectIconOverride } from "@t3tools/contracts";
+import {
+  type EnvironmentId,
+  type ProjectIconOverride,
+  type SidebarProjectGroupingMode,
+} from "@t3tools/contracts";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import * as Cause from "effect/Cause";
 import { InfoIcon, Trash2Icon } from "lucide-react";
@@ -20,8 +24,12 @@ import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "rea
 
 import { useComposerDraftStore } from "../../composerDraftStore";
 import { releaseProjectDraftUploads } from "../../lib/composerDraftUploads";
+import { updateClientSettings, useClientSettings } from "../../hooks/useSettings";
 import { readLocalApi } from "../../localApi";
+import { deriveProjectGroupingOverrideKey } from "../../logicalProject";
 import {
+  PROJECT_GROUPING_MODE_LABELS,
+  withProjectGroupingOverride,
   type SidebarProjectGroupMember,
   type SidebarProjectSnapshot,
 } from "../../sidebarProjectGrouping";
@@ -32,6 +40,7 @@ import { ProjectFavicon } from "../ProjectFavicon";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
@@ -55,6 +64,60 @@ const ProjectIconPickerDialog = lazy(() =>
     default: module.ProjectIconPickerDialog,
   })),
 );
+
+function isGroupingSelection(value: unknown): value is SidebarProjectGroupingMode | "inherit" {
+  return (
+    value === "inherit" ||
+    value === "repository" ||
+    value === "repository_path" ||
+    value === "separate"
+  );
+}
+
+// Grouping overrides are client settings, so they stay editable without project write access.
+function CheckoutGroupingSelect({ member }: { member: SidebarProjectGroupMember }) {
+  const overrideKey = deriveProjectGroupingOverrideKey(member);
+  const globalMode = useClientSettings((settings) => settings.sidebarProjectGroupingMode);
+  const overrides = useClientSettings((settings) => settings.sidebarProjectGroupingOverrides);
+  const selection = overrides?.[overrideKey] ?? "inherit";
+  return (
+    <Select
+      value={selection}
+      onValueChange={(value) => {
+        if (!isGroupingSelection(value)) return;
+        void updateClientSettings({
+          sidebarProjectGroupingOverrides: withProjectGroupingOverride(
+            overrides,
+            overrideKey,
+            value,
+          ),
+        });
+      }}
+    >
+      <SelectTrigger size="sm" aria-label={`Grouping rule for ${member.workspaceRoot}`}>
+        <SelectValue>
+          {selection === "inherit"
+            ? `Default (${PROJECT_GROUPING_MODE_LABELS[globalMode]})`
+            : PROJECT_GROUPING_MODE_LABELS[selection]}
+        </SelectValue>
+      </SelectTrigger>
+      <SelectPopup align="end" alignItemWithTrigger={false}>
+        <SelectItem hideIndicator value="inherit">
+          Use global default
+        </SelectItem>
+        <SelectItem hideIndicator value="repository">
+          {PROJECT_GROUPING_MODE_LABELS.repository}
+        </SelectItem>
+        <SelectItem hideIndicator value="repository_path">
+          {PROJECT_GROUPING_MODE_LABELS.repository_path}
+        </SelectItem>
+        <SelectItem hideIndicator value="separate">
+          {PROJECT_GROUPING_MODE_LABELS.separate}
+        </SelectItem>
+      </SelectPopup>
+    </Select>
+  );
+}
 
 export type ProjectSettingsCategory = "general" | "source-control" | "project";
 
@@ -377,16 +440,25 @@ function ProjectDetail({
     if (members) members.push(member);
     else checkoutsByEnvironment.set(member.environmentId, [member]);
   }
-  const checkoutRemoveButton = (member: SidebarProjectGroupMember) => (
-    <Button
-      size="sm"
-      variant="outline"
-      disabled={!editableIds.has(member.environmentId)}
-      onClick={() => void removeMembers([member])}
-      aria-label={`Remove checkout ${member.workspaceRoot}`}
-    >
-      Remove
-    </Button>
+  // A lone checkout is removed from the Danger section, but it still needs its grouping
+  // rule here so "Keep separate" can be undone.
+  const checkoutControls = (member: SidebarProjectGroupMember) => (
+    <div className="flex items-center gap-2">
+      <div className="w-56">
+        <CheckoutGroupingSelect member={member} />
+      </div>
+      {hasMultipleCheckouts ? (
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!editableIds.has(member.environmentId)}
+          onClick={() => void removeMembers([member])}
+          aria-label={`Remove checkout ${member.workspaceRoot}`}
+        >
+          Remove
+        </Button>
+      ) : null}
+    </div>
   );
   const checkoutChoices = (
     <SettingsSection title="Checkouts">
@@ -397,7 +469,7 @@ function ProjectDetail({
               key={member.physicalProjectKey}
               title={member.environmentLabel ?? "Environment"}
               description={member.workspaceRoot}
-              control={checkoutRemoveButton(member)}
+              control={checkoutControls(member)}
             />
           ));
         }
@@ -426,7 +498,7 @@ function ProjectDetail({
                 ) : null}
               </>
             }
-            control={hasMultiple ? undefined : checkoutRemoveButton(firstMember)}
+            control={hasMultiple ? undefined : checkoutControls(firstMember)}
           >
             {hasMultiple ? (
               <div className="space-y-3 pb-2 pt-1">
@@ -445,7 +517,7 @@ function ProjectDetail({
                       </TooltipTrigger>
                       <TooltipPopup>{member.workspaceRoot}</TooltipPopup>
                     </Tooltip>
-                    <div className="shrink-0">{checkoutRemoveButton(member)}</div>
+                    <div className="shrink-0">{checkoutControls(member)}</div>
                   </div>
                 ))}
               </div>
@@ -549,7 +621,7 @@ function ProjectDetail({
         </SettingsSection>
         <ProjectDefaultsSettings category="project" />
         <ProjectActionsSettings />
-        {hasMultipleCheckouts ? checkoutChoices : null}
+        {checkoutChoices}
         <SettingsSection title="Danger">
           <SettingsRow
             title={
