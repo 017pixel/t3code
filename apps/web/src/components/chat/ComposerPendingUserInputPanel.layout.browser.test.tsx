@@ -73,6 +73,7 @@ async function renderPanel(
       />
     </ComposerBanner.Root>
   );
+  // router: false because the pending-input panel never navigates.
   await using screen = await render(panel({}), { container, router: false });
   await run(container, (answers) => screen.rerender(panel(answers)));
 }

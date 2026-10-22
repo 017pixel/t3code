@@ -90,7 +90,6 @@ function pressKey(key: string) {
 }
 
 it("swaps the chosen option's number for a check in place and restores it when the choice moves", async () => {
-  using _timers = fakeTimers();
   const options = [
     { label: "Rolling", description: "One node at a time" },
     { label: "Canary", description: "A slice of traffic first" },
@@ -104,6 +103,7 @@ it("swaps the chosen option's number for a check in place and restores it when t
     ],
   };
   await using screen = await render(<Questions prompt={choicePrompt} />);
+  using _timers = fakeTimers();
   const keys = () => optionKeys(screen.container);
   const activeIndex = () => screen.container.querySelector("output")!.textContent;
   const unpressed = [
@@ -148,7 +148,6 @@ it("swaps the chosen option's number for a check in place and restores it when t
 });
 
 it("does not select or advance from a custom-answer hint", async () => {
-  using _timers = fakeTimers();
   const prompt: PendingUserInput = {
     ...defaultPrompt,
     questions: [
@@ -167,6 +166,7 @@ it("does not select or advance from a custom-answer hint", async () => {
     ],
   };
   await using screen = await render(<Questions prompt={prompt} />);
+  using _timers = fakeTimers();
   const keys = () => optionKeys(screen.container);
   const activeIndex = () => screen.container.querySelector("output")!.textContent;
   const unpressed = [
