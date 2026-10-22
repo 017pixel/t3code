@@ -2472,8 +2472,9 @@ export const make = Effect.gen(function* () {
 
   // `observedAt` moves on every fetch, so it alone is no change worth telling readers about.
   const sameReading = <A extends { readonly observedAt?: number | undefined }>(a: A, b: A) =>
+    a === b ||
     JSON.stringify({ ...a, observedAt: undefined }) ===
-    JSON.stringify({ ...b, observedAt: undefined });
+      JSON.stringify({ ...b, observedAt: undefined });
   const makeLastGoodRead = <A extends { readonly observedAt?: number | undefined }>(
     capacity: number,
   ) => {
