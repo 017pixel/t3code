@@ -5171,11 +5171,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
   });
 
   it.effect.each([
-    ["while the parent turn runs", false],
-    ["after the parent turn completed", true],
+    ["while the parent turn runs", false, 1],
+    ["after the parent turn completed", true, 1],
+    // The earlier server stopped after registering the child but before its
+    // first provider turn was saved, and nothing reports the child running
+    // before its turn starts.
+    ["with no saved turn after the parent turn completed", true, 0],
   ] as const)(
     "restores an existing child resumed on a fresh adapter session %s",
-    ([, parentCompletesFirst]) =>
+    ([, parentCompletesFirst, savedTurns]) =>
       Effect.scoped(
         Effect.gen(function* () {
           const scenario = "codex-resumed-child-after-restart";
@@ -5206,8 +5210,11 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           );
           yield* TestClock.adjust("100 millis");
           yield* earlier.awaitTerminal(1);
-          const saved = savedSubagentThread(earlier.events, childThreadId);
-          assert.equal(saved.latestProviderTurnOrdinal, 1);
+          const saved = {
+            ...savedSubagentThread(earlier.events, childThreadId),
+            ...(savedTurns === 0 ? { latestProviderTurnOrdinal: 0 } : {}),
+          };
+          assert.equal(saved.latestProviderTurnOrdinal, savedTurns);
 
           // A fresh harness stands in for a restarted server: the child was spawned
           // by an earlier adapter session, so this one first hears of it through
@@ -5250,9 +5257,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                         receiverThreadIds: [RESUME_CHILD_THREAD],
                         prompt: "Reply PROBE_AFTER_RESTART.",
                         model: null,
-                        agentsStates: {
-                          [RESUME_CHILD_THREAD]: { status: "running", message: null },
-                        },
+                        agentsStates:
+                          savedTurns === 0
+                            ? {}
+                            : { [RESUME_CHILD_THREAD]: { status: "running", message: null } },
                       },
                     },
                   },
@@ -5314,26 +5322,29 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ["running", "completed"],
           );
           assert.isTrue(childUpdates.every((event) => event.subagent.id === saved.subagent.id));
-          // The run that resumed the child stops ingesting once its root turn
-          // ends with no running children, so the reopen must come first.
-          const reopenedAt = harness.events.findIndex(
-            (event) =>
-              event.type === "subagent.updated" &&
-              event.subagent.childThreadId === childThreadId &&
-              event.subagent.status === "running",
-          );
-          assert.isAtLeast(reopenedAt, 0);
-          assert.isBelow(
-            reopenedAt,
-            harness.events.findIndex((event) => event.type === "turn.terminal"),
-          );
+          assert.equal(childUpdates.at(-1)?.subagent.runId, "run-attempt-after-restart");
+          if (savedTurns > 0) {
+            // The run that resumed the child stops ingesting once its root turn
+            // ends with no running children, so the early reopen must come first.
+            const reopenedAt = harness.events.findIndex(
+              (event) =>
+                event.type === "subagent.updated" &&
+                event.subagent.childThreadId === childThreadId &&
+                event.subagent.status === "running",
+            );
+            assert.isAtLeast(reopenedAt, 0);
+            assert.isBelow(
+              reopenedAt,
+              harness.events.findIndex((event) => event.type === "turn.terminal"),
+            );
+          }
           assert.isFalse(harness.events.some((event) => event.type === "app_thread.created"));
           assert.isTrue(
             harness.events.some(
               (event) =>
                 event.type === "provider_turn.updated" &&
                 event.providerTurn.providerThreadId === saved.providerThread.id &&
-                event.providerTurn.ordinal === 2,
+                event.providerTurn.ordinal === savedTurns + 1,
             ),
           );
           assert.isTrue(

@@ -1232,6 +1232,8 @@ interface CodexSubagentThreadContext {
   readonly nativeToolCallId: string;
   readonly ordinal: number;
   readonly nativeTurnIds: Set<string>;
+  // Restored from an earlier session, so its task still belongs to an older run.
+  readonly restored: boolean;
   startedAt: DateTime.Utc;
   readonly turnItemId: OrchestrationV2TurnItem["id"];
   readonly turnItemOrdinal: number;
@@ -2659,7 +2661,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               subagent,
               status: "running",
               startedAt: turn.startedAt,
-              ...(providerTurnOrdinal > 1 ? { reopen: true, result: null } : {}),
+              ...(providerTurnOrdinal > 1 || subagent.restored
+                ? { reopen: true, result: null }
+                : {}),
             });
             const now = yield* DateTime.now;
             yield* emitProviderEvent({
@@ -2774,6 +2778,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeToolCallId: nativeItemId,
               ordinal: 1,
               nativeTurnIds: new Set<string>(),
+              restored: true,
               startedAt: saved.subagent.startedAt ?? parentContext.startedAt,
               turnItemId: saved.turnItem.id,
               turnItemOrdinal: saved.turnItem.ordinal,
@@ -2999,6 +3004,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeToolCallId: input.nativeToolCallId,
               ordinal: input.ordinal,
               nativeTurnIds: new Set<string>(),
+              restored: false,
               startedAt: now,
               turnItemId: idAllocator.derive.turnItemFromProviderItem({
                 driver: CODEX_PROVIDER,
