@@ -527,14 +527,9 @@ export const make = Effect.gen(function* () {
             return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
           }
           yield* workflow.invalidateLocalStatus(cwd);
-          const local = yield* workflow.localStatus({ cwd }).pipe(
-            // A commit in an editor can hold index.lock. The remote still belongs to the
-            // branch clients show, but must not go out under the name of a branch they don't.
-            Effect.catch((error) => (branchShown ? Effect.succeed(null) : Effect.fail(error))),
-          );
-          if (local === null) {
-            return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
-          }
+          // A failed read (an editor commit can hold index.lock) publishes nothing, so the
+          // counts still differ from the cache and the next poll reads local status again.
+          const local = yield* workflow.localStatus({ cwd });
           if (local.refName !== branch) continue;
           if (cached?.local?.fingerprint === fingerprintStatusPart(local)) {
             return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });

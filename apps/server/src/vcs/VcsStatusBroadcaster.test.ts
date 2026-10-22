@@ -622,7 +622,7 @@ describe("VcsStatusBroadcaster", () => {
     }).pipe(Effect.provide(layerTestFor(state)), Effect.scoped);
   });
 
-  it.effect("a poll whose local read fails never shows a new branch with old metadata", () => {
+  it.effect("a poll whose local read fails publishes nothing and the next poll recovers", () => {
     const state: Parameters<typeof layerTestFor>[0] = {
       currentLocalStatus: { ...baseLocalStatus, isDefaultRef: true, refName: "main" },
       currentRemoteStatus: remoteStatusWithPr,
@@ -648,21 +648,41 @@ describe("VcsStatusBroadcaster", () => {
       // An editor commit holds index.lock while main moves ahead.
       state.failLocalStatus = true;
       state.currentRemoteStatus = { ...remoteStatusWithPr, aheadCount: 1 };
+      let failedLocalCalls = state.localStatusCalls;
       received.push(yield* Deferred.make<void>());
+      yield* TestClock.adjust(Duration.seconds(30));
+      assert.strictEqual(state.localStatusCalls, failedLocalCalls + 1);
+      assert.strictEqual(clientStates.length, 1);
+
+      // The lock clears on the same branch: the counts still differ from the cache, so the
+      // next poll reads local status again instead of keeping the old totals.
+      state.failLocalStatus = false;
+      state.currentLocalStatus = {
+        ...state.currentLocalStatus,
+        hasWorkingTreeChanges: true,
+        workingTree: { files: [], insertions: 3, deletions: 0 },
+      };
       yield* TestClock.adjust(Duration.seconds(30));
       yield* Deferred.await(received[1]!);
       assert.deepStrictEqual(
-        [clientStates[1]?.refName, clientStates[1]?.aheadCount, clientStates[1]?.pr],
-        ["main", 1, remoteStatusWithPr.pr],
+        [
+          clientStates[1]?.refName,
+          clientStates[1]?.aheadCount,
+          clientStates[1]?.pr,
+          clientStates[1]?.hasWorkingTreeChanges,
+        ],
+        ["main", 1, remoteStatusWithPr.pr, true],
       );
 
       // Still locked after `git switch -c repro`: repro's remote cannot go out under main.
       state.currentLocalStatus = { ...baseLocalStatus, isDefaultRef: false, refName: "repro" };
       state.currentRemoteStatus = { ...baseRemoteStatus, hasUpstream: false };
-      const failedLocalCalls = state.localStatusCalls;
+      state.failLocalStatus = true;
+      failedLocalCalls = state.localStatusCalls;
       received.push(yield* Deferred.make<void>());
       yield* TestClock.adjust(Duration.seconds(30));
       assert.strictEqual(state.localStatusCalls, failedLocalCalls + 1);
+      assert.strictEqual(clientStates.length, 2);
 
       state.failLocalStatus = false;
       yield* TestClock.adjust(Duration.seconds(30));
