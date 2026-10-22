@@ -14,3 +14,24 @@ it("states t3_thread_read page size limits in the parameter descriptions", () =>
     expect(schema.properties[name]?.description, name).toContain(maximum);
   }
 });
+
+// The server defaults bindToCurrentThread to true only for the caller's own project;
+// elsewhere, or with no calling thread, each run launches a fresh thread.
+it("states schedule_task's bindToCurrentThread default is conditional on the project", () => {
+  const schema = Tool.getJsonSchema(OrchestratorToolkit.tools.schedule_task) as {
+    readonly properties: Readonly<
+      Record<
+        string,
+        {
+          readonly description?: string;
+          readonly anyOf?: ReadonlyArray<{ readonly description?: string }>;
+        }
+      >
+    >;
+  };
+  const property = schema.properties.bindToCurrentThread;
+  const description = property?.description ?? property?.anyOf?.[0]?.description ?? "";
+  expect(description).not.toMatch(/^True \(default\)/);
+  expect(description).toMatch(/this thread's project/i);
+  expect(description).toMatch(/elsewhere|other project|no calling thread/i);
+});
