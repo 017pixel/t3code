@@ -4,6 +4,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
@@ -810,6 +811,45 @@ describe("EnvironmentSupervisor", () => {
       expect(yield* Ref.get(harness.releaseCount)).toBe(0);
       expect(yield* Ref.get(harness.sessionCount)).toBe(1);
       expect((yield* SubscriptionRef.get(supervisor.state)).generation).toBe(1);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("replaces a session after consecutive unanswered foreground probes", () =>
+    Effect.gen(function* () {
+      const probeCalls = yield* Ref.make(0);
+      const probeStarted = yield* Queue.unbounded<number>();
+      const harness = yield* makeHarness({
+        // Misses, answers, then misses twice in a row.
+        probe: () =>
+          Ref.updateAndGet(probeCalls, (count) => count + 1).pipe(
+            Effect.tap((call) => Queue.offer(probeStarted, call)),
+            Effect.flatMap((call) => (call === 2 ? Effect.void : Effect.never)),
+          ),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(
+        supervisor.state,
+        (state) => state.phase === "connected" && state.generation === 1,
+      );
+      for (const attempt of [1, 2, 3]) {
+        yield* harness.wake("application-active");
+        expect(yield* Queue.take(probeStarted)).toBe(attempt);
+        yield* TestClock.adjust("18 seconds");
+      }
+      // The answer in between reset the tolerance, so the session survives.
+      expect(yield* Ref.get(harness.releaseCount)).toBe(0);
+
+      yield* harness.wake("application-active");
+      expect(yield* Queue.take(probeStarted)).toBe(4);
+      yield* TestClock.adjust("18 seconds");
+      yield* awaitState(
+        supervisor.state,
+        (state) => state.phase === "connected" && state.generation === 2,
+      );
+      expect(yield* Ref.get(harness.releaseCount)).toBe(1);
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
