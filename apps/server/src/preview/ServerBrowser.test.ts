@@ -191,6 +191,9 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
       accept: ReturnType<typeof vi.fn>;
       dismiss: ReturnType<typeof vi.fn>;
     },
+    // Set to hold the page open after `beforeunload` until resolved, as Playwright's
+    // `runBeforeUnload` close resolves before the page actually closes.
+    unloadGate: null as PromiseWithResolvers<void> | null,
     close: vi.fn(async (options?: { runBeforeUnload?: boolean }) => {
       if (closed) return;
       const finish = () => {
@@ -201,6 +204,10 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
       };
       if (!options?.runBeforeUnload || page.beforeUnload === "none") return finish();
       page.unloadEvents.push("beforeunload");
+      if (page.beforeUnload === "listen" && page.unloadGate) {
+        void page.unloadGate.promise.then(finish);
+        return;
+      }
       if (page.beforeUnload === "listen") return finish();
       const dialog = {
         type: () => "beforeunload",
@@ -225,9 +232,11 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
       sessions.push(session);
       return session;
     },
+    closing: Promise.withResolvers<void>(),
     close: vi.fn(async () => {
       if (contextClosed) return;
       contextClosed = true;
+      context.closing.resolve();
       await page.close();
       onClose?.(context as unknown as BrowserContext);
     }),
@@ -703,6 +712,25 @@ it.live("closing a tab runs the page's beforeunload handlers", () =>
       const page = contexts[0]!.page;
       page.beforeUnload = "listen";
       yield* broker.invoke({ scope, tabId, operation: "close", input: {} });
+      expect(page.isClosed()).toBe(true);
+      expect(page.unloadEvents).toEqual(["beforeunload", "pagehide", "visibilitychange"]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("closing an isolated tab closes its context only after the page closes", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const context = contexts[0]!;
+      const page = context.page;
+      page.beforeUnload = "listen";
+      page.unloadGate = Promise.withResolvers<void>();
+      yield* broker.invoke({ scope, tabId, operation: "close", input: {} });
+      expect(context.close).not.toHaveBeenCalled();
+      expect(page.isClosed()).toBe(false);
+      page.unloadGate.resolve();
+      yield* Effect.promise(() => context.closing.promise);
       expect(page.isClosed()).toBe(true);
       expect(page.unloadEvents).toEqual(["beforeunload", "pagehide", "visibilitychange"]);
     }),
