@@ -27,6 +27,10 @@ with c:
   mid=f'dng-evidence-message-{i}'
   payload=dict(id=mid,threadId=populated,runId=None,nodeId=None,role=role,text=text,attachments=[],streaming=False,createdAt=ts,updatedAt=ts,createdBy='user' if role=='user' else 'agent',creationSource='web' if role=='user' else 'provider')
   c.execute('insert into orchestration_v2_projection_messages values(?,?,?,?,?,?,?,?,?)',(mid,populated,None,None,role,0,ts,ts,json.dumps(payload)))
-rows={t:c.execute('select * from '+t+' order by 1').fetchall() for t in ['projection_projects','orchestration_v2_projection_threads','orchestration_v2_projection_messages','orchestration_v2_projection_runs','orchestration_v2_projection_runtime_requests']}
+  item=dict(id=f'dng-evidence-item-{i}',threadId=populated,runId=None,nodeId=None,providerThreadId=None,providerTurnId=None,nativeItemRef=None,parentItemId=None,ordinal=i,status='completed',title=None,startedAt=ts,completedAt=ts,updatedAt=ts,type='user_message' if role=='user' else 'assistant_message',messageId=mid,text=text,attachments=[])
+  if role=='user': item.update(createdBy='user',creationSource='web',inputIntent='turn_start')
+  else: item['streaming']=False
+  c.execute('insert into orchestration_v2_projection_turn_items values(?,?,?,?,?,?,?,?,?,?,?,?)',(item['id'],populated,None,None,None,None,None,i,item['type'],'completed',ts,json.dumps(item)))
+rows={t:c.execute('select * from '+t+' order by 1').fetchall() for t in ['projection_projects','orchestration_v2_projection_threads','orchestration_v2_projection_messages','orchestration_v2_projection_runs','orchestration_v2_projection_runtime_requests','orchestration_v2_projection_turn_items']}
 print(json.dumps(dict(seedHash=hashlib.sha256(json.dumps(rows,sort_keys=True).encode()).hexdigest(),threads=[populated,empty],environment=(root/'.t3/userdata/environment-id').read_text().strip())))
 pathlib.Path('/tmp/dng-evidence-workspace').mkdir(exist_ok=True)
