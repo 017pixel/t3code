@@ -164,6 +164,68 @@ it.effect("re-seeds a migration-only V2 store when V1 gained threads after the c
     }
 
     assert.deepEqual(yield* startV2, ["thread-a", "thread-b"]);
+    assert.deepEqual(yield* startV2, ["thread-a", "thread-b"]);
+    assert.equal(
+      NodeFS.readdirSync(directory).filter(
+        (name) =>
+          name.startsWith("statev2.sqlite.stale-") &&
+          !name.endsWith("-wal") &&
+          !name.endsWith("-shm"),
+      ).length,
+      1,
+    );
+  }).pipe(
+    Effect.provide(
+      ServerConfig.layerTest(directory, directory).pipe(Layer.provideMerge(NodeServices.layer)),
+    ),
+    Effect.ensuring(Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true }))),
+  );
+});
+
+it.effect("keeps a V2 store with V2 work even when V1 gained threads after the copy", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-v1-v2-diverged-"));
+  const sourcePath = NodePath.join(directory, "state.sqlite");
+  const destinationPath = NodePath.join(directory, "statev2.sqlite");
+  const seed = Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations({ toMigrationInclusive: 52 });
+    yield* sql`INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+    VALUES ('project-a', 'Project A', '/tmp/project-a', '[]', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`;
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: sourcePath })));
+
+  return Effect.gen(function* () {
+    yield* seed;
+    const config = yield* ServerConfig.ServerConfig;
+    const layerDatabase = SqlitePersistence.layerConfig.pipe(
+      Layer.provide(ServerConfig.layer({ ...config, dbPath: destinationPath })),
+    );
+    // Stands in for V2 work by cloning a migration event under a non-migration id.
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TEMP TABLE native_event AS
+        SELECT * FROM orchestration_events WHERE application_event_version = 2 LIMIT 1`;
+      yield* sql`UPDATE native_event
+        SET sequence = NULL, event_id = 'native-event', stream_version = stream_version + 1000`;
+      yield* sql`INSERT INTO orchestration_events SELECT * FROM native_event`;
+    }).pipe(Effect.provide(layerDatabase));
+
+    const v1 = new NodeSqlite.DatabaseSync(sourcePath);
+    try {
+      v1.exec(`INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, created_at, updated_at)
+        VALUES ('thread-b', 'project-a', 'Newer V1 thread', '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', 'default', '2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z');`);
+    } finally {
+      v1.close();
+    }
+
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      assert.lengthOf(
+        yield* sql`SELECT 1 FROM orchestration_events WHERE event_id = 'native-event'`,
+        1,
+      );
+      assert.lengthOf(yield* sql`SELECT 1 FROM projection_threads WHERE thread_id = 'thread-b'`, 0);
+    }).pipe(Effect.provide(layerDatabase));
+    assert.isFalse(NodeFS.readdirSync(directory).some((name) => name.includes(".stale-")));
   }).pipe(
     Effect.provide(
       ServerConfig.layerTest(directory, directory).pipe(Layer.provideMerge(NodeServices.layer)),
