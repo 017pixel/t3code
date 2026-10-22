@@ -7,10 +7,16 @@ session; wait for Listening, then stop this process with Ctrl+C):
   T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD=0 node scripts/dev-runner.ts dev --home-dir /tmp/issue-22997/after-proof
 With that server stopped:
   python3 scripts/seed-issue-22997.py /tmp/issue-22997/after-proof
+For the separate C6 projection-only pending-answer control, add --pending to
+the seed command. It replaces the sibling view with a message-capability
+question; do not submit its answer. Omit --pending for affected captures.
 Restart using the identical bootstrap-disabled command above. Pair through the
 startup URL privately. Use real UI Settings for rich text and theme. Never send
-the proof draft to a provider. To reset, stop this server, rerun the seed command,
-restart, and clear each browser draft with Ctrl+A then Backspace in the editor.
+the proof draft to a provider. A visited proof home records thread.visited events,
+so reset with a NEW empty path, e.g. /tmp/issue-22997/after-rebuild: stop this
+server, repeat the complete start/stop migration, seed and restart commands
+above with after-rebuild in place of after-proof. Clear each browser draft
+with Ctrl+A then Backspace in the editor. Do not reuse a visited database.
 The default bootstrap MUST be disabled: it creates event history this script
 refuses. Before comparison uses the same commands and a separate before-proof
 home, running the pinned before checkout. Use a separate node_modules/.vite
@@ -61,4 +67,14 @@ with c:
             c.execute('insert into orchestration_v2_projection_messages values(?,?,?,?,?,?,?,?,?)',(mid,tid,None,None,message['role'],0,t,t,json.dumps(payload)))
             item=dict(createdBy="user", creationSource="web", id=f'{mid}-item',threadId=tid,runId=None,nodeId=None,providerThreadId=None,providerTurnId=None,nativeItemRef=None,parentItemId=None,ordinal=ordinal,status='completed',title=None,startedAt=t,completedAt=t,updatedAt=t,type=message['role']+'_message',messageId=mid,text=message['text'],attachments=[],streaming=False,inputIntent='turn_start')
             c.execute('insert into orchestration_v2_projection_turn_items values(?,?,?,?,?,?,?,?,?,?,?,?)',(item['id'],tid,None,None,None,None,None,ordinal,item['type'],'completed',t,json.dumps(item)))
+    if '--pending' in sys.argv[2:]:
+        tid = 'proof-22997-sibling'
+        nid = 'proof-22997-question-node'
+        rid = 'proof-22997-request'
+        node = dict(id=nid,threadId=tid,runId=None,parentNodeId=None,rootNodeId=nid,kind='user_input_request',status='waiting',countsForRun=False,providerThreadId=None,providerTurnId=None,nativeItemRef=None,runtimeRequestId=rid,checkpointScopeId=None,startedAt=t,completedAt=None)
+        c.execute('insert into orchestration_v2_projection_nodes values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(nid,tid,None,None,nid,'user_input_request','waiting',None,None,rid,None,t,None,json.dumps(node)))
+        request = dict(id=rid,nodeId=nid,providerTurnId=None,nativeRequestRef=None,kind='user_input',status='pending',responseCapability=dict(type='message'),createdAt=t,resolvedAt=None)
+        c.execute('insert into orchestration_v2_projection_runtime_requests values(?,?,?,?,?,?,?,?,?)',(rid,tid,nid,None,'user_input','pending',t,None,json.dumps(request)))
+        item = dict(id='proof-22997-question-item',threadId=tid,runId=None,nodeId=nid,providerThreadId=None,providerTurnId=None,nativeItemRef=None,parentItemId=None,ordinal=0,status='waiting',title=None,startedAt=t,completedAt=None,updatedAt=t,type='user_input_request',requestId=rid,questions=[fixture['pendingQuestion']],responseMode='message')
+        c.execute('insert into orchestration_v2_projection_turn_items values(?,?,?,?,?,?,?,?,?,?,?,?)',(item['id'],tid,None,nid,None,None,None,0,item['type'],'waiting',t,json.dumps(item)))
 print(json.dumps(dict(seedId=fixture['seedId'],sha256=hashlib.sha256(fixture_path.read_bytes()).hexdigest(),database=str(db))))
