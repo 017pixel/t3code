@@ -1747,6 +1747,8 @@ describe("AcpRegistryAdapterV2", () => {
             stopReason: "error",
             ...(error === undefined ? {} : { error }),
           }),
+          ...claudeFrames.prompt(2),
+          claudeFrames.idle("end_turn"),
         ],
         undefined,
         false,
@@ -1760,6 +1762,20 @@ describe("AcpRegistryAdapterV2", () => {
       } else {
         assert.equal(terminal.failure?.message, error.message);
       }
+      yield* session.runtime.startTurn(session.turnInput(2));
+      const following = yield* session.until((event) => event.type === "turn.terminal");
+      const nextTerminal = following.at(-1)!;
+      if (nextTerminal.type !== "turn.terminal") throw new Error("Missing following terminal");
+      assert.equal(nextTerminal.status, "completed");
+      assert.notEqual(nextTerminal.providerTurnId, terminal.providerTurnId);
+      assert.lengthOf(
+        [terminal, ...following].filter(
+          (event) =>
+            event.type === "turn.terminal" && event.providerTurnId === terminal.providerTurnId,
+        ),
+        1,
+        "the failed turn terminalizes once through the following prompt's completion",
+      );
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
