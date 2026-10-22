@@ -631,7 +631,8 @@ public struct AddProjectView: View {
     private func resetEnvironmentState() {
         if mode == .newProject && selectedEnvironment?.newProjectsRoot == nil { mode = .folder }
         publishesToGitHub = false
-        browsePath = "~/"
+        let baseDirectory = addProjectBaseDirectory
+        browsePath = baseDirectory
         browseResult = nil
         browseError = nil
         browseRequestID = nil
@@ -644,11 +645,18 @@ public struct AddProjectView: View {
         pendingManagedClone = nil
         cloneRequestID = nil
         didEditDestination = false
-        localPath = "~/"
+        localPath = baseDirectory
         destinationPath = repositoryInput.isEmpty
-            ? "~/"
-            : ProjectCreationPath.appending(repositoryName, to: "~/")
+            ? baseDirectory
+            : ProjectCreationPath.appending(repositoryName, to: baseDirectory)
         errorMessage = nil
+    }
+
+    /// Matches web: a blank per-environment setting falls back to the home directory.
+    private var addProjectBaseDirectory: String {
+        let configured = selectedEnvironment?.addProjectBaseDirectory?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return configured.isEmpty ? "~/" : ProjectCreationPath.directoryBrowsePath(configured)
     }
 
     private func loadDiscovery() async {
