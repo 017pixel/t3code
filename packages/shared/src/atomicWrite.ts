@@ -22,6 +22,18 @@ export const isWindowsRenameLock = (error: PlatformError.PlatformError) => {
 const LOCKED_RENAME_RETRIES = 20;
 const LOCKED_RENAME_RETRY_DELAY = "100 millis";
 
+// A save keeps the permissions of the file it replaces, so a private file stays
+// private, and a new file is readable only by its owner. chmod rather than an open
+// mode, because the umask narrows the latter.
+const replacedMode = (fs: FileSystem.FileSystem, targetPath: string) =>
+  fs.stat(targetPath).pipe(
+    Effect.map((info) => info.mode & 0o777),
+    Effect.catchIf(
+      (error) => error.reason._tag === "NotFound",
+      () => Effect.succeed(0o600),
+    ),
+  );
+
 /**
  * A symlinked target is resolved first so the link survives and its destination is
  * rewritten, since renaming over the link itself would swap it for a regular file.
@@ -52,7 +64,25 @@ export const writeFileStringAtomically = (input: {
       const tempPath = path.join(tempDirectory, "contents.tmp");
 
       yield* fs.writeFileString(tempPath, input.contents);
-      if (platform !== "win32") return yield* fs.rename(tempPath, targetPath);
+      // Windows modes carry only the read-only bit, which the rename below handles.
+      if (platform !== "win32") yield* fs.chmod(tempPath, yield* replacedMode(fs, targetPath));
+      // Without this a crash soon after the rename can leave the target empty. A sync
+      // flushes the file, not just its handle, and the handle closes before the rename,
+      // which Windows refuses while it is open.
+      yield* fs.open(tempPath, { flag: "r+" }).pipe(
+        Effect.flatMap((file) => file.sync),
+        Effect.scoped,
+      );
+      if (platform !== "win32") {
+        yield* fs.rename(tempPath, targetPath);
+        // Persists the rename. Windows cannot open a directory to sync it, and a
+        // filesystem that refuses must not fail a write that already landed.
+        return yield* fs.open(targetDirectory, { flag: "r" }).pipe(
+          Effect.flatMap((directory) => directory.sync),
+          Effect.scoped,
+          Effect.ignore({ log: true }),
+        );
+      }
 
       // A retry must not replace a save another process landed while this one
       // waited, so it gives up once the target is no longer the file seen here.

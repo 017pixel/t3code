@@ -175,16 +175,20 @@ it.layer(NodeServices.layer)("writeFileStringAtomically", (it) => {
         ...fs,
         open: (openedPath, options) =>
           fs.open(openedPath, options).pipe(
-            Effect.map((file) => ({
-              ...file,
-              sync: file.sync.pipe(
-                Effect.tap(() =>
-                  Effect.sync(() => {
-                    events.push(openedPath === root ? "sync directory" : "sync temp file");
-                  }),
-                ),
-              ),
-            })),
+            // The real handle keeps its methods on its prototype, so it is extended, not spread.
+            Effect.map((file): FileSystem.File =>
+              Object.create(file, {
+                sync: {
+                  value: file.sync.pipe(
+                    Effect.tap(() =>
+                      Effect.sync(() => {
+                        events.push(openedPath === root ? "sync directory" : "sync temp file");
+                      }),
+                    ),
+                  ),
+                },
+              }),
+            ),
           ),
         rename: (from, to) =>
           fs
@@ -203,7 +207,13 @@ it.layer(NodeServices.layer)("writeFileStringAtomically", (it) => {
       );
 
       assert.strictEqual(yield* fs.readFileString(filePath), "after");
-      assert.deepStrictEqual(events, ["sync temp file", "rename temp file", "sync directory"]);
+      // Windows cannot open a directory to sync it.
+      assert.deepStrictEqual(
+        events,
+        HostProcess.Platform.defaultValue() === "win32"
+          ? ["sync temp file", "rename temp file"]
+          : ["sync temp file", "rename temp file", "sync directory"],
+      );
     }),
   );
 });
@@ -281,7 +291,18 @@ it.effect("succeeds when the write lands but its temp directory cannot be remove
         ),
       makeDirectory: () => Effect.void,
       makeTempDirectory: () => Effect.succeed("/home/settings.json.abc123"),
+      stat: (path) =>
+        Effect.fail(
+          PlatformError.systemError({
+            _tag: "NotFound",
+            module: "FileSystem",
+            method: "stat",
+            pathOrDescriptor: path,
+          }),
+        ),
+      chmod: () => Effect.void,
       writeFileString: () => Effect.void,
+      open: () => Effect.succeed({ sync: Effect.void } as FileSystem.File),
       rename: (_from, to) => Effect.sync(() => void renamed.push(to)),
       remove: (path) =>
         Effect.sync(() => void removed.push(path)).pipe(
