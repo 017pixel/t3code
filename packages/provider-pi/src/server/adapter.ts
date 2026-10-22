@@ -40,6 +40,7 @@ import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import { isProviderNativeImageAttachment } from "@t3tools/provider-core/server/attachmentPrompt";
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { parsePiCompactCommand, type PiCompactCommand } from "./commands.ts";
@@ -2339,7 +2340,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         for (const attachment of attachments) {
           const path = host.resolveAttachmentPath(attachment);
           if (path === null) continue;
-          if (attachment.mimeType.startsWith("image/")) {
+          if (isProviderNativeImageAttachment(attachment)) {
             const bytes = yield* fileSystem.readFile(path);
             images.push({
               type: "image",

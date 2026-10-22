@@ -22,6 +22,7 @@ import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -31,6 +32,7 @@ import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -547,6 +549,33 @@ describe("PiAdapterV2", () => {
         const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
         assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("sends a DNG photo attached as a file by path instead of as an image", () =>
+    Effect.gen(function* () {
+      const host = yield* ProviderHost.ProviderHost;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const dng = {
+        type: "file",
+        id: "thread-dng-attachment",
+        name: "IMG_3921.DNG",
+        mimeType: "image/x-adobe-dng",
+        sizeBytes: 3,
+      } as ChatAttachment;
+      const path = host.resolveAttachmentPath(dng)!;
+      yield* fileSystem.writeFileString(path, "dng");
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread, "default", [dng], "Look at this photo");
+      const prompt = yield* fake.takeRequest("prompt");
+      assert.equal(prompt["message"], `Look at this photo\n\n[Attachment saved at ${path}]`);
+      assert.isUndefined(prompt["images"]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect.each([false, true])(
