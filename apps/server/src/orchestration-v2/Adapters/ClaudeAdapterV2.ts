@@ -2444,6 +2444,10 @@ const CLAUDE_SCHEDULED_WAKEUP_TASK: OrchestrationV2PendingBackgroundTask = {
   description: "Scheduled wakeup",
 };
 
+// Claude Code jitters one-shot wakeups early but never before the requested time, which is at
+// most 60 s before the minute-rounded scheduledFor it reports; the rest is slack.
+const CLAUDE_SCHEDULED_WAKEUP_EARLY_FIRE_MARGIN_MS = 120_000;
+
 function claudePendingBackgroundTasksFromRoster(
   roster: ReadonlyMap<string, OrchestrationV2PendingBackgroundTask>,
 ): ReadonlyArray<OrchestrationV2PendingBackgroundTask> {
@@ -4267,13 +4271,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         ) {
           if (isClaudeTurnStartMessage(message)) {
             const scheduledFor = scheduledWakeupsByNativeThread.get(nativeThreadId);
-            // A turn Claude starts by itself is the wake, even before scheduledFor: Claude fires
-            // up to ~90 s early. A host turn before scheduledFor leaves the wakeup pending.
-            if (
-              scheduledFor !== undefined &&
-              ((yield* Ref.get(activeTurn)) === null ||
-                DateTime.toEpochMillis(yield* DateTime.now) >= scheduledFor)
-            ) {
+            if (scheduledFor === undefined) return;
+            // A turn Claude starts by itself near scheduledFor is the wake; a task notification
+            // also starts one, so an idle turn well before scheduledFor leaves the wakeup pending.
+            const earliestWake =
+              (yield* Ref.get(activeTurn)) === null
+                ? scheduledFor - CLAUDE_SCHEDULED_WAKEUP_EARLY_FIRE_MARGIN_MS
+                : scheduledFor;
+            if (DateTime.toEpochMillis(yield* DateTime.now) >= earliestWake) {
               scheduledWakeupsByNativeThread.delete(nativeThreadId);
             }
             return;
