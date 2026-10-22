@@ -185,7 +185,12 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     prompt.questions.length > 1 ? `${questionIndex + 1}/${prompt.questions.length}` : null;
   // Pulls the caret's icon-box padding in so the count and caret read as one cluster.
   const questionCountClassName =
-    "-me-2 text-3xs font-medium text-muted-foreground tabular-nums sm:-me-1.5";
+    "-me-2 text-xs/4 font-medium text-muted-foreground tabular-nums sm:-me-1.5";
+  // Without an eyebrow to carry it, the multi-select hint rides in the actions row.
+  const actionsHint =
+    !isCollapsed && !showHeader && activeQuestion.multiSelect ? (
+      <span className="text-xs/4 text-muted-foreground/70">Select any</span>
+    ) : null;
 
   return (
     <Collapsible
@@ -219,7 +224,9 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
             </ComposerBanner.Content>
           </>
         ) : null}
-        <ComposerBanner.Actions>
+        {/* The end margin puts the trailing control's center 22px in, on the option indicators' axis. */}
+        <ComposerBanner.Actions className="me-1 sm:me-1.5">
+          {actionsHint}
           {questionCount ? <span className={questionCountClassName}>{questionCount}</span> : null}
           <ComposerBanner.ToggleIcon expanded={!isCollapsed} />
           {prompt.dismissible ? (
@@ -247,10 +254,23 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
       <CollapsiblePanel>
         <ComposerBanner.Scroll>
           {/* Both sides sit 16px in with the banner's px-1; the overflow scrollbar gutter takes 8px of the right.
-              The top inset centers the first 20px line on the 28px (24px from sm) actions row. */}
-          <ComposerBanner.Body className="ps-3 pe-3 pt-1 pb-1 wrap-anywhere sm:ps-3 sm:pt-0.5 [[data-has-overflow-y]>*>&]:pe-1">
-            {/* Mirrors the overlaid actions so only the first line wraps clear of them; the end margin cancels the 12px body inset. */}
-            <span aria-hidden className="invisible float-end ms-2 -me-3 flex h-5 gap-1">
+              The top inset centers the first line (16px eyebrow or 20px question) on the 28px (24px from sm) actions row. */}
+          <ComposerBanner.Body
+            className={cn(
+              "ps-3 pe-3 pb-1 wrap-anywhere sm:ps-3 [[data-has-overflow-y]>*>&]:pe-1",
+              showHeader ? "pt-1.5 sm:pt-1" : "pt-1 sm:pt-0.5",
+            )}
+          >
+            {/* Mirrors the overlaid actions so only the first line wraps clear of them; the end margin cancels the 12px body inset.
+                Its height matches that first line, so a 16px eyebrow does not push its second line clear too. */}
+            <span
+              aria-hidden
+              className={cn(
+                "invisible float-end ms-2 -me-3 flex items-center gap-1 pe-1 sm:pe-1.5",
+                showHeader ? "h-4" : "h-5",
+              )}
+            >
+              {actionsHint}
               {questionCount ? (
                 <span className={questionCountClassName}>{questionCount}</span>
               ) : null}
@@ -258,20 +278,20 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
               {prompt.dismissible ? <span className="w-(--composer-banner-icon-column)" /> : null}
             </span>
             {showHeader ? (
-              <p className="text-sm/5 font-semibold text-foreground">{activeQuestion.header}</p>
+              <p className="text-xs/4 font-medium text-muted-foreground">
+                {activeQuestion.multiSelect
+                  ? `${activeQuestion.header} · Select any`
+                  : activeQuestion.header}
+              </p>
             ) : null}
             <ChatMarkdown
               text={activeQuestion.question}
               cwd={cwd}
               threadRef={threadRef}
-              className={
-                showHeader ? "text-xs/5 text-secondary-label" : "text-sm/5 text-foreground/85"
-              }
+              className={cn("text-sm/5 font-medium text-foreground", showHeader && "mt-1.5")}
             />
-            {activeQuestion.multiSelect ? (
-              <p className="mt-1 text-secondary-label text-xs">Select one or more options.</p>
-            ) : null}
-            <div className="mt-2 space-y-0.5">
+            {/* Row fills hang 12px past the text column so labels stay on its edge. */}
+            <div className="-mx-3 mt-3">
               {activeQuestion.options.map((option, index) => {
                 const optionValue = option.value ?? option.label;
                 const isOptimisticallySelected =
@@ -289,27 +309,35 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                       handleOptionSelection(activeQuestion.id, optionValue);
                     }}
                     className={cn(
-                      "flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left outline-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary/25",
-                      isSelected
-                        ? "bg-muted/55 text-foreground"
-                        : "bg-transparent text-foreground/85 hover:bg-muted/30",
+                      "grid w-full grid-cols-[min(40%,16rem)_minmax(0,1fr)_--spacing(5)] items-baseline gap-x-4 rounded-lg ps-3 pe-2 py-2 text-left outline-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary/40",
+                      "@max-[480px]:grid-cols-[minmax(0,1fr)_--spacing(5)] @max-[480px]:gap-y-0.5",
+                      isSelected ? "bg-foreground/8" : "bg-transparent hover:bg-foreground/4",
                       (disabled || isResponding) && "opacity-50 cursor-not-allowed",
                       !disabled && !isResponding && "cursor-pointer",
                     )}
                   >
-                    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                      <span className="text-sm font-medium">{option.label}</span>
-                      {option.description && option.description !== option.label ? (
-                        <span className="text-secondary-label text-2xs">{option.description}</span>
-                      ) : null}
+                    <span
+                      className={cn(
+                        "col-start-1 row-start-1 text-sm/5",
+                        isSelected ? "text-foreground" : "text-foreground/90",
+                      )}
+                    >
+                      {option.label}
+                    </span>
+                    {/* Stays as an empty cell without a description so the columns never shift.
+                        Baseline alignment drops 12px text a pixel below the 14px label's box; the margin keeps rows 36px. */}
+                    <span className="col-start-2 row-start-1 -mb-px text-xs/5 text-muted-foreground @max-[480px]:col-start-1 @max-[480px]:row-start-2 @max-[480px]:mb-0 @max-[480px]:text-xs/4 @max-[480px]:empty:hidden">
+                      {option.description && option.description !== option.label
+                        ? option.description
+                        : null}
                     </span>
                     {/* The number and the check share one fixed box so selecting never resizes the row. */}
                     <span
                       data-pending-user-input-option-key
-                      className="flex size-5 shrink-0 items-center justify-center text-3xs font-medium text-muted-foreground tabular-nums"
+                      className="col-start-3 row-start-1 flex size-5 items-center justify-center self-start text-xs/5 font-medium text-muted-foreground/60 tabular-nums @max-[480px]:col-start-2"
                     >
                       {isSelected ? (
-                        <CheckIcon aria-hidden className="size-4 text-primary" strokeWidth={3} />
+                        <CheckIcon aria-hidden className="size-4 text-primary" strokeWidth={2.5} />
                       ) : index < 9 ? (
                         index + 1
                       ) : null}

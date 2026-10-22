@@ -69,8 +69,8 @@ const EXPANDED_CARD_IS_OVERLAY = Platform.OS === "ios";
 
 const CARD_LAYOUT_TRANSITION = LinearTransition.duration(200);
 
-function QuestionText(props: { readonly markdown: string; readonly tone: "body" | "secondary" }) {
-  const styles = useMarkdownPreviewStyles(props.tone);
+function QuestionText(props: { readonly markdown: string }) {
+  const styles = useMarkdownPreviewStyles();
   const openLink = useOpenPullRequest();
   return (
     <SelectableMarkdownText
@@ -244,15 +244,16 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
           const showHeader = !isGenericUserInputQuestionHeader(question.header);
           return (
             <View key={question.id} className="gap-2 pt-1">
-              <View className="gap-0.5">
+              <View className="gap-1.5">
                 {showHeader ? (
-                  <Text className="font-t3-bold text-sm text-foreground">{question.header}</Text>
+                  <Text className="font-t3-medium text-2xs text-foreground-muted">
+                    {question.multiSelect ? `${question.header} · Select any` : question.header}
+                  </Text>
                 ) : null}
-                {/* Under a title the question is context; without one it leads. */}
-                <QuestionText
-                  markdown={question.question}
-                  tone={showHeader ? "secondary" : "body"}
-                />
+                <QuestionText markdown={question.question} />
+                {!showHeader && question.multiSelect ? (
+                  <Text className="font-sans text-2xs text-foreground-muted">Select any</Text>
+                ) : null}
               </View>
               <View className="gap-0.5">
                 {question.options.map((option) => {
@@ -267,8 +268,8 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
                       accessibilityState={{ checked: selected, disabled: responseDisabled }}
                       disabled={responseDisabled}
                       className={cn(
-                        "min-h-12 w-full flex-row items-center gap-3 rounded-xl px-2 py-2",
-                        selected ? "bg-grouped-card" : "active:bg-row-hover",
+                        "min-h-12 w-full justify-center gap-0.5 rounded-xl px-2 py-2",
+                        selected ? "bg-foreground/8" : "active:bg-row-hover",
                       )}
                       onPress={() =>
                         props.onSelectOption(
@@ -278,29 +279,31 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
                         )
                       }
                     >
-                      <View className="min-w-0 flex-1 gap-0.5">
-                        <Text className="font-t3-medium text-sm text-foreground">
+                      {/* The check shares the label's first line and keeps its box when unselected, so selecting never rewraps the label. */}
+                      <View className="flex-row items-start gap-3">
+                        <Text className="min-w-0 flex-1 font-t3-medium text-sm text-foreground">
                           {option.label}
                         </Text>
-                        {description ? (
-                          <Text className="font-sans text-xs text-foreground-muted">
-                            {description}
-                          </Text>
-                        ) : null}
-                      </View>
-                      {selected ? (
                         <View
                           accessibilityElementsHidden
                           importantForAccessibility="no-hide-descendants"
+                          className="h-[19px] w-4 items-center justify-center"
                         >
-                          <SymbolView
-                            name="checkmark"
-                            size={16}
-                            tintColorClassName="accent-primary-text"
-                            type="monochrome"
-                            weight="bold"
-                          />
+                          {selected ? (
+                            <SymbolView
+                              name="checkmark"
+                              size={16}
+                              tintColorClassName="accent-primary-text"
+                              type="monochrome"
+                              weight="bold"
+                            />
+                          ) : null}
                         </View>
+                      </View>
+                      {description ? (
+                        <Text className="pr-7 font-sans text-xs text-foreground-muted">
+                          {description}
+                        </Text>
                       ) : null}
                     </Pressable>
                   );
