@@ -252,124 +252,123 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const list: IssueService["Service"]["list"] = (input) =>
-    Effect.gen(function* () {
-      const { supported, unimplemented } = yield* listProjects(input);
-      const limit = input.limit ?? DEFAULT_LIST_LIMIT;
-      // Worktrees of one repository are separate projects; read each scope once.
-      const scopes = new Map<string, SupportedProject>();
-      for (const project of supported) {
-        if (!scopes.has(project.canonicalKey)) scopes.set(project.canonicalKey, project);
-      }
-      const continuing = input.cursors;
-      const viewers = new Map<string, string>();
-      const trackers = new Map<string, IssueTrackerSummary>();
-      const entries: IssueListEntry[] = [];
-      const errors: IssueListProjectError[] = [];
-      const nextCursors: Record<string, string> = {};
+  const list: IssueService["Service"]["list"] = Effect.fn("IssueService.list")(function* (input) {
+    const { supported, unimplemented } = yield* listProjects(input);
+    const limit = input.limit ?? DEFAULT_LIST_LIMIT;
+    // Worktrees of one repository are separate projects; read each scope once.
+    const scopes = new Map<string, SupportedProject>();
+    for (const project of supported) {
+      if (!scopes.has(project.canonicalKey)) scopes.set(project.canonicalKey, project);
+    }
+    const continuing = input.cursors;
+    const viewers = new Map<string, string>();
+    const trackers = new Map<string, IssueTrackerSummary>();
+    const entries: IssueListEntry[] = [];
+    const errors: IssueListProjectError[] = [];
+    const nextCursors: Record<string, string> = {};
 
-      const viewerRequests = new Map<string, Effect.Effect<string, IssueTrackerError>>();
-      for (const project of scopes.values()) {
-        if (viewerRequests.has(project.host)) continue;
-        const request = yield* Effect.cached(
-          project.api
-            .getViewer({ cwd: project.project.workspaceRoot, host: project.host })
-            .pipe(Effect.tap((viewer) => Effect.sync(() => viewers.set(project.host, viewer)))),
-        );
-        viewerRequests.set(project.host, request);
-      }
+    const viewerRequests = new Map<string, Effect.Effect<string, IssueTrackerError>>();
+    for (const project of scopes.values()) {
+      if (viewerRequests.has(project.host)) continue;
+      const request = yield* Effect.cached(
+        project.api
+          .getViewer({ cwd: project.project.workspaceRoot, host: project.host })
+          .pipe(Effect.tap((viewer) => Effect.sync(() => viewers.set(project.host, viewer)))),
+      );
+      viewerRequests.set(project.host, request);
+    }
 
-      // Every project counts, including worktrees of a scope read once below.
-      for (const project of supported) {
-        const existing = trackers.get(project.host);
-        trackers.set(
-          project.host,
-          existing === undefined
-            ? {
-                tracker: project.tracker,
-                host: project.host,
-                projectCount: 1,
-                capabilities: project.api.capabilities,
-                configured: true,
-                detail: null,
-              }
-            : { ...existing, projectCount: existing.projectCount + 1 },
-        );
-      }
-      const recordFailure = (project: SupportedProject, failure: IssueTrackerError) => {
-        const existing = trackers.get(project.host);
-        if (existing !== undefined && isTrackerUnusable(failure))
-          trackers.set(project.host, { ...existing, configured: false, detail: failure.detail });
-      };
-
-      yield* Effect.forEach(
-        scopes.values(),
-        (project) =>
-          Effect.gen(function* () {
-            const key = listCursorKey(project.host, project.scope);
-            // A continuation names the scopes it wants; one not named has nothing to add.
-            if (continuing !== undefined && continuing[key] === undefined) return;
-            const cursor = continuing?.[key];
-            const page = yield* viewerRequests.get(project.host)!.pipe(
-              Effect.flatMap((viewer) =>
-                project.api.listIssues({
-                  cwd: project.project.workspaceRoot,
-                  host: project.host,
-                  scope: project.scope,
-                  state: input.state,
-                  involvement: input.involvement ?? "all",
-                  viewer,
-                  limit,
-                  query: input.query,
-                  cursor,
-                }),
-              ),
-              Effect.result,
-            );
-            if (page._tag === "Failure") {
-              if (cursor !== undefined) nextCursors[key] = cursor;
-              recordFailure(project, page.failure);
-              errors.push({
-                projectId: project.project.id,
-                projectTitle: project.project.title,
-                message: page.failure.detail,
-              });
-              return;
+    // Every project counts, including worktrees of a scope read once below.
+    for (const project of supported) {
+      const existing = trackers.get(project.host);
+      trackers.set(
+        project.host,
+        existing === undefined
+          ? {
+              tracker: project.tracker,
+              host: project.host,
+              projectCount: 1,
+              capabilities: project.api.capabilities,
+              configured: true,
+              detail: null,
             }
-            for (const item of page.success.items) {
-              entries.push({
-                ...item,
-                tracker: project.tracker,
+          : { ...existing, projectCount: existing.projectCount + 1 },
+      );
+    }
+    const recordFailure = (project: SupportedProject, failure: IssueTrackerError) => {
+      const existing = trackers.get(project.host);
+      if (existing !== undefined && isTrackerUnusable(failure))
+        trackers.set(project.host, { ...existing, configured: false, detail: failure.detail });
+    };
+
+    yield* Effect.forEach(
+      scopes.values(),
+      (project) =>
+        Effect.gen(function* () {
+          const key = listCursorKey(project.host, project.scope);
+          // A continuation names the scopes it wants; one not named has nothing to add.
+          if (continuing !== undefined && continuing[key] === undefined) return;
+          const cursor = continuing?.[key];
+          const page = yield* viewerRequests.get(project.host)!.pipe(
+            Effect.flatMap((viewer) =>
+              project.api.listIssues({
+                cwd: project.project.workspaceRoot,
                 host: project.host,
                 scope: project.scope,
-                projectId: project.project.id,
-                projectTitle: project.project.title,
-              });
-            }
-            if (page.success.nextCursor !== null) nextCursors[key] = page.success.nextCursor;
-          }),
-        { concurrency: SCOPE_CONCURRENCY, discard: true },
-      );
+                state: input.state,
+                involvement: input.involvement ?? "all",
+                viewer,
+                limit,
+                query: input.query,
+                cursor,
+              }),
+            ),
+            Effect.result,
+          );
+          if (page._tag === "Failure") {
+            if (cursor !== undefined) nextCursors[key] = cursor;
+            recordFailure(project, page.failure);
+            errors.push({
+              projectId: project.project.id,
+              projectTitle: project.project.title,
+              message: page.failure.detail,
+            });
+            return;
+          }
+          for (const item of page.success.items) {
+            entries.push({
+              ...item,
+              tracker: project.tracker,
+              host: project.host,
+              scope: project.scope,
+              projectId: project.project.id,
+              projectTitle: project.project.title,
+            });
+          }
+          if (page.success.nextCursor !== null) nextCursors[key] = page.success.nextCursor;
+        }),
+      { concurrency: SCOPE_CONCURRENCY, discard: true },
+    );
 
-      for (const [host, { tracker, projectCount }] of unimplemented) {
-        trackers.set(host, {
-          tracker,
-          host,
-          projectCount,
-          capabilities: null,
-          configured: false,
-          detail: "Issues cannot be browsed for this host yet.",
-        });
-      }
-      entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-      return {
-        viewers: Object.fromEntries(viewers),
-        trackers: [...trackers.values()],
-        entries,
-        errors,
-        nextCursors,
-      };
-    });
+    for (const [host, { tracker, projectCount }] of unimplemented) {
+      trackers.set(host, {
+        tracker,
+        host,
+        projectCount,
+        capabilities: null,
+        configured: false,
+        detail: "Issues cannot be browsed for this host yet.",
+      });
+    }
+    entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return {
+      viewers: Object.fromEntries(viewers),
+      trackers: [...trackers.values()],
+      entries,
+      errors,
+      nextCursors,
+    };
+  });
 
   const detail: IssueService["Service"]["detail"] = (input) =>
     requireProject(input).pipe(

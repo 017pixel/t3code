@@ -220,67 +220,66 @@ export const make = Effect.gen(function* () {
         ),
       ),
 
-    getIssue: (input) =>
-      Effect.gen(function* () {
-        const { owner, name, number } = yield* issue(input, "getIssue");
-        const result = yield* client
-          .IssueDetail({ owner, name, number })
-          .pipe(graphql(input.host, "getIssue"));
-        const detail = toIssueDetail(result);
-        const raw = result.repository?.issue;
-        if (detail === null || raw == null) return yield* notFound("getIssue");
-        // Editing replaces these sets. Finish their pages before handing them to a client.
-        let labels = raw.labels;
-        let assignees = raw.assignees;
-        const seen = new Set<string>();
-        const allLabels = [...detail.labels];
-        const allAssignees = [...detail.assignees];
-        while (labels?.pageInfo.hasNextPage === true || assignees.pageInfo.hasNextPage) {
-          const labelsCursor = labels?.pageInfo.hasNextPage ? labels.pageInfo.endCursor : null;
-          const assigneesCursor = assignees.pageInfo.hasNextPage
-            ? assignees.pageInfo.endCursor
-            : null;
-          const key = `${labelsCursor ?? ""} ${assigneesCursor ?? ""}`;
-          if (
-            (labels?.pageInfo.hasNextPage && labelsCursor === null) ||
-            (assignees.pageInfo.hasNextPage && assigneesCursor === null) ||
-            seen.has(key)
-          ) {
-            return yield* invalid(
-              "getIssue",
-              "GitHub did not return complete issue labels or assignees.",
-            );
-          }
-          seen.add(key);
-          const page = yield* client
-            .IssueCollections({ owner, name, number, labelsCursor, assigneesCursor })
-            .pipe(graphql(input.host, "getIssue"));
-          const next = page.repository?.issue;
-          if (next == null) return yield* notFound("getIssue");
-          if (labels?.pageInfo.hasNextPage) {
-            labels = next.labels;
-            if (next.labels === null) {
-              return yield* invalid("getIssue", "GitHub did not return complete issue labels.");
-            }
-            allLabels.push(
-              ...(next.labels.nodes ?? []).flatMap((node) =>
-                node === null ? [] : [{ name: node.name, color: node.color }],
-              ),
-            );
-          }
-          if (assignees.pageInfo.hasNextPage) {
-            assignees = next.assignees;
-            allAssignees.push(
-              ...(next.assignees.nodes ?? []).flatMap((node) =>
-                node === null
-                  ? []
-                  : [{ login: node.login, name: node.name, avatarUrl: node.avatarUrl }],
-              ),
-            );
-          }
+    getIssue: Effect.fn("GitHubIssueTracker.getIssue")(function* (input) {
+      const { owner, name, number } = yield* issue(input, "getIssue");
+      const result = yield* client
+        .IssueDetail({ owner, name, number })
+        .pipe(graphql(input.host, "getIssue"));
+      const detail = toIssueDetail(result);
+      const raw = result.repository?.issue;
+      if (detail === null || raw == null) return yield* notFound("getIssue");
+      // Editing replaces these sets. Finish their pages before handing them to a client.
+      let labels = raw.labels;
+      let assignees = raw.assignees;
+      const seen = new Set<string>();
+      const allLabels = [...detail.labels];
+      const allAssignees = [...detail.assignees];
+      while (labels?.pageInfo.hasNextPage === true || assignees.pageInfo.hasNextPage) {
+        const labelsCursor = labels?.pageInfo.hasNextPage ? labels.pageInfo.endCursor : null;
+        const assigneesCursor = assignees.pageInfo.hasNextPage
+          ? assignees.pageInfo.endCursor
+          : null;
+        const key = `${labelsCursor ?? ""} ${assigneesCursor ?? ""}`;
+        if (
+          (labels?.pageInfo.hasNextPage && labelsCursor === null) ||
+          (assignees.pageInfo.hasNextPage && assigneesCursor === null) ||
+          seen.has(key)
+        ) {
+          return yield* invalid(
+            "getIssue",
+            "GitHub did not return complete issue labels or assignees.",
+          );
         }
-        return { ...detail, labels: allLabels, assignees: allAssignees };
-      }),
+        seen.add(key);
+        const page = yield* client
+          .IssueCollections({ owner, name, number, labelsCursor, assigneesCursor })
+          .pipe(graphql(input.host, "getIssue"));
+        const next = page.repository?.issue;
+        if (next == null) return yield* notFound("getIssue");
+        if (labels?.pageInfo.hasNextPage) {
+          labels = next.labels;
+          if (next.labels === null) {
+            return yield* invalid("getIssue", "GitHub did not return complete issue labels.");
+          }
+          allLabels.push(
+            ...(next.labels.nodes ?? []).flatMap((node) =>
+              node === null ? [] : [{ name: node.name, color: node.color }],
+            ),
+          );
+        }
+        if (assignees.pageInfo.hasNextPage) {
+          assignees = next.assignees;
+          allAssignees.push(
+            ...(next.assignees.nodes ?? []).flatMap((node) =>
+              node === null
+                ? []
+                : [{ login: node.login, name: node.name, avatarUrl: node.avatarUrl }],
+            ),
+          );
+        }
+      }
+      return { ...detail, labels: allLabels, assignees: allAssignees };
+    }),
 
     getComments: (input) =>
       issue(input, "getComments").pipe(
@@ -365,38 +364,37 @@ export const make = Effect.gen(function* () {
           : {}),
       }),
 
-    setReaction: (input) =>
-      Effect.gen(function* () {
-        let subjectId: string;
-        if (input.subjectId === undefined) {
-          const target = yield* verifiedIssue(input, "setReaction");
-          subjectId = target.id;
-        } else {
-          const { owner, name, number } = yield* issue(input, "setReaction");
-          // Node ids are global: prove the comment belongs to this issue before writing.
-          const result = yield* client
-            .IssueCommentScope({ owner, name, number, commentId: input.subjectId })
-            .pipe(graphql(input.host, "setReaction"));
-          const expected = result.repository?.issue?.id;
-          if (
-            expected === undefined ||
-            result.node?.__typename !== "IssueComment" ||
-            result.node.issue.id !== expected
-          ) {
-            return yield* invalid(
-              "setReaction",
-              "The comment does not belong to the selected issue.",
-            );
-          }
-          subjectId = input.subjectId;
+    setReaction: Effect.fn("GitHubIssueTracker.setReaction")(function* (input) {
+      let subjectId: string;
+      if (input.subjectId === undefined) {
+        const target = yield* verifiedIssue(input, "setReaction");
+        subjectId = target.id;
+      } else {
+        const { owner, name, number } = yield* issue(input, "setReaction");
+        // Node ids are global: prove the comment belongs to this issue before writing.
+        const result = yield* client
+          .IssueCommentScope({ owner, name, number, commentId: input.subjectId })
+          .pipe(graphql(input.host, "setReaction"));
+        const expected = result.repository?.issue?.id;
+        if (
+          expected === undefined ||
+          result.node?.__typename !== "IssueComment" ||
+          result.node.issue.id !== expected
+        ) {
+          return yield* invalid(
+            "setReaction",
+            "The comment does not belong to the selected issue.",
+          );
         }
-        const variables = { subjectId, content: gitHubReactionContent(input.content) };
-        yield* (
-          input.reacted
-            ? client.AddReaction(variables).pipe(Effect.asVoid)
-            : client.RemoveReaction(variables).pipe(Effect.asVoid)
-        ).pipe(graphql(input.host, "setReaction"));
-      }),
+        subjectId = input.subjectId;
+      }
+      const variables = { subjectId, content: gitHubReactionContent(input.content) };
+      yield* (
+        input.reacted
+          ? client.AddReaction(variables).pipe(Effect.asVoid)
+          : client.RemoveReaction(variables).pipe(Effect.asVoid)
+      ).pipe(graphql(input.host, "setReaction"));
+    }),
 
     listTemplates: (input) =>
       repository(input.scope, "listTemplates").pipe(
