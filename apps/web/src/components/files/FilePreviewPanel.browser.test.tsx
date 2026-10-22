@@ -88,6 +88,6 @@ describe("rendered markdown file preview", () => {
 
     await screen.rerender(panel("AGENTS.md"));
     await expect.element(screen.getByText("Agents paragraph 0.")).toBeInTheDocument();
-    await expect.poll(() => viewport(screen.container).scrollTop).toBe(1800);
+    await vi.waitFor(() => expect(viewport(screen.container).scrollTop).toBe(1800));
   });
 });
