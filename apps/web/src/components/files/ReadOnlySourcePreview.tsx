@@ -18,7 +18,7 @@ export default function ReadOnlySourcePreview(props: {
   const resolvedTheme = useRenderedAppearance();
   const wordWrap = useClientSettings((settings) => settings.wordWrap);
   const onSelectionPostRender = useSourceTextSelection(props.text);
-  const { onPostRender } = props;
+  const { onPostRender, text } = props;
   return (
     <DiffWorkerPoolProvider>
       <Virtualizer
@@ -41,7 +41,7 @@ export default function ReadOnlySourcePreview(props: {
             unsafeCSS: FILE_LINK_REVEAL_UNSAFE_CSS,
             onPostRender: (fileContainer, instance, phase) => {
               onPostRender?.(fileContainer, instance, phase);
-              onSelectionPostRender(fileContainer, phase);
+              onSelectionPostRender(fileContainer, phase, text);
             },
           }}
           className="min-h-full"

@@ -1,5 +1,5 @@
 import type { PostRenderPhase } from "@pierre/diffs";
-import { useEffect, useLayoutEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 // Source offsets in selection order: the anchor stays put while the focus
 // follows the pointer or keyboard, as in the DOM Selection API.
@@ -154,6 +154,18 @@ function readDomSelection(root: ShadowRoot): { anchor: DomPoint; focus: DomPoint
     : { anchor: start, focus: end };
 }
 
+// Keys that move a caret-browsing selection, and collapse it without Shift.
+const CARET_KEYS = new Set([
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowDown",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+]);
+
 function isEditableTarget(target: EventTarget | null): boolean {
   return (
     target instanceof HTMLElement &&
@@ -174,6 +186,9 @@ class SourceTextSelection {
   // The last pointer or focus interaction was in this preview, so its
   // select all and an offscreen selection's copy belong here.
   engaged = false;
+  // A caret key was pressed here, so a collapse inside a rendered row is the
+  // user cancelling the selection rather than its rows being virtualized away.
+  caretKey = false;
 
   constructor(public text: string) {}
 
@@ -199,11 +214,14 @@ class SourceTextSelection {
     return points;
   }
 
-  onPostRender = (fileContainer: HTMLElement, phase: PostRenderPhase) => {
+  // Takes the text this render drew: the parent's effects run after the
+  // child's postRender, too late to redraw new rows from the new text.
+  onPostRender = (fileContainer: HTMLElement, phase: PostRenderPhase, text: string) => {
     if (phase === "unmount") {
       if (this.host === fileContainer) this.host = null;
       return;
     }
+    this.setText(text);
     this.host = fileContainer;
     if (!this.dragging) this.redraw();
   };
@@ -274,9 +292,17 @@ class SourceTextSelection {
       anchor: domPointToOffset(this, current.anchor, false),
       focus: domPointToOffset(this, current.focus, false),
     };
-    // A collapsed selection is usually a range virtualized away. Deliberate
-    // collapses come from a click, which pointerdown already handled.
-    if (seen.anchor === null || seen.focus === null || seen.anchor === seen.focus) return;
+    if (seen.anchor === null || seen.focus === null) return;
+    if (seen.anchor === seen.focus) {
+      // A collapsed selection is usually a range virtualized away, which
+      // leaves its points outside the rows. Clicks are handled on pointerdown.
+      if (this.caretKey && domPointToOffset(this, current.focus, true) !== null) {
+        this.caretKey = false;
+        this.selection = null;
+        this.drawn = null;
+      }
+      return;
+    }
     // An endpoint still where redraw clamped it stands for the source one,
     // so extending a selection keeps its offscreen anchor.
     const { drawn, selection } = this;
@@ -294,6 +320,7 @@ class SourceTextSelection {
       if (scroller && event.target === scroller) return;
       const inside = scroller ? event.composedPath().includes(scroller) : false;
       this.engaged = inside;
+      this.caretKey = false;
       // A context menu click keeps the selection it opens on.
       if (inside && event.button !== 0) return;
       this.dragging = inside;
@@ -312,6 +339,10 @@ class SourceTextSelection {
       this.engaged = scroller ? event.composedPath().includes(scroller) : false;
     };
     const onKeyDown = (event: KeyboardEvent) => {
+      if (CARET_KEYS.has(event.key)) {
+        this.caretKey = this.engaged && !isEditableTarget(event.target);
+        return;
+      }
       if (event.key.toLowerCase() !== "a" || !(event.metaKey || event.ctrlKey) || event.altKey) {
         return;
       }
@@ -368,7 +399,6 @@ class SourceTextSelection {
  */
 export function useSourceTextSelection(text: string) {
   const [selection] = useState(() => new SourceTextSelection(text));
-  useLayoutEffect(() => selection.setText(text), [selection, text]);
   useEffect(() => selection.listen(), [selection]);
   return selection.onPostRender;
 }
