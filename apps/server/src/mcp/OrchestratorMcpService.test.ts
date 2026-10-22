@@ -1535,6 +1535,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           getThreadShell: (threadId) =>
             Effect.succeed({
               ...liveThreadShell(threadId, { activeRunId: null }),
+              latestRunId: parentRunId,
               pendingBackgroundTasks: [
                 {
                   taskId: "native-background-subagent",
