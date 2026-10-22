@@ -738,6 +738,9 @@ export const layer: Layer.Layer<
                       type: "checkpoint.capture" as const,
                       runId: input.run.id,
                       scopeId: input.checkpointScope.id,
+                      ...(input.providerThread.providerSessionId === null
+                        ? {}
+                        : { providerSessionId: input.providerThread.providerSessionId }),
                     },
                   },
                 ]

@@ -408,7 +408,6 @@ export interface ProjectionStoreV2Shape {
   readonly getMessageCount: (threadId: ThreadId) => Effect.Effect<number, ProjectionStoreV2Error>;
   readonly hasSiblingThreadWithWorktreePath: (input: {
     readonly threadId: ThreadId;
-    readonly projectId: ProjectId;
     readonly worktreePath: string;
   }) => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly getNextTurnItemOrdinal: (
@@ -5265,8 +5264,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       (input) =>
         sql<{ readonly thread_id: string }>`
           SELECT thread_id FROM orchestration_v2_projection_threads
-          WHERE project_id = ${input.projectId}
-            AND thread_id != ${input.threadId}
+          WHERE thread_id != ${input.threadId}
             AND deleted_at IS NULL
             AND archived_at IS NULL
             AND json_extract(payload_json, '$.worktreePath') = ${input.worktreePath}
@@ -6893,7 +6891,6 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             [...state.projections.values()].some(
               ({ thread }) =>
                 thread.id !== input.threadId &&
-                thread.projectId === input.projectId &&
                 thread.worktreePath === input.worktreePath &&
                 thread.deletedAt === null &&
                 thread.archivedAt === null,

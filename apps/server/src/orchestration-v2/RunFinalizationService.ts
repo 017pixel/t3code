@@ -4,6 +4,7 @@ import {
   CommandId,
   type OrchestrationV2ThreadShell,
   ProjectId,
+  type ProviderSessionId,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -85,7 +86,6 @@ export class RunFinalizationFollowError extends Schema.TaggedError<RunFinalizati
     operation: Schema.Literals([
       "read-thread",
       "read-run",
-      "read-provider-context",
       "read-provider-session",
       "read-session-sharing",
       "read-project",
@@ -105,6 +105,7 @@ export class RunFinalizationObserver extends Context.Reference<{
   readonly followWorktreeMove: (input: {
     readonly threadId: ThreadId;
     readonly runId: RunId;
+    readonly providerSessionId?: ProviderSessionId | undefined;
   }) => Effect.Effect<void, RunFinalizationFollowError>;
 }>("t3/orchestration-v2/RunFinalizationObserver", {
   defaultValue: () => ({
@@ -120,6 +121,7 @@ export class RunFinalizationService extends Context.Service<
       readonly threadId: ThreadId;
       readonly runId: RunId;
       readonly scopeId: CheckpointScopeId;
+      readonly providerSessionId?: ProviderSessionId | undefined;
     }) => Effect.Effect<void, RunFinalizationError>;
   }
 >()("t3/orchestration-v2/RunFinalizationService") {}
@@ -139,7 +141,7 @@ const make = Effect.gen(function* () {
           (cause) => new RunFinalizationError({ ...input, operation: "capture-checkpoint", cause }),
         ),
       );
-    yield* observer.followWorktreeMove({ threadId: input.threadId, runId: input.runId }).pipe(
+    yield* observer.followWorktreeMove(input).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("worktree-location follow failed", {
           threadId: input.threadId,
@@ -228,10 +230,15 @@ export const layerObserver = Layer.effect(
     const followWorktreeMove = Effect.fn("RunFinalizationService.followWorktreeMove")(function* ({
       threadId,
       runId,
+      providerSessionId,
     }: {
       readonly threadId: ThreadId;
       readonly runId: RunId;
+      readonly providerSessionId?: ProviderSessionId | undefined;
     }) {
+      // Queue promotion can replace the provider thread's session, so the capture
+      // effect carries the one this run used.
+      if (providerSessionId === undefined) return;
       const thread = yield* projections
         .getThreadShell(threadId)
         .pipe(
@@ -259,26 +266,7 @@ export const layerObserver = Layer.effect(
         const active = runs.find((candidate) => candidate.id === thread.activeRunId);
         if (active?.status !== "starting" || active.startedAt !== null) return;
       }
-      const { providerThreadId, providerInstanceId } = run;
-      if (providerThreadId === null) return;
-      const providerContext = yield* projections
-        .getThreadProviderContext(threadId, providerInstanceId)
-        .pipe(
-          Effect.mapError(
-            (cause) =>
-              new RunFinalizationFollowError({
-                threadId,
-                operation: "read-provider-context",
-                cause,
-              }),
-          ),
-        );
-      // A queued successor may already have selected a different provider thread.
-      const providerSessionId = providerContext.providerThreads.find(
-        (providerThread) => providerThread.id === providerThreadId,
-      )?.providerSessionId;
-      if (providerSessionId == null) return;
-      // Queue promotion can detach the binding before this finishing run follows its session.
+      // Queue promotion can also detach the binding before this run follows its session.
       const session = yield* projections.getProviderSession(threadId, providerSessionId).pipe(
         Effect.mapError(
           (cause) =>

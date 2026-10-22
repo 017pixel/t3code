@@ -92,6 +92,8 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     type: Schema.Literal("checkpoint.capture"),
     runId: RunId,
     scopeId: CheckpointScopeId,
+    // Queue promotion can replace the provider thread's session before capture runs.
+    providerSessionId: Schema.optional(ProviderSessionId),
   }),
   Schema.Struct({
     type: Schema.Literal("scheduled-tasks.cleanup"),

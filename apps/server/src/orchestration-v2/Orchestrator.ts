@@ -2789,10 +2789,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         !(yield* projectionStore
           .hasSiblingThreadWithWorktreePath({
             threadId: command.threadId,
-            projectId: thread.projectId,
             worktreePath: targetWorktreePath,
           })
-          .pipe(mapDispatchError(command)));
+          .pipe(mapDispatchError(command))) &&
+        // Another project rooted at this checkout shares it with that project's threads.
+        Option.isNone(
+          yield* projects
+            .findActiveByWorkspaceRoot(targetWorktreePath)
+            .pipe(mapDispatchError(command)),
+        );
       if (!exclusive) {
         if (command.worktreePath !== undefined) {
           metadataBranchOverride = null;
@@ -9145,6 +9150,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             type: "checkpoint.capture",
             runId: run.id,
             scopeId,
+            ...(providerThread?.providerSessionId == null
+              ? {}
+              : { providerSessionId: providerThread.providerSessionId }),
           },
         } satisfies PendingOrchestrationEffectV2,
       ]);

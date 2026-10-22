@@ -2324,7 +2324,12 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
                     },
                   ],
                 });
-                yield* finalization.finalize({ threadId, runId, scopeId });
+                yield* finalization.finalize({
+                  threadId,
+                  runId,
+                  scopeId,
+                  providerSessionId: providerThread.providerSessionId!,
+                });
               });
             const location = Effect.map(
               orchestrator.getThreadProjection(threadId),
@@ -2486,12 +2491,13 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const projectId = ProjectId.make("follow-guards-project");
       const threadId = ThreadId.make("follow-guards-thread");
       const worktreePath = "/repo/guards";
+      // The sibling belongs to another project; sharing is per checkout, not per project.
       for (const id of [threadId, ThreadId.make("follow-guards-sibling")]) {
         yield* orchestrator.dispatch({
           type: "thread.create",
           commandId: CommandId.make(`create-${id}`),
           threadId: id,
-          projectId,
+          projectId: id === threadId ? projectId : ProjectId.make("follow-guards-other-project"),
           createdBy: "user",
           creationSource: "web",
           title: "Guard",
@@ -2531,6 +2537,29 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         assert.instanceOf(staleRun, Orchestrator.OrchestratorDispatchError);
         assert.equal((yield* orchestrator.getThreadProjection(threadId)).thread.branch, "feature");
       }
+      // A checkout that is another project's root keeps the move but not the branch.
+      yield* seedProject({
+        projectId: ProjectId.make("follow-guards-rooted-project"),
+        title: "Rooted",
+        workspaceRoot: "/repo/rooted",
+        defaultModelSelection: null,
+        createdAt: "2026-09-17T00:00:00.000Z",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("follow-guards-rooted"),
+        threadId,
+        worktreePath: "/repo/rooted",
+        branch: "rooted",
+        expectedBranch: "feature",
+        expectedWorktreePath: worktreePath,
+        requireExclusiveWorktree: true,
+      });
+      const rooted = (yield* orchestrator.getThreadProjection(threadId)).thread;
+      assert.deepEqual(
+        { worktreePath: rooted.worktreePath, branch: rooted.branch },
+        { worktreePath: "/repo/rooted", branch: null },
+      );
     }),
   );
 
@@ -6932,7 +6961,14 @@ const queueWorktreeVariants = (move: "enter" | "exit-remove") => [
           instance,
         })),
       ]
-    : []),
+    : [
+        {
+          move,
+          terminalStatus: "waiting" as const,
+          instance: claudeProviderInstance,
+          modelSwitch: true,
+        },
+      ]),
 ];
 
 it.layer(Layer.fresh(layerQueueWorktreeTest))("worktree moves with queued messages", (it) => {
@@ -6943,6 +6979,8 @@ it.layer(Layer.fresh(layerQueueWorktreeTest))("worktree moves with queued messag
         Effect.gen(function* () {
           const { move, terminalStatus, instance } = variant;
           const afterFailure = "afterFailure" in variant;
+          // Promotion replaces the moved session when the queued message changes model.
+          const modelSwitch = "modelSwitch" in variant;
           const rootRepoint =
             move === "root-repoint" ||
             move === "root-repoint-non-git" ||
@@ -7041,7 +7079,9 @@ it.layer(Layer.fresh(layerQueueWorktreeTest))("worktree moves with queued messag
                       instanceId: instance.instanceId,
                       model:
                         instance.driverKind === claudeProviderInstance.driverKind
-                          ? "claude-sonnet-4-6"
+                          ? modelSwitch
+                            ? "claude-opus-4-6"
+                            : "claude-sonnet-4-6"
                           : "gpt-5.4",
                     },
                   }
@@ -7449,7 +7489,12 @@ it.layer(Layer.fresh(layerQueueWorktreeTest))("worktree moves with queued messag
                 id: `effect:checkpoint.capture:${run.id}`,
                 commandId: CommandId.make(`command:effect:checkpoint.capture:${run.id}`),
                 threadId,
-                request: { type: "checkpoint.capture", runId: run.id, scopeId: scope.id },
+                request: {
+                  type: "checkpoint.capture",
+                  runId: run.id,
+                  scopeId: scope.id,
+                  providerSessionId: providerThread.providerSessionId!,
+                },
               },
             ],
           });
@@ -7697,7 +7742,7 @@ it.layer(Layer.fresh(layerQueueWorktreeTest))("worktree moves with queued messag
             expect
               .soft(
                 starts,
-                `${move}/${terminalStatus}/${instance.instanceId}${afterFailure ? "/after-failure" : ""}`,
+                `${move}/${terminalStatus}/${instance.instanceId}${afterFailure ? "/after-failure" : ""}${modelSwitch ? "/model-switch" : ""}`,
               )
               .toEqual([
                 {

@@ -448,6 +448,7 @@ export const layerExecutor: Layer.Layer<
                 threadId: effect.threadId,
                 runId: effect.request.runId,
                 scopeId: effect.request.scopeId,
+                providerSessionId: effect.request.providerSessionId,
               })
               .pipe(
                 Effect.mapError(
