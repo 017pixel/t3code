@@ -117,6 +117,61 @@ it.effect(
   },
 );
 
+it.effect("re-seeds a migration-only V2 store when V1 gained threads after the copy", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-v1-v2-stale-"));
+  const sourcePath = NodePath.join(directory, "state.sqlite");
+  const destinationPath = NodePath.join(directory, "statev2.sqlite");
+  const seed = Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations({ toMigrationInclusive: 52 });
+    yield* sql`INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+    VALUES ('project-a', 'Project A', '/tmp/project-a', '[]', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`;
+    yield* sql`INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, created_at, updated_at)
+    VALUES ('thread-a', 'project-a', 'First V1 thread', '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', 'default', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`;
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: sourcePath })));
+
+  return Effect.gen(function* () {
+    yield* seed;
+    const config = yield* ServerConfig.ServerConfig;
+    const layerDatabase = SqlitePersistence.layerConfig.pipe(
+      Layer.provide(ServerConfig.layer({ ...config, dbPath: destinationPath })),
+    );
+    const layerStores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
+      Layer.provideMerge(layerDatabase),
+    );
+    const layerSink = EventSink.layer.pipe(Layer.provide(layerStores));
+    const layerImporter = LegacyV1ThreadImporter.layer.pipe(
+      Layer.provideMerge(Layer.mergeAll(layerStores, layerSink)),
+    );
+    const startV2 = Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* (yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter).reconcileShells;
+      const rows =
+        yield* sql`SELECT thread_id FROM orchestration_v2_projection_threads ORDER BY thread_id`;
+      return rows.map((row) => row.thread_id);
+    }).pipe(Effect.provide(layerImporter));
+
+    assert.deepEqual(yield* startV2, ["thread-a"]);
+
+    const v1 = new NodeSqlite.DatabaseSync(sourcePath);
+    try {
+      v1.exec(`INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+        VALUES ('project-b', 'Project B', '/tmp/project-b', '[]', '2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z');
+        INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, created_at, updated_at)
+        VALUES ('thread-b', 'project-b', 'Newer V1 thread', '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', 'default', '2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z');`);
+    } finally {
+      v1.close();
+    }
+
+    assert.deepEqual(yield* startV2, ["thread-a", "thread-b"]);
+  }).pipe(
+    Effect.provide(
+      ServerConfig.layerTest(directory, directory).pipe(Layer.provideMerge(NodeServices.layer)),
+    ),
+    Effect.ensuring(Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true }))),
+  );
+});
+
 it.effect("includes committed WAL data and does not publish a failed snapshot", () => {
   const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-v2-snapshot-"));
   const sourcePath = NodePath.join(directory, "state.sqlite");
