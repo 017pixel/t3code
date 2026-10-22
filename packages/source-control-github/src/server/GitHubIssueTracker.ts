@@ -142,7 +142,10 @@ export const make = Effect.gen(function* () {
   const notFound = (operation: string) =>
     invalid(operation, "GitHub could not find the requested issue.", "not-found");
 
-  const repository = Effect.fnUntraced(function* (scope: string, operation: string) {
+  const repository = Effect.fn("GitHubIssueTracker.repository")(function* (
+    scope: string,
+    operation: string,
+  ) {
     if (!REPOSITORY.test(scope) || scope.endsWith("/.") || scope.endsWith("/..")) {
       return yield* invalid(operation, "A repository was named that GitHub cannot address.");
     }
@@ -150,7 +153,7 @@ export const make = Effect.gen(function* () {
     return { owner, name };
   });
 
-  const issue = Effect.fnUntraced(function* (
+  const issue = Effect.fn("GitHubIssueTracker.issue")(function* (
     input: { readonly scope: string; readonly key: string },
     operation: string,
   ) {
@@ -169,7 +172,7 @@ export const make = Effect.gen(function* () {
     ) =>
       effect.pipe(GitHubGraphQlClient.call({ host, operation }), Effect.mapError(fail(operation)));
 
-  const verifiedIssue = Effect.fnUntraced(function* (
+  const verifiedIssue = Effect.fn("GitHubIssueTracker.verifiedIssue")(function* (
     input: { readonly host: string; readonly scope: string; readonly key: string },
     operation: string,
   ) {
