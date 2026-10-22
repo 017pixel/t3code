@@ -135,7 +135,10 @@ export function MediaVideoPlayer({
         <span
           role="alert"
           className={cn(
-            "flex aspect-video max-h-full min-h-28 w-full flex-col items-center justify-center gap-3 rounded-lg border border-border/40 bg-muted/40 p-4 text-center text-sm text-muted-foreground",
+            "flex aspect-video w-full flex-col items-center justify-center gap-3 rounded-lg border border-border/40 bg-muted/40 p-4 text-center text-sm text-muted-foreground",
+            // The explanation is too long for a fixed frame in narrow authored videos, so the
+            // aspect ratio's automatic minimum lets the card grow to fit it.
+            !unavailableDetail && "max-h-full min-h-28",
             stateClassName,
           )}
         >
