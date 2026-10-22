@@ -236,7 +236,8 @@ export function capClaudeCatalogEffort(
   if (!maxEffortLevel) return models;
   const capRank = claudeEffortRank(maxEffortLevel);
   return models.map((model) => {
-    if (!model.capabilities?.optionDescriptors) return model;
+    // Custom model labels are the user's, and may already carry a copied "(capped to …)" suffix.
+    if (model.isCustom || !model.capabilities?.optionDescriptors) return model;
     return {
       ...model,
       capabilities: {

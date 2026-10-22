@@ -68,6 +68,19 @@ lines.on("line", (line) => {
     );
     return;
   }
+  if (message.request?.subtype === "get_settings" && process.env.T3_CLAUDE_SETTINGS_UNSUPPORTED) {
+    process.stdout.write(
+      JSON.stringify({
+        type: "control_response",
+        response: {
+          subtype: "error",
+          request_id: message.request_id,
+          error: "Unsupported control request subtype: get_settings",
+        },
+      }) + "\n",
+    );
+    return;
+  }
   if (message.request?.subtype === "get_settings") {
     process.stdout.write(
       JSON.stringify({

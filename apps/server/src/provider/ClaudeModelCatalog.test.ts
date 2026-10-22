@@ -297,4 +297,27 @@ describe("Claude model catalog", () => {
       ],
     );
   });
+
+  it("leaves custom model effort labels alone under a cap", () => {
+    const custom = {
+      slug: "claude-custom-copy",
+      name: "Copy",
+      isCustom: true,
+      capabilities: {
+        optionDescriptors: [
+          {
+            id: "effort",
+            label: "Reasoning",
+            type: "select" as const,
+            options: [
+              { id: "high", label: "High", isDefault: true },
+              { id: "max", label: "Max (capped to High)" },
+            ],
+          },
+        ],
+      },
+    };
+
+    assert.deepStrictEqual(capClaudeCatalogEffort({ models: [] }, [custom], "high"), [custom]);
+  });
 });
