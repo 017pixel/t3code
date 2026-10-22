@@ -15,7 +15,7 @@ def insert(table, **values):
     c.execute(f"INSERT OR REPLACE INTO {table} ({','.join(values)}) VALUES ({','.join('?' for _ in values)})",list(values.values()))
 def dump(v): return json.dumps(v,ensure_ascii=False)
 t='2026-10-01T12:00:00.000Z';tid='proof-22181';pid='proof-project-22181';rid='proof-run-22181'
-root='/tmp/issue-22181-workspace';
+root=str(home/'workspace')
 import shutil
 shutil.copytree(p/'workspace',root,dirs_exist_ok=True)
 # Stored as .txt so the repo's TS tooling (knip) never sees a fake source file.
