@@ -32,6 +32,9 @@ NodeFS.writeFileSync(
   ].join("\n"),
 );
 NodeFS.chmodSync(wrapper, 0o700);
+const localHarness = NodePath.join(scratch, "localharness_external");
+NodeFS.writeFileSync(localHarness, "#!/bin/sh\nexit 0\n");
+NodeFS.chmodSync(localHarness, 0o700);
 const settings = JSON.parse(NodeFS.readFileSync(settingsPath, "utf8"));
 settings.providerInstances ??= {};
 settings.providerInstances.antigravity = {
