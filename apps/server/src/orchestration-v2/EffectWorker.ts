@@ -604,8 +604,10 @@ const uncertainSteer = (
   cause: Cause.Cause<unknown>,
 ) => {
   if (effect.request.type !== "provider-turn.steer") return false;
+  const seen = new Set<object>();
   let error: unknown = Cause.squash(cause);
-  while (typeof error === "object" && error !== null) {
+  while (typeof error === "object" && error !== null && !seen.has(error)) {
+    seen.add(error);
     if (Cause.isTimeoutError(error)) return true;
     error = "cause" in error ? error.cause : undefined;
   }

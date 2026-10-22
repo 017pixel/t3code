@@ -8,6 +8,7 @@ import {
   RunAttemptId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import type * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
@@ -393,7 +394,10 @@ export const layer: Layer.Layer<
                     threadId: input.threadId,
                     operation: "steer",
                     providerTurnId: input.providerTurnId,
-                    turnCompleted: current.providerTurn?.status === "completed",
+                    // A timed-out steer may have been accepted, so it must not be
+                    // resent as a follow-up even if the turn has since completed.
+                    turnCompleted:
+                      !Cause.isTimeoutError(cause) && current.providerTurn?.status === "completed",
                     cause,
                   });
                 }),
