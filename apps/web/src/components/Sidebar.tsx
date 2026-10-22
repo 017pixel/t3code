@@ -1285,6 +1285,25 @@ export default function Sidebar() {
         : () => void router.navigate({ to: "/" });
   };
 
+  // A remote change can land while the action is pending; only a change to where this
+  // thread sits counts as the action's own.
+  const trustThreadChange = (threadRef: ScopedThreadRef) => {
+    const placement = () => {
+      const thread = readThreadShell(threadRef);
+      return thread === null
+        ? null
+        : [
+            thread.archivedAt,
+            thread.settledOverride,
+            thread.snoozedUntil,
+            thread.pinnedAt,
+            thread.pinOrderKey,
+            thread.activeOrderKey,
+          ].join("|");
+    };
+    const before = placement();
+    return listPressGuardRef.current?.trust(() => placement() !== before);
+  };
   const attemptSettle = (
     threadRef: ScopedThreadRef,
     opts: { coSettlingKeys?: ReadonlySet<string> } = {},
@@ -1293,11 +1312,12 @@ export default function Sidebar() {
       const threadKey = scopedThreadKey(threadRef);
       if (settlingThreadKeysRef.current.has(threadKey)) return;
       settlingThreadKeysRef.current.add(threadKey);
-      listPressGuardRef.current?.trust();
+      const revokeTrust = trustThreadChange(threadRef);
       const navigateAfterSettle = planForwardNavigation(threadKey, opts.coSettlingKeys);
       const result = await settleThread(threadRef);
       settlingThreadKeysRef.current.delete(threadKey);
       if (result._tag === "Failure") {
+        revokeTrust?.();
         if (!isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);
           toastManager.add(
@@ -1333,9 +1353,10 @@ export default function Sidebar() {
     }
   };
   const attemptUnsettle = (threadRef: ScopedThreadRef) => {
-    listPressGuardRef.current?.trust();
+    const revokeTrust = trustThreadChange(threadRef);
     void (async () => {
       const result = await unsettleThread(threadRef);
+      if (result._tag === "Failure") revokeTrust?.();
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add(
@@ -1349,9 +1370,10 @@ export default function Sidebar() {
     })();
   };
   const attemptUnsnooze = (threadRef: ScopedThreadRef) => {
-    listPressGuardRef.current?.trust();
+    const revokeTrust = trustThreadChange(threadRef);
     void (async () => {
       const result = await unsnoozeThread(threadRef);
+      if (result._tag === "Failure") revokeTrust?.();
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add(
@@ -1529,13 +1551,14 @@ export default function Sidebar() {
     setOptimisticDrop(null);
   }
   const attemptPin = (threadRef: ScopedThreadRef) => {
-    listPressGuardRef.current?.trust();
+    const revokeTrust = trustThreadChange(threadRef);
     void (async () => {
       // Fresh pins take the top of the arranged run: pinThread computes a
       // key before the smallest key across ALL pinned shells — including
       // snoozed pins hidden from this list, whose keys are still part of
       // the run — so the new pin can't land beneath a hidden head.
       const result = await pinThread(threadRef);
+      if (result._tag === "Failure") revokeTrust?.();
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add(
@@ -1549,9 +1572,12 @@ export default function Sidebar() {
     })();
   };
   const attemptUnpin = (threadRef: ScopedThreadRef) => {
-    listPressGuardRef.current?.trust();
+    const revokeTrust = trustThreadChange(threadRef);
     void (async () => {
       const result = await confirmAndUnpinThread(threadRef);
+      // A cancelled confirmation also succeeds; the thread is then still pinned.
+      if (result._tag === "Failure" || readThreadShell(threadRef)?.pinnedAt != null)
+        revokeTrust?.();
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add(
@@ -1806,7 +1832,7 @@ export default function Sidebar() {
       assignedKeys: new Map(assignments.map(({ id, orderKey }) => [id, orderKey])),
     };
     setOptimisticDrop(drop);
-    listPressGuardRef.current?.trust();
+    const revokeTrust = listPressGuardRef.current?.trust();
     void (async () => {
       const run = async (
         operation: Promise<AtomCommandResult<unknown, unknown>>,
@@ -1814,6 +1840,7 @@ export default function Sidebar() {
       ) => {
         const result = await operation;
         if (result._tag === "Success") return true;
+        revokeTrust?.();
         setOptimisticDrop((current) => (current === drop ? null : current));
         if (!isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);
@@ -1898,11 +1925,12 @@ export default function Sidebar() {
       return { status: "skipped" } as const;
     }
     snoozingThreadKeysRef.current.add(threadKey);
-    listPressGuardRef.current?.trust();
+    const revokeTrust = trustThreadChange(threadRef);
     const navigateAfterSnooze = planForwardNavigation(threadKey, opts.coSnoozingKeys);
     const result = await snoozeThread(threadRef, preset.snoozedUntil);
     snoozingThreadKeysRef.current.delete(threadKey);
     if (result._tag === "Failure") {
+      revokeTrust?.();
       return isAtomCommandInterrupted(result)
         ? ({ status: "interrupted" } as const)
         : ({ status: "failure", error: squashAtomCommandFailure(result) } as const);

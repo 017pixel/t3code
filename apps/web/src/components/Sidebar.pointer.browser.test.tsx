@@ -204,6 +204,63 @@ describe("sidebar stale press guard", () => {
     expect(clicked).toEqual(["alpha", "gamma"]);
   });
 
+  // regression: a local action that fails must not lend its trust to a later remote shift
+  it("swallows a remote shift after the user's own action fails", () => {
+    const { stack, guard, rows, clicked, press } = list();
+    using _list = stack;
+    const [alpha, beta] = rows;
+    let revoke: (() => void) | undefined;
+    alpha!.addEventListener("click", () => {
+      revoke = guard.trust();
+    });
+    alpha!.dispatchEvent(pointer("pointermove", { pointerType: "mouse", buttons: 0 }));
+    press(alpha!);
+    revoke?.();
+    alpha!.remove();
+    guard.rowsChanged();
+
+    press(beta!);
+    press(beta!);
+
+    expect(clicked).toEqual(["alpha", "beta"]);
+  });
+
+  // regression: trust granted before the mouse left must not survive its return
+  it("swallows a remote shift after the mouse leaves and returns during a local action", () => {
+    const { stack, guard, rows, clicked, press } = list();
+    using _list = stack;
+    const [alpha, beta] = rows;
+    alpha!.addEventListener("click", () => guard.trust());
+    alpha!.dispatchEvent(pointer("pointermove", { pointerType: "mouse", buttons: 0 }));
+    press(alpha!);
+    alpha!.parentElement!.dispatchEvent(new PointerEvent("pointerleave", { pointerType: "mouse" }));
+    alpha!.dispatchEvent(pointer("pointermove", { pointerType: "mouse", buttons: 0, clientY: 12 }));
+    alpha!.remove();
+    guard.rowsChanged();
+
+    press(beta!);
+    press(beta!);
+
+    expect(clicked).toEqual(["alpha", "beta"]);
+  });
+
+  // regression: a remote shift while the user's own action is pending must not take its trust
+  it("swallows a remote shift that lands while the user's own action is pending", () => {
+    const { stack, guard, rows, clicked, press } = list();
+    using _list = stack;
+    const [alpha, beta] = rows;
+    alpha!.addEventListener("click", () => guard.trust(() => false));
+    alpha!.dispatchEvent(pointer("pointermove", { pointerType: "mouse", buttons: 0 }));
+    press(alpha!);
+    alpha!.remove();
+    guard.rowsChanged();
+
+    press(beta!);
+    press(beta!);
+
+    expect(clicked).toEqual(["alpha", "beta"]);
+  });
+
   function scrolledList() {
     const { stack, guard, rows, clicked, press } = list();
     const scroller = document.createElement("div");

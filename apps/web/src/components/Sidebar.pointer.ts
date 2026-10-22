@@ -154,9 +154,9 @@ export class SidebarPointerSensor {
  * Another client can insert or remove rows while the mouse rests on the list, sliding a
  * different row under it. Hit-testing follows the new layout, so swallow the first press
  * that lands on a list child the mouse never moved onto. Touch has no hover to go stale.
- * Call `trust` when the user's own action is about to change the rows, and `rowsChanged`
- * after every committed row change, before row motion transforms the rows. The first change
- * after `trust` re-reads the row under the resting mouse, so the row it slid in takes the
+ * Call `trust` when the user's own action is about to change the rows, revoke it if that
+ * action fails, and call `rowsChanged` after every committed row change, before row motion
+ * transforms the rows. The first change after `trust` re-reads the row under the resting mouse, so the row it slid in takes the
  * next press while a later remote shift is still caught.
  */
 export function guardSidebarStalePress(list: HTMLElement) {
@@ -164,7 +164,8 @@ export function guardSidebarStalePress(list: HTMLElement) {
   let point: { x: number; y: number } | null = null;
   let hovered: Element | null = null;
   let swallowClick = false;
-  let trusted = false;
+  // The local action's pending grant: the first row change where `changed` holds takes it.
+  let trusted: { changed: () => boolean } | null = null;
   const childOf = (target: EventTarget | null) => {
     let node = target instanceof Element ? target : null;
     while (node !== null && node !== list && node.parentElement !== list) {
@@ -183,10 +184,15 @@ export function guardSidebarStalePress(list: HTMLElement) {
     point = null;
     hovered = null;
   };
+  const leave = () => {
+    forget();
+    // The rows a local action changes while the mouse is away were never under it.
+    trusted = null;
+  };
   const press = (event: PointerEvent) => {
     swallowClick = false;
     // A local action that changed no rows must not lend its trust to a later remote change.
-    trusted = false;
+    trusted = null;
     if (event.pointerType !== "mouse" || event.button !== 0) return;
     const target = childOf(event.target);
     // The mouse came back without moving onto a row, so this press is the user's aim.
@@ -211,7 +217,7 @@ export function guardSidebarStalePress(list: HTMLElement) {
     event.stopPropagation();
   };
   list.addEventListener("pointermove", move, { passive: true });
-  list.addEventListener("pointerleave", forget);
+  list.addEventListener("pointerleave", leave);
   // A wheel moves rows under the mouse on purpose. Scroll events cannot tell: the browser
   // also scrolls when a remote removal shrinks a list scrolled to its end.
   list.addEventListener("wheel", forget, { passive: true });
@@ -220,17 +226,25 @@ export function guardSidebarStalePress(list: HTMLElement) {
   return {
     /** For a finished drag: the row it moved under the mouse takes the next press. */
     forget,
-    trust: () => {
-      trusted = true;
+    /**
+     * `changed` tells the action's own row change from a remote one that lands while it is
+     * pending. Returns a revoke for an action that ends without changing the rows.
+     */
+    trust: (changed: () => boolean = () => true) => {
+      const grant = { changed };
+      trusted = grant;
+      return () => {
+        if (trusted === grant) trusted = null;
+      };
     },
     rowsChanged: () => {
-      if (!trusted) return;
-      trusted = false;
+      if (trusted === null || !trusted.changed()) return;
+      trusted = null;
       if (point !== null) hovered = childOf(document.elementFromPoint(point.x, point.y));
     },
     release: () => {
       list.removeEventListener("pointermove", move);
-      list.removeEventListener("pointerleave", forget);
+      list.removeEventListener("pointerleave", leave);
       list.removeEventListener("wheel", forget);
       list.removeEventListener("pointerdown", press, { capture: true });
       list.removeEventListener("click", click, { capture: true });
