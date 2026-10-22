@@ -57,8 +57,7 @@ server.listen(port, "127.0.0.1", () =>
       state: ".t3/desktop",
       lateAttach:
         "H1 actually captured https://example.com (not the local fixture): submit Claude sleep 5 then preview_open {url:https://example.com,open:false,reuseExistingTab:false}. Immediately CDP-evaluate setTimeout(() => { const end = Date.now() + 45000; while (Date.now() < end) {} }, 200) on the t3code:// APP renderer. After recovery preview_open same tabId open:true; evaluate body background red and innerHTML <h1>ISSUE 16901 / STEP RED</h1>, then blue/STEP BLUE. preview_snapshot {tabId,includeImage:true,save:true}.",
-      nativeHidden:
-        "C1 actually captured http://127.0.0.1:14807/A: preview_open {url:http://127.0.0.1:14807/A,open:true,reuseExistingTab:false}; select its panel tab and verify hosted webview exists. Submit Claude sleep 10, evaluate background red and #marker NATIVE HIDDEN RED, preview_snapshot {tabId,includeImage:true,save:true}, sleep 12, evaluate blue/NATIVE HIDDEN BLUE, preview_snapshot again. Immediately hide panel/floating and select thread B before first capture. Observe data-preview-rendering through turn end. Never enable built-in recording.",
+      nativeHidden: `C1 actually captured http://127.0.0.1:${port}/A: preview_open {url:http://127.0.0.1:${port}/A,open:true,reuseExistingTab:false}; select its panel tab and verify hosted webview exists. Submit Claude sleep 10, evaluate background red and #marker NATIVE HIDDEN RED, preview_snapshot {tabId,includeImage:true,save:true}, sleep 12, evaluate blue/NATIVE HIDDEN BLUE, preview_snapshot again. Immediately hide panel/floating and select thread B before first capture. Observe data-preview-rendering through turn end. Never enable built-in recording.`,
     }),
   ),
 );
