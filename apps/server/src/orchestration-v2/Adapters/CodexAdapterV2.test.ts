@@ -881,6 +881,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       Effect.void,
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
+    // Answers requests the transcript does not script; undefined forwards to the replay.
+    answerRequest: (method: string, params: unknown) => unknown = () => undefined,
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -911,8 +913,22 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                       ...client,
                       request: (method, params) =>
                         onRequest(method, params).pipe(
-                          Effect.andThen(client.request(method, params)),
+                          Effect.andThen(() => {
+                            const answer = answerRequest(method, params);
+                            return answer === undefined
+                              ? client.request(method, params)
+                              : Effect.succeed(answer as never);
+                          }),
                         ),
+                      raw: {
+                        ...client.raw,
+                        request: (method, params) => {
+                          const answer = answerRequest(method, params);
+                          return answer === undefined
+                            ? client.raw.request(method, params)
+                            : Effect.succeed(answer);
+                        },
+                      },
                     }) satisfies CodexClient.CodexAppServerClient["Service"],
                 ),
                 Effect.provide(context),
@@ -2623,6 +2639,90 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.deepEqual(
           assistantMessages(harness.events).map((event) => event.message.text),
           ["CODEX_RECOVERY_OK"],
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  // regression: #15140 Codex skips an untrusted project's config without telling the user
+  it.effect("tells the user why Codex skipped the project's MCP config", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const transcript = finalAnswerTranscript("codex-untrusted-project-config", [
+          { id: "answer", text: "No issue15140_probe tool is available." },
+        ]);
+        // Codex 0.163.0 config/read for a project missing from the user config's trusted projects.
+        const disabledReason =
+          "To load project-local config, hooks, and exec policies, add /workspace as a trusted project in /tmp/codex-home/config.toml.";
+        const harness = yield* makeCodexReplayHarness(
+          transcript,
+          undefined,
+          undefined,
+          undefined,
+          (method, params) =>
+            method !== "config/read"
+              ? undefined
+              : {
+                  config: { mcp_servers: {} },
+                  origins: {},
+                  layers:
+                    Predicate.isObject(params) &&
+                    params.cwd === "/workspace" &&
+                    params.includeLayers === true
+                      ? [
+                          {
+                            name: { type: "project", dotCodexFolder: "/workspace/.codex" },
+                            version: "sha256:project",
+                            config: {
+                              mcp_servers: {
+                                issue15140: { command: "python3", args: ["mcp.py"], enabled: true },
+                              },
+                            },
+                            disabledReason,
+                          },
+                          {
+                            name: {
+                              type: "user",
+                              file: "/tmp/codex-home/config.toml",
+                              profile: null,
+                            },
+                            version: "sha256:user",
+                            config: {},
+                          },
+                        ]
+                      : null,
+                },
+        );
+        const now = yield* DateTime.now;
+
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-codex-untrusted-project-config"),
+            text: "Reply with the requested recovery marker.",
+          }),
+        );
+        yield* harness.awaitTerminal(1);
+
+        const turnItems = harness.events.flatMap((event) =>
+          event.type === "turn_item.updated" ? [event.turnItem] : [],
+        );
+        const notices = turnItems.flatMap((item) =>
+          item.type === "system_notice"
+            ? [item.message]
+            : item.type === "notification"
+              ? [`${item.summary}\n${item.detail ?? ""}`]
+              : [],
+        );
+        assert.isTrue(
+          notices.some((notice) => notice.includes(disabledReason)),
+          `expected a chat notice containing ${JSON.stringify(disabledReason)}; turn items: ${JSON.stringify(turnItems, null, 2)}`,
         );
       }).pipe(
         Effect.provide(
