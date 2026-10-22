@@ -6559,6 +6559,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
   const startScheduleWakeupTurn = Effect.fnUntraced(function* (
     harness: Effect.Success<typeof makeWakeHarness>,
+    result = makeResultFrame({
+      uuid: "00000000-0000-4000-8000-000000002103",
+      result: "Scheduled.",
+    }),
   ) {
     const now = yield* DateTime.now;
     yield* harness.runtime.startTurn(
@@ -6579,19 +6583,21 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     })) {
       yield* Queue.offer(harness.sdkMessages, frame);
     }
-    yield* Queue.offer(
-      harness.sdkMessages,
-      makeResultFrame({ uuid: "00000000-0000-4000-8000-000000002103", result: "Scheduled." }),
-    );
+    yield* Queue.offer(harness.sdkMessages, result);
     yield* harness.awaitTerminal(1);
   });
 
   const publishedRoster = (harness: Effect.Success<typeof makeWakeHarness>) =>
     providerThreadRosterEvents(harness.events).at(-1)?.providerThread.pendingBackgroundTasks ?? [];
 
-  it.effect.each([false, true])(
-    "a fired ScheduleWakeup holds completion only while its wake turn reschedules (rescheduled=%s)",
-    (rescheduled) =>
+  it.effect.each([
+    { rescheduled: false, firedAfter: "60 seconds" },
+    { rescheduled: true, firedAfter: "60 seconds" },
+    // Claude fires one-shot wakeups up to ~90 s early, so the wake init can precede scheduledFor.
+    { rescheduled: false, firedAfter: "30 seconds" },
+  ] as const)(
+    "a fired ScheduleWakeup holds completion only while its wake turn reschedules (rescheduled=$rescheduled, fired after $firedAfter)",
+    ({ rescheduled, firedAfter }) =>
       Effect.scoped(
         Effect.gen(function* () {
           const harness = yield* makeWakeHarness;
@@ -6602,7 +6608,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             "a wakeup past the idle timeout must keep the session from being released",
           );
 
-          yield* TestClock.adjust("60 seconds");
+          yield* TestClock.adjust(firedAfter);
           yield* harness.offerAndWait(wakeTurnInit);
           yield* harness.awaitContinuation(1);
           const now = yield* DateTime.now;
@@ -6648,6 +6654,68 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
         ),
       ),
+  );
+
+  it.effect("a user turn before the wakeup fires keeps the pending wakeup's hold", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        yield* startScheduleWakeupTurn(harness);
+        yield* TestClock.adjust("10 seconds");
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-claude-schedule-wakeup-user"),
+            text: "What time is it?",
+            attachments: [],
+            providerTurnOrdinal: 2,
+          }),
+        );
+        yield* harness.offerAndWait(wakeTurnInit);
+        yield* harness.offerAndWait(
+          makeAssistantTextFrame({ uuid: "00000000-0000-4000-8000-000000002401", text: "Noon." }),
+        );
+        yield* harness.offerAndWait(
+          makeResultFrame({ uuid: "00000000-0000-4000-8000-000000002402", result: "Noon." }),
+        );
+        yield* harness.awaitTerminal(2);
+        assert.equal(harness.terminalEvents()[1]?.status, "completed");
+        assert.isTrue(backgroundWorkHoldsCompletion(publishedRoster(harness)));
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("a failed turn on a live Claude process keeps the pending wakeup's hold", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        yield* startScheduleWakeupTurn(
+          harness,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000002103",
+            result: "API Error: 529 overloaded",
+            subtype: "error_during_execution",
+            isError: true,
+            errors: ["API Error: 529 overloaded"],
+            terminalReason: "model_error",
+          }),
+        );
+        assert.equal(harness.terminalEvents()[0]?.status, "failed");
+        assert.isTrue(backgroundWorkHoldsCompletion(publishedRoster(harness)));
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
   );
 
   it.effect("ScheduleWakeup stop:true releases the pending wakeup's hold", () =>

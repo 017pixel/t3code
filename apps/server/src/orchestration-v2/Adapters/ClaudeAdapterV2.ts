@@ -4267,10 +4267,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         ) {
           if (isClaudeTurnStartMessage(message)) {
             const scheduledFor = scheduledWakeupsByNativeThread.get(nativeThreadId);
-            // The wake turn's own init is the first frame at or after the scheduled time.
+            // A turn Claude starts by itself is the wake, even before scheduledFor: Claude fires
+            // up to ~90 s early. A host turn before scheduledFor leaves the wakeup pending.
             if (
               scheduledFor !== undefined &&
-              DateTime.toEpochMillis(yield* DateTime.now) >= scheduledFor
+              ((yield* Ref.get(activeTurn)) === null ||
+                DateTime.toEpochMillis(yield* DateTime.now) >= scheduledFor)
             ) {
               scheduledWakeupsByNativeThread.delete(nativeThreadId);
             }
@@ -4731,7 +4733,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const clearPendingBackgroundTasksForNativeThread =
           /* Provider events include streaming deltas; avoid a span for each update. */
           Effect.fnUntraced(function* (nativeThreadId: string) {
-            scheduledWakeupsByNativeThread.delete(nativeThreadId);
             yield* Ref.update(pendingBackgroundTasksByNativeThread, (current) => {
               if (!current.has(nativeThreadId)) {
                 return current;
@@ -4796,6 +4797,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const preservedOpaqueTombstones = [...priorOpaqueTombstones].filter((taskId) =>
             bufferedTaskNotificationIds.has(taskId),
           );
+          scheduledWakeupsByNativeThread.delete(nativeThreadId);
           yield* clearPendingBackgroundTasksForNativeThread(nativeThreadId);
           yield* clearNativeThreadTaskIdSet(
             wakeEligibleBackgroundTasksByNativeThread,
@@ -6875,6 +6877,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   input.context.input.providerThread.nativeThreadRef?.nativeId ?? null;
                 if (nativeThreadId !== null) {
                   if (input.status !== "completed") {
+                    // Stop cancels Claude's wakeup and an exited process loses it; a failed
+                    // turn on a live process leaves it pending. Process exits null the query first.
+                    if (input.status !== "failed" || (yield* Ref.get(queryContext)) === null) {
+                      scheduledWakeupsByNativeThread.delete(nativeThreadId);
+                    }
                     yield* clearPendingBackgroundTasksForNativeThread(nativeThreadId);
                     yield* clearNativeThreadTaskIdSet(
                       wakeEligibleBackgroundTasksByNativeThread,
