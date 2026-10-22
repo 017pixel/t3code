@@ -26,4 +26,6 @@ process.exit(${JSON.stringify(fixture.exitCode)});
 );
 console.log(`Synthetic fixture: ${binaryPath}`);
 console.log("Select this binary only in an isolated environment's Muse settings, then refresh.");
-console.log("Enable Muse and clear custom models. This is not a real Muse launcher or recovery proof.");
+console.log(
+  "Enable Muse and clear custom models. This is not a real Muse launcher or recovery proof.",
+);
