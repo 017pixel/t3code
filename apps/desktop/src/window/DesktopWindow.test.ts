@@ -454,7 +454,16 @@ const makeSplashScenario = (
       ),
     );
 
-    return { layer, createCalls, mainWindow, revealedWindows } as const;
+    const closeWindow = (fake: ReturnType<typeof makeFakeBrowserWindow>) =>
+      Effect.gen(function* () {
+        yield* Ref.update(createdWindows, (windows) =>
+          windows.filter((window) => window !== fake.window),
+        );
+        fake.windowListeners.get("closed")?.();
+        yield* Effect.promise(() => Promise.resolve());
+      });
+
+    return { layer, createCalls, mainWindow, revealedWindows, closeWindow } as const;
   });
 
 const captureOne = DesktopSnapShotId.make("11111111-1111-4111-8111-111111111111");
@@ -1019,7 +1028,27 @@ describe("DesktopWindow", () => {
       }),
   );
 
-  it.effect("reopens the connecting splash on activate while the local backend is starting", () =>
+  it.effect(
+    "reopens a closed connecting splash on activate while the backend is still starting",
+    () =>
+      Effect.gen(function* () {
+        const splash = makeFakeBrowserWindow();
+        const reopenedSplash = makeFakeBrowserWindow();
+        const scenario = yield* makeSplashScenario([splash.window, reopenedSplash.window]);
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.showConnectingSplash;
+          yield* scenario.closeWindow(splash);
+
+          yield* desktopWindow.activate;
+          assert.equal(yield* Ref.get(scenario.createCalls), 2);
+          assert.isTrue(Option.isNone(yield* Ref.get(scenario.mainWindow)));
+        }).pipe(Effect.provide(scenario.layer));
+      }),
+  );
+
+  it.effect("opens no window on activate during a normal boot that never showed a splash", () =>
     Effect.gen(function* () {
       const splash = makeFakeBrowserWindow();
       const scenario = yield* makeSplashScenario([splash.window]);
@@ -1027,8 +1056,7 @@ describe("DesktopWindow", () => {
       yield* Effect.gen(function* () {
         const desktopWindow = yield* DesktopWindow.DesktopWindow;
         yield* desktopWindow.activate;
-        assert.equal(yield* Ref.get(scenario.createCalls), 1);
-        assert.isTrue(Option.isNone(yield* Ref.get(scenario.mainWindow)));
+        assert.equal(yield* Ref.get(scenario.createCalls), 0);
       }).pipe(Effect.provide(scenario.layer));
     }),
   );

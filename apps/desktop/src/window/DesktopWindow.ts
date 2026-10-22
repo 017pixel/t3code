@@ -315,6 +315,9 @@ export const make = Effect.gen(function* () {
   const rendererHistory = yield* DesktopRendererHistory.DesktopRendererHistory;
   const backendReadyRef = yield* Ref.make(false);
   const splashWindowRef = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+  // Only a start that already needed a splash may bring it back; a normal boot
+  // never shows one, even though activate fires during it.
+  const splashShownWhileStartingRef = yield* Ref.make(false);
   const context = yield* Effect.context<DesktopWindowRuntimeServices>();
   const runFork = Effect.runForkWith(context);
   const runPromise = Effect.runPromiseWith(context);
@@ -941,6 +944,7 @@ export const make = Effect.gen(function* () {
     }
     yield* rendererHistory.register(splash.webContents, { surface: "splash" });
     yield* Ref.set(splashWindowRef, Option.some(splash));
+    yield* Ref.set(splashShownWhileStartingRef, true);
     splash.once("closed", () => {
       void runPromise(Ref.set(splashWindowRef, Option.none()));
     });
@@ -1009,9 +1013,9 @@ export const make = Effect.gen(function* () {
           return;
         }
       }
-      // A splash closed during a stalled boot would otherwise leave the Dock dead
-      // until the next readiness timeout.
-      if (yield* waitingForBackend) {
+      // A splash closed during a slow start would otherwise leave Dock clicks,
+      // second launches and the update menu dead until the backend is ready.
+      if ((yield* Ref.get(splashShownWhileStartingRef)) && (yield* waitingForBackend)) {
         yield* showConnectingSplash;
         return;
       }
@@ -1021,6 +1025,7 @@ export const make = Effect.gen(function* () {
     showConnectingSplash,
     handleBackendReady: Effect.fn("desktop.window.handleBackendReady")(function* (httpBaseUrl) {
       yield* Ref.set(backendReadyRef, true);
+      yield* Ref.set(splashShownWhileStartingRef, false);
       yield* logWindowInfo("backend ready", { source: "http", url: httpBaseUrl.href });
       yield* createMainIfBackendReady;
     }),
