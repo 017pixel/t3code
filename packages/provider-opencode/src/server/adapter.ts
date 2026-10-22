@@ -3068,8 +3068,10 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
               let nativeSession = unwrapData("session.get", response);
               // OpenCode keeps the rules a session was created with, so a
               // runtime mode change must replace them or the old mode's
-              // approvals survive the switch.
-              if (threadInput.runtimePolicy !== undefined) {
+              // approvals survive the switch. Task child sessions carry
+              // agent-specific restrictions the root policy cannot rebuild,
+              // so their rules stay as installed when the task started.
+              if (threadInput.runtimePolicy !== undefined && nativeSession.parentID === undefined) {
                 const permission = openCodePermissionRules(threadInput.runtimePolicy);
                 nativeSession = unwrapData(
                   "session.update",

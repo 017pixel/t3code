@@ -2191,7 +2191,10 @@ describe("OpenCodeAdapterV2", () => {
     ),
   );
 
-  it.effect("installs Full access rules on a native session it resumes from Auto", () =>
+  it.effect.each([
+    { kind: "root", nativeParentId: undefined },
+    { kind: "task child", nativeParentId: "ses_native_parent" },
+  ])("resumes a $kind native session from Auto under Full access", ({ nativeParentId }) =>
     Effect.gen(function* () {
       const nativeSessions = new Map<string, Record<string, unknown>>();
       const updateInputs: Array<unknown> = [];
@@ -2284,6 +2287,19 @@ describe("OpenCodeAdapterV2", () => {
         modelSelection,
         runtimePolicy: fullAccess,
       });
+      // A native task child carries agent-specific restrictions, such as no
+      // nested tasks, that the root policy cannot reproduce. The fresh
+      // provider session has no in-memory child marker; only parentID says so.
+      const childPermission = openCodeChildPermissionRules(auto, [
+        { permission: "task", pattern: "*", action: "deny" },
+      ]);
+      if (nativeParentId !== undefined) {
+        nativeSessions.set("ses_native_auto", {
+          ...nativeSessions.get("ses_native_auto"),
+          parentID: nativeParentId,
+          permission: childPermission,
+        });
+      }
       yield* fullAccessSession.resumeThread({
         providerThread,
         threadId,
@@ -2291,9 +2307,14 @@ describe("OpenCodeAdapterV2", () => {
         runtimePolicy: fullAccess,
       });
 
-      assert.deepEqual(updateInputs, [
-        { sessionID: "ses_native_auto", permission: openCodePermissionRules(fullAccess) },
-      ]);
+      if (nativeParentId === undefined) {
+        assert.deepEqual(updateInputs, [
+          { sessionID: "ses_native_auto", permission: openCodePermissionRules(fullAccess) },
+        ]);
+      } else {
+        assert.deepEqual(updateInputs, []);
+        assert.deepEqual(nativeSessions.get("ses_native_auto")?.permission, childPermission);
+      }
     }).pipe(
       Effect.scoped,
       Effect.provide(
