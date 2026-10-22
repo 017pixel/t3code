@@ -3566,6 +3566,81 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  // #15720: priority "now" alone leaves a running foreground Bash command
+  // blocking the CLI, so the steer is never answered until it exits.
+  it.effect("steering releases a running foreground command", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const releases: Array<string> = [];
+        const harness = yield* makeWakeHarnessWithOptions({
+          interrupt: Effect.sync(() => {
+            releases.push("interrupt");
+          }),
+          backgroundTasks: (toolUseId) =>
+            Effect.sync(() => {
+              releases.push(`background:${toolUseId}`);
+              return true;
+            }),
+        });
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const attemptId = RunAttemptId.make("attempt-steer-running-command");
+        const input = makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId,
+          text: "Run the slow request.",
+          attachments: [],
+        });
+        yield* harness.runtime.startTurn(input);
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "assistant",
+            message: {
+              model: "claude-sonnet-4-6",
+              id: "msg_steer_running_command",
+              type: "message",
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: "toolu_steer_curl",
+                  name: "Bash",
+                  input: { command: "curl --max-time 180 http://127.0.0.1:15820/" },
+                },
+              ],
+            },
+            parent_tool_use_id: null,
+            uuid: "00000000-0000-4000-8000-000000000910",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: input.runId,
+          providerThread: harness.providerThread,
+          providerTurnId: idAllocator.derive.providerTurn({
+            driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+            nativeTurnId: `turn:${attemptId}`,
+          }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make("message-steer-running-command"),
+            text: "Change of plan: stop waiting for that command and reply with exactly STEERED_NOW.",
+            attachments: [],
+          },
+        });
+        assert.equal(harness.offeredMessages[1]?.priority, "now");
+        assert.isNotEmpty(releases, "steer left the running Bash command blocking the turn");
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect("announces usage-limit pauses once per window and again on a new turn", () =>
     Effect.gen(function* () {
       const harness = yield* makeWakeHarness;
