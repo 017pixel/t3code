@@ -63,7 +63,6 @@ import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import type {
   BrowserContext,
   CDPSession,
-  Dialog,
   Download,
   FileChooser,
   Frame,
@@ -272,6 +271,14 @@ interface Recording {
   readonly framesInFlight: Set<Promise<void>>;
 }
 
+interface PendingDialog {
+  readonly type: string;
+  readonly message: string;
+  readonly defaultValue: string;
+  readonly accept: (input: PreviewAutomationDialogInput) => Promise<void>;
+  readonly dismiss: () => Promise<void>;
+}
+
 interface ServerTab {
   readonly threadId: ThreadId;
   readonly tabId: string;
@@ -302,7 +309,9 @@ interface ServerTab {
     readonly accept: string;
     readonly offeredTo: string | null;
   } | null;
-  dialog: Dialog | null;
+  dialog: PendingDialog | null;
+  /** Called when an auth challenge holds the main navigation. */
+  readonly authWaiters: Set<() => void>;
   setting: PreviewViewportSetting;
   colorScheme: PreviewAppearancePreference;
   zoomFactor: number;
@@ -499,9 +508,9 @@ const make = Effect.gen(function* () {
   const dialogStatus = (tab: ServerTab) =>
     tab.dialog
       ? {
-          type: tab.dialog.type(),
-          message: tab.dialog.message().slice(0, 4000),
-          defaultValue: tab.dialog.defaultValue().slice(0, 4000),
+          type: tab.dialog.type,
+          message: tab.dialog.message.slice(0, 4000),
+          defaultValue: tab.dialog.defaultValue.slice(0, 4000),
         }
       : null;
 
@@ -537,11 +546,47 @@ const make = Effect.gen(function* () {
   const resolveDialog = async (tab: ServerTab, input: PreviewAutomationDialogInput) => {
     const dialog = tab.dialog;
     if (!dialog) throw new Error("No dialog is pending.");
-    if (input.accept) await dialog.accept(input.promptText);
+    if (input.accept) await dialog.accept(input);
     else await dialog.dismiss();
     if (tab.dialog === dialog) tab.dialog = null;
     ServerBrowserPage.invalidateRefs(tab.page);
     broadcastControl(tab);
+  };
+
+  /**
+   * An HTTP auth challenge pauses its request until it is answered. It shows
+   * as an `auth` dialog; the credentials go straight to Chromium and are never
+   * stored, logged, or echoed back in status.
+   */
+  const requestAuth = (
+    tab: ServerTab,
+    requestId: string,
+    { origin, realm, source }: { origin: string; realm: string; source?: string },
+  ) => {
+    const respond = (
+      authChallengeResponse:
+        | { response: "CancelAuth" }
+        | { response: "ProvideCredentials"; username: string; password: string },
+    ) =>
+      tab.cdp.send("Fetch.continueWithAuth", { requestId, authChallengeResponse }).then(constVoid);
+    if (tab.closing || tab.dialog) {
+      void respond({ response: "CancelAuth" }).catch(constVoid);
+      return;
+    }
+    tab.dialog = {
+      type: "auth",
+      message: `${source === "Proxy" ? "The proxy " : ""}${origin} asks you to sign in.${realm ? ` It says: ${realm}` : ""}`,
+      defaultValue: "",
+      accept: (input) =>
+        respond({
+          response: "ProvideCredentials",
+          username: input.username ?? "",
+          password: input.password ?? "",
+        }),
+      dismiss: () => respond({ response: "CancelAuth" }),
+    };
+    broadcastControl(tab);
+    for (const waiter of tab.authWaiters) waiter();
   };
 
   const report = (tab: ServerTab, navStatus: PreviewNavStatus) => {
@@ -737,7 +782,8 @@ const make = Effect.gen(function* () {
     if (!desktop) await prepareContext(context);
     const page = adopted?.page ?? desktop?.page ?? (await context.newPage());
     const cdp = await context.newCDPSession(page);
-    await installPdfDocumentNavigation(cdp);
+    // A desktop page has no viewer that could show a sign-in prompt, so Electron keeps handling auth.
+    await installPdfDocumentNavigation(cdp, { handleAuthRequests: !desktop });
     // The desktop's page is already a normal browser. A popup's first request
     // went out before it became a tab; everything after presents as Chrome.
     if (!desktop) await presentAsChrome(cdp, host);
@@ -770,6 +816,7 @@ const make = Effect.gen(function* () {
       downloads: [],
       fileChooser: null,
       dialog: null,
+      authWaiters: new Set(),
       setting: snapshot.viewport ?? FILL_PREVIEW_VIEWPORT,
       colorScheme: "system",
       zoomFactor: 1,
@@ -794,6 +841,13 @@ const make = Effect.gen(function* () {
       if (!isMainNavigation(request)) return;
       navigationGenerations.set(request, ++tab.navigationGeneration);
       clearAbortedNavigation(tab);
+      // Navigating away abandons a sign-in prompt; release its paused request.
+      if (tab.dialog?.type === "auth") {
+        const abandoned = tab.dialog;
+        tab.dialog = null;
+        void abandoned.dismiss().catch(constVoid);
+        broadcastControl(tab);
+      }
       tab.loading = true;
       report(tab, {
         _tag: "Loading",
@@ -871,9 +925,19 @@ const make = Effect.gen(function* () {
       });
     });
     page.on("dialog", (dialog) => {
-      tab.dialog = dialog;
+      tab.dialog = {
+        type: dialog.type(),
+        message: dialog.message(),
+        defaultValue: dialog.defaultValue(),
+        accept: (input) => dialog.accept(input.promptText),
+        dismiss: () => dialog.dismiss(),
+      };
       broadcastControl(tab);
     });
+    if (!desktop)
+      cdp.on("Fetch.authRequired", (event) =>
+        requestAuth(tab, event.requestId, event.authChallenge),
+      );
     page.on("download", (download) => void saveDownload(tab, download));
     updateFileChooserInterception(tab);
     // Popups become tabs and keep `window.opener`, so sign-in popups can report back.
@@ -1426,6 +1490,12 @@ const make = Effect.gen(function* () {
     readiness: "load" | "domContentLoaded" | "none",
     timeout: number,
   ) => {
+    // A sign-in prompt holds the navigation until it is answered, outside the action queue.
+    let onAuth = constVoid;
+    const authRequested = new Promise<"auth">((resolve) => {
+      onAuth = () => resolve("auth");
+      tab.authWaiters.add(onAuth);
+    });
     const navigation = tab.page.goto(url, {
       timeout,
       waitUntil:
@@ -1435,11 +1505,12 @@ const make = Effect.gen(function* () {
             ? "commit"
             : "load",
     });
+    void navigation.finally(() => tab.authWaiters.delete(onAuth)).catch(constVoid);
     if (readiness === "none") {
-      tab.control.track(navigation);
+      tab.control.track(Promise.race([navigation, authRequested]));
       return;
     }
-    await navigation.catch((cause: unknown) => {
+    const navigated = navigation.catch((cause: unknown) => {
       const message = cause instanceof Error ? cause.message : String(cause);
       if (message.includes("Download is starting")) {
         throw new ServerBrowserPage.ServerBrowserOperationError(
@@ -1455,6 +1526,8 @@ const make = Effect.gen(function* () {
       }
       throw cause;
     });
+    const settled = navigated.then(() => "navigated" as const);
+    if ((await Promise.race([settled, authRequested])) === "auth") void settled.catch(constVoid);
   };
 
   const withCaptureLock = <A>(tab: ServerTab, operation: () => Promise<A>): Promise<A> => {
@@ -1912,7 +1985,8 @@ const make = Effect.gen(function* () {
     return tab.control.agent(
       agentSessionId,
       async () => {
-        if (tab.dialog)
+        // Navigating away answers a sign-in prompt by cancelling it.
+        if (tab.dialog && !(tab.dialog.type === "auth" && request.operation === "navigate"))
           throw new BrowserControlInterrupted(
             "A browser dialog is pending. Read preview_status and use preview_dialog first.",
             "dialogPending",
@@ -2438,6 +2512,8 @@ const make = Effect.gen(function* () {
                 ...(typeof message.promptText === "string"
                   ? { promptText: message.promptText }
                   : {}),
+                ...(typeof message.username === "string" ? { username: message.username } : {}),
+                ...(typeof message.password === "string" ? { password: message.password } : {}),
               });
             } else {
               await tab.control.human(viewer.id, () =>

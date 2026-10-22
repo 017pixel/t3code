@@ -83,7 +83,9 @@ const PNG_HEADER = (() => {
 function makeSession(frame?: ReturnType<typeof makeFrame>) {
   const events = new NodeEvents.EventEmitter();
   return {
-    on: vi.fn((name: string, listener: (...args: never[]) => void) => events.on(name, listener)),
+    on: vi.fn((name: string, listener: Parameters<typeof events.on>[1]) =>
+      events.on(name, listener),
+    ),
     emit: (name: string, ...args: unknown[]) => events.emit(name, ...args),
     detach: vi.fn(async () => {}),
     send: vi.fn(async (method: string, input?: unknown): Promise<Record<string, unknown>> => {
@@ -723,6 +725,99 @@ it.live("asks for HTTP Basic credentials as a pending dialog that can be cancell
         input: {},
       });
       expect(cancelled.dialog).toBeNull();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+const basicChallenge = {
+  requestId: "auth-1",
+  frameId: "main",
+  resourceType: "Document",
+  request: { url: "http://localhost:18914/", method: "GET", headers: {} },
+  authChallenge: {
+    source: "Server",
+    origin: "http://localhost:18914",
+    scheme: "basic",
+    realm: "test",
+  },
+};
+
+it.live("signs in to an HTTP Basic challenge without holding the action queue", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const page = contexts[0]!.page;
+      const session = contexts[0]!.sessions[0]!;
+      const signedIn = Promise.withResolvers<void>();
+      yield* Effect.addFinalizer(() => Effect.sync(() => signedIn.resolve()));
+      // Chromium holds the navigation until the challenge is answered.
+      page.goto.mockImplementationOnce(async () => {
+        session.emit("Fetch.authRequired", basicChallenge);
+        await signedIn.promise;
+      });
+      yield* broker.invoke({
+        scope,
+        tabId,
+        operation: "navigate",
+        input: { url: "http://localhost:18914/" },
+      });
+      const blocked = yield* broker
+        .invoke<void>({ scope, tabId, operation: "evaluate", input: { expression: "1" } })
+        .pipe(Effect.flip);
+      expect(blocked).toMatchObject({ reason: "dialogPending" });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "dialog",
+        input: { accept: true, username: "test", password: "hunter2" },
+      });
+      expect(session.send).toHaveBeenCalledWith("Fetch.continueWithAuth", {
+        requestId: "auth-1",
+        authChallengeResponse: {
+          response: "ProvideCredentials",
+          username: "test",
+          password: "hunter2",
+        },
+      });
+      expect(status.dialog).toBeNull();
+      expect(JSON.stringify(status)).not.toContain("hunter2");
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("navigating away from an HTTP Basic challenge cancels it", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const page = contexts[0]!.page;
+      const session = contexts[0]!.sessions[0]!;
+      session.emit("Fetch.authRequired", basicChallenge);
+      const goto = page.goto.getMockImplementation()!;
+      page.goto.mockImplementationOnce(async (next: string) => {
+        page.emit("request", {
+          isNavigationRequest: () => true,
+          frame: () => page,
+          url: () => next,
+        });
+        await goto(next);
+      });
+      yield* broker.invoke({
+        scope,
+        tabId,
+        operation: "navigate",
+        input: { url: "http://localhost:5173/" },
+      });
+      expect(session.send).toHaveBeenCalledWith("Fetch.continueWithAuth", {
+        requestId: "auth-1",
+        authChallengeResponse: { response: "CancelAuth" },
+      });
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.dialog).toBeNull();
     }),
   ).pipe(Effect.provide(layer)),
 );

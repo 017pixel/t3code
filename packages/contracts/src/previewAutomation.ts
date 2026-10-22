@@ -152,6 +152,12 @@ export const PreviewAutomationDialogInput = Schema.Struct({
   promptText: Schema.optional(Schema.String).annotate({
     description: "Optional text to submit when accepting a prompt dialog.",
   }),
+  username: Schema.optional(Schema.String).annotate({
+    description: "Username to submit when accepting an auth dialog.",
+  }),
+  password: Schema.optional(Schema.String).annotate({
+    description: "Password to submit when accepting an auth dialog.",
+  }),
 });
 export type PreviewAutomationDialogInput = typeof PreviewAutomationDialogInput.Type;
 
