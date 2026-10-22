@@ -283,7 +283,7 @@ export function probeSourceControlProvider(input: {
       if (item.status !== "available") {
         return Effect.succeed({
           ...item,
-          auth: unknownAuth("Hosting integration command was not found on the server PATH."),
+          auth: unknownAuth(item.installHint),
         } satisfies SourceControlProviderDiscoveryItem);
       }
 

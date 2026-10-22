@@ -304,9 +304,19 @@ it.effect("explains a hosting CLI version probe that failed instead of advising 
     const installHintOf = (kind: string) =>
       result.sourceControlProviders.find((item) => item.kind === kind)?.installHint ?? "";
 
+    const authDetailOf = (kind: string) =>
+      Option.getOrElse(
+        result.sourceControlProviders.find((item) => item.kind === kind)?.auth.detail ??
+          Option.none(),
+        () => "",
+      );
+
     assert.include(installHintOf("github"), "timed out");
     assert.notInclude(installHintOf("github"), "Install the GitHub command-line tool");
+    assert.include(authDetailOf("github"), "timed out");
+    assert.include(installHintOf("azure-devops"), "`az --version` exited with status 1");
     assert.notInclude(installHintOf("azure-devops"), "Install");
+    assert.include(authDetailOf("azure-devops"), "`az --version` exited with status 1");
     assert.include(installHintOf("gitlab"), "Install the GitLab command-line tool (`glab`)");
   }).pipe(Effect.provide(layerTest));
 });
