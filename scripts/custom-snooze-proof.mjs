@@ -41,19 +41,28 @@ function bootstrap() {
       return Reflect.apply(target, self, [args[0] ?? locale, args[1]]);
     },
   });
+  const ids = ["proof-19930-primary", "proof-19930-bulk-peer"];
   const trace = [];
   const NativeSocket = WebSocket;
   window.WebSocket = class extends NativeSocket {
     constructor(...args) {
       super(...args);
+      // Effect RPC JSON frames are one message or an array of them; thread
+      // stream chunks carry `{ kind: "event", event }` values.
       this.addEventListener("message", (event) => {
         try {
-          const message = JSON.parse(event.data);
-          if (
-            JSON.stringify(message).includes("thread.snoozed") ||
-            JSON.stringify(message).includes("thread.unsnoozed")
-          ) {
-            trace.push({ direction: "projection", at: performance.now(), message });
+          const frame = JSON.parse(event.data);
+          for (const message of Array.isArray(frame) ? frame : [frame]) {
+            if (message?._tag !== "Chunk" || !Array.isArray(message.values)) continue;
+            for (const value of message.values) {
+              if (
+                value?.kind === "event" &&
+                ["thread.snoozed", "thread.unsnoozed"].includes(value.event?.type) &&
+                ids.includes(value.event.threadId)
+              ) {
+                trace.push({ direction: "projection", at: performance.now(), message: value });
+              }
+            }
           }
         } catch {}
       });
@@ -61,7 +70,10 @@ function bootstrap() {
     send(data) {
       try {
         const message = JSON.parse(data);
-        if (["thread.snooze", "thread.unsnooze"].includes(message.payload?.type)) {
+        if (
+          ["thread.snooze", "thread.unsnooze"].includes(message.payload?.type) &&
+          ids.includes(message.payload.threadId)
+        ) {
           trace.push({ direction: "command", at: performance.now(), message });
         }
       } catch {}
@@ -70,6 +82,7 @@ function bootstrap() {
   };
   window.proof = {
     locale,
+    ids,
     clock: new Date().toISOString(),
     trace,
     NativeSocket,
@@ -92,7 +105,7 @@ function bootstrap() {
 }
 
 const fixture = String.raw`
-const ids = ["proof-19930-primary", "proof-19930-bulk-peer"];
+const ids = proof.ids;
 const names = ["Proof 19930 — primary", "Proof 19930 — bulk peer"];
 let socket, sequence = 0;
 const pending = new Map();
