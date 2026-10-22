@@ -272,6 +272,58 @@ describe("CodexAdapterV2 native protocol logging", () => {
           },
         },
       });
+
+      const databaseUrl = "postgres://user:password@host/db";
+      yield* protocolLogger({
+        direction: "incoming",
+        stage: "decoded",
+        payload: {
+          id: 42,
+          result: {
+            config: { mcp_servers: { database: { env: { DB_URL: databaseUrl } } } },
+            origins: {},
+            layers: [
+              {
+                name: { type: "project", dotCodexFolder: "/repo/.codex" },
+                version: "project-version",
+                config: { mcp_servers: { database: { env: { DB_URL: databaseUrl } } } },
+                disabledReason: "Project is not trusted",
+              },
+            ],
+          },
+        },
+      });
+
+      assert.equal(writes.length, 2);
+      assert.notInclude(JSON.stringify(writes), databaseUrl);
+      assert.deepEqual(writes[1], {
+        threadId,
+        event: {
+          provider: "codex",
+          protocol: "codex.app-server",
+          kind: "protocol",
+          providerSessionId,
+          event: {
+            direction: "incoming",
+            stage: "decoded",
+            payload: {
+              id: 42,
+              result: {
+                config: "[REDACTED]",
+                origins: {},
+                layers: [
+                  {
+                    name: { type: "project", dotCodexFolder: "/repo/.codex" },
+                    version: "project-version",
+                    config: "[REDACTED]",
+                    disabledReason: "Project is not trusted",
+                  },
+                ],
+              },
+            },
+          },
+        },
+      });
     }),
   );
 });
@@ -2723,6 +2775,110 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isTrue(
           notices.some((notice) => notice.includes(disabledReason)),
           `expected a chat notice containing ${JSON.stringify(disabledReason)}; turn items: ${JSON.stringify(turnItems, null, 2)}`,
+        );
+        assert.equal(turnItems.filter((item) => item.type === "system_notice").length, 1);
+        assert.deepEqual(
+          assistantMessages(harness.events).map((event) => event.message.text),
+          ["No issue15140_probe tool is available."],
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("does not warn for enabled project layers or disabled user layers", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const transcript = finalAnswerTranscript("codex-enabled-project-config", [
+          { id: "answer", text: "The tool is available." },
+        ]);
+        const harness = yield* makeCodexReplayHarness(
+          transcript,
+          undefined,
+          undefined,
+          undefined,
+          (method) =>
+            method !== "config/read"
+              ? undefined
+              : {
+                  config: {},
+                  origins: {},
+                  layers: [
+                    {
+                      name: { type: "project", dotCodexFolder: "/workspace/.codex" },
+                      version: "sha256:project",
+                      config: { mcp_servers: { probe: { command: "probe" } } },
+                    },
+                    {
+                      name: { type: "user", file: "/tmp/codex-home/config.toml", profile: null },
+                      version: "sha256:user",
+                      config: {},
+                      disabledReason: "User layer disabled.",
+                    },
+                  ],
+                },
+        );
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-codex-enabled-project-config"),
+            text: "Check the tool.",
+          }),
+        );
+        yield* harness.awaitTerminal(1);
+        assert.isFalse(
+          harness.events.some(
+            (event) =>
+              event.type === "turn_item.updated" && event.turnItem.type === "system_notice",
+          ),
+        );
+        assert.deepEqual(
+          assistantMessages(harness.events).map((event) => event.message.text),
+          ["The tool is available."],
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("starts the turn when the optional project config read never responds", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const transcript = finalAnswerTranscript("codex-project-config-timeout", [
+          { id: "answer", text: "The turn still completed." },
+        ]);
+        const readStarted = yield* Deferred.make<void>();
+        const harness = yield* makeCodexReplayHarness(transcript, undefined, (method) =>
+          method === "config/read"
+            ? Deferred.succeed(readStarted, undefined).pipe(Effect.andThen(Effect.never))
+            : Effect.void,
+        );
+        const start = yield* harness.runtime
+          .startTurn(
+            makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("attempt-codex-project-config-timeout"),
+              text: "Reply anyway.",
+            }),
+          )
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(readStarted);
+        yield* TestClock.adjust("3 seconds");
+        yield* Fiber.join(start);
+        yield* harness.awaitTerminal(1);
+        assert.deepEqual(
+          assistantMessages(harness.events).map((event) => event.message.text),
+          ["The turn still completed."],
         );
       }).pipe(
         Effect.provide(
