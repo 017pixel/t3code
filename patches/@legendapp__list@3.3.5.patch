@@ -1619,7 +1619,7 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..d7cbe1cb43449cc29822b2646deabbdd
      }
    }
 diff --git a/react.js b/react.js
-index 914d2dafaafa001c9ab6791a0a0581659295e333..390bdeb809a8cc44a824f05dd1f48df3fb6c8fc5 100644
+index 914d2dafaafa001c9ab6791a0a0581659295e333..221e215cc96b5aac8ede9b971f74b24458fd300e 100644
 --- a/react.js
 +++ b/react.js
 @@ -4702,7 +4702,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
@@ -1687,7 +1687,20 @@ index 914d2dafaafa001c9ab6791a0a0581659295e333..390bdeb809a8cc44a824f05dd1f48df3
      }
    }, [ctx, containerLayoutEpoch]);
    return children;
-@@ -5651,6 +5673,32 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
+@@ -5595,6 +5617,12 @@ var Container = typedMemo(function Container2({
+     [itemKey, data, extraData]
+   );
+   const { renderedItem } = renderedItemInfo || {};
++  // T3 patch: React places a newly mounted row by slot order, not item order, after the
++  // selection-time sort has already run. Re-sort once this commit lands.
++  React3.useLayoutEffect(() => {
++    var _a3;
++    (_a3 = ctx.sortDOMOrderIfSelecting) == null ? void 0 : _a3.call(ctx);
++  }, [ctx, itemKey]);
+   const contextValue = React3.useMemo(() => {
+     ctx.viewRefs.set(id, ref);
+     return {
+@@ -5651,6 +5679,32 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
  });
  
  // src/utils/reordering.ts
@@ -1720,7 +1733,7 @@ index 914d2dafaafa001c9ab6791a0a0581659295e333..390bdeb809a8cc44a824f05dd1f48df3
  function sortDOMElements(container, indexByElement) {
    const elements = Array.from(container.children);
    if (elements.length <= 1) return elements;
-@@ -5674,26 +5722,17 @@ function sortDOMElements(container, indexByElement) {
+@@ -5674,26 +5728,17 @@ function sortDOMElements(container, indexByElement) {
      targetPositions.set(item[0], index);
    });
    const currentPositions = elements.map((el) => targetPositions.get(el));
@@ -1757,7 +1770,7 @@ index 914d2dafaafa001c9ab6791a0a0581659295e333..390bdeb809a8cc44a824f05dd1f48df3
      }
    }
  }
-@@ -5738,28 +5777,47 @@ function useDOMOrder(ref) {
+@@ -5738,28 +5783,57 @@ function useDOMOrder(ref) {
    const ctx = useStateContext();
    const debounceRef = React3.useRef(void 0);
    React3.useEffect(() => {
@@ -1801,6 +1814,15 @@ index 914d2dafaafa001c9ab6791a0a0581659295e333..390bdeb809a8cc44a824f05dd1f48df3
 +      const selection = typeof window !== "undefined" ? window.getSelection() : null;
 +      return !!parent && !!selection && !selection.isCollapsed && (parent.contains(selection.anchorNode) || parent.contains(selection.focusNode));
 +    };
++    let isSortQueued = false;
++    ctx.sortDOMOrderIfSelecting = () => {
++      if (isSortQueued || !isSelecting()) return;
++      isSortQueued = true;
++      queueMicrotask(() => {
++        isSortQueued = false;
++        sort();
++      });
++    };
 +    const parent = ref.current;
 +    parent == null ? void 0 : parent.addEventListener("pointerdown", sort, true);
 +    const unsubscribe = listen$(ctx, "lastPositionUpdate", () => {
@@ -1816,10 +1838,11 @@ index 914d2dafaafa001c9ab6791a0a0581659295e333..390bdeb809a8cc44a824f05dd1f48df3
      return () => {
        unsubscribe();
 +      parent == null ? void 0 : parent.removeEventListener("pointerdown", sort, true);
++      ctx.sortDOMOrderIfSelecting = void 0;
        if (debounceRef.current !== void 0) {
          clearTimeout(debounceRef.current);
        }
-@@ -6446,8 +6504,8 @@ function ScrollAdjust() {
+@@ -6446,8 +6520,8 @@ function ScrollAdjust() {
                window.getComputedStyle(contentNode)[axis.paddingEndProp]
              );
              const temporaryPaddingEnd = `${(currentPaddingEnd || 0) + pad}px`;
@@ -1829,7 +1852,7 @@ index 914d2dafaafa001c9ab6791a0a0581659295e333..390bdeb809a8cc44a824f05dd1f48df3
              void contentNode.offsetHeight;
              scrollBy();
              if (resetPaddingRafRef.current !== void 0) {
-@@ -8194,6 +8252,17 @@ var LegendListInner = typedForwardRef(function LegendListInner2(props, forwarded
+@@ -8194,6 +8268,17 @@ var LegendListInner = typedForwardRef(function LegendListInner2(props, forwarded
        useAlignItemsAtEndPadding
      ]
    );
@@ -1848,7 +1871,7 @@ index 914d2dafaafa001c9ab6791a0a0581659295e333..390bdeb809a8cc44a824f05dd1f48df3
      const {
        didColumnsChange,
 diff --git a/react.mjs b/react.mjs
-index 95465f2ab89ce41a10553f58af83618f7310e83c..b9f6e0699fa97a0da2e3bb30ce897443096c5628 100644
+index 95465f2ab89ce41a10553f58af83618f7310e83c..e75eacb3b512facb1e70d5f28fd39be72c3fb3ca 100644
 --- a/react.mjs
 +++ b/react.mjs
 @@ -4681,7 +4681,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
@@ -1916,7 +1939,20 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..b9f6e0699fa97a0da2e3bb30ce897443
      }
    }, [ctx, containerLayoutEpoch]);
    return children;
-@@ -5630,6 +5652,32 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
+@@ -5574,6 +5596,12 @@ var Container = typedMemo(function Container2({
+     [itemKey, data, extraData]
+   );
+   const { renderedItem } = renderedItemInfo || {};
++  // T3 patch: React places a newly mounted row by slot order, not item order, after the
++  // selection-time sort has already run. Re-sort once this commit lands.
++  useLayoutEffect(() => {
++    var _a3;
++    (_a3 = ctx.sortDOMOrderIfSelecting) == null ? void 0 : _a3.call(ctx);
++  }, [ctx, itemKey]);
+   const contextValue = useMemo(() => {
+     ctx.viewRefs.set(id, ref);
+     return {
+@@ -5630,6 +5658,32 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
  });
  
  // src/utils/reordering.ts
@@ -1949,7 +1985,7 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..b9f6e0699fa97a0da2e3bb30ce897443
  function sortDOMElements(container, indexByElement) {
    const elements = Array.from(container.children);
    if (elements.length <= 1) return elements;
-@@ -5653,26 +5701,17 @@ function sortDOMElements(container, indexByElement) {
+@@ -5653,26 +5707,17 @@ function sortDOMElements(container, indexByElement) {
      targetPositions.set(item[0], index);
    });
    const currentPositions = elements.map((el) => targetPositions.get(el));
@@ -1986,7 +2022,7 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..b9f6e0699fa97a0da2e3bb30ce897443
      }
    }
  }
-@@ -5717,28 +5756,47 @@ function useDOMOrder(ref) {
+@@ -5717,28 +5762,57 @@ function useDOMOrder(ref) {
    const ctx = useStateContext();
    const debounceRef = useRef(void 0);
    useEffect(() => {
@@ -2030,6 +2066,15 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..b9f6e0699fa97a0da2e3bb30ce897443
 +      const selection = typeof window !== "undefined" ? window.getSelection() : null;
 +      return !!parent && !!selection && !selection.isCollapsed && (parent.contains(selection.anchorNode) || parent.contains(selection.focusNode));
 +    };
++    let isSortQueued = false;
++    ctx.sortDOMOrderIfSelecting = () => {
++      if (isSortQueued || !isSelecting()) return;
++      isSortQueued = true;
++      queueMicrotask(() => {
++        isSortQueued = false;
++        sort();
++      });
++    };
 +    const parent = ref.current;
 +    parent == null ? void 0 : parent.addEventListener("pointerdown", sort, true);
 +    const unsubscribe = listen$(ctx, "lastPositionUpdate", () => {
@@ -2045,10 +2090,11 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..b9f6e0699fa97a0da2e3bb30ce897443
      return () => {
        unsubscribe();
 +      parent == null ? void 0 : parent.removeEventListener("pointerdown", sort, true);
++      ctx.sortDOMOrderIfSelecting = void 0;
        if (debounceRef.current !== void 0) {
          clearTimeout(debounceRef.current);
        }
-@@ -6425,8 +6483,8 @@ function ScrollAdjust() {
+@@ -6425,8 +6499,8 @@ function ScrollAdjust() {
                window.getComputedStyle(contentNode)[axis.paddingEndProp]
              );
              const temporaryPaddingEnd = `${(currentPaddingEnd || 0) + pad}px`;
@@ -2058,7 +2104,7 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..b9f6e0699fa97a0da2e3bb30ce897443
              void contentNode.offsetHeight;
              scrollBy();
              if (resetPaddingRafRef.current !== void 0) {
-@@ -8173,6 +8231,17 @@ var LegendListInner = typedForwardRef(function LegendListInner2(props, forwarded
+@@ -8173,6 +8247,17 @@ var LegendListInner = typedForwardRef(function LegendListInner2(props, forwarded
        useAlignItemsAtEndPadding
      ]
    );
