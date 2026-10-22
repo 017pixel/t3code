@@ -6,13 +6,17 @@ Never accepts the live T3 home. No copied conversation data is retained.
 import argparse, hashlib, json, pathlib, socket, sqlite3
 p=argparse.ArgumentParser(); p.add_argument('worktree',type=pathlib.Path); a=p.parse_args()
 root=a.worktree.resolve()
-assert root.name in ('issue-16023','issue-16023-before') and root.parent == pathlib.Path('/home/ubuntu/wt')
+if root.name not in ('issue-16023','issue-16023-before') or root.parent != pathlib.Path('/home/ubuntu/wt'):
+ raise ValueError('Only disposable issue-16023 sandboxes are accepted')
 for port in (7840,15880,7492,15532):
  s=socket.socket(); s.settimeout(.2); result=s.connect_ex(('127.0.0.1',port)); s.close()
- assert result != 0, f'Stop isolated server on {port} first'
-db=root/'.t3/userdata/statev2.sqlite'; assert db.is_file()
+ if result == 0: raise RuntimeError(f'Stop isolated server on {port} first')
+db=root/'.t3/userdata/statev2.sqlite'
+if not db.is_file(): raise FileNotFoundError(db)
 c=sqlite3.connect(db)
-assert not c.execute("select 1 from orchestration_v2_effect_outbox where status in ('pending','running')").fetchone()
+if c.execute("select 1 from orchestration_v2_effect_outbox where status in ('pending','running')").fetchone():
+ c.close()
+ raise RuntimeError("Sandbox has pending or running effects")
 ts='2026-10-22T12:00:00.000Z'; project='dng-evidence-project'; populated='dng-evidence-populated'; empty='dng-evidence-empty'
 # Clear disposable projections to prevent unrelated private history in sidebar/search.
 with c:
