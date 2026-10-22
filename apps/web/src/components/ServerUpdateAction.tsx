@@ -242,7 +242,7 @@ export function ServerUpdatesAction({
     <UpdatePermissionHint
       message={updatePermissionMessage(denied.map((target) => target.serverLabel))}
       descriptionId={descriptionId}
-      disabled={disabled}
+      disabled={permitted.length === 0}
     >
       {button}
     </UpdatePermissionHint>

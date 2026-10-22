@@ -278,6 +278,35 @@ describe("ServerUpdatesAction", () => {
     expect(explanation(screen)).toMatch(/pair/i);
   });
 
+  it("does not ask to pair again when a mixed batch is pending", async () => {
+    using _state = setup();
+    const denied = Atom.make<SessionResult>(AsyncResult.success(legacyPairedSession));
+    testState.sessionAtoms.set("batch-b" as EnvironmentId, denied);
+    const update = Promise.withResolvers<ReturnType<typeof success>>();
+    testState.updateServer.mockReturnValue(update.promise);
+    await using screen = await mount(targets.slice(0, 2));
+
+    try {
+      await click(screen, "Update all");
+      expect(button(screen, "Update all")!.disabled).toBe(true);
+      expect(testState.toast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: "Office skipped" }),
+      );
+
+      await act(() => button(screen, "Update all")!.parentElement!.click());
+
+      expect(testState.toast).not.toHaveBeenCalledWith(
+        expect.objectContaining({ title: "Pair again to update" }),
+      );
+    } finally {
+      await act(async () => {
+        update.resolve(success());
+        await update.promise;
+      });
+    }
+    expect(button(screen, "Update all")!.disabled).toBe(false);
+  });
+
   it("names a target it skips for missing environment:maintain", async () => {
     using _state = setup();
     const denied = Atom.make<SessionResult>(AsyncResult.success(legacyPairedSession));
