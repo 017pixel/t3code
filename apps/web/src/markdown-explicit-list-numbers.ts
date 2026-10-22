@@ -33,5 +33,3 @@ export function remarkExplicitListNumbers() {
     visit(tree);
   };
 }
-
-export const USER_MESSAGE_REMARK_PLUGINS = [remarkExplicitListNumbers];

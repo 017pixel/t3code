@@ -14,6 +14,7 @@ import {
   CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS,
   CHAT_MARKDOWN_REHYPE_PLUGINS,
 } from "@t3tools/shared/markdownPipeline";
+import { remarkExplicitListNumbers } from "../markdown-explicit-list-numbers";
 import { useAtomValue } from "@effect/atom-react";
 import {
   COMPOSER_CONTEXT_CLIPBOARD_MIME,
@@ -235,6 +236,8 @@ interface ChatMarkdownProps {
   workspaceMutationId?: string | null | undefined;
   onImageExpand?: ((preview: ExpandedImagePreview) => void) | undefined;
   extraRemarkPlugins?: NonNullable<ReactMarkdownOptions["remarkPlugins"]>;
+  /** Shows each ordered-list item with the number typed in the source. */
+  explicitListNumbers?: boolean;
   renderContextReference?: ((reference: ChatMarkdownContextReference) => ReactNode) | undefined;
   /** Loads GitHub-hosted media through `cwd`'s GitHub credential, which a private repository's
       uploads need; without it those images and videos load unauthenticated and 404. */
@@ -1566,6 +1569,7 @@ function ChatMarkdown({
   lineBreaks = false,
   parseRawHtml = true,
   extraRemarkPlugins = EMPTY_REMARK_PLUGINS,
+  explicitListNumbers = false,
   ...props
 }: ChatMarkdownProps) {
   const {
@@ -1585,6 +1589,9 @@ function ChatMarkdown({
     markdownRef.current = node;
   };
   const remarkPlugins = [
+    // Runs before list-indentation recovery, whose re-parsed nodes carry offsets
+    // into a synthetic source rather than `text`.
+    ...(explicitListNumbers ? [remarkExplicitListNumbers] : []),
     ...(lineBreaks ? CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS : CHAT_MARKDOWN_REMARK_PLUGINS),
     ...extraRemarkPlugins,
     ...(incrementalParsing ? [createIncrementalMarkdownPlugin()] : []),
