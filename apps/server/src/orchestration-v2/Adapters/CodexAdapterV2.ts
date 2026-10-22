@@ -6437,8 +6437,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               Effect.catchTags({
                 // The profile may have been renamed or removed from config.toml
                 // since Codex reported it; fall back to the legacy sandboxPolicy.
+                // Codex names `default_permissions` in both errors it gives for that.
                 CodexAppServerRequestError: (error) => {
-                  if (turnStartParams.permissions === undefined) return Effect.fail(error);
+                  if (
+                    turnStartParams.permissions === undefined ||
+                    !error.errorMessage.includes("default_permissions")
+                  ) {
+                    return Effect.fail(error);
+                  }
                   permissionProfilesByThread.delete(threadId);
                   return buildParams(undefined).pipe(
                     Effect.flatMap((params) => client.request("turn/start", params)),
