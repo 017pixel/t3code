@@ -429,8 +429,9 @@ const discoverPluginSkillRoots = Effect.fn("discoverPluginSkillRoots")(function*
     roots.push(...(yield* pluginSkillRoots(installPath, scope, prefix, manifest)));
   }
 
-  // Claude adopts each personal skills folder holding `.claude-plugin` as `<name>@skills-dir`,
-  // enabled unless settings or the manifest say otherwise. Project folders need workspace trust.
+  // Claude adopts each personal skills folder with a valid named `.claude-plugin/plugin.json` as
+  // `<name>@skills-dir`, enabled unless settings or the manifest say otherwise. A folder with its
+  // own SKILL.md stays an ordinary skill. Project folders need workspace trust.
   const skillsDirectory = path.join(configDirPath, "skills");
   const entries = yield* fileSystem
     .readDirectory(skillsDirectory)
@@ -438,13 +439,14 @@ const discoverPluginSkillRoots = Effect.fn("discoverPluginSkillRoots")(function*
   for (const entry of [...entries].sort()) {
     if (entry.startsWith(".")) continue;
     const pluginPath = path.join(skillsDirectory, entry);
-    const isPlugin = yield* fileSystem
-      .exists(path.join(pluginPath, ".claude-plugin"))
-      .pipe(Effect.orElseSucceed(() => false));
-    if (!isPlugin) continue;
+    const isSkill = yield* fileSystem
+      .exists(path.join(pluginPath, "SKILL.md"))
+      .pipe(Effect.orElseSucceed(() => true));
+    if (isSkill) continue;
     const manifest = yield* readPluginManifest(pluginPath);
-    const prefix = manifest?.name ?? entry;
-    if (!(enabledPlugins.get(`${prefix}@skills-dir`) ?? manifest?.defaultEnabled !== false)) {
+    if (manifest?.name === undefined) continue;
+    const prefix = manifest.name;
+    if (!(enabledPlugins.get(`${prefix}@skills-dir`) ?? manifest.defaultEnabled !== false)) {
       continue;
     }
     roots.push(...(yield* pluginSkillRoots(pluginPath, "user", prefix, manifest)));

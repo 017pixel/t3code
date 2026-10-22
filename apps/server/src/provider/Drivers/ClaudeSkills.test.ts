@@ -144,6 +144,45 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     }),
   );
 
+  it.effect("adopts only skills-dir folders native Claude treats as plugins", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const configDir = path.join(tempDir, "claude-home");
+      const skillsDir = path.join(configDir, "skills");
+      for (const [folder, manifest] of [
+        ["absent", undefined],
+        ["empty", "{}"],
+        ["malformed", "{"],
+        ["invalid-default", '{"name":"invalid-default","defaultEnabled":"no"}'],
+        ["rootskill", '{"name":"rootskill"}'],
+      ] as const) {
+        const wrapper = path.join(skillsDir, folder);
+        yield* writeSkill(path.join(wrapper, "skills"), "review", "# Review");
+        yield* fs.makeDirectory(path.join(wrapper, ".claude-plugin"), { recursive: true });
+        if (manifest !== undefined) {
+          yield* fs.writeFileString(path.join(wrapper, ".claude-plugin", "plugin.json"), manifest);
+        }
+      }
+      yield* writeSkill(skillsDir, "rootskill", "# Root");
+      yield* writeSkill(skillsDir, "onlyroot", "# Only root");
+      yield* fs.makeDirectory(path.join(skillsDir, "onlyroot", ".claude-plugin"));
+      yield* fs.writeFileString(
+        path.join(skillsDir, "onlyroot", ".claude-plugin", "plugin.json"),
+        '{"name":"onlyroot"}',
+      );
+
+      const skills = yield* discoverClaudeSkills({ homePath: "" }, undefined, {
+        CLAUDE_CONFIG_DIR: configDir,
+      });
+      assert.deepEqual(
+        skills.map((skill) => skill.name),
+        ["onlyroot", "rootskill"],
+      );
+    }),
+  );
+
   it.effect("merges plugin enablement and selects installs in native registry order", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
