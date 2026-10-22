@@ -2003,6 +2003,84 @@ it.effect.each([false, true])(
     }),
 );
 
+it.effect.each([true, false])(
+  "keeps a moved child's nested pending work on the prior subscription (grandchild pending=%s)",
+  (grandchildPending) =>
+    Effect.gen(function* () {
+      const consumed = yield* Deferred.make<void>();
+      const result = yield* Effect.raceFirst(
+        runBackgroundItemScenario(
+          "nested-transfer-pending",
+          (ids) => {
+            const childProviderThreadId = ProviderThreadId.make(
+              "provider-thread:nested-transfer-pending:child",
+            );
+            const grandchildThreadId = ThreadId.make("thread:nested-transfer-pending:grandchild");
+            const grandchildProviderThreadId = ProviderThreadId.make(
+              "provider-thread:nested-transfer-pending:grandchild",
+            );
+            const snapshot = (
+              providerThreadId: ProviderThreadId,
+              appThreadId: ThreadId,
+              pendingBackgroundWork: boolean,
+            ) => ({
+              type: "provider_thread.updated" as const,
+              driver,
+              providerThread: {
+                id: providerThreadId,
+                appThreadId,
+                status: "idle",
+              } as OrchestrationV2ProviderThread,
+              pendingBackgroundWork,
+            });
+            const running = subagentEvent(ids, "running");
+            if (running.type !== "subagent.updated") throw new Error("Missing subagent");
+            const linked = {
+              ...running,
+              subagent: {
+                ...running.subagent,
+                origin: "provider_native" as const,
+                childThreadId: ids.childThreadId,
+                providerThreadId: childProviderThreadId,
+              },
+            };
+            return [
+              childThreadCreatedEvent(ids),
+              linked,
+              snapshot(childProviderThreadId, ids.childThreadId, true),
+              {
+                ...childThreadCreatedEvent(ids),
+                appThread: {
+                  id: grandchildThreadId,
+                  lineage: {
+                    parentThreadId: ids.childThreadId,
+                    relationshipToParent: "subagent",
+                    rootThreadId: ids.threadId,
+                  },
+                },
+              } as ProviderAdapter.ProviderAdapterV2Event,
+              snapshot(grandchildProviderThreadId, grandchildThreadId, true),
+              rootTerminalEvent(ids, "completed"),
+              { ...linked, subagent: { ...linked.subagent, runId: RunId.make("run:replacement") } },
+              snapshot(grandchildProviderThreadId, grandchildThreadId, grandchildPending),
+            ];
+          },
+          {
+            keepEventStreamOpen: true,
+            hasPendingBackgroundWorkForThread: () => Effect.succeed(false),
+            onEventsConsumed: Deferred.succeed(consumed, undefined).pipe(Effect.asVoid),
+          },
+        ).pipe(Effect.map(Option.some)),
+        Deferred.await(consumed).pipe(Effect.as(Option.none())),
+      );
+      assert.strictEqual(
+        Option.isSome(result),
+        !grandchildPending,
+        "retained descendant work keeps the prior subscription open until its snapshot clears",
+      );
+    }),
+);
+
 it.effect("does not pin ingestion on background items when the root turn is interrupted", () =>
   Effect.gen(function* () {
     const observed = yield* runBackgroundItemScenario("bg-interrupted", (ids) => [
