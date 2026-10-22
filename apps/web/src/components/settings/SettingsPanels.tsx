@@ -7,6 +7,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   type DesktopUpdateChannel,
   IDLE_COMPACTION_MODES,
+  globalIdleCompaction,
+  idleCompactionPatch,
   ProviderDriverKind,
   type ProviderInstanceId,
   type SidebarProjectGroupingMode,
@@ -996,34 +998,35 @@ export function GeneralSettingsPanel() {
 
         <SettingsRow
           serverScoped
-          settingKeys={["compactIdleThreads"]}
+          settingKeys={["idleCompaction", "compactIdleThreads"]}
           {...searchableSetting("compact-idle-threads")}
           description="When to compact an idle Claude thread over 200,000 tokens: after you return, just before its prompt cache expires, or never. Each Claude provider can override this."
           resetAction={
-            settings.compactIdleThreads !== DEFAULT_UNIFIED_SETTINGS.compactIdleThreads ? (
+            globalIdleCompaction(settings) !== globalIdleCompaction(DEFAULT_UNIFIED_SETTINGS) ? (
               <SettingResetButton
                 label="compact idle threads"
                 onClick={() =>
-                  updateSettings({
-                    compactIdleThreads: DEFAULT_UNIFIED_SETTINGS.compactIdleThreads,
-                  })
+                  updateSettings(
+                    idleCompactionPatch(settings, globalIdleCompaction(DEFAULT_UNIFIED_SETTINGS)),
+                  )
                 }
               />
             ) : null
           }
           control={
             <Select
-              value={settings.compactIdleThreads}
+              value={globalIdleCompaction(settings)}
               onValueChange={(value) => {
                 const mode = IDLE_COMPACTION_MODES.find((candidate) => candidate.value === value);
-                if (mode) updateSettings({ compactIdleThreads: mode.value });
+                if (mode) updateSettings(idleCompactionPatch(settings, mode.value));
               }}
             >
               <SelectTrigger size="sm" className="w-full sm:w-56" aria-label="Compact idle threads">
                 <SelectValue>
                   {
-                    IDLE_COMPACTION_MODES.find((mode) => mode.value === settings.compactIdleThreads)
-                      ?.label
+                    IDLE_COMPACTION_MODES.find(
+                      (mode) => mode.value === globalIdleCompaction(settings),
+                    )?.label
                   }
                 </SelectValue>
               </SelectTrigger>
