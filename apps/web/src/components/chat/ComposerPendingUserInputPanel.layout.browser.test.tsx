@@ -1,8 +1,6 @@
 import "../../index.css";
 
 import { EnvironmentId, RuntimeRequestId, ThreadId } from "@t3tools/contracts";
-import { act } from "react";
-import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 
@@ -13,6 +11,7 @@ vi.mock(import("../ChatMarkdown"), async (importOriginal) => ({
   )) as never,
 }));
 
+import { act, render } from "../../../test/render";
 import type { PendingUserInputDraftAnswer } from "../../pendingUserInput";
 import { ComposerBanner } from "./ComposerBanner";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
@@ -42,54 +41,40 @@ async function renderPanel(
     rerender: (answers: Record<string, PendingUserInputDraftAnswer>) => Promise<void>,
   ) => Promise<void>,
 ) {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const container = document.createElement("div");
   container.style.width = `${width}px`;
-  document.body.append(container);
-  const root = createRoot(container);
-  const rerender = (answers: Record<string, PendingUserInputDraftAnswer>) =>
-    act(async () =>
-      root.render(
-        <ComposerBanner.Root>
-          <ComposerPendingUserInputPanel
-            pendingUserInputs={[
-              {
-                requestId: RuntimeRequestId.make("long-header"),
-                createdAt: "2026-10-20T00:00:00.000Z",
-                dismissible: true,
-                responseCapability: "live",
-                ...(queue
-                  ? { queueQuestionIndex: queue.index, queueQuestionTotal: queue.total }
-                  : {}),
-                questions: Array.from({ length: questionCount }, (_, index) => ({
-                  id: index === 0 ? "strategy" : `strategy-${index}`,
-                  header,
-                  question,
-                  options,
-                  multiSelect,
-                })),
-              },
-            ]}
-            cwd="/repo"
-            threadRef={threadRef}
-            respondingRequestIds={[]}
-            answers={answers}
-            questionIndex={0}
-            onToggleOption={() => {}}
-            onAdvance={() => {}}
-            onDismiss={() => {}}
-          />
-        </ComposerBanner.Root>,
-      ),
-    );
-  try {
-    await rerender({});
-    await run(container, rerender);
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-    vi.unstubAllGlobals();
-  }
+  const panel = (answers: Record<string, PendingUserInputDraftAnswer>) => (
+    <ComposerBanner.Root>
+      <ComposerPendingUserInputPanel
+        pendingUserInputs={[
+          {
+            requestId: RuntimeRequestId.make("long-header"),
+            createdAt: "2026-10-20T00:00:00.000Z",
+            dismissible: true,
+            responseCapability: "live",
+            ...(queue ? { queueQuestionIndex: queue.index, queueQuestionTotal: queue.total } : {}),
+            questions: Array.from({ length: questionCount }, (_, index) => ({
+              id: index === 0 ? "strategy" : `strategy-${index}`,
+              header,
+              question,
+              options,
+              multiSelect,
+            })),
+          },
+        ]}
+        cwd="/repo"
+        threadRef={threadRef}
+        respondingRequestIds={[]}
+        answers={answers}
+        questionIndex={0}
+        onToggleOption={() => {}}
+        onAdvance={() => {}}
+        onDismiss={() => {}}
+      />
+    </ComposerBanner.Root>
+  );
+  await using screen = await render(panel({}), { container, router: false });
+  await run(container, (answers) => screen.rerender(panel(answers)));
 }
 
 const centerX = (element: Element) => {
