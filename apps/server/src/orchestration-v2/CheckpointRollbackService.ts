@@ -363,19 +363,15 @@ export const layer: Layer.Layer<
         function* (input) {
           // Storage cleanup removes worktrees under the same lease.
           const thread = yield* projections.getThread(input.threadId);
-          const cwd =
-            thread.worktreePath ??
-            (yield* projects.get(thread.projectId).pipe(
-              Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot),
-              Effect.orElseSucceed(() => undefined),
-            ));
-          const rollback =
-            thread.worktreePath === null
-              ? execute(input)
-              : withWorkspaceLease(path.resolve(thread.worktreePath), execute(input));
-          yield* cwd === undefined
+          if (thread.worktreePath === null) return yield* execute(input);
+          const worktreePath = path.resolve(thread.worktreePath);
+          const rollback = withWorkspaceLease(worktreePath, execute(input));
+          // Shared-workspace restores are rejected and conversation-only rewinds
+          // touch no files; reserving for them would stall turn starts on the
+          // slow provider rollback for nothing.
+          yield* input.restoreFiles === false
             ? rollback
-            : withCheckpointRestoreReservation(fileSystem, path.resolve(cwd), rollback);
+            : withCheckpointRestoreReservation(fileSystem, path, worktreePath, rollback);
         },
         (effect, input) =>
           effect.pipe(

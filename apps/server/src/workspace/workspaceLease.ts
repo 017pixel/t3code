@@ -1,6 +1,7 @@
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
+import type * as Path from "effect/Path";
 import * as Semaphore from "effect/Semaphore";
 
 const leases = new Map<string, { semaphore: Semaphore.Semaphore; users: number }>();
@@ -35,20 +36,25 @@ interface Reservation {
 const reservations = new Set<Reservation>();
 let reservationReleased = Deferred.makeUnsafe<void>();
 
-const contains = (parent: string, child: string) =>
-  child === parent ||
-  child.startsWith(parent.endsWith("/") ? parent : `${parent}/`) ||
-  child.startsWith(parent.endsWith("\\") ? parent : `${parent}\\`);
+// path.relative folds win32 drive-letter case and treats a POSIX backslash as
+// part of a name, unlike a raw prefix check.
+const contains = (path: Path.Path, parent: string, child: string) => {
+  const relative = path.relative(parent, child);
+  return (
+    relative === "" ||
+    (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`))
+  );
+};
 
-const conflicts = (a: Reservation, b: Reservation) =>
+const conflicts = (path: Path.Path, a: Reservation, b: Reservation) =>
   (a.kind === "restore" || b.kind === "restore") &&
-  (contains(a.cwd, b.cwd) || contains(b.cwd, a.cwd));
+  (contains(path, a.cwd, b.cwd) || contains(path, b.cwd, a.cwd));
 
-const reserve = (reservation: Reservation): Effect.Effect<void> =>
+const reserve = (path: Path.Path, reservation: Reservation): Effect.Effect<void> =>
   Effect.suspend(() => {
     for (const held of reservations) {
-      if (conflicts(held, reservation)) {
-        return Deferred.await(reservationReleased).pipe(Effect.andThen(reserve(reservation)));
+      if (conflicts(path, held, reservation)) {
+        return Deferred.await(reservationReleased).pipe(Effect.andThen(reserve(path, reservation)));
       }
     }
     reservations.add(reservation);
@@ -67,6 +73,7 @@ const withReservation =
   (kind: Reservation["kind"]) =>
   <A, E, R>(
     fileSystem: FileSystem.FileSystem,
+    path: Path.Path,
     cwd: string,
     effect: Effect.Effect<A, E, R>,
   ): Effect.Effect<A, E, R> =>
@@ -74,7 +81,7 @@ const withReservation =
       Effect.orElseSucceed(() => cwd),
       Effect.flatMap((canonical) => {
         const reservation: Reservation = { cwd: canonical, kind };
-        return reserve(reservation).pipe(
+        return reserve(path, reservation).pipe(
           Effect.andThen(effect),
           Effect.ensuring(release(reservation)),
         );

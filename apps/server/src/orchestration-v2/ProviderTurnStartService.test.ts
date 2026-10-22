@@ -1010,6 +1010,7 @@ effectIt.effect.each([
       // isolation check, provider rollback, and git restore of `restorePath`.
       const restore = yield* withCheckpointRestoreReservation(
         fileSystem,
+        yield* Path.Path,
         restorePath,
         Deferred.succeed(restoreEntered, undefined).pipe(
           Effect.andThen(Deferred.await(releaseRestore)),
@@ -1022,7 +1023,7 @@ effectIt.effect.each([
       yield* Fiber.join(restore);
       yield* Fiber.join(startup);
       expect(order).toEqual(["checkpoint files restored", "provider session opened"]);
-    }),
+    }).pipe(Effect.provide(Path.layer)),
 );
 
 effectIt.effect("reads current startup state after waiting for the workspace lease", () =>

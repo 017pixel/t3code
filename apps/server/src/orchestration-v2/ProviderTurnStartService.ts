@@ -1345,14 +1345,14 @@ export const layer: Layer.Layer<
           const { thread } = yield* projectionStore.getThreadRecords(input.threadId, []);
           const cwd =
             thread.worktreePath ??
-            (yield* projects.getById(thread.projectId).pipe(
-              Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot),
-              Effect.orElseSucceed(() => undefined),
-            ));
+            (yield* projects
+              .getById(thread.projectId, { includeDeleted: true })
+              .pipe(Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot)));
           const providerTurn = yield* cwd === undefined
             ? start(input)
             : withTurnStartReservation(
                 fileSystem,
+                path,
                 path.resolve(cwd),
                 thread.worktreePath === null
                   ? start(input)
