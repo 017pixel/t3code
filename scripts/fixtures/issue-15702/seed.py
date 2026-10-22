@@ -34,7 +34,7 @@ with con:
     for thread in (fixture, settled):
         encoded = json.dumps(thread, separators=(',', ':'))
         row = dict(projection)
-        row.update(thread_id=thread['id'],title=thread['title'],created_at=thread['createdAt'],updated_at=thread['updatedAt'],archived_at=None,deleted_at=None,payload_json=encoded)
+        row.update(project_id=thread['projectId'], default_provider='codex', provider_instance_id='codex', runtime_mode=thread['runtimeMode'], interaction_mode=thread['interactionMode'], active_provider_thread_id=None, thread_id=thread['id'],title=thread['title'],created_at=thread['createdAt'],updated_at=thread['updatedAt'],archived_at=None,deleted_at=None,payload_json=encoded)
         columns = ','.join(row)
         con.execute(f'INSERT OR REPLACE INTO orchestration_v2_projection_threads ({columns}) VALUES ({",".join("?" for _ in row)})', tuple(row.values()))
 print(f'Seeded F and F-settled in {db}')
