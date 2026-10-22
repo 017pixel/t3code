@@ -115,7 +115,6 @@ server.on("upgrade", (req, sock, head) =>
     });
     const pending = [];
     const mocked = new Set();
-    let alive = true;
     function send(v) {
       if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(v));
     }
