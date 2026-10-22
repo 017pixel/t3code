@@ -8,9 +8,34 @@ import * as NodeURL from "node:url";
 const root = NodeFS.realpathSync(
   NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "../../../.."),
 );
-const scratch = process.argv[2];
-if (!scratch || !scratch.startsWith("/tmp/"))
+const canonicalPath = (path) => {
+  const absolute = NodePath.resolve(path);
+  let parent = absolute;
+  while (true) {
+    try {
+      return NodePath.resolve(NodeFS.realpathSync(parent), NodePath.relative(parent, absolute));
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      if (NodeFS.lstatSync(parent, { throwIfNoEntry: false })?.isSymbolicLink())
+        throw new Error("Fixture paths must not contain dangling symlinks", { cause: error });
+      parent = NodePath.dirname(parent);
+    }
+  }
+};
+const tmp = NodeFS.realpathSync("/tmp");
+const scratch = process.argv[2] && canonicalPath(process.argv[2]);
+if (!scratch || !scratch.startsWith(tmp + NodePath.sep))
   throw new Error("Supply a scratch directory below /tmp");
+for (const name of [
+  "scenario",
+  "agy_acp_server.par",
+  "localharness_external",
+  "lifecycle.jsonl",
+  "command-pids",
+]) {
+  if (!canonicalPath(NodePath.join(scratch, name)).startsWith(tmp + NodePath.sep))
+    throw new Error("Fixture files must stay below /tmp");
+}
 const settingsPath = NodePath.join(root, ".t3/userdata/settings.json");
 if (!NodeFS.realpathSync(settingsPath).startsWith(NodePath.join(root, ".t3/")))
   throw new Error("Isolated settings must not be symlinked outside this checkout");
@@ -38,9 +63,10 @@ NodeFS.chmodSync(localHarness, 0o700);
 const settings = JSON.parse(NodeFS.readFileSync(settingsPath, "utf8"));
 settings.providerInstances ??= {};
 settings.providerInstances.antigravity = {
+  ...settings.providerInstances.antigravity,
   driver: "antigravity",
   enabled: true,
-  config: { binaryPath: wrapper },
+  config: { ...settings.providerInstances.antigravity?.config, binaryPath: wrapper },
 };
 NodeFS.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 console.log(`Configured isolated Antigravity fixture. Scenario file: ${scenario}`);
