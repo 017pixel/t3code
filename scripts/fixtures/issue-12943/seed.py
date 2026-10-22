@@ -16,7 +16,7 @@ if not database.execute(
 
 with database:
     for index in range(120):
-        message_id = f"selection-12943-{index}"
+        message_id = f"selection-12943-{args.thread_id}-{index}"
         role = "user" if index % 2 == 0 else "assistant"
         stamp = (
             datetime.datetime(2026, 10, 1, tzinfo=datetime.timezone.utc)
