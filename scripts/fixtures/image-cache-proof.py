@@ -17,9 +17,14 @@ p.add_argument('--color', choices=['blue', 'yellow'], default='blue')
 p.add_argument('--images-only', action='store_true')
 p.add_argument('--board', action='store_true')
 p.add_argument('--supplement', action='store_true')
+p.add_argument('--font', type=pathlib.Path, help='TrueType font for PNG labels; defaults to Liberation Sans Bold, else Pillow default')
 a = p.parse_args()
 f = json.loads(pathlib.Path(__file__).with_suffix('.json').read_text())
-font = ImageFont.truetype('/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf', 28)
+default_font = pathlib.Path('/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf')
+if a.font and not a.font.is_file():
+    p.error(f'--font not found: {a.font}')
+font_path = a.font or (default_font if default_font.is_file() else None)
+font = ImageFont.truetype(str(font_path), 28) if font_path else ImageFont.load_default(28)
 label, color, ink = ('BLUE v1', '#1261e8', 'white') if a.color == 'blue' else ('YELLOW v2', '#ffe100', 'black')
 def png(path, size):
     image = Image.new('RGB', size, color)
@@ -41,8 +46,11 @@ if '.t3' not in resolved.parts or resolved.is_relative_to(pathlib.Path.home() / 
     p.error('Only an isolated worktree .t3 database is supported')
 c = sqlite3.connect(resolved)
 c.row_factory = sqlite3.Row
-with sqlite3.connect(str(resolved)+'.image-proof-backup') as backup:
-    c.backup(backup)
+# Keep the first backup: a repeat seed must not replace the pre-seed recovery copy.
+backup_path = pathlib.Path(str(resolved)+'.image-proof-backup')
+if not backup_path.exists():
+    with sqlite3.connect(backup_path) as backup:
+        c.backup(backup)
 msg = c.execute("SELECT * FROM orchestration_v2_projection_messages WHERE thread_id=? AND role='assistant' LIMIT 1", (a.template_thread or a.thread,)).fetchone()
 item = c.execute("SELECT * FROM orchestration_v2_projection_turn_items WHERE thread_id=? AND type='assistant_message' LIMIT 1", (a.template_thread or a.thread,)).fetchone()
 if not msg or not item:
