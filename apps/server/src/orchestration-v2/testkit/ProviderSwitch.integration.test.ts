@@ -116,6 +116,7 @@ function makeTestAdapter(input: {
   readonly holdRunOrdinal?: number;
   readonly holdFirstTurn?: Deferred.Deferred<void>;
   readonly releaseFirstTurn?: Deferred.Deferred<void>;
+  readonly backgroundWork?: Ref.Ref<boolean>;
 }): ProviderAdapter.ProviderAdapterV2["Service"] {
   return {
     instanceId: input.instanceId,
@@ -151,6 +152,9 @@ function makeTestAdapter(input: {
           ...(input.canReuseContextUsage === undefined
             ? {}
             : { canReuseContextUsage: input.canReuseContextUsage }),
+          ...(input.backgroundWork === undefined
+            ? {}
+            : { hasPendingBackgroundWorkForThread: () => Ref.get(input.backgroundWork!) }),
           ensureThread: (threadInput) =>
             Effect.gen(function* () {
               const createdAt = yield* DateTime.now;
@@ -675,16 +679,7 @@ describe("orchestration v2 provider switching", () => {
             yield* wait(3);
           }
           if (replaceNative) {
-            const target = (yield* orchestrator.getThreadProjection(threadId)).providerThreads.find(
-              (thread) => thread.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
-            )!;
-            yield* orchestrator.dispatch({
-              type: "provider-session.detach",
-              commandId: CommandId.make("detach-for-native-replacement"),
-              threadId,
-              providerSessionId: target.providerSessionId!,
-            });
-            yield* worker.drain();
+            // Switching back to Codex already released Claude's session.
             yield* Ref.set(failResumeOnce, true);
           }
           if (scenario.includes("retry")) yield* Ref.set(failStartOnce, true);
@@ -2226,114 +2221,147 @@ describe("orchestration v2 provider switching", () => {
   );
 
   // regression: #20343 sending to an instance with separate history must release the old session
-  it.live(
-    "detaches the previous instance's session when a send hands off to another instance",
-    () =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          const cwd = yield* checkpointWorkspace("handoff-releases-session");
-          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
-          const secondSelection: ModelSelection = {
-            ...CLAUDE_MODEL_SELECTION,
-            instanceId: ProviderInstanceId.make("claude-second-account"),
-          };
-          // No shared continuation key: each Claude instance owns its own native history.
-          const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
-            makeTestAdapter({
-              instanceId: CLAUDE_MODEL_SELECTION.instanceId,
-              driver: CLAUDE_DRIVER,
-              capabilities: ClaudeProviderCapabilitiesV2,
-              modelSelection: CLAUDE_MODEL_SELECTION,
-              responseByRunOrdinal: { 1: "First account complete" },
-              capturedTurns,
-            }),
-            makeTestAdapter({
-              instanceId: secondSelection.instanceId,
-              driver: CLAUDE_DRIVER,
-              capabilities: ClaudeProviderCapabilitiesV2,
-              modelSelection: secondSelection,
-              responseByRunOrdinal: { 2: "Second account complete" },
-              capturedTurns,
-            }),
-          ]);
-          const handoffThreadId = ThreadId.make("thread:handoff-releases-session");
-          yield* Effect.gen(function* () {
-            const orchestrator = yield* Orchestrator.OrchestratorV2;
-            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-            const send = (ordinal: number, modelSelection: ModelSelection) =>
-              orchestrator.dispatch({
-                type: "message.dispatch",
-                createdBy: "user",
-                creationSource: "web",
-                commandId: CommandId.make(`command:handoff-releases-session:${ordinal}`),
-                threadId: handoffThreadId,
-                messageId: MessageId.make(`message:handoff-releases-session:${ordinal}`),
-                text: `Prompt ${ordinal}`,
-                attachments: [],
-                modelSelection,
-                dispatchMode: { type: "start_immediately" },
-              });
-            yield* orchestrator.dispatch({
-              type: "thread.create",
+  it.live.each([
+    ["detaches the previous instance's session when a send hands off to another instance", false],
+    ["refuses the hand-off while the previous instance still runs background work", true],
+  ] as const)("%s", ([, backgroundRunning]) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("handoff-releases-session");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const backgroundWork = yield* Ref.make(backgroundRunning);
+        const secondSelection: ModelSelection = {
+          ...CLAUDE_MODEL_SELECTION,
+          instanceId: ProviderInstanceId.make("claude-second-account"),
+        };
+        // No shared continuation key: each Claude instance owns its own native history.
+        const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+          makeTestAdapter({
+            instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            responseByRunOrdinal: { 1: "First account complete" },
+            capturedTurns,
+            backgroundWork,
+          }),
+          makeTestAdapter({
+            instanceId: secondSelection.instanceId,
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: secondSelection,
+            responseByRunOrdinal: { 2: "Second account complete" },
+            capturedTurns,
+          }),
+        ]);
+        const handoffThreadId = ThreadId.make("thread:handoff-releases-session");
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const eventSink = yield* EventSink.EventSinkV2;
+          const send = (ordinal: number, modelSelection: ModelSelection, attempt = "") =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
               createdBy: "user",
               creationSource: "web",
-              commandId: CommandId.make("command:handoff-releases-session:create"),
+              commandId: CommandId.make(`command:handoff-releases-session:${ordinal}${attempt}`),
               threadId: handoffThreadId,
-              projectId: ProjectId.make("project:handoff-releases-session"),
-              title: "Handoff releases session",
-              modelSelection: CLAUDE_MODEL_SELECTION,
-              runtimeMode: "full-access",
-              interactionMode: "default",
-              branch: null,
-              worktreePath: cwd,
+              messageId: MessageId.make(`message:handoff-releases-session:${ordinal}${attempt}`),
+              text: `Prompt ${ordinal}`,
+              attachments: [],
+              modelSelection,
+              dispatchMode: { type: "start_immediately" },
             });
-            yield* send(1, CLAUDE_MODEL_SELECTION);
-            yield* worker.drain();
-            const afterFirst = yield* waitForIdle(handoffThreadId);
-            const firstSession = afterFirst.providerSessions.find(
-              (session) => session.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
-            );
-            assert.equal(firstSession?.status, "ready");
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:handoff-releases-session:create"),
+            threadId: handoffThreadId,
+            projectId: ProjectId.make("project:handoff-releases-session"),
+            title: "Handoff releases session",
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+          });
+          yield* send(1, CLAUDE_MODEL_SELECTION);
+          yield* worker.drain();
+          const afterFirst = yield* waitForIdle(handoffThreadId);
+          const firstSession = afterFirst.providerSessions.find(
+            (session) => session.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
+          );
+          assert.equal(firstSession?.status, "ready");
 
-            yield* send(2, secondSelection);
-            yield* worker.drain();
-            const afterSecond = yield* waitForIdle(handoffThreadId);
-            yield* worker.drain();
-            const projection = yield* orchestrator.getThreadProjection(handoffThreadId);
-
-            assert.deepEqual(
-              projection.runs.map((run) => [run.providerInstanceId, run.status]),
-              [
-                [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
-                [secondSelection.instanceId, "completed"],
-              ],
-            );
-            assert.lengthOf(afterSecond.contextHandoffs, 1);
-            assert.deepEqual(
-              projection.providerSessions.map((session) => session.providerInstanceId),
-              [secondSelection.instanceId],
-            );
-          }).pipe(
-            Effect.provide(
-              ProviderReplayHarness.layerWithRegistry(
+          if (backgroundRunning) {
+            yield* eventSink.write({
+              events: [
                 {
-                  name: "handoff-releases-session",
-                  runtimePolicyOverride: {
-                    cwd,
-                    approvalPolicy: "never",
-                    sandboxPolicy: {
-                      type: "readOnly",
-                      access: { type: "fullAccess" },
-                      networkAccess: false,
-                    },
+                  id: EventId.make("handoff-releases-session:background-roster"),
+                  type: "provider-thread.updated",
+                  threadId: handoffThreadId,
+                  occurredAt: yield* DateTime.now,
+                  payload: {
+                    ...afterFirst.providerThreads[0]!,
+                    pendingBackgroundTasks: [
+                      { taskId: "agent", description: "Background agent", kind: "subagent" },
+                    ],
                   },
                 },
-                layerRegistry,
-              ),
-            ),
+              ],
+            });
+            const refused = yield* send(2, secondSelection, ":refused").pipe(Effect.flip);
+            assert.include(String(refused.cause), "still running background agents or commands");
+            const unchanged = yield* orchestrator.getThreadProjection(handoffThreadId);
+            assert.lengthOf(unchanged.runs, 1);
+            assert.equal(unchanged.thread.providerInstanceId, CLAUDE_MODEL_SELECTION.instanceId);
+            assert.deepEqual(
+              unchanged.providerSessions.map((session) => [session.id, session.status]),
+              [[firstSession!.id, "ready"]],
+            );
+            yield* Ref.set(backgroundWork, false);
+          }
+
+          yield* send(2, secondSelection);
+          yield* worker.drain();
+          const afterSecond = yield* waitForIdle(handoffThreadId);
+          yield* worker.drain();
+          const projection = yield* orchestrator.getThreadProjection(handoffThreadId);
+
+          assert.deepEqual(
+            projection.runs.map((run) => [run.providerInstanceId, run.status]),
+            [
+              [CLAUDE_MODEL_SELECTION.instanceId, "completed"],
+              [secondSelection.instanceId, "completed"],
+            ],
           );
-        }),
-      ),
+          assert.lengthOf(afterSecond.contextHandoffs, 1);
+          assert.deepEqual(
+            projection.providerSessions.map((session) => session.providerInstanceId),
+            [secondSelection.instanceId],
+          );
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: "handoff-releases-session",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: {
+                    type: "readOnly",
+                    access: { type: "fullAccess" },
+                    networkAccess: false,
+                  },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+      }),
+    ),
   );
 
   // regression: #21314 a queued PR update must follow the provider that took over the thread
