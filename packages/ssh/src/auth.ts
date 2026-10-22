@@ -202,30 +202,17 @@ export const buildSshChildEnvironment = Effect.fn("ssh/auth.buildSshChildEnviron
   };
 });
 
-const SSH_AUTH_METHODS = new Set([
-  "publickey",
-  "password",
-  "keyboard-interactive",
-  "hostbased",
-  "gssapi-with-mic",
-]);
-
 export function isSshAuthFailure(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   const normalized = message.toLowerCase();
-  // When the agent refused to sign for a key, that error is what the user must
-  // fix. Surface it instead of hiding it behind a password prompt.
+  // Surface the agent signing error instead of hiding it behind a password prompt.
   if (/(?:^|\n)sign_and_send_pubkey: signing failed [^\n]* from agent: /u.test(normalized)) {
     return false;
   }
-  const deniedPrefix = "permission denied (";
-  const deniedStart = normalized.indexOf(deniedPrefix);
-  const deniedEnd = deniedStart === -1 ? -1 : normalized.indexOf(")", deniedStart);
   return (
-    (deniedEnd !== -1 &&
-      SSH_AUTH_METHODS.has(
-        normalized.slice(deniedStart + deniedPrefix.length, deniedEnd).split(",")[0] ?? "",
-      )) ||
+    /permission denied \((?:publickey|password|keyboard-interactive|hostbased|gssapi-with-mic)[^)]*\)/u.test(
+      normalized,
+    ) ||
     /authentication failed/u.test(normalized) ||
     /too many authentication failures/u.test(normalized)
   );
