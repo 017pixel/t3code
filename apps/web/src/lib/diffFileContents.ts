@@ -24,6 +24,14 @@ interface GitDiffFileContentsSource {
   readonly cacheKey: string;
 }
 
+interface CheckpointDiffFileContentsSource {
+  readonly environmentId: EnvironmentId;
+  readonly cwd: string;
+  readonly fromCheckpointRef: string;
+  readonly toCheckpointRef: string;
+  readonly cacheKey: string;
+}
+
 interface PullRequestDiffFileContentsSource {
   readonly environmentId: EnvironmentId;
   readonly reference: PullRequestRef;
@@ -95,6 +103,41 @@ export function createGitDiffFileContentsLoader<E>(
       throw squashAtomCommandFailure(result);
     }
     return result.value;
+  }, source.cacheKey);
+}
+
+export function createCheckpointDiffFileContentsLoader<E>(
+  getDiffFileContents: GetDiffFileContents<E>,
+  source: CheckpointDiffFileContentsSource,
+): FileDiffContentsLoader {
+  // Both sides are saved checkpoints, never the working tree. A working-tree read of a "deleted"
+  // file returns exactly `baseRef:oldPath` and skips the disk side, so each side is one such read.
+  const readAt = async (ref: string, filePath: string) => {
+    const result = await getDiffFileContents({
+      environmentId: source.environmentId,
+      input: {
+        cwd: source.cwd,
+        sourceKind: "working-tree",
+        changeType: "deleted",
+        baseRef: ref,
+        headRef: null,
+        oldPath: filePath,
+        newPath: filePath,
+      },
+    });
+    if (result._tag !== "Success") {
+      throw squashAtomCommandFailure(result);
+    }
+    return result.value.oldContents;
+  };
+  return createDiffFileContentsLoader(async ({ changeType, oldPath, newPath }) => {
+    const [oldContents, newContents] = await Promise.all([
+      changeType === "new" || changeType === "rename-pure"
+        ? ""
+        : readAt(source.fromCheckpointRef, oldPath),
+      changeType === "deleted" ? "" : readAt(source.toCheckpointRef, newPath),
+    ]);
+    return { oldContents, newContents };
   }, source.cacheKey);
 }
 

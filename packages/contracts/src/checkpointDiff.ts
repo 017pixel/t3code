@@ -2,7 +2,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import * as Struct from "effect/Struct";
 
-import { NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { CheckpointRef, NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 export const TurnCountRange = Schema.Struct({
   fromTurnCount: NonNegativeInt,
@@ -22,6 +22,15 @@ export const ThreadTurnDiff = TurnCountRange.mapFields(
   Struct.assign({
     threadId: ThreadId,
     diff: Schema.String,
+    // The checkpoints the diff compares, so a client can load either side's full file. Optional
+    // because older servers do not send it.
+    source: Schema.optionalKey(
+      Schema.Struct({
+        cwd: Schema.String,
+        fromCheckpointRef: CheckpointRef,
+        toCheckpointRef: CheckpointRef,
+      }),
+    ),
   }),
   { unsafePreserveChecks: true },
 );

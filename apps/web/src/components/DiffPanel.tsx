@@ -88,7 +88,10 @@ import { serverEnvironment } from "../state/server";
 import { reviewEnvironment } from "../state/review";
 import { vcsEnvironment } from "../state/vcs";
 import { buildBaseRefChoices, filterBaseRefChoices } from "../lib/baseRefChoices";
-import { createGitDiffFileContentsLoader } from "../lib/diffFileContents";
+import {
+  createCheckpointDiffFileContentsLoader,
+  createGitDiffFileContentsLoader,
+} from "../lib/diffFileContents";
 
 import { useReviewFilePatches } from "./diffs/useReviewFilePatches";
 import { DiffFileLoadingBoundary } from "./diffs/DiffFileLoadingBoundary";
@@ -374,17 +377,26 @@ export default function DiffPanel({
           { additions: 0, deletions: 0 },
         )
       : null;
+  const turnDiffSource = selectedTurn ? activeCheckpointDiff.data?.source : undefined;
   const currentLoadDiffFiles =
-    selectedRunId === null && activeThread && preview && selectedGitSource && canReadFiles
-      ? createGitDiffFileContentsLoader(getDiffFileContents, {
-          environmentId: activeThread.environmentId,
-          cwd: preview.cwd,
-          sourceKind: selectedGitSource.kind,
-          baseRef: selectedGitSource.baseRef,
-          headRef: selectedGitSource.headRef,
-          cacheKey: selectedGitSource.diffHash,
-        })
-      : undefined;
+    !activeThread || !canReadFiles
+      ? undefined
+      : turnDiffSource && selectedTurn
+        ? createCheckpointDiffFileContentsLoader(getDiffFileContents, {
+            environmentId: activeThread.environmentId,
+            ...turnDiffSource,
+            cacheKey: `turn:${selectedTurn.runId}`,
+          })
+        : selectedRunId === null && preview && selectedGitSource
+          ? createGitDiffFileContentsLoader(getDiffFileContents, {
+              environmentId: activeThread.environmentId,
+              cwd: preview.cwd,
+              sourceKind: selectedGitSource.kind,
+              baseRef: selectedGitSource.baseRef,
+              headRef: selectedGitSource.headRef,
+              cacheKey: selectedGitSource.diffHash,
+            })
+          : undefined;
   // The code view keeps one loader for its lifetime; a new identity would remount it.
   const loadDiffFiles: FileDiffContentsLoader = useStableCallback(async (fileDiff) => {
     if (!currentLoadDiffFiles) {

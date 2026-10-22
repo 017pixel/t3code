@@ -1841,6 +1841,36 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("reads a saved revision without the working tree and rejects oversized files", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const saved = (yield* git(cwd, ["rev-parse", "HEAD"])).trim();
+        yield* writeTextFile(cwd, "README.md", "# later\n");
+        yield* writeTextFile(cwd, "large.txt", "x".repeat(1024 * 1024 + 1));
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "later"]);
+        yield* writeTextFile(cwd, "README.md", "# dirty\n");
+
+        const contents = yield* driver.getReviewDiffFileContents(
+          makeReviewDiffFileContentsInput(cwd, { changeType: "deleted", baseRef: saved }),
+        );
+        const oversized = yield* driver
+          .getReviewDiffFileContents(
+            makeReviewDiffFileContentsInput(cwd, {
+              changeType: "deleted",
+              oldPath: "large.txt",
+              newPath: "large.txt",
+            }),
+          )
+          .pipe(Effect.flip);
+
+        assert.deepStrictEqual(contents, { oldContents: "# test\n", newContents: "" });
+        assert.instanceOf(oversized, GitCommandError);
+      }),
+    );
+
     it.effect("loads merge-base and disk contents for Changes expansion", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
