@@ -181,6 +181,19 @@ function isFixtureRequest(request, requireOrigin) {
   return origins === 1 && request.headers.origin === fixtureOrigin;
 }
 
+// Only Vite's SPA entry (index.html, served for `/` and every client route)
+// gets the bootstrap. Backend paths can return untrusted HTML such as sandboxed
+// assets; those, and anything carrying a CSP, pass through byte-exact.
+const APP_ENTRY_SIGNATURE = '<script type="module" src="/src/bootstrap.ts"></script>';
+const BACKEND_PREFIXES = ["/api", "/oauth", "/.well-known", "/ws", "/mcp", "/__proof"];
+function isEntryCandidate(request) {
+  if (request.method !== "GET") return false;
+  const pathname = request.url.split("?", 1)[0];
+  return !BACKEND_PREFIXES.some(
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+  );
+}
+
 const server = NodeHttp.createServer((request, response) => {
   if (!isFixtureRequest(request, false)) {
     response.writeHead(403);
@@ -197,7 +210,8 @@ const server = NodeHttp.createServer((request, response) => {
     host: `localhost:${upstreamPort}`,
     origin: `http://localhost:${upstreamPort}`,
   };
-  delete headers["accept-encoding"];
+  const entryCandidate = isEntryCandidate(request);
+  if (entryCandidate) delete headers["accept-encoding"];
   const upstream = NodeHttp.request(
     {
       hostname: upstreamHost,
@@ -207,19 +221,28 @@ const server = NodeHttp.createServer((request, response) => {
       headers,
     },
     (incoming) => {
-      if (incoming.headers["content-type"]?.includes("text/html")) {
-        let body = "";
-        incoming.setEncoding("utf8");
-        incoming.on("data", (chunk) => {
-          body += chunk;
-        });
+      if (
+        entryCandidate &&
+        incoming.statusCode === 200 &&
+        incoming.headers["content-type"]?.startsWith("text/html") &&
+        !incoming.headers["content-encoding"] &&
+        !incoming.headers["content-security-policy"]
+      ) {
+        const chunks = [];
+        incoming.on("data", (chunk) => chunks.push(chunk));
         incoming.on("end", () => {
+          const body = Buffer.concat(chunks);
+          const html = body.toString("utf8");
+          if (!html.includes(APP_ENTRY_SIGNATURE)) {
+            response.writeHead(incoming.statusCode, incoming.headers);
+            response.end(body);
+            return;
+          }
           const outputHeaders = { ...incoming.headers };
           delete outputHeaders["content-length"];
-          delete outputHeaders["content-security-policy"];
           response.writeHead(incoming.statusCode, outputHeaders);
           response.end(
-            body.replace("<head>", `<head><script>(${bootstrap.toString()})()</script>`),
+            html.replace("<head>", `<head><script>(${bootstrap.toString()})()</script>`),
           );
         });
       } else {
