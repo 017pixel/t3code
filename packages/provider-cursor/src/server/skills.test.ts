@@ -162,6 +162,49 @@ describe("Cursor skills", () => {
       }),
     ));
 
+  it("finds sibling skills when one skill ships more files than the scan budget", async () =>
+    await runNode(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const tempDirectory = (prefix: string) =>
+          fileSystem
+            .makeTempDirectoryScoped({ directory: NodeOS.tmpdir(), prefix })
+            .pipe(Effect.flatMap((directory) => fileSystem.realPath(directory)));
+        const userHome = yield* tempDirectory("cursor-skills-home-");
+        const workspace = yield* tempDirectory("cursor-skills-workspace-");
+        const root = path.join(workspace, ".cursor", "skills");
+        const artifacts = path.join(root, "a-large", "artifacts");
+        yield* fileSystem.makeDirectory(artifacts, { recursive: true });
+        yield* fileSystem.writeFileString(path.join(root, "a-large", "SKILL.md"), "---\n---\n");
+        yield* fileSystem.makeDirectory(path.join(root, "b-small"), { recursive: true });
+        yield* fileSystem.writeFileString(path.join(root, "b-small", "SKILL.md"), "---\n---\n");
+        // More ordinary files than the whole-scan entry budget of 10,000.
+        yield* Effect.forEach(
+          Array.from({ length: 11_000 }, (_, index) => path.join(artifacts, `file-${index}.txt`)),
+          (file) => fileSystem.writeFileString(file, ""),
+          { concurrency: 64, discard: true },
+        );
+
+        const expected = [
+          {
+            name: "a-large",
+            path: path.join(root, "a-large", "SKILL.md"),
+            scope: "project",
+            enabled: true,
+          },
+          {
+            name: "b-small",
+            path: path.join(root, "b-small", "SKILL.md"),
+            scope: "project",
+            enabled: true,
+          },
+        ];
+        expect(yield* discoverCursorSkills(workspace, { HOME: userHome })).toEqual(expected);
+        expect(yield* probeCursorSkills(workspace, { HOME: userHome })).toEqual(expected);
+      }),
+    ));
+
   it.skipIf(!symlinksSupported)(
     "treats a symlinked skill outside the root as a package boundary",
     async () =>
