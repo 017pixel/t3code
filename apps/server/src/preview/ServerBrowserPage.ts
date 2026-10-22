@@ -32,8 +32,8 @@ export class ServerBrowserOperationError extends Error {
   readonly tag: string;
   readonly detail: unknown;
 
-  constructor(tag: string, message: string, detail?: unknown) {
-    super(message);
+  constructor(tag: string, message: string, detail?: unknown, options?: ErrorOptions) {
+    super(message, options);
     this.tag = tag;
     this.detail = detail;
   }
@@ -683,8 +683,10 @@ const namedTargetTimeout = async (
   return new ServerBrowserOperationError(
     "PreviewAutomationTimeoutError",
     matches === 0
-      ? `No element matches ${target} after the timeout. Take a fresh snapshot and use its locator.`
+      ? `No element matches ${target} after the timeout. The click may have happened and removed its target or navigated; check the page before retrying, then take a fresh snapshot and use its locator.`
       : `${target} still matches an element after the timeout. The click may have happened; check the page before retrying.`,
+    undefined,
+    { cause },
   );
 };
 

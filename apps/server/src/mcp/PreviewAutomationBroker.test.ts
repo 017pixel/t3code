@@ -332,7 +332,7 @@ it.effect("names the click target that matched nothing when the server browser t
           error: {
             _tag: "PreviewAutomationTimeoutError",
             message:
-              'No element matches ".definitely-no-such-t3-target" after the timeout. Take a fresh snapshot and use its locator.',
+              'No element matches ".definitely-no-such-t3-target" after the timeout. The click may have happened and removed its target or navigated; check the page before retrying, then take a fresh snapshot and use its locator.',
           },
         }),
       ).pipe(Effect.forkScoped);
