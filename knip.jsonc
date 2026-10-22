@@ -24,6 +24,8 @@
       "entry": [
         // These fixture scripts are injected into a browser page by path.
         "fixtures/issue-16534/*.js",
+        // Run by hand to seed the issue 17418 Claude mod fixture.
+        "fixtures/issue-17418/*.js",
         "knip-schemas.ts",
         "mobile-native-client.ts",
         "setup-worktree.ts",

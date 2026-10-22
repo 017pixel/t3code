@@ -2,7 +2,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
 // Keep the fixture in sandbox state; never seed the running user's T3 home.
-const root = NodePath.resolve(import.meta.dirname, "../.t3/repro-mod");
+const root = NodePath.resolve(import.meta.dirname, "../../../.t3/repro-mod");
 await NodeFSP.mkdir(NodePath.join(root, "hooks"), { recursive: true });
 await NodeFSP.writeFile(NodePath.join(root, "hooks/hooks.json"), '{"modules":["./register.ts"]}\n');
 await NodeFSP.writeFile(
