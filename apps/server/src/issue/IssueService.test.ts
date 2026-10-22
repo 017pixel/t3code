@@ -340,7 +340,8 @@ describe("IssueService", () => {
                     tracker: GITHUB,
                     operation: "listIssues",
                     reason: "failed",
-                    detail: "boom",
+                    // A tracker may fail without a detail; the wire error still needs one.
+                    detail: " ",
                   });
                 if (input.scope === "acme/docs")
                   return { items: [issue("3", "2026-07-04T00:00:00Z")], nextCursor: null };
@@ -374,7 +375,9 @@ describe("IssueService", () => {
         result.entries.filter((entry) => entry.projectId === "web").map((entry) => entry.scope),
       ).toEqual(["Acme/Web", "Acme/Web"]);
       expect(result.nextCursors).toEqual({ "github.com Acme/Web": "next" });
-      expect(result.errors).toEqual([{ projectId: "api", projectTitle: "api", message: "boom" }]);
+      expect(result.errors).toEqual([
+        { projectId: "api", projectTitle: "api", message: "The issue tracker request failed." },
+      ]);
       expect(result.viewers).toEqual({ "github.com": "julius" });
       expect(result.trackers).toEqual([
         expect.objectContaining({ host: "github.com", projectCount: 4, configured: true }),

@@ -50,6 +50,16 @@ const interactive =
   (input: I) =>
     call(input).pipe(Effect.provideService(SourceControlRateLimit.Interactive, true));
 
+const traced =
+  <I, A>(operation: string, call: (input: I) => Effect.Effect<A, IssueError>) =>
+  (input: I) =>
+    call(input).pipe(Effect.withSpan(`IssueService.${operation}`));
+
+/** A tracker may fail with no detail; the wire errors carry a non-empty one. */
+function trackerDetail(error: IssueTrackerError): string {
+  return error.detail.trim() || "The issue tracker request failed.";
+}
+
 /** One project's resolved tracker: which driver, where it is served from, and its container. */
 interface ProjectTrackerBinding {
   readonly canonicalKey: string;
@@ -119,7 +129,7 @@ function toIssueError(operation: string): (error: IssueTrackerError) => IssueErr
         })
       : new IssueOperationError({
           operation,
-          detail: error.detail,
+          detail: trackerDetail(error),
           ...(error.reason === "not-found" || error.reason === "rate-limited"
             ? { reason: error.reason }
             : {}),
@@ -331,7 +341,7 @@ const make = Effect.gen(function* () {
             errors.push({
               projectId: project.project.id,
               projectTitle: project.project.title,
-              message: page.failure.detail,
+              message: trackerDetail(page.failure),
             });
             return;
           }
@@ -561,15 +571,15 @@ const make = Effect.gen(function* () {
 
   return IssueService.of({
     list,
-    detail,
-    comments,
-    templates,
-    candidates: interactive(candidates),
-    create: interactive(create),
-    comment: interactive(comment),
-    update: interactive(update),
-    setState: interactive(setState),
-    react: interactive(react),
+    detail: traced("detail", detail),
+    comments: traced("comments", comments),
+    templates: traced("templates", templates),
+    candidates: interactive(traced("candidates", candidates)),
+    create: interactive(traced("create", create)),
+    comment: interactive(traced("comment", comment)),
+    update: interactive(traced("update", update)),
+    setState: interactive(traced("setState", setState)),
+    react: interactive(traced("react", react)),
   });
 });
 
