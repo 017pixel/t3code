@@ -8364,6 +8364,106 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  // Claude reports a background subagent `completed` when its turn ends while
+  // its own background shell still runs, then resumes it with a new
+  // task_started for the same task and launch tool_use_id while the root is
+  // idle. That start is the only signal it is running again.
+  it.effect("reopens a completed background subagent that resumes while the root is idle", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const TASK_ID = "task-self-resume";
+        const TOOL_USE_ID = "toolu-self-resume";
+        const RESUMED_BASH = "toolu-self-resume-bash";
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const startTurn = (ordinal: number, continuation: boolean) =>
+          harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make(`attempt-claude-self-resume-${ordinal}`),
+              text: continuation ? "Background task completed." : "Launch a background agent.",
+              attachments: [],
+              providerTurnOrdinal: ordinal,
+              ...(continuation
+                ? {
+                    messageCreatedBy: "agent" as const,
+                    messageCreationSource: "provider" as const,
+                  }
+                : {}),
+            }),
+          );
+        const latestSubagent = () =>
+          harness.events.findLast(
+            (event): event is Extract<typeof event, { type: "subagent.updated" }> =>
+              event.type === "subagent.updated",
+          )?.subagent;
+
+        yield* startTurn(1, false);
+        yield* harness.offerAndWait(
+          makeSubagentTaskStartedFrame({
+            taskId: TASK_ID,
+            toolUseId: TOOL_USE_ID,
+            uuid: "00000000-0000-4000-8000-000000016101",
+          }),
+        );
+        yield* harness.offerAndWait(
+          makeResultFrame({ uuid: "00000000-0000-4000-8000-000000016102", result: "LAUNCHED" }),
+        );
+        yield* Queue.take(harness.terminalReceipts);
+
+        // The interim completion wakes the parent, which answers and goes idle.
+        yield* harness.offerAndWait(
+          makeSubagentNotificationFrame({
+            taskId: TASK_ID,
+            toolUseId: TOOL_USE_ID,
+            summary: "WAITING",
+            uuid: "00000000-0000-4000-8000-000000016103",
+          }),
+        );
+        yield* Queue.take(harness.continuationReceipts);
+        yield* startTurn(2, true);
+        yield* harness.offerAndWait(
+          makeResultFrame({ uuid: "00000000-0000-4000-8000-000000016104", result: "Noted." }),
+        );
+        yield* Queue.take(harness.terminalReceipts);
+        assert.equal(latestSubagent()?.status, "completed");
+
+        // The subagent's own shell finishes and Claude resumes it.
+        yield* harness.offerAndWait(
+          makeSubagentTaskStartedFrame({
+            taskId: TASK_ID,
+            toolUseId: TOOL_USE_ID,
+            uuid: "00000000-0000-4000-8000-000000016105",
+          }),
+        );
+        for (const frame of makeSubagentAssistantFrames({
+          parentToolUseId: TOOL_USE_ID,
+          uuid: "00000000-0000-4000-8000-000000016106",
+          text: "Resuming.",
+          bashToolUseId: RESUMED_BASH,
+        })) {
+          yield* harness.offerAndWait(frame);
+        }
+
+        const resumed = latestSubagent();
+        assert.equal(resumed?.status, "running");
+        assert.isNull(resumed?.completedAt);
+        const routing = subagentRouting(harness.events, [RESUMED_BASH]);
+        assert.deepEqual(
+          [...(routing.toolThreadIds.get(RESUMED_BASH) ?? [])],
+          [routing.childThreadId],
+        );
+        assert.equal(harness.continuationRequests.length, 1);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect("keeps a nested subagent's launch in order while the root turn is idle", () =>
     Effect.scoped(
       Effect.gen(function* () {
