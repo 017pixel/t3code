@@ -772,6 +772,7 @@ export const make = Effect.gen(function* () {
     yield* refreshLocalStatusCore(cwd);
   });
 
+  // Runs for the subscription lifetime, so tracing would leave a span open indefinitely.
   const watchHead = Effect.fnUntraced(function* (cwd: string, ready: Deferred.Deferred<void>) {
     const headPath = yield* workflow.headPath(cwd);
     if (headPath === null) return;
