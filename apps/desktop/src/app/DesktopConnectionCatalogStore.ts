@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off - `node:crypto` names the backup of an undecryptable catalog by its content.
+import * as NodeCrypto from "node:crypto";
+
 import {
   BearerConnectionCredential,
   BearerConnectionProfile,
@@ -52,6 +55,7 @@ const DesktopConnectionCatalogStoreWriteOperation = Schema.Literals([
   "create-directory",
   "write-temporary-file",
   "replace-catalog-file",
+  "preserve-undecryptable-catalog",
 ]);
 
 const DesktopConnectionCatalogStoreMigrationOperation = Schema.Literals([
@@ -64,7 +68,6 @@ const DesktopConnectionCatalogStoreMigrationOperation = Schema.Literals([
 const DesktopConnectionCatalogStoreProtectionOperation = Schema.Literals([
   "check-encryption-availability",
   "encrypt-catalog",
-  "decrypt-catalog",
 ]);
 
 export class DesktopConnectionCatalogStoreWriteError extends Schema.TaggedError<DesktopConnectionCatalogStoreWriteError>()(
@@ -156,6 +159,7 @@ export class DesktopConnectionCatalogStore extends Context.Service<
       | DesktopConnectionCatalogStoreDecodeError
       | DesktopConnectionCatalogStoreMigrationError
       | DesktopConnectionCatalogStoreProtectionError
+      | DesktopConnectionCatalogStoreWriteError
     >;
     readonly set: (
       catalog: string,
@@ -430,6 +434,45 @@ export const make = Effect.gen(function* () {
     });
   });
 
+  // Electron regenerates its key when the OS keyring entry is lost, orphaning the catalog for
+  // good. Read it as empty so the user can reconnect, but keep a copy first: the catalog stays
+  // in place until the next save replaces it, and the content-derived name keeps repeated and
+  // concurrent reads to one backup.
+  const preserveUndecryptableCatalog = Effect.fn(
+    "desktop.connectionCatalogStore.preserveUndecryptableCatalog",
+  )(function* (
+    encryptedCatalog: Uint8Array,
+    decryptError: ElectronSafeStorage.ElectronSafeStorageDecryptError,
+  ) {
+    const digest = NodeCrypto.createHash("sha256").update(encryptedCatalog).digest("hex");
+    const backupPath = `${catalogPath}.${digest}.undecryptable`;
+    const preserveError = (cause: unknown) =>
+      new DesktopConnectionCatalogStoreWriteError({
+        operation: "preserve-undecryptable-catalog",
+        path: backupPath,
+        cause,
+      });
+    if (!(yield* fileSystem.exists(backupPath).pipe(Effect.mapError(preserveError)))) {
+      const suffix = (yield* crypto.randomUUIDv4().pipe(Effect.mapError(preserveError))).replace(
+        /-/g,
+        "",
+      );
+      const tempPath = `${backupPath}.${process.pid}.${suffix}.tmp`;
+      yield* fileSystem
+        .copyFile(catalogPath, tempPath)
+        .pipe(
+          Effect.andThen(fileSystem.rename(tempPath, backupPath)),
+          Effect.mapError(preserveError),
+          Effect.ensuring(fileSystem.remove(tempPath, { force: true }).pipe(Effect.ignore)),
+        );
+      yield* Effect.logWarning(
+        "The desktop connection catalog can no longer be decrypted; starting a new one.",
+        { catalogPath, backupPath, error: decryptError },
+      );
+    }
+    return Option.none<string>();
+  });
+
   const migrateLegacyCatalog = Effect.gen(function* () {
     if (!(yield* encryptionAvailable)) {
       return Option.none<string>();
@@ -480,21 +523,17 @@ export const make = Effect.gen(function* () {
       if (!(yield* encryptionAvailable)) {
         return Option.none<string>();
       }
-      const decrypted = yield* decodeSecretBytes(catalogPath, document.value.encryptedCatalog).pipe(
-        Effect.flatMap((encryptedCatalog) =>
-          safeStorage.decryptString(encryptedCatalog).pipe(
-            Effect.mapError(
-              (cause) =>
-                new DesktopConnectionCatalogStoreProtectionError({
-                  operation: "decrypt-catalog",
-                  catalogPath,
-                  cause,
-                }),
-            ),
-          ),
-        ),
+      const encryptedCatalog = yield* decodeSecretBytes(
+        catalogPath,
+        document.value.encryptedCatalog,
       );
-      return Option.some(decrypted);
+      return yield* safeStorage.decryptString(encryptedCatalog).pipe(
+        Effect.asSome,
+        Effect.catchTags({
+          ElectronSafeStorageDecryptError: (decryptError) =>
+            preserveUndecryptableCatalog(encryptedCatalog, decryptError),
+        }),
+      );
     }).pipe(Effect.withSpan("desktop.connectionCatalogStore.get")),
     set: Effect.fn("desktop.connectionCatalogStore.set")(function* (catalog) {
       if (!(yield* encryptionAvailable)) {
