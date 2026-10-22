@@ -363,6 +363,11 @@ it.effect("offers MiniMax Code's Global region alongside its Mainland China defa
     const { methods = [] } = yield* h.state((value) => (value.methods?.length ?? 0) > 0);
     const global = methods.find((method) => /global/i.test(method.name));
     assert.isDefined(global, `no Global sign-in among ${JSON.stringify(methods)}`);
+    // The advertised ID stays the Mainland China login so saved authMethodId values keep working.
+    assert.deepEqual(
+      methods.map((method) => method.id),
+      [global!.id, "minimax-code-login"],
+    );
     yield* h.controller.start("owner", Effect.void, global!.id);
     yield* h.phase("waiting");
     assert.deepEqual(h.terminalSpawn()?.args, ["--acp", "login", "--region", "global"]);
