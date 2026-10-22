@@ -73,7 +73,13 @@ export const make = Effect.gen(function* () {
   // unlock prompt. Prefer the async API, falling back to sync where it is unavailable.
   const isAsyncEncryptionAvailable = async () => {
     try {
-      return await Electron.safeStorage.isAsyncEncryptionAvailable();
+      const available = await Electron.safeStorage.isAsyncEncryptionAvailable();
+      // The async API reports the plaintext basic_text backend as available, while
+      // the sync API refuses it. Defer to the sync API there so credentials stay refused.
+      return (
+        available &&
+        !(platform === "linux" && Electron.safeStorage.getSelectedStorageBackend() === "basic_text")
+      );
     } catch (cause) {
       if (!Electron.safeStorage.isEncryptionAvailable()) {
         throw cause;
