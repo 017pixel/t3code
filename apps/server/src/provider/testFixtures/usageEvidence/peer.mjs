@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
+import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 const data = JSON.parse(NodeFS.readFileSync(new URL("./data.json", import.meta.url)));
 const control = () =>
@@ -89,9 +90,20 @@ else {
             rateLimitsByLimitId: null,
             rateLimitResetCredits: null,
           };
-        NodeFS.appendFileSync(
+        const milestones = NodePath.resolve(
           (process.env.T3_USAGE_EVIDENCE_CONTROL || "/tmp/issue-11873-evidence/control.json") +
             ".milestones",
+        );
+        const info = NodeFS.lstatSync(milestones, { throwIfNoEntry: false });
+        if (
+          NodeFS.realpathSync(NodePath.dirname(milestones)) !== NodePath.dirname(milestones) ||
+          (info && (!info.isFile() || info.nlink !== 1))
+        )
+          throw new Error(
+            "Fixture milestones must be a regular file without links or redirected parents",
+          );
+        NodeFS.appendFileSync(
+          milestones,
           JSON.stringify({
             scenario: c.scenario,
             phase: c.phase,

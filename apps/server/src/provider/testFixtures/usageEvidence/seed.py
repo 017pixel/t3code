@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Seed an initialized, stopped, disposable worktree .t3; never use production userdata."""
-import json, pathlib, shutil, sqlite3, subprocess, sys
+import json, pathlib, shutil, sqlite3, stat, subprocess, sys
 root=pathlib.Path.cwd().resolve()
 base=root/'.t3/userdata'
 if not (root/'.git').is_file() or base.resolve()!=base or base.resolve()==(pathlib.Path.home()/'.t3/userdata').resolve():
@@ -17,6 +17,14 @@ control=pathlib.Path('/tmp/issue-11873-evidence/control.json')
 milestones=control.with_suffix('.json.milestones')
 if home.is_symlink() or control.parent.resolve()!=control.parent or control.is_symlink() or milestones.is_symlink():
     raise SystemExit('Fixture home and control paths must not be symlinks')
+# SQLite may write its sidecars as soon as the database is opened.
+for target in [base/'settings.json', *(base/('statev2.sqlite'+suffix) for suffix in ['', '-wal', '-shm', '-journal']), control, milestones]:
+    try:
+        info=target.lstat()
+    except FileNotFoundError:
+        continue
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:
+        raise SystemExit(f'Fixture files must be regular files without links: {target}')
 if home.exists(): shutil.rmtree(home)
 home.mkdir()
 control.parent.mkdir(exist_ok=True)
