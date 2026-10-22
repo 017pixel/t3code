@@ -1,5 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
+  EnvironmentId,
+  MessageId,
   type ModelSelection,
   NodeId,
   type OrchestrationV2ProviderThread,
@@ -14,6 +16,10 @@ import {
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import {
+  expandAssistantCitationsForProvider,
+  serializeAssistantCitation,
+} from "@t3tools/shared/assistantCitations";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -328,4 +334,99 @@ it.effect(
       assert.equal(interrupted?.id, providerThreadId);
       assert.equal(interrupted?.nativeThreadRef?.nativeId, "native-thread:restart-session");
     }),
+);
+
+// regression: #16327 assistant citations reached providers as raw links
+it.effect("expands assistant citations before steering the provider turn", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:steer-citation");
+    const providerSessionId = ProviderSessionId.make("provider-session:steer-citation");
+    const providerThreadId = ProviderThreadId.make("provider-thread:steer-citation");
+    const providerTurnId = ProviderTurnId.make("provider-turn:steer-citation");
+    const attemptId = RunAttemptId.make("run-attempt:steer-citation");
+    const messageId = MessageId.make("message:steer-citation");
+    const providerThread: OrchestrationV2ProviderThread = {
+      id: providerThreadId,
+      driver,
+      providerInstanceId,
+      providerSessionId,
+      appThreadId: threadId,
+      ownerNodeId: null,
+      nativeThreadRef: { driver, nativeId: "native-thread:steer-citation", strength: "strong" },
+      nativeConversationHeadRef: null,
+      status: "idle",
+      firstRunOrdinal: 1,
+      lastRunOrdinal: 1,
+      handoffIds: [],
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const projection = makeProjection({ now, threadId, providerThread, providerTurnId, attemptId });
+    const citation = serializeAssistantCitation({
+      version: 1,
+      environmentId: EnvironmentId.make("environment-citation"),
+      threadId,
+      messageId: MessageId.make("assistant-message-citation"),
+      text: "The café opens at noon.",
+      start: 0,
+      end: 23,
+      prefix: "",
+      suffix: "",
+    });
+    const text = `${citation} Echo my input exactly.`;
+    const message = {
+      id: messageId,
+      text,
+      attachments: [],
+      createdBy: "user",
+      creationSource: "web",
+    } as unknown as OrchestrationV2ThreadProjection["messages"][number];
+    const run = {
+      id: RunId.make("run:restart-session"),
+    } as OrchestrationV2ThreadProjection["runs"][number];
+    const steered = yield* Ref.make<string | null>(null);
+    const runtime = {
+      instanceId: providerInstanceId,
+      driver,
+      providerSessionId,
+      steerTurn: ({ message: steerMessage }) => Ref.set(steered, steerMessage.text),
+    } as Pick<
+      ProviderAdapter.ProviderAdapterV2SessionRuntime,
+      "steerTurn"
+    > as ProviderAdapter.ProviderAdapterV2SessionRuntime;
+    const layerControl = ProviderTurnControlService.layer.pipe(
+      Layer.provide(
+        Layer.merge(
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getProviderControlContext: () =>
+              Effect.succeed({
+                providerThread,
+                providerTurn: projection.providerTurns[0],
+                attempt: projection.attempts[0],
+                message,
+                run,
+              }),
+          }),
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            get: () => Effect.succeedSome(runtime),
+          }),
+        ),
+      ),
+    );
+
+    yield* Effect.gen(function* () {
+      const control = yield* ProviderTurnControlService.ProviderTurnControlServiceV2;
+      yield* control.steer({
+        threadId,
+        providerSessionId,
+        providerThreadId,
+        providerTurnId,
+        messageId,
+      });
+    }).pipe(Effect.provide(layerControl));
+
+    assert.equal(yield* Ref.get(steered), expandAssistantCitationsForProvider(text));
+  }),
 );

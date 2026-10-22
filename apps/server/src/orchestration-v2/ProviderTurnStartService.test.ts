@@ -3,6 +3,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  EnvironmentId,
   MessageId,
   NodeId,
   ProviderSessionId,
@@ -17,6 +18,10 @@ import {
   type OrchestrationV2ThreadProjection,
   OrchestrationV2DomainEvent,
 } from "@t3tools/contracts";
+import {
+  expandAssistantCitationsForProvider,
+  serializeAssistantCitation,
+} from "@t3tools/shared/assistantCitations";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -795,6 +800,33 @@ effectIt.effect("reads current startup state after waiting for the workspace lea
     yield* Fiber.join(startup);
     expect(harness.open).not.toHaveBeenCalled();
     expect(harness.startRootRun).not.toHaveBeenCalled();
+  }),
+);
+
+// regression: #16327 assistant citations reached providers as raw links
+effectIt.effect("expands assistant citations before the provider turn starts", () =>
+  Effect.gen(function* () {
+    const citation = serializeAssistantCitation({
+      version: 1,
+      environmentId: EnvironmentId.make("environment-citation"),
+      threadId: ThreadId.make("thread-citation"),
+      messageId: MessageId.make("assistant-message-citation"),
+      text: "The café opens at noon.",
+      start: 0,
+      end: 23,
+      prefix: "",
+      suffix: "",
+    });
+    const text = `${citation} Echo my input exactly.`;
+    const harness = makeLocalCommandHarness({ text, failReadsAfterRunning: true });
+
+    yield* harness.start;
+
+    expect(harness.startRootRun).toHaveBeenCalledTimes(1);
+    expect(harness.startRootRun.mock.calls[0]![0].message.text).toBe(
+      expandAssistantCitationsForProvider(text),
+    );
+    expect(harness.projection().messages.at(-1)?.text).toBe(text);
   }),
 );
 
