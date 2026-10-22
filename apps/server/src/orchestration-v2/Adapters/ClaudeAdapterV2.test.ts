@@ -4783,6 +4783,76 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  // regression: #18386 a turn the CLI blocked with its own permission denial ended as plain "completed"
+  it.effect("surfaces Claude CLI permission denials but not ones T3 made", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      const now = yield* DateTime.now;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("claude-cli-permission-denial-attempt"),
+          text: "Run exactly `printf T3_DENIAL_PROBE`, then stop if it is denied.",
+          attachments: [],
+          runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            cwd: "/denial-probe",
+          }),
+        }),
+      );
+      const declinedInput = { command: "git push --force" };
+      const decision = yield* Effect.promise(() =>
+        harness.getOpenedOptions()!.canUseTool!("Bash", declinedInput, {
+          signal: new AbortController().signal,
+          toolUseID: "tool-t3-declined",
+          requestId: "request-t3-declined",
+        }),
+      ).pipe(Effect.forkScoped);
+      const request = yield* Queue.take(harness.runtimeRequestReceipts);
+      yield* harness.runtime.respondToRuntimeRequest({
+        requestId: request.runtimeRequest.id,
+        decision: "decline",
+      });
+      assert.equal((yield* Fiber.join(decision))?.behavior, "deny");
+
+      // A settings deny rule (or the auto-mode classifier) rejects inside the
+      // CLI, so canUseTool never runs and only the result reports the denial.
+      yield* harness.offerAndWait(
+        claudeSdkFrame({
+          ...makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000308",
+            result: "The command was denied, so I stopped.",
+          }),
+          permission_denials: [
+            { tool_name: "Bash", tool_use_id: "tool-t3-declined", tool_input: declinedInput },
+            {
+              tool_name: "Bash",
+              tool_use_id: "tool-cli-denied",
+              tool_input: { command: "printf T3_DENIAL_PROBE" },
+            },
+          ],
+        }),
+      );
+      yield* Queue.take(harness.terminalReceipts);
+      const notices = harness.events.flatMap((event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
+          ? [event.turnItem]
+          : [],
+      );
+      assert.lengthOf(notices, 1, "a CLI-side permission denial must leave a visible notice");
+      assert.include(notices[0]?.message, "printf T3_DENIAL_PROBE");
+      assert.notInclude(notices[0]?.message, "git push --force");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(NodeServices.layer, IdAllocator.layer, McpProviderSessions.layer),
+      ),
+    ),
+  );
+
   it.effect(
     "runs native compaction and keeps its context watermark separate from billed usage",
     () =>
