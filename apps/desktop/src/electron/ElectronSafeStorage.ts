@@ -44,6 +44,11 @@ export class ElectronSafeStorageDecryptError extends Schema.TaggedError<Electron
   }
 }
 
+// Chromium's v10 Linux prefix marks ciphertext under the fixed "peanuts" key. The async
+// API falls back to it when the keyring provider fails or is cancelled, while still
+// reporting the keyring backend, so it would store credentials effectively in plaintext.
+const LINUX_FALLBACK_CIPHERTEXT_PREFIX = Buffer.from("v10");
+
 export const ElectronSafeStorageError = Schema.Union([
   ElectronSafeStorageAvailabilityError,
   ElectronSafeStorageEncryptError,
@@ -96,10 +101,21 @@ export const make = Effect.gen(function* () {
     }),
     encryptString: (value) =>
       Effect.tryPromise({
-        try: async () =>
-          (await isAsyncEncryptionAvailable())
-            ? Electron.safeStorage.encryptStringAsync(value)
-            : Electron.safeStorage.encryptString(value),
+        try: async () => {
+          if (!(await isAsyncEncryptionAvailable())) {
+            return Electron.safeStorage.encryptString(value);
+          }
+          const encrypted = await Electron.safeStorage.encryptStringAsync(value);
+          if (
+            platform === "linux" &&
+            encrypted
+              .subarray(0, LINUX_FALLBACK_CIPHERTEXT_PREFIX.length)
+              .equals(LINUX_FALLBACK_CIPHERTEXT_PREFIX)
+          ) {
+            throw new Error("The keyring fell back to an insecure fixed encryption key.");
+          }
+          return encrypted;
+        },
         catch: (cause) => new ElectronSafeStorageEncryptError({ cause }),
       }),
     decryptString: (value) =>
