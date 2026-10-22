@@ -2,6 +2,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as PlatformError from "effect/PlatformError";
@@ -68,7 +69,8 @@ function runShellEnvironment(input: {
   readonly env: NodeJS.ProcessEnv;
   readonly platform: NodeJS.Platform;
   readonly userShell?: string;
-  readonly handler: (
+  // Omit to spawn real processes through NodeServices.
+  readonly handler?: (
     command: ChildProcess.Command,
   ) => string | { output: string; exitCode: number };
   readonly failure?: PlatformError.PlatformError;
@@ -83,7 +85,7 @@ function runShellEnvironment(input: {
     ChildProcessSpawner.ChildProcessSpawner,
     ChildProcessSpawner.make((command) => {
       if (input.failure !== undefined) return Effect.fail(input.failure);
-      const result = input.handler(command);
+      const result = input.handler!(command);
       return Effect.succeed(
         typeof result === "string"
           ? makeProcess(result)
@@ -100,7 +102,11 @@ function runShellEnvironment(input: {
   }).pipe(
     Effect.provide(
       DesktopShellEnvironment.layer.pipe(
-        Layer.provide(Layer.mergeAll(layerEnvironment, NodeServices.layer, layerSpawner)),
+        Layer.provide(
+          input.handler === undefined
+            ? Layer.mergeAll(layerEnvironment, NodeServices.layer)
+            : Layer.mergeAll(layerEnvironment, NodeServices.layer, layerSpawner),
+        ),
       ),
     ),
   );
@@ -168,6 +174,27 @@ describe("DesktopShellEnvironment", () => {
       assert.equal(env.SSH_AUTH_SOCK, "/tmp/secretive.sock");
       assert.equal(env.HOMEBREW_PREFIX, "/opt/homebrew");
     }),
+  );
+
+  it.effect("hydrates CLAUDE_CODE_OAUTH_TOKEN from a real login shell profile on macOS", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const home = yield* fileSystem.makeTempDirectoryScoped();
+        yield* fileSystem.writeFileString(
+          `${home}/.bash_profile`,
+          'export CLAUDE_CODE_OAUTH_TOKEN="synthetic-token-22816"\n',
+        );
+        // A Dock launch inherits no shell profile exports.
+        const env: NodeJS.ProcessEnv = { HOME: home, SHELL: "/bin/bash", PATH: "/usr/bin:/bin" };
+
+        yield* runShellEnvironment({ env, platform: "darwin" }).pipe(
+          Effect.provide(Logger.layer([])),
+        );
+
+        assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "synthetic-token-22816");
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("does not mix login-shell locale categories into an inherited locale", () =>
