@@ -160,7 +160,7 @@ Object.assign(proof, {
     const settings = await import("/src/hooks/useSettings.ts");
     await settings.ensureClientSettingsHydrated();
     await settings.updateClientSettings({timestampFormat});
-    return {persisted:JSON.parse(localStorage.getItem("t3code:client-settings:v1")), runtime:proof.runtime()};
+    return {persisted:settings.getClientSettings(), runtime:proof.runtime()};
   },
 });
 `;
