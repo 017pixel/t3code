@@ -7,7 +7,12 @@ import fixture from "./issue-8963.json" with { type: "json" };
 
 // This is the navigation browser-test probe's projection boundary, not ChatView
 // or a provider emulator. Its status buttons never call the server.
-export function mountProbe(scenario) {
+export function mountProbe(scenario, theme = "dark") {
+  if (!["dark", "light"].includes(theme)) throw new Error("Unknown theme");
+  const background = theme === "dark" ? "#0a0a0a" : "#fff";
+  const foreground = theme === "dark" ? "#eee" : "#111";
+  document.documentElement.style.backgroundColor = background;
+  document.body.style.backgroundColor = background;
   if (!["R4", "R6", "R8"].includes(scenario)) throw new Error("Unknown scenario");
   const environmentId = `proof-probe-${scenario}`;
   const threadId = `proof-thread-${scenario}`;
@@ -60,8 +65,23 @@ export function mountProbe(scenario) {
     })),
   };
   useComposerDraftStore.getState().clearComposerContent(target);
-  function Probe() {
+  function Shell() {
     const [projection, setProjection] = useState(initial);
+    const [mounted, setMounted] = useState(true);
+    return h(
+      "main",
+      null,
+      h(
+        "button",
+        { onClick: () => setMounted(!mounted) },
+        mounted ? "Unmount hook probe" : "Remount hook probe",
+      ),
+      mounted
+        ? h(Probe, { projection, setProjection })
+        : h("p", null, "Hook probe unmounted · synthetic revisit only"),
+    );
+  }
+  function Probe({ projection, setProjection }) {
     const [chosenRequest, setChosenRequest] = useState(ids[0]);
     const promptRef = useRef("");
     const composerRef = useRef(null);
@@ -100,8 +120,8 @@ export function mountProbe(scenario) {
     };
     return h(
       "main",
-      { style: { background: "#111", color: "#eee", minHeight: "100vh" } },
-      h("h1", { style: { color: "#fff" } }, `${scenario} · CLIENT HOOK PROBE`),
+      null,
+      h("h1", null, `${scenario} · CLIENT HOOK PROBE`),
       h(
         "p",
         null,
@@ -159,9 +179,8 @@ export function mountProbe(scenario) {
   }
   const host = document.createElement("div");
   const style = document.createElement("style");
-  style.textContent =
-    "body{margin:0;background:#111;color:#eee;font:16px system-ui}main{padding:32px;max-width:1000px;margin:auto}h1{font-size:24px}h2{font-size:18px}textarea{display:block;box-sizing:border-box;width:100%;height:120px;padding:12px;background:#222;color:#fff;border:1px solid #777;font:16px monospace}button{padding:10px 16px;margin:12px 12px 12px 0;background:#eee;color:#111;border:0;border-radius:6px}pre{white-space:pre-wrap}";
+  style.textContent = `html,body{background:${background};color:${foreground};color-scheme:${theme}}body{margin:0;font:16px system-ui}main{padding:32px;max-width:1000px;margin:auto}main main{padding:0}h1{font-size:24px}h2{font-size:18px}textarea{display:block;box-sizing:border-box;width:100%;height:120px;padding:12px;background:${theme === "dark" ? "#222" : "#fff"};color:${foreground};border:1px solid #777;font:16px monospace}button{padding:10px 16px;margin:12px 12px 12px 0;background:#eee;color:#111;border:0;border-radius:6px}pre{white-space:pre-wrap}`;
   document.head.append(style);
   document.body.replaceChildren(host);
-  createRoot(host).render(h(Probe));
+  createRoot(host).render(h(Shell));
 }
