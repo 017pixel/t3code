@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
 import * as NodeStringDecoder from "node:string_decoder";
 
 // Transparent CLI observer: retain only user text blocks, never env, auth, or control frames.
 const executable = process.env.T3_CLAUDE_OBSERVER_EXECUTABLE;
-const output = process.env.T3_CLAUDE_OBSERVER_OUTPUT;
+const rawOutput = process.env.T3_CLAUDE_OBSERVER_OUTPUT;
+// Resolve first so `/tmp/../elsewhere` cannot pass the prefix check.
+const output = rawOutput ? NodePath.resolve(rawOutput) : undefined;
 if (!executable || !output?.startsWith("/tmp/")) {
   throw new Error("Set T3_CLAUDE_OBSERVER_EXECUTABLE and /tmp T3_CLAUDE_OBSERVER_OUTPUT");
 }

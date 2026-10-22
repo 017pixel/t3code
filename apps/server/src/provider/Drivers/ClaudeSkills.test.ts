@@ -3,6 +3,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { discoverClaudeSkills } from "./ClaudeSkills.ts";
 import { planClaudeSkillDispatch } from "./ClaudeSkillDispatch.ts";
@@ -182,6 +183,107 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
         ["onlyroot", "rootskill"],
       );
     }),
+  );
+
+  it.effect(
+    "skips skills-dir plugins that managed policy blocks, as Claude Code 2.1.303 does",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+        const configDir = path.join(tempDir, "claude-home");
+        const wrapper = path.join(configDir, "skills", "mine");
+        yield* writeSkill(path.join(wrapper, "skills"), "hello", "# Hello");
+        yield* fs.makeDirectory(path.join(wrapper, ".claude-plugin"), { recursive: true });
+        yield* fs.writeFileString(
+          path.join(wrapper, ".claude-plugin", "plugin.json"),
+          '{"name":"mine"}',
+        );
+        const managedDir = path.join(tempDir, "program-data", "ClaudeCode");
+        yield* fs.makeDirectory(managedDir, { recursive: true });
+        const environment = {
+          CLAUDE_CONFIG_DIR: configDir,
+          PROGRAMDATA: path.join(tempDir, "program-data"),
+        };
+        // User settings cannot set these managed-only keys.
+        yield* fs.writeFileString(
+          path.join(configDir, "settings.json"),
+          '{"blockedMarketplaces":[{"source":"skills-dir"}],"strictPluginOnlyCustomization":true}',
+        );
+
+        const namesUnder = Effect.fn(function* (managed: unknown) {
+          yield* fs.writeFileString(
+            path.join(managedDir, "managed-settings.json"),
+            JSON.stringify(managed),
+          );
+          const skills = yield* discoverClaudeSkills({ homePath: "" }, undefined, environment).pipe(
+            Effect.provideService(HostProcess.Platform, "win32"),
+          );
+          return skills.map((skill) => skill.name);
+        });
+
+        for (const allowed of [
+          {},
+          { strictKnownMarketplaces: [1, { source: "skills-dir", extra: true }] },
+          { blockedMarketplaces: "skills-dir" },
+          { strictPluginOnlyCustomization: [] },
+          { strictPluginOnlyCustomization: ["SKILLS"] },
+        ]) {
+          assert.deepEqual(yield* namesUnder(allowed), ["mine:hello"], JSON.stringify(allowed));
+        }
+        for (const blocked of [
+          { strictKnownMarketplaces: [] },
+          { strictKnownMarketplaces: "bogus" },
+          { blockedMarketplaces: [1, { source: "skills-dir" }] },
+          { strictPluginOnlyCustomization: true },
+          { strictPluginOnlyCustomization: ["hooks"] },
+          { strictPluginOnlyCustomization: "bogus" },
+        ]) {
+          assert.deepEqual(yield* namesUnder(blocked), [], JSON.stringify(blocked));
+        }
+      }),
+  );
+
+  it.effect(
+    "lets an enabled installed plugin hold its manifest name over a skills-dir plugin",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+        const configDir = path.join(tempDir, "claude-home");
+        const installed = path.join(configDir, "plugins", "cache", "shop", "mine", "2.0.0");
+        const wrapper = path.join(configDir, "skills", "mine");
+        for (const [root, skill] of [
+          [installed, "inst-only"],
+          [wrapper, "hello"],
+        ] as const) {
+          yield* writeSkill(path.join(root, "skills"), skill, `# ${skill}`);
+          yield* fs.makeDirectory(path.join(root, ".claude-plugin"), { recursive: true });
+          yield* fs.writeFileString(
+            path.join(root, ".claude-plugin", "plugin.json"),
+            '{"name":"mine"}',
+          );
+        }
+        yield* fs.writeFileString(
+          path.join(configDir, "plugins", "installed_plugins.json"),
+          JSON.stringify({ plugins: { "mine@shop": [{ scope: "user", installPath: installed }] } }),
+        );
+        yield* fs.writeFileString(
+          path.join(configDir, "settings.json"),
+          '{"enabledPlugins":{"mine@shop":true}}',
+        );
+
+        // Native reports mine@skills-dir as "Not loaded — the name "mine" is already taken".
+        const skills = yield* discoverClaudeSkills({ homePath: "" }, undefined, {
+          CLAUDE_CONFIG_DIR: configDir,
+        });
+        assert.deepEqual(
+          skills.map((skill) => skill.name),
+          ["mine:inst-only"],
+        );
+      }),
   );
 
   it.effect("merges plugin enablement and selects installs in native registry order", () =>
