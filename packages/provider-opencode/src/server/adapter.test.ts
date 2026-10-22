@@ -2300,8 +2300,8 @@ describe("OpenCodeAdapterV2", () => {
           permission: childPermission,
         });
       }
-      yield* fullAccessSession.resumeThread({
-        providerThread,
+      yield* fullAccessSession.ensureThread({
+        existingProviderThread: providerThread,
         threadId,
         modelSelection,
         runtimePolicy: fullAccess,
