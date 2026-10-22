@@ -2536,6 +2536,46 @@ it.effect("tells a held detail reader about a check change only when the refresh
   }),
 );
 
+it.effect("a held detail's change notice does not leave checks readers on the cached list", () =>
+  Effect.gen(function* () {
+    let status: "pending" | "success" = "pending";
+    const reference = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+    const checks = () => [{ name: "ci", status, description: null, url: null }];
+    const service = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          getChangeRequest: () =>
+            Effect.sync(() => ({ ...hostedChangeRequest("body"), checks: checks() })),
+          getChangeRequestChecks: () =>
+            Effect.sync(() => ({ state: "open" as const, checks: checks() })),
+        }),
+      ],
+    });
+
+    yield* service.detail(reference);
+    yield* TestClock.adjust("61 seconds");
+    yield* service.checks(reference);
+    status = "success";
+    // The panel refetches checks on the notice, well inside the checks cache's lifetime.
+    const reread = yield* service.subscribeRefreshes.pipe(
+      Stream.take(1),
+      Stream.mapEffect(() => service.checks(reference)),
+      Stream.runHead,
+      Effect.timeoutOption("1 second"),
+      Effect.forkChild({ startImmediately: true }),
+    );
+    yield* service.detail(reference);
+    yield* TestClock.adjust("1 second");
+    assert.deepStrictEqual(
+      Option.flatten(yield* Fiber.join(reread)).pipe(
+        Option.map((result) => result?.checks.map((check) => check.status).join()),
+      ),
+      Option.some("success"),
+    );
+  }),
+);
+
 it.effect("keeps routed reads separate when the GitHub account changes", () =>
   Effect.gen(function* () {
     for (const operation of ["summary", "detail", "checks", "diff", "filesViewed"] as const) {

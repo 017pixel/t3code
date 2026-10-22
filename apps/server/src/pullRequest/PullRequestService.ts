@@ -2520,6 +2520,7 @@ export const make = Effect.gen(function* () {
       key: string,
       effect: Effect.Effect<A, PullRequestError>,
       mode: "reuse" | "revalidate",
+      beforeNotice: Effect.Effect<void> = Effect.void,
     ) => {
       const snapshot = held.get(key);
       if (snapshot === undefined) return read(key, effect);
@@ -2531,7 +2532,11 @@ export const make = Effect.gen(function* () {
           Effect.flatMap((fresh) =>
             sameReading(snapshot.value, fresh)
               ? Effect.void
-              : Effect.suspend(() => SubscriptionRef.set(pullRequestRefreshes, ++epochCounter)),
+              : beforeNotice.pipe(
+                  Effect.andThen(
+                    Effect.suspend(() => SubscriptionRef.set(pullRequestRefreshes, ++epochCounter)),
+                  ),
+                ),
           ),
         ),
       ).pipe(Effect.as(snapshot.value));
@@ -2986,7 +2991,8 @@ export const make = Effect.gen(function* () {
     );
     return input.allowStale === false
       ? read.pipe(Effect.tap((value) => lastGoodDetail.record(key, value)))
-      : lastGoodDetail.serveHeld(key, read, "revalidate");
+      : // Readers refetch checks on the notice, so a cached list must not outlive the change.
+        lastGoodDetail.serveHeld(key, read, "revalidate", Cache.invalidate(checksCache, key));
   };
 
   const activityCache = yield* Cache.makeWith(
