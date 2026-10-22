@@ -34,8 +34,9 @@ export function createTitleRegenerationReporter() {
         toastId = null;
       },
     };
-    if (toastId === null) toastId = toastManager.add(options);
-    else toastManager.update(toastId, options);
+    // Re-adding by id, unlike `update`, restarts the dismissal timer so a late
+    // failure in a bulk run stays visible.
+    toastId = toastManager.add(toastId === null ? options : { ...options, id: toastId });
   };
 
   return {

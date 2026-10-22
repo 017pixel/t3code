@@ -350,10 +350,7 @@ describe("ThreadTitleRegenerationService", () => {
             text: "Some conversation",
           });
           const requestId = yield* armRegeneration({ command: "command:title:reason:1", threadId });
-          const first = yield* service
-            .execute({ threadId, requestId, kind: { type: "regenerate" } })
-            .pipe(Effect.forkChild);
-          yield* Fiber.join(first);
+          yield* service.execute({ threadId, requestId, kind: { type: "regenerate" } });
           const projection = yield* threads.getThreadProjection(threadId);
           const shell = yield* threads.getThreadShell(threadId);
           assert.equal(projection.thread.title, "Seed title");
