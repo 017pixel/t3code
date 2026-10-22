@@ -76,6 +76,39 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     }),
   );
 
+  it.effect("discovers personal skills-dir plugins with manifest names and symlinked skills", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const configDir = path.join(tempDir, "claude-home");
+      const wrapper = path.join(configDir, "skills", "demo-wrapper");
+      const live = path.join(tempDir, "live");
+      yield* writeSkill(live, "review", "---\ndescription: Review changes.\n---\n");
+      yield* fs.makeDirectory(path.join(wrapper, "skills"), { recursive: true });
+      yield* fs.symlink(path.join(live, "review"), path.join(wrapper, "skills", "review"));
+      yield* fs.makeDirectory(path.join(wrapper, ".claude-plugin"), { recursive: true });
+      yield* fs.writeFileString(
+        path.join(wrapper, ".claude-plugin", "plugin.json"),
+        '{"name":"demo-tools"}',
+      );
+
+      // `claude plugin list` reports this as demo-tools@skills-dir, enabled without a registry.
+      const skills = yield* discoverClaudeSkills({ homePath: "" }, undefined, {
+        CLAUDE_CONFIG_DIR: configDir,
+      });
+      assert.deepEqual(skills, [
+        {
+          name: "demo-tools:review",
+          path: path.join(wrapper, "skills", "review", "SKILL.md"),
+          enabled: true,
+          scope: "user",
+          description: "Review changes.",
+        },
+      ]);
+    }),
+  );
+
   it.effect("merges plugin enablement and selects installs in native registry order", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
