@@ -387,7 +387,9 @@ export const make = Effect.gen(function* () {
         .execute({
           operation: "GitWorkflowService.checkedOutBranch",
           cwd,
-          args: ["symbolic-ref", "--quiet", "--short", "HEAD"],
+          // symbolic-ref --short disambiguates against same-named tags (heads/main);
+          // status porcelain reports the bare branch name, which this must match.
+          args: ["branch", "--show-current"],
           allowNonZeroExit: true,
         })
         .pipe(
