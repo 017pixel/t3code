@@ -4532,55 +4532,111 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
-  it.effect("refuses a worktree PR checkout in a checkout of another repository", () =>
+  it.effect.each(["local", "worktree"] as const)(
+    "refuses a %s PR checkout in a checkout of another repository",
+    (mode) =>
+      Effect.gen(function* () {
+        // A pull request read can borrow any project on its host, but checking it out there would
+        // fetch another repository's history into the wrong checkout.
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        const remoteDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+        yield* runGit(repoDir, ["checkout", "-b", "feature/foreign"]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "foreign.txt"), "foreign\n");
+        yield* runGit(repoDir, ["add", "foreign.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Another repository's head"]);
+        yield* runGit(repoDir, ["push", "origin", "HEAD:refs/pull/23165/head"]);
+        yield* runGit(repoDir, ["push", "origin", "feature/foreign"]);
+        yield* runGit(repoDir, ["checkout", "main"]);
+        yield* runGit(repoDir, ["branch", "-D", "feature/foreign"]);
+        const remoteUrl = "https://github.com/octocat/Hello-World.git";
+        yield* runGit(repoDir, ["remote", "set-url", "origin", remoteUrl]);
+        yield* runGit(repoDir, ["config", `url.${remoteDir}.insteadOf`, remoteUrl]);
+
+        const gitCommands: string[] = [];
+        const { manager } = yield* makeManager({
+          gitCommands,
+          ghScenario: {
+            pullRequest: {
+              number: 23165,
+              title: "Another repository's PR",
+              url: "https://github.com/pingdotgg/t3code/pull/23165",
+              baseRefName: "main",
+              headRefName: "feature/foreign",
+              state: "open",
+              isCrossRepository: false,
+            },
+          },
+        });
+
+        const exit = yield* Effect.exit(
+          preparePullRequestThread(manager, {
+            cwd: repoDir,
+            reference: "https://github.com/pingdotgg/t3code/pull/23165",
+            mode,
+          }),
+        );
+
+        expect(exit._tag).toBe("Failure");
+        expect(gitCommands.filter((command) => command.startsWith("fetch"))).toEqual([]);
+        const worktrees = (yield* runGit(repoDir, ["worktree", "list", "--porcelain"])).stdout;
+        expect(worktrees.match(/^worktree /gm)).toHaveLength(1);
+        expect((yield* runGit(repoDir, ["branch", "--show-current"])).stdout.trim()).toBe("main");
+      }),
+  );
+
+  it.effect("prepares a worktree PR thread through an insteadOf shorthand remote", () =>
     Effect.gen(function* () {
-      // A pull request read can borrow any project on its host, but checking it out there would
-      // fetch another repository's history into the wrong checkout.
+      // `gh:` only names the repository once `insteadOf` rewrites it; the SSH command serves the
+      // rewritten GitHub URL from a local bare repository.
       const repoDir = yield* makeTempDir("t3code-git-manager-");
       yield* initRepo(repoDir);
       const remoteDir = yield* createBareRemote();
       yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
       yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
-      yield* runGit(repoDir, ["checkout", "-b", "feature/foreign"]);
-      NodeFS.writeFileSync(NodePath.join(repoDir, "foreign.txt"), "foreign\n");
-      yield* runGit(repoDir, ["add", "foreign.txt"]);
-      yield* runGit(repoDir, ["commit", "-m", "Another repository's head"]);
-      yield* runGit(repoDir, ["push", "origin", "HEAD:refs/pull/23165/head"]);
-      yield* runGit(repoDir, ["push", "origin", "feature/foreign"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/shorthand"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "shorthand.txt"), "shorthand\n");
+      yield* runGit(repoDir, ["add", "shorthand.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Shorthand PR branch"]);
+      yield* runGit(repoDir, ["push", "origin", "feature/shorthand"]);
+      yield* runGit(repoDir, ["push", "origin", "HEAD:refs/pull/84/head"]);
       yield* runGit(repoDir, ["checkout", "main"]);
-      yield* runGit(repoDir, ["branch", "-D", "feature/foreign"]);
-      const remoteUrl = "https://github.com/octocat/Hello-World.git";
-      yield* runGit(repoDir, ["remote", "set-url", "origin", remoteUrl]);
-      yield* runGit(repoDir, ["config", `url.${remoteDir}.insteadOf`, remoteUrl]);
+      yield* runGit(repoDir, ["branch", "-D", "feature/shorthand"]);
+      yield* runGit(repoDir, ["remote", "set-url", "origin", "gh:pingdotgg/codething-mvp.git"]);
+      yield* runGit(repoDir, ["config", "url.git@github.com:.insteadOf", "gh:"]);
+      yield* runGit(repoDir, ["config", "ssh.variant", "simple"]);
+      yield* runGit(repoDir, [
+        "config",
+        "core.sshCommand",
+        `sh -c 'exec git-upload-pack "$0"' '${remoteDir}'`,
+      ]);
 
-      const gitCommands: string[] = [];
       const { manager } = yield* makeManager({
-        gitCommands,
         ghScenario: {
           pullRequest: {
-            number: 23165,
-            title: "Another repository's PR",
-            url: "https://github.com/pingdotgg/t3code/pull/23165",
+            number: 84,
+            title: "Shorthand PR",
+            url: "https://github.com/pingdotgg/codething-mvp/pull/84",
             baseRefName: "main",
-            headRefName: "feature/foreign",
+            headRefName: "feature/shorthand",
             state: "open",
             isCrossRepository: false,
           },
         },
       });
 
-      const exit = yield* Effect.exit(
-        preparePullRequestThread(manager, {
-          cwd: repoDir,
-          reference: "https://github.com/pingdotgg/t3code/pull/23165",
-          mode: "worktree",
-        }),
-      );
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: repoDir,
+        reference: "84",
+        mode: "worktree",
+      });
 
-      expect(exit._tag).toBe("Failure");
-      expect(gitCommands.filter((command) => command.startsWith("fetch"))).toEqual([]);
-      const worktrees = (yield* runGit(repoDir, ["worktree", "list", "--porcelain"])).stdout;
-      expect(worktrees.match(/^worktree /gm)).toHaveLength(1);
+      expect(result.worktreePath).not.toBeNull();
+      expect(
+        (yield* runGit(result.worktreePath as string, ["show", "HEAD:shorthand.txt"])).stdout,
+      ).toBe("shorthand\n");
     }),
   );
 

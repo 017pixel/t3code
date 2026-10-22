@@ -2748,8 +2748,9 @@ export const make = Effect.gen(function* () {
 
   // A pull request read may borrow any checkout on its host, and a link can name a renamed
   // repository, so the URL the host answers with is the one compared. Checking out anywhere but a
-  // checkout of the base or head repository would fetch its history into an unrelated one. Raw
-  // config rather than `git remote -v`, which reports URLs after `insteadOf` rewriting.
+  // checkout of the base or head repository would fetch its history into an unrelated one. Both
+  // raw config and `git remote -v` count: a local `insteadOf` mirror only shows in the first, and
+  // shorthand like `gh:` only names the repository after rewriting.
   const ensurePullRequestBelongsToCheckout = Effect.fn("ensurePullRequestBelongsToCheckout")(
     function* (cwd: string, pullRequest: ResolvedPullRequest & PullRequestHeadRemoteInfo) {
       const baseKey = pullRequestRepositoryKey(pullRequest.url);
@@ -2768,21 +2769,32 @@ export const make = Effect.gen(function* () {
                 : []),
             ],
       );
-      const remoteUrls = yield* gitCore
-        .execute({
-          operation: "GitManager.preparePullRequestThread.remotes",
-          cwd,
-          args: ["config", "--get-regexp", "^remote\\..*\\.url$"],
-          allowNonZeroExit: true,
-        })
-        .pipe(
-          Effect.map((result) =>
-            result.stdout.split("\n").flatMap((line) => {
-              const separator = line.indexOf(" ");
-              return separator === -1 ? [] : [line.slice(separator + 1).trim()];
-            }),
-          ),
-        );
+      const listRemoteUrls = (args: ReadonlyArray<string>) =>
+        gitCore
+          .execute({
+            operation: "GitManager.preparePullRequestThread.remotes",
+            cwd,
+            args,
+            allowNonZeroExit: true,
+          })
+          .pipe(
+            Effect.map((result) =>
+              result.stdout.split("\n").flatMap((line) => {
+                // `key url` from config, `name\turl (fetch)` from `remote -v`; URLs may hold spaces.
+                const separator = line.search(/\s/);
+                if (separator === -1) return [];
+                const url = line
+                  .slice(separator + 1)
+                  .replace(/ \((?:fetch|push)\)$/, "")
+                  .trim();
+                return url ? [url] : [];
+              }),
+            ),
+          );
+      const remoteUrls = [
+        ...(yield* listRemoteUrls(["config", "--get-regexp", "^remote\\..*\\.url$"])),
+        ...(yield* listRemoteUrls(["remote", "-v"])),
+      ];
       if (
         !remoteUrls.some((remoteUrl) =>
           repositoryKeys.has(canonicalRepositoryKey(normalizeGitRemoteUrl(remoteUrl))),
