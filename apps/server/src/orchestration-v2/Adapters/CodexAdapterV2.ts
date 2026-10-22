@@ -1412,7 +1412,6 @@ function isCodexHooksListUnsupported(error: CodexErrors.CodexAppServerRequestErr
   );
 }
 
-const MAX_CODEX_HOOK_DISCOVERY_DETAILS_LENGTH = 2_000;
 const MAX_CODEX_HOOK_SOURCE_PATHS = 10;
 const MAX_CODEX_HOOK_SOURCE_PATH_LENGTH = 256;
 
@@ -1422,15 +1421,15 @@ const truncateWithEllipsis = (text: string, maxLength: number) =>
 const codexHookReviewTarget = (cwd: string | null, homePath: string | undefined) =>
   `\`codex\`${cwd === null ? "" : ` in ${cwd}`}${homePath ? ` with CODEX_HOME=${homePath}` : ""}`;
 
-// The user has to fix Codex's own config, so the bounded discovery text stays
-// in the message like DeviceBootError.diagnostics.
+// Codex's discovery text can echo config values, so it stays in `cause`; the
+// message points the user at Codex, which prints the full errors.
 class CodexHookDiscoveryError extends Schema.TaggedError<CodexHookDiscoveryError>()(
   "CodexHookDiscoveryError",
   {
     cwd: Schema.NullOr(Schema.String),
     homePath: Schema.optional(Schema.String),
     errorCount: Schema.Number,
-    details: Schema.String.check(Schema.isMaxLength(MAX_CODEX_HOOK_DISCOVERY_DETAILS_LENGTH)),
+    cause: Schema.Defect(),
   },
 ) {
   static fromDiscoveryErrors(input: {
@@ -1438,19 +1437,18 @@ class CodexHookDiscoveryError extends Schema.TaggedError<CodexHookDiscoveryError
     readonly homePath: string | undefined;
     readonly errors: ReadonlyArray<{ readonly path: string; readonly message: string }>;
   }): CodexHookDiscoveryError {
-    const details = input.errors.map((error) => `${error.path}: ${error.message}`).join("; ");
     return new CodexHookDiscoveryError({
       cwd: input.cwd,
       ...(input.homePath ? { homePath: input.homePath } : {}),
       errorCount: input.errors.length,
-      details: truncateWithEllipsis(details, MAX_CODEX_HOOK_DISCOVERY_DETAILS_LENGTH),
+      cause: input.errors,
     });
   }
 
   override get message(): string {
     return (
-      `Codex could not load its hook configuration (${this.details}), so T3 Code cannot check whether a hook needs review. ` +
-      `Fix the configuration, confirm ${codexHookReviewTarget(this.cwd, this.homePath)} starts cleanly, then try again.`
+      `Codex could not load its hook configuration (${this.errorCount} ${this.errorCount === 1 ? "error" : "errors"}), so T3 Code cannot check whether a hook needs review. ` +
+      `Run ${codexHookReviewTarget(this.cwd, this.homePath)} to see the errors, fix the configuration, then try again.`
     );
   }
 }

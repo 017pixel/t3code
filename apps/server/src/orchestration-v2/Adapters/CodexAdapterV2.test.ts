@@ -984,8 +984,8 @@ describe("CodexAdapterV2 session initialize", () => {
                   path: "/tmp/codex-home/config.toml",
                   message: 'invalid type: string "soon", expected u64',
                 },
-                // Discovery text is arbitrary Codex output, so it must not
-                // grow the error without bound or push out the guidance.
+                // Discovery text is arbitrary Codex output that can echo
+                // config values, so only its count reaches the message.
                 ...Array.from({ length: 200 }, (_, index) => ({
                   path: `/tmp/codex-home/hooks-${index}.json`,
                   message: "unexpected token ".repeat(20),
@@ -1002,11 +1002,18 @@ describe("CodexAdapterV2 session initialize", () => {
 
       assert.equal(failed._tag, "ProviderAdapterEnsureThreadError");
       const message = startFailureMessage(failed);
-      assert.include(message, "/tmp/codex-home/config.toml");
-      assert.include(message, "expected u64");
-      assert.include(message, "…), so T3 Code cannot check whether a hook needs review.");
-      assert.include(message, "starts cleanly, then try again.");
-      assert.isBelow(message.length, 2_500);
+      assert.include(message, "(201 errors), so T3 Code cannot check whether a hook needs review.");
+      assert.include(message, "to see the errors, fix the configuration, then try again.");
+      assert.notInclude(message, "/tmp/codex-home/config.toml");
+      assert.notInclude(message, '"soon"');
+      // The raw entries survive only as the discovery error's cause.
+      assert.notProperty(failed.cause, "details");
+      assert.nestedPropertyVal(failed.cause, "errorCount", 201);
+      assert.nestedPropertyVal(failed.cause, "cause.length", 201);
+      assert.deepNestedPropertyVal(failed.cause, "cause[0]", {
+        path: "/tmp/codex-home/config.toml",
+        message: 'invalid type: string "soon", expected u64',
+      });
       assert.notInclude(session.requests(), "thread/start");
     }).pipe(Effect.scoped, Effect.provide(hooksTestLayer)),
   );
