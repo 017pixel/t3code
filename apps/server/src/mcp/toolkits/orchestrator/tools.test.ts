@@ -27,5 +27,6 @@ it("separates independent review rounds from same-conversation follow-ups", () =
   for (const [name, text] of Object.entries(guidance)) {
     expect.soft(text, name).toMatch(/independent review rounds?/i);
     expect.soft(text, name).toMatch(/follow-up that needs the same child's conversation/i);
+    expect.soft(text, name).not.toMatch(/(?:another|a) (?:delegated )?review round/i);
   }
 });
