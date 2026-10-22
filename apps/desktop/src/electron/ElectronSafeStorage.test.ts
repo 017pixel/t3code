@@ -71,6 +71,12 @@ describe("ElectronSafeStorage", () => {
         safeStorage.getSelectedStorageBackend.mockReturnValue("basic_text");
         safeStorage.isAsyncEncryptionAvailable.mockResolvedValue(true);
         safeStorage.isEncryptionAvailable.mockReturnValue(false);
+        safeStorage.encryptString.mockImplementation(() => {
+          throw new Error("Encryption is not available.");
+        });
+        safeStorage.decryptString.mockImplementation(() => {
+          throw new Error("Decryption is not available.");
+        });
         safeStorage.encryptStringAsync.mockResolvedValue(Buffer.from("ciphertext"));
         safeStorage.decryptStringAsync.mockResolvedValue({
           result: "secret",
@@ -79,8 +85,20 @@ describe("ElectronSafeStorage", () => {
         const storage = yield* ElectronSafeStorage.make;
         assert.isFalse(yield* storage.isEncryptionAvailable);
 
-        yield* Effect.exit(storage.encryptString("secret"));
-        yield* Effect.exit(storage.decryptString(Buffer.from("ciphertext")));
+        const encryptExit = yield* Effect.exit(storage.encryptString("secret"));
+        const decryptExit = yield* Effect.exit(storage.decryptString(Buffer.from("ciphertext")));
+        assert.isTrue(Exit.isFailure(encryptExit));
+        assert.isTrue(Exit.isFailure(decryptExit));
+        if (Exit.isFailure(encryptExit) && Exit.isFailure(decryptExit)) {
+          assert.instanceOf(
+            Option.getOrThrow(Cause.findErrorOption(encryptExit.cause)),
+            ElectronSafeStorage.ElectronSafeStorageEncryptError,
+          );
+          assert.instanceOf(
+            Option.getOrThrow(Cause.findErrorOption(decryptExit.cause)),
+            ElectronSafeStorage.ElectronSafeStorageDecryptError,
+          );
+        }
         assert.equal(safeStorage.encryptStringAsync.mock.calls.length, 0);
         assert.equal(safeStorage.decryptStringAsync.mock.calls.length, 0);
       }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
