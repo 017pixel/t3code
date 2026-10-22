@@ -62,25 +62,30 @@ def main():
         ):
             if connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]:
                 parser.error(f"Expected empty synthetic state: {table} is populated.")
+        project, project_title = "shortcut-fixtures", "Shortcut fixtures"
+        # Only rows this script writes may be replaced; match them exactly.
         if connection.execute(
-            "SELECT count(*) FROM orchestration_v2_projection_threads "
-            "WHERE thread_id NOT LIKE 'shortcut-fixture-%'"
+            "SELECT count(*) FROM orchestration_v2_projection_threads WHERE NOT "
+            "(thread_id IN ('shortcut-fixture-1','shortcut-fixture-2','shortcut-fixture-3') "
+            "AND project_id IS ?)",
+            (project,),
         ).fetchone()[0]:
             parser.error("Refusing to replace nonfixture threads.")
         if connection.execute(
-            "SELECT count(*) FROM projection_projects WHERE title != 'Shortcut fixtures'"
+            "SELECT count(*) FROM projection_projects "
+            "WHERE NOT (project_id IS ? AND title IS ?)",
+            (project, project_title),
         ).fetchone()[0]:
             parser.error("Refusing to replace nonfixture projects.")
 
         clock = "2026-10-22T08:00:00.000Z"
-        project = "shortcut-fixtures"
         connection.execute("DELETE FROM orchestration_v2_projection_threads")
         connection.execute("DELETE FROM projection_projects")
         connection.execute(
             "INSERT INTO projection_projects "
             "(project_id,title,workspace_root,scripts_json,created_at,updated_at) "
             "VALUES (?,?,?,?,?,?)",
-            (project, "Shortcut fixtures", str(workspace), "[]", clock, clock),
+            (project, project_title, str(workspace), "[]", clock, clock),
         )
         for index, title in enumerate(() if args.empty else ("Alpha", "Beta", "Gamma"), 1):
             thread = f"shortcut-fixture-{index}"
