@@ -165,7 +165,28 @@ Object.assign(proof, {
 });
 `;
 
+// The proxy rewrites Host/Origin to Vite's trusted origin, so it must enforce
+// the upstream origin check itself: only this exact fixture origin may pass.
+// Duplicates are read from rawHeaders because Node collapses them. Navigations
+// and same-origin GETs omit Origin; browser WebSocket upgrades always send it.
+const fixtureHost = `localhost:${port}`;
+const fixtureOrigin = `http://${fixtureHost}`;
+function isFixtureRequest(request, requireOrigin) {
+  const count = (name) =>
+    request.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === name)
+      .length;
+  if (count("host") !== 1 || request.headers.host !== fixtureHost) return false;
+  const origins = count("origin");
+  if (origins === 0) return !requireOrigin;
+  return origins === 1 && request.headers.origin === fixtureOrigin;
+}
+
 const server = NodeHttp.createServer((request, response) => {
+  if (!isFixtureRequest(request, false)) {
+    response.writeHead(403);
+    response.end("Fixture rejects foreign Host or Origin");
+    return;
+  }
   if (request.url === "/__proof/fixture.js") {
     response.writeHead(200, { "content-type": "text/javascript" });
     response.end(fixture);
@@ -214,6 +235,10 @@ const server = NodeHttp.createServer((request, response) => {
   request.pipe(upstream);
 });
 server.on("upgrade", (request, socket, head) => {
+  if (!isFixtureRequest(request, true)) {
+    socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+    return;
+  }
   const upstream = NodeNet.connect(upstreamPort, upstreamHost, () => {
     upstream.write(
       `${request.method} ${request.url} HTTP/1.1\r\n` +
