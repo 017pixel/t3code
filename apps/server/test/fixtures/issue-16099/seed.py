@@ -18,8 +18,10 @@ host=Path('/tmp/issue-16099-host.html');host.write_text('<!doctype html><html><b
 other=Path('/tmp/issue-16099-other');other.mkdir(exist_ok=True);(other/'other.html').write_text('<!doctype html><html><body><h1>Other workspace report</h1></body></html>\n')
 (files/'absent.html').unlink(missing_ok=True)
 c=sqlite3.connect(home/'userdata/statev2.sqlite');c.row_factory=sqlite3.Row
-p=dict(c.execute('select * from projection_projects where workspace_root=?',(str(workspace),)).fetchone())
-t=dict(c.execute('select * from orchestration_v2_projection_threads where project_id=?',(p['project_id'],)).fetchone())
+pr=c.execute('select * from projection_projects where workspace_root=?',(str(workspace),)).fetchone()
+tr=pr and c.execute('select * from orchestration_v2_projection_threads where project_id=?',(pr['project_id'],)).fetchone()
+if not tr: raise SystemExit(f'No project with a thread for {workspace} in {home}/userdata/statev2.sqlite; see README prerequisite.')
+p=dict(pr);t=dict(tr)
 # Keep synthetic presentation only: no copied customer text in public captures.
 for table in ['orchestration_v2_projection_turn_items','orchestration_v2_projection_messages','orchestration_v2_projection_threads','projection_projects']:
  c.execute('delete from '+table)
