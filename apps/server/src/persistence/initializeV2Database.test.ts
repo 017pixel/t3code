@@ -133,6 +133,8 @@ const makeStaleCopy = Effect.fn(function* (name: string) {
     VALUES ('thread-a', 'project-a', 'First V1 thread', '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', 'default', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`;
     yield* sql`INSERT INTO auth_sessions (session_id, subject, scopes, method, issued_at, expires_at)
     VALUES ('session-a', 'phone', '[]', 'browser-session-cookie', '2026-01-01T00:00:00.000Z', '2027-01-01T00:00:00.000Z')`;
+    yield* sql`INSERT INTO auth_pairing_links (id, credential, method, scopes, subject, created_at, expires_at)
+    VALUES ('link-a', 'credential-a', 'desktop-bootstrap', '[]', 'phone', '2026-01-01T00:00:00.000Z', '2027-01-01T00:00:00.000Z')`;
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: sourcePath })));
 
   const services = ServerConfig.layerTest(directory, directory).pipe(
@@ -261,6 +263,9 @@ const v2Work = {
   "a V2 scheduled task": `INSERT INTO scheduled_tasks (task_id, title, prompt, enabled, schedule_json, project_id, workspace_strategy_json, model_selection_json, runtime_mode, interaction_mode, created_by, creation_source, created_at, updated_at, last_run_status, run_count)
     VALUES ('v2-task', 'Daily', 'Check CI', 1, '{}', 'project-a', '{}', '{}', 'full-access', 'default', 'user', 'ui', '2026-01-03T00:00:00.000Z', '2026-01-03T00:00:00.000Z', 'never', 0)`,
   "a session revoked in V2": `UPDATE auth_sessions SET revoked_at = '2026-01-03T00:00:00.000Z' WHERE session_id = 'session-a'`,
+  "a pairing link consumed in V2": `UPDATE auth_pairing_links SET consumed_at = '2026-01-03T00:00:00.000Z' WHERE id = 'link-a'`,
+  "a V2 project": `INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+    VALUES ('v2-project', 'V2 project', '/tmp/v2-project', '[]', '2026-01-03T00:00:00.000Z', '2026-01-03T00:00:00.000Z')`,
 };
 
 it.effect.each(Object.entries(v2Work))(
