@@ -483,6 +483,7 @@ export const probeClaudeWorkspaceSnapshot = Effect.fn("probeClaudeWorkspaceSnaps
       ...(capabilities?.slashCommands ?? (runHooks ? machineSnapshot.slashCommands : [])),
     ]),
     slashCommandsPending: !settled,
+    hooksSkipped: !runHooks,
   };
 });
 

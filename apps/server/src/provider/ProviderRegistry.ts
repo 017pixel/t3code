@@ -141,7 +141,9 @@ export function upsertProviderWorkspaceSnapshot(
       ? (previousSnapshot?.slashCommands ?? scopedSnapshot.slashCommands)
       : scopedSnapshot.slashCommands,
     ...(scopedSnapshot.slashCommandsPending ? { slashCommandsPending: true } : {}),
-    ...(scopedSnapshot.hooksSkipped ? { hooksSkipped: true } : {}),
+    ...(scopedSnapshot.hooksSkipped === undefined
+      ? {}
+      : { hooksSkipped: scopedSnapshot.hooksSkipped }),
     skills: scopedSnapshot.skills,
     ...(optionDescriptors === undefined ? {} : { optionDescriptors }),
   } satisfies NonNullable<ServerProvider["workspaceSnapshots"]>[number];
@@ -941,10 +943,11 @@ export const layer = Layer.effect(
         !provider.enabled ||
         // A hook-free scan would replace commands that hooks registered with
         // fewer, so a read-only caller keeps the full inventory, even stale.
+        // Only drivers whose scans run hooks report `hooksSkipped: false`.
         (!runHooks &&
           scannedFrom &&
           !scannedFrom.slashCommandsPending &&
-          !scannedFrom.hooksSkipped) ||
+          scannedFrom.hooksSkipped === false) ||
         (!input.fresh &&
           scannedFrom &&
           !scannedFrom.slashCommandsPending &&
@@ -1000,7 +1003,6 @@ export const layer = Layer.effect(
                   }
                   return upsertProviderWorkspaceSnapshot(candidate, input.cwd, {
                     ...scopedSnapshot,
-                    hooksSkipped: !runHooks,
                     checkedAt: scannedAt,
                     // Unless the driver reports its own command discovery,
                     // commands come from the health check. A failed check

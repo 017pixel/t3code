@@ -1369,6 +1369,17 @@ it.layer(
           assert.deepStrictEqual(recovered?.skills, laterSkills);
           assert.deepStrictEqual(recovered?.slashCommands, [COMPACT_SLASH_COMMAND]);
           assert.strictEqual(recovered?.slashCommandsPending, undefined);
+
+          // Codex scans run no hooks, so a read-only caller still refreshes
+          // an expired scan an operator published.
+          yield* TestClock.adjust(PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS);
+          yield* registry
+            .refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" })
+            .pipe(Effect.provideService(WorkspaceScanRunsHooks, true));
+          yield* TestClock.adjust(PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS);
+          yield* Ref.set(scanResult, { ...healthyProvider, skills: firstSkills });
+          yield* registry.refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" });
+          assert.deepStrictEqual((yield* workspaceOf)?.skills, firstSkills);
         }).pipe(Effect.provide(runtimeServices));
       }),
     );
@@ -1418,7 +1429,7 @@ it.layer(
             Effect.gen(function* () {
               if (!(yield* WorkspaceScanRunsHooks)) {
                 yield* Ref.update(hookFreeScans, (count) => count + 1);
-                return { ...provider, slashCommandsPending: false };
+                return { ...provider, slashCommandsPending: false, hooksSkipped: true };
               }
               yield* Ref.update(hookScans, (count) => count + 1);
               yield* Deferred.succeed(hookScanStarted, undefined);
@@ -1427,6 +1438,7 @@ it.layer(
                 ...provider,
                 slashCommands: [COMPACT_SLASH_COMMAND, modCommand],
                 slashCommandsPending: false,
+                hooksSkipped: false,
               };
             }),
           orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
@@ -1487,7 +1499,7 @@ it.layer(
           yield* Deferred.succeed(releaseHookScan, undefined);
           yield* Fiber.join(operator);
           assert.deepStrictEqual(yield* commandNames, ["compact", "handoffs"]);
-          assert.strictEqual((yield* workspaceSnapshot)?.hooksSkipped, undefined);
+          assert.strictEqual((yield* workspaceSnapshot)?.hooksSkipped, false);
 
           // The full inventory then serves both kinds of caller.
           yield* scan;
