@@ -545,6 +545,11 @@ export class RunExecutionIngestError extends Schema.TaggedError<RunExecutionInge
   }
 }
 
+// A provider that stays alive but stops answering control requests would
+// otherwise hold an effect worker forever. Healthy starts finish within ~33s;
+// this bounds each control call, not the agent turn that follows acceptance.
+export const PROVIDER_CONTROL_TIMEOUT = Duration.minutes(2);
+
 export const RunExecutionServiceV2Error = Schema.Union([
   RunExecutionStartError,
   RunExecutionIngestError,
@@ -1621,7 +1626,10 @@ export const layer: Layer.Layer<
               }),
             ))
           : input.session.startTurn(turnInput);
-        yield* Effect.andThen(shouldStart, startTurn).pipe(
+        yield* Effect.andThen(
+          shouldStart,
+          Effect.timeout(startTurn, PROVIDER_CONTROL_TIMEOUT),
+        ).pipe(
           // Wait for acceptance so abandoned startup cannot leave a refresher
           // on the already-detached ingestion fiber.
           Effect.tap(() =>

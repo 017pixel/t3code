@@ -5,6 +5,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import { identity } from "effect/Function";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
@@ -570,6 +571,14 @@ export class OrchestrationEffectWorkerV2 extends Context.Service<
   OrchestrationEffectWorkerV2Shape
 >()("t3/orchestration-v2/EffectWorker/OrchestrationEffectWorkerV2") {}
 
+// Backstop for provider control effects whose own calls are not bounded, such
+// as interrupts and steers sent to a provider that stopped answering. A timeout
+// fails through the normal retry path and frees the worker. Starts bound each
+// provider call more tightly so the run settles in-band before this fires.
+const PROCESS_BOUND_EFFECT_TIMEOUT = Duration.minutes(12);
+const processBound = (effect: EffectOutbox.OrchestrationEffectV2) =>
+  EffectOutbox.PROCESS_BOUND_EFFECT_TYPES.some((type) => type === effect.request.type);
+
 export interface OrchestrationEffectWorkerOptions {
   readonly workerId?: string;
   readonly leaseDurationMs?: number;
@@ -734,7 +743,10 @@ export const layerWithOptions = (
 
           const execution = executor
             .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
-            .pipe(Effect.as("executed" as const));
+            .pipe(
+              processBound(effect) ? Effect.timeout(PROCESS_BOUND_EFFECT_TIMEOUT) : identity,
+              Effect.as("executed" as const),
+            );
           const exit = yield* Effect.exit(Effect.raceFirst(execution, cancellation)).pipe(
             Effect.ensuring(outbox.clearCancellation(effect.id)),
           );

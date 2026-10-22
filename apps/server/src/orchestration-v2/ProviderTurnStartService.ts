@@ -598,11 +598,13 @@ export const layer: Layer.Layer<
           // Older versions could fail the run without stopping its provider.
           // Recover that exact turn before reusing its native conversation.
           const recovered = yield* Effect.result(
-            liveSession.value.interruptTurn({
-              providerThread,
-              providerTurnId: abandonedTurn.id,
-              requestRuntimeRestart: true,
-            }),
+            liveSession.value
+              .interruptTurn({
+                providerThread,
+                providerTurnId: abandonedTurn.id,
+                requestRuntimeRestart: true,
+              })
+              .pipe(Effect.timeout(RunExecutionService.PROVIDER_CONTROL_TIMEOUT)),
           );
           if (recovered._tag === "Failure") {
             if (input.willRetry === true) return yield* recovered.failure;
@@ -638,24 +640,26 @@ export const layer: Layer.Layer<
         if (!repaired.committed) return;
       }
       const sessionResult = yield* Effect.result(
-        providerSessions.open({
-          threadId: projection.thread.id,
-          providerSessionId,
-          modelSelection: run.modelSelection,
-          runtimePolicy: resolvedRuntimePolicy,
-          ...(existingSessionProjection === undefined
-            ? {}
-            : { resumeFromSession: existingSessionProjection }),
-          ...(providerThread.nativeThreadRef?.nativeId == null
-            ? {}
-            : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
-          ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
-            ? {}
-            : {
-                initialProviderItemIdentityVersion:
-                  providerThread.nativeMetadata.itemIdentityVersion,
-              }),
-        }),
+        providerSessions
+          .open({
+            threadId: projection.thread.id,
+            providerSessionId,
+            modelSelection: run.modelSelection,
+            runtimePolicy: resolvedRuntimePolicy,
+            ...(existingSessionProjection === undefined
+              ? {}
+              : { resumeFromSession: existingSessionProjection }),
+            ...(providerThread.nativeThreadRef?.nativeId == null
+              ? {}
+              : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
+            ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
+              ? {}
+              : {
+                  initialProviderItemIdentityVersion:
+                    providerThread.nativeMetadata.itemIdentityVersion,
+                }),
+          })
+          .pipe(Effect.timeout(RunExecutionService.PROVIDER_CONTROL_TIMEOUT)),
       );
       if (sessionResult._tag === "Failure") {
         if (input.willRetry === true) return yield* sessionResult.failure;
@@ -671,7 +675,9 @@ export const layer: Layer.Layer<
       const loadFromProvider = Effect.fn("ProviderTurnStartService.loadFromProvider")(function* (
         load: Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapter.ProviderAdapterV2Error>,
       ) {
-        const loaded = yield* Effect.result(load);
+        const loaded = yield* Effect.result(
+          Effect.timeout(load, RunExecutionService.PROVIDER_CONTROL_TIMEOUT),
+        );
         if (loaded._tag === "Success") return loaded.success;
         if (input.willRetry === true) return yield* loaded.failure;
         yield* settleStartFailure({
@@ -754,12 +760,14 @@ export const layer: Layer.Layer<
                   cause: "Uncertain native history injection",
                 }),
               )
-            : session.resumeThread({
-                providerThread,
-                threadId: projection.thread.id,
-                modelSelection: run.modelSelection,
-                runtimePolicy: resolvedRuntimePolicy,
-              }),
+            : session
+                .resumeThread({
+                  providerThread,
+                  threadId: projection.thread.id,
+                  modelSelection: run.modelSelection,
+                  runtimePolicy: resolvedRuntimePolicy,
+                })
+                .pipe(Effect.timeout(RunExecutionService.PROVIDER_CONTROL_TIMEOUT)),
         );
         if (resumed._tag === "Success") {
           return resumed.success;
