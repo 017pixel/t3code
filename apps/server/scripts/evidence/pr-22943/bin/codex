@@ -1,0 +1,20 @@
+#!/bin/bash
+# Fake codex: answers the probes T3 makes and writes a fixed PR title/body for `exec`.
+dir="${EV_LOG_DIR:-/tmp}"
+echo "codex $*" >> "$dir/codex.log"
+case "$1" in
+  --version) echo "codex-cli 0.0.0-fake"; exit 0 ;;
+  mcp) echo "[]"; exit 0 ;;
+  exec)
+    out=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--output-last-message" ] || [ "$prev" = "-o" ]; then out="$arg"; fi
+      prev="$arg"
+    done
+    n=$(ls "$dir"/prompt-*.txt 2>/dev/null | wc -l)
+    cat > "$dir/prompt-$((n + 1)).txt"
+    if [ -n "$out" ]; then printf '%s' '{"title":"Fixture PR","body":"fixture body"}' > "$out"; fi
+    exit 0 ;;
+esac
+exit 0

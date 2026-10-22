@@ -1,0 +1,5 @@
+#!/bin/sh
+# Fake gh: only hands out a token for the stub forge. Logs argv.
+echo "gh $*" >> "${EV_LOG_DIR:-/tmp}/gh.log"
+if [ "$1" = "auth" ] && [ "$2" = "token" ]; then echo fake-token; exit 0; fi
+exit 1
