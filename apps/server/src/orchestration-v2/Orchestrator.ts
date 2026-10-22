@@ -20,7 +20,6 @@ import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
   CommandId,
-  OrchestrationV2DispatchRejectionReason,
   isOrchestrationV2WorkActive,
   isProviderNativeSubagentThread,
   MessageId,
@@ -153,12 +152,31 @@ export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDi
   {
     commandId: CommandId,
     commandType: Schema.String,
-    reason: Schema.optional(OrchestrationV2DispatchRejectionReason),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message(): string {
     return `Failed to dispatch orchestration command ${this.commandType} (${this.commandId}).`;
+  }
+}
+
+/** A conditional delete ("discard if empty") found a message or a run on the thread. */
+export class OrchestratorThreadNotEmptyError extends Schema.TaggedError<OrchestratorThreadNotEmptyError>()(
+  "OrchestratorThreadNotEmptyError",
+  { commandId: CommandId, threadId: ThreadId },
+) {
+  override get message(): string {
+    return `Thread ${this.threadId} is no longer empty.`;
+  }
+}
+
+/** A conditional delete for a side chat found the thread promoted to an ordinary one. */
+export class OrchestratorThreadNotSideChatError extends Schema.TaggedError<OrchestratorThreadNotSideChatError>()(
+  "OrchestratorThreadNotSideChatError",
+  { commandId: CommandId, threadId: ThreadId },
+) {
+  override get message(): string {
+    return `Thread ${this.threadId} is no longer a side chat.`;
   }
 }
 
@@ -282,6 +300,8 @@ function canReplayCommandReceipt(receiptThreadId: ThreadId, commandThreadId: Thr
 export const OrchestratorV2Error = Schema.Union([
   OrchestratorDispatchError,
   OrchestratorThreadAlreadyExistsError,
+  OrchestratorThreadNotEmptyError,
+  OrchestratorThreadNotSideChatError,
   OrchestratorCommandRejectedError,
   OrchestratorProjectionError,
   OrchestratorDomainEventStreamError,
@@ -11345,11 +11365,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         // Decided under the thread's command lock, so a promotion or a message
         // that already landed always wins over "discard if empty".
         if (command.expectedSideChat === true && projection.thread.sideChat !== true) {
-          return yield* new OrchestratorDispatchError({
+          return yield* new OrchestratorThreadNotSideChatError({
             commandId: command.commandId,
-            commandType: command.type,
-            reason: "thread_not_side_chat",
-            cause: `Thread ${command.threadId} is no longer a side chat.`,
+            threadId: command.threadId,
           });
         }
         if (command.expectedEmpty === true) {
@@ -11357,11 +11375,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             .getMessageCount(command.threadId)
             .pipe(mapDispatchError(command));
           if (messageCount > 0 || projection.runs.length > 0) {
-            return yield* new OrchestratorDispatchError({
+            return yield* new OrchestratorThreadNotEmptyError({
               commandId: command.commandId,
-              commandType: command.type,
-              reason: "thread_not_empty",
-              cause: `Thread ${command.threadId} is no longer empty.`,
+              threadId: command.threadId,
             });
           }
         }
