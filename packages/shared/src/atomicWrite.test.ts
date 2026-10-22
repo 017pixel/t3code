@@ -130,6 +130,82 @@ it.layer(NodeServices.layer)("writeFileStringAtomically", (it) => {
       assert.deepStrictEqual(yield* fs.readDirectory(root), ["settings.json"]);
     }),
   );
+
+  it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "keeps the permissions of the file it replaces",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-atomic-write-" });
+        const filePath = path.join(root, "settings.json");
+        yield* fs.writeFileString(filePath, "before");
+        yield* fs.chmod(filePath, 0o600);
+
+        yield* writeFileStringAtomically({ filePath, contents: "after" });
+
+        assert.strictEqual(yield* fs.readFileString(filePath), "after");
+        assert.strictEqual(((yield* fs.stat(filePath)).mode & 0o777).toString(8), "600");
+      }),
+  );
+
+  it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "creates a new file readable only by its owner",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-atomic-write-" });
+        const filePath = path.join(root, "settings.json");
+
+        yield* writeFileStringAtomically({ filePath, contents: "fresh" });
+
+        assert.strictEqual(((yield* fs.stat(filePath)).mode & 0o777).toString(8), "600");
+      }),
+  );
+
+  it.effect("syncs the contents before the rename and the directory after it", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-atomic-write-" });
+      const filePath = path.join(root, "settings.json");
+      const events: Array<string> = [];
+      const recording = FileSystem.make({
+        ...fs,
+        open: (openedPath, options) =>
+          fs.open(openedPath, options).pipe(
+            Effect.map((file) => ({
+              ...file,
+              sync: file.sync.pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    events.push(openedPath === root ? "sync directory" : "sync temp file");
+                  }),
+                ),
+              ),
+            })),
+          ),
+        rename: (from, to) =>
+          fs
+            .rename(from, to)
+            .pipe(
+              Effect.tap(() =>
+                Effect.sync(() =>
+                  events.push(from === filePath ? "rename target" : "rename temp file"),
+                ),
+              ),
+            ),
+      });
+
+      yield* writeFileStringAtomically({ filePath, contents: "after" }).pipe(
+        Effect.provideService(FileSystem.FileSystem, recording),
+      );
+
+      assert.strictEqual(yield* fs.readFileString(filePath), "after");
+      assert.deepStrictEqual(events, ["sync temp file", "rename temp file", "sync directory"]);
+    }),
+  );
 });
 
 // Retries stat the real target between waits, and that I/O finishes outside the
