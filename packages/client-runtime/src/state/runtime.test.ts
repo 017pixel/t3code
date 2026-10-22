@@ -874,6 +874,9 @@ describe("environment query lifecycle", () => {
         const closePicker = registry.mount(atom);
         expect(yield* listNames).toEqual(["existing"]);
         closePicker();
+        // A closed picker stays closed past the registry's scheduled node
+        // removal; a remount within the same tick keeps the live node.
+        yield* afterScheduledTasks;
 
         onDisk = [entry("created-externally"), entry("existing")];
         registry.mount(atom);
