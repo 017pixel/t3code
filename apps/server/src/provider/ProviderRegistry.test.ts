@@ -2276,6 +2276,9 @@ it.layer(
         for (const { slug, label } of maxOptions) {
           // Sonnet 4.6 already sends Max as `high`, under the cap.
           if (slug === "claude-sonnet-4-6") assert.strictEqual(label, "Max", slug);
+          // Models without Extra High run Max at High, the highest level they support under the cap.
+          else if (slug === "claude-opus-4-6" || slug === "claude-opus-4-5")
+            assert.strictEqual(label, "Max (capped to High)", slug);
           else assert.include(label, "capped to Extra High", slug);
         }
       }).pipe(

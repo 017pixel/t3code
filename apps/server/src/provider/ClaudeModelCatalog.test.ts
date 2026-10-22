@@ -296,6 +296,34 @@ describe("Claude model catalog", () => {
         ["Medium", "High", "Extra High", "Max", "Ultracode", "Ultrathink"],
       ],
     );
+
+    // Without an Extra High option (Opus 4.6), the CLI clamps an xhigh cap down to High.
+    const noXhigh = {
+      slug: "claude-no-xhigh",
+      name: "claude-no-xhigh",
+      isCustom: false,
+      capabilities: {
+        optionDescriptors: [
+          {
+            id: "effort",
+            label: "Reasoning",
+            type: "select" as const,
+            options: [
+              { id: "low", label: "Low" },
+              { id: "medium", label: "Medium" },
+              { id: "high", label: "High", isDefault: true },
+              { id: "max", label: "Max" },
+            ],
+          },
+        ],
+      },
+    };
+    const [capped] = capClaudeCatalogEffort({ models: [] }, [noXhigh], "xhigh");
+    const cappedEffort = capped?.capabilities?.optionDescriptors?.[0];
+    assert.deepStrictEqual(
+      cappedEffort?.type === "select" ? cappedEffort.options.map((option) => option.label) : [],
+      ["Low", "Medium", "High", "Max (capped to High)"],
+    );
   });
 
   it("leaves custom model effort labels alone under a cap", () => {

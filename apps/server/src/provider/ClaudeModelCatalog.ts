@@ -212,17 +212,11 @@ function claudeEffortRank(level: string | undefined): number {
   return CLAUDE_EFFORT_LEVELS.indexOf(level as ClaudeEffortLevel);
 }
 
-const CLAUDE_EFFORT_LABELS: Record<ClaudeEffortLevel, string> = {
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "Extra High",
-  max: "Max",
-};
-
 /**
- * Claude Code clamps every effort above settings.json `maxEffortLevel` to it. Options above the
- * cap are relabelled rather than removed: a stored selection that no longer matched any option
+ * Claude Code clamps every effort above settings.json `maxEffortLevel` to the highest level the
+ * model supports at or below it, so a model without Extra High runs Max at High under an `xhigh`
+ * cap. Each descriptor's effective cap is therefore its highest plain-level option at or below the
+ * configured cap. Options above it are relabelled rather than removed: a stored selection that no longer matched any option
  * would fall back to the descriptor default and run below the cap. An option counts as above the
  * cap only when both the level it reads as and the level the CLI is sent are, so an `effortMap`
  * that already sends Max as High keeps its label, and values that map to no level (prompt-injected
@@ -236,7 +230,7 @@ export function capClaudeCatalogEffort(
   if (!maxEffortLevel) return models;
   const capRank = claudeEffortRank(maxEffortLevel);
   return models.map((model) => {
-    // Custom model labels are the user's, and may already carry a copied "(capped to …)" suffix.
+    // Custom model labels are user-authored, so they are left alone.
     if (model.isCustom || !model.capabilities?.optionDescriptors) return model;
     return {
       ...model,
@@ -244,9 +238,16 @@ export function capClaudeCatalogEffort(
         ...model.capabilities,
         optionDescriptors: model.capabilities.optionDescriptors.map((descriptor) => {
           if (descriptor.id !== "effort" || descriptor.type !== "select") return descriptor;
-          const capLabel =
-            descriptor.options.find((option) => option.id === maxEffortLevel)?.label ??
-            CLAUDE_EFFORT_LABELS[maxEffortLevel];
+          const cap = descriptor.options.reduce<{ rank: number; label: string } | undefined>(
+            (best, option) => {
+              const rank = claudeEffortRank(option.id);
+              return rank >= 0 && rank <= capRank && rank > (best?.rank ?? -1)
+                ? { rank, label: option.label }
+                : best;
+            },
+            undefined,
+          );
+          if (!cap) return descriptor;
           return {
             ...descriptor,
             options: descriptor.options.map((option) => {
@@ -256,8 +257,8 @@ export function capClaudeCatalogEffort(
               );
               const displayedRank = idRank >= 0 ? idRank : sentRank;
               const runsRank = sentRank >= 0 ? sentRank : idRank;
-              return displayedRank > capRank && runsRank > capRank
-                ? { ...option, label: `${option.label} (capped to ${capLabel})` }
+              return displayedRank > cap.rank && runsRank > cap.rank
+                ? { ...option, label: `${option.label} (capped to ${cap.label})` }
                 : option;
             }),
           };
