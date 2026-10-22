@@ -3061,7 +3061,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   );
 
   // regression: #15708 Stop must not silently drop a steer Claude queued behind a foreground task
-  it.effect("delivers a steer Claude never read before Stop to the next turn", () =>
+  it.effect("warns that a steer Claude never read before Stop was not delivered", () =>
     Effect.gen(function* () {
       const harness = yield* makeWakeHarnessWithOptions({
         close: (sdkMessages) => Queue.shutdown(sdkMessages),
@@ -3131,28 +3131,29 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           attachments: [],
         },
       });
-      const steerOffers = harness.offeredMessages.length;
+      const noticesBefore = harness.events.length;
       yield* harness.runtime.interruptTurn({
         providerThread: harness.providerThread,
         providerTurnId,
       });
       assert.equal((yield* Queue.take(harness.terminalReceipts)).status, "interrupted");
 
-      yield* harness.runtime.startTurn({
-        ...firstInput,
-        attemptId: RunAttemptId.make("attempt-claude-unread-steer-2"),
-        providerTurnOrdinal: 2,
-        message: {
-          ...firstInput.message,
-          text: "Earlier in this conversation, did I send you a codeword?",
-        },
-      });
-      assert.equal(harness.processQueues.length, 2);
-      const nextTurnText = harness.offeredMessages
-        .slice(steerOffers)
-        .map((offered) => JSON.stringify(offered.message.content))
-        .join("\n");
-      assert.include(nextTurnText, "Codeword: PELICAN");
+      const notices = harness.events
+        .slice(noticesBefore)
+        .flatMap((event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
+            ? [event.turnItem.message]
+            : [],
+        );
+      const undelivered = notices.find((message) =>
+        /not (been )?delivered|never (reached|delivered)/i.test(message ?? ""),
+      );
+      assert.isDefined(
+        undelivered,
+        `expected an undelivered-steer notice, got ${JSON.stringify(notices)}`,
+      );
+      assert.match(undelivered ?? "", /resend|send it again|re-send/i);
+      assert.include(undelivered, "PELICAN");
     }).pipe(
       Effect.scoped,
       Effect.provide(
