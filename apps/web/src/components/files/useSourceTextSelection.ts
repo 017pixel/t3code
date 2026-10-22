@@ -336,6 +336,9 @@ class SourceTextSelection {
     };
     const onFocusIn = (event: FocusEvent) => {
       const scroller = this.scroller();
+      // A modal sheet's popup takes focus when a click lands on the
+      // unfocusable rows, which keeps the click's engagement.
+      if (scroller && event.target instanceof Node && event.target.contains(scroller)) return;
       this.engaged = scroller ? event.composedPath().includes(scroller) : false;
     };
     const onKeyDown = (event: KeyboardEvent) => {
