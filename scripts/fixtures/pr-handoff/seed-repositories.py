@@ -3,7 +3,8 @@
 import json, os, pathlib, subprocess
 fixture = json.loads(pathlib.Path(__file__).with_name('fixture.json').read_text())
 root = pathlib.Path(fixture['root']).resolve()
-if not str(root).startswith('/tmp/'):
+tmp = pathlib.Path('/tmp').resolve()
+if root == tmp or tmp not in root.parents:
     raise SystemExit('Set fixture.json root to an isolated directory below /tmp.')
 paths = [root / project['directory'] for project in fixture['projects']]
 if any(path.exists() for path in paths):

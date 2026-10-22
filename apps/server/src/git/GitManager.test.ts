@@ -4832,7 +4832,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* runGit(repoDir, ["checkout", "main"]);
       yield* runGit(repoDir, ["branch", "-D", "feature/fork-only"]);
 
-      const ghScenario = {
+      const ghScenario: FakeGhScenario = {
         pullRequest: {
           number: 82,
           title: "Fork-only PR",
@@ -4900,7 +4900,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           forkDir,
         );
 
-        const ghScenario = {
+        const ghScenario: FakeGhScenario = {
           pullRequest: {
             number: 82,
             title: "Fork-only PR",
