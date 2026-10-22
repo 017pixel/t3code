@@ -4,12 +4,25 @@ import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 const data = JSON.parse(NodeFS.readFileSync(new URL("./data.json", import.meta.url)));
-const control = () =>
-  JSON.parse(
-    NodeFS.readFileSync(
-      process.env.T3_USAGE_EVIDENCE_CONTROL || "/tmp/issue-11873-evidence/control.json",
-    ),
-  );
+const controlPath = NodePath.resolve(
+  process.env.T3_USAGE_EVIDENCE_CONTROL || "/tmp/issue-11873-evidence/control.json",
+);
+const assertControlDirectory = () => {
+  const directory = NodePath.dirname(controlPath);
+  const info = NodeFS.statSync(directory);
+  if (
+    NodeFS.realpathSync(directory) !== directory ||
+    info.uid !== process.getuid() ||
+    (info.mode & 0o022) !== 0
+  )
+    throw new Error(
+      "Fixture control directory must be owned by the current user and not writable by others",
+    );
+};
+const control = () => {
+  assertControlDirectory();
+  return JSON.parse(NodeFS.readFileSync(controlPath));
+};
 const limits = (used) => ({
   limitId: "codex",
   planType: "plus",
@@ -90,10 +103,8 @@ else {
             rateLimitsByLimitId: null,
             rateLimitResetCredits: null,
           };
-        const milestones = NodePath.resolve(
-          (process.env.T3_USAGE_EVIDENCE_CONTROL || "/tmp/issue-11873-evidence/control.json") +
-            ".milestones",
-        );
+        assertControlDirectory();
+        const milestones = controlPath + ".milestones";
         const info = NodeFS.lstatSync(milestones, { throwIfNoEntry: false });
         if (
           NodeFS.realpathSync(NodePath.dirname(milestones)) !== NodePath.dirname(milestones) ||

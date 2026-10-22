@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Seed an initialized, stopped, disposable worktree .t3; never use production userdata."""
-import json, pathlib, shutil, sqlite3, stat, subprocess, sys
+import json, os, pathlib, shutil, sqlite3, stat, subprocess, sys
 root=pathlib.Path.cwd().resolve()
 base=root/'.t3/userdata'
 if not (root/'.git').is_file() or base.resolve()!=base or base.resolve()==(pathlib.Path.home()/'.t3/userdata').resolve():
@@ -25,9 +25,12 @@ for target in [base/'settings.json', *(base/('statev2.sqlite'+suffix) for suffix
         continue
     if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:
         raise SystemExit(f'Fixture files must be regular files without links: {target}')
+control.parent.mkdir(mode=0o700,exist_ok=True)
+info=control.parent.stat()
+if info.st_uid!=os.getuid() or info.st_mode & 0o022:
+    raise SystemExit('Fixture control directory must be owned by the current user and not writable by others')
 if home.exists(): shutil.rmtree(home)
 home.mkdir()
-control.parent.mkdir(exist_ok=True)
 milestones.unlink(missing_ok=True)
 config={'homePath':str(home),'binaryPath':'codex','launchArgs':'-c model_providers.cliproxy.name="cliproxy" -c model_providers.cliproxy.base_url="http://127.0.0.1:8317/v1" -c model_providers.cliproxy.env_key="ANTHROPIC_AUTH_TOKEN" -c model_providers.cliproxy.wire_api="responses" -c model_provider="cliproxy"'}
 if scenario in ['S3','R2','R3']:
