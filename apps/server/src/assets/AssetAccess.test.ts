@@ -330,6 +330,7 @@ describe("AssetAccess", () => {
           resource: { _tag: "draft-workspace-file", cwd: root, path: name },
           workspaceRoot: root,
         });
+        expect(result.fileRevision).toEqual(expect.any(String));
         const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
         const separator = suffix.indexOf("/");
         const token = suffix.slice(0, separator);
