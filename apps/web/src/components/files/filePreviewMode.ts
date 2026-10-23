@@ -48,16 +48,21 @@ const isFrontmatterFence = (line: string, fence: string): boolean =>
  * still point into the original source.
  */
 export function maskMarkdownFrontmatter(markdown: string): string {
-  let lineEnd = markdown.indexOf("\n");
-  if (lineEnd < 0 || !isFrontmatterFence(markdown.slice(0, lineEnd), "---")) return markdown;
+  const start = markdown.startsWith("\uFEFF") ? 1 : 0;
+  const line = /([^\r\n]*)(\r\n|\r|\n|$)/y;
+  line.lastIndex = start;
+  let match = line.exec(markdown);
+  if (!match?.[2] || !isFrontmatterFence(match[1] ?? "", "---")) return markdown;
 
-  while (lineEnd >= 0) {
-    const lineStart = lineEnd + 1;
-    lineEnd = markdown.indexOf("\n", lineStart);
-    const line = markdown.slice(lineStart, lineEnd < 0 ? undefined : lineEnd);
-    if (isFrontmatterFence(line, "---") || isFrontmatterFence(line, "...")) {
-      const blockEnd = lineEnd < 0 ? markdown.length : lineEnd;
-      return markdown.slice(0, blockEnd).replace(/[^\r\n]/g, " ") + markdown.slice(blockEnd);
+  while (line.lastIndex < markdown.length && (match = line.exec(markdown))) {
+    const text = match[1] ?? "";
+    if (isFrontmatterFence(text, "---") || isFrontmatterFence(text, "...")) {
+      const blockEnd = match.index + text.length;
+      return (
+        markdown.slice(0, start) +
+        markdown.slice(start, blockEnd).replace(/[^\r\n]/g, " ") +
+        markdown.slice(blockEnd)
+      );
     }
   }
   return markdown;

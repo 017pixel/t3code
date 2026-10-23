@@ -131,6 +131,18 @@ describe("maskMarkdownFrontmatter", () => {
     expect(masked.indexOf("[ ]")).toBe(markdown.indexOf("[ ]"));
   });
 
+  it("blanks frontmatter after a byte order mark", () => {
+    expect(maskMarkdownFrontmatter("\uFEFF---\ntitle: Task\n---\n# Body")).toBe(
+      "\uFEFF   \n           \n   \n# Body",
+    );
+  });
+
+  it("blanks frontmatter with CR-only line endings", () => {
+    expect(maskMarkdownFrontmatter("---\rtitle: Task\r---\r# Body")).toBe(
+      "   \r           \r   \r# Body",
+    );
+  });
+
   it("leaves unterminated or non-leading fences alone", () => {
     expect(maskMarkdownFrontmatter("---\ntitle: Task\n")).toBe("---\ntitle: Task\n");
     expect(maskMarkdownFrontmatter("# A\n---\nb\n---\n")).toBe("# A\n---\nb\n---\n");
