@@ -1012,6 +1012,18 @@ function toolStatus(
 
 type ProjectedToolStatus = ReturnType<typeof toolStatus> | "interrupted";
 
+/**
+ * Some agents answer Stop's `session/cancel` by failing the tools and subagents
+ * that were running (Kiro: "Tool execution was cancelled by the user."). After
+ * Stop, a failure is shown as the interruption it was.
+ */
+function stoppedToolStatus(
+  turn: Pick<ActiveAcpTurn, "interrupted">,
+  tool: AcpToolCallState,
+): "interrupted" | undefined {
+  return turn.interrupted && tool.status === "failed" ? "interrupted" : undefined;
+}
+
 function nodeStatus(status: ProjectedToolStatus): OrchestrationV2ExecutionNode["status"] {
   return status === "pending" ? "running" : status;
 }
@@ -2785,8 +2797,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
 
         const emitSubagent = Effect.fnUntraced(function* (
           context: ActiveAcpTurn,
-          update: AcpAdapterV2SubagentUpdate,
+          reported: AcpAdapterV2SubagentUpdate,
         ) {
+          // See stoppedToolStatus: after Stop, a failed subagent was interrupted.
+          const update: AcpAdapterV2SubagentUpdate =
+            context.interrupted && reported.status === "failed"
+              ? { ...reported, status: "interrupted" }
+              : reported;
           // Hydration tools (get_command_or_subagent_output) use a new toolCallId
           // but reference the child via subagent_id / task id.
           const existing =
@@ -3287,10 +3304,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
             for (const event of parseSessionUpdateEvent(notification).events) {
               if (event._tag === "ToolCallUpdated") {
+                const tool = flavor.normalizeToolCall?.(event.toolCall) ?? event.toolCall;
                 yield* projectSubagentTool(
                   subagent,
                   notification.sessionId,
-                  flavor.normalizeToolCall?.(event.toolCall) ?? event.toolCall,
+                  tool,
+                  stoppedToolStatus(owner.owner, tool),
                 );
               }
             }
@@ -3647,7 +3666,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             yield* rearmDeferredFinalize(context);
             return;
           }
-          const status = projectedStatus ?? toolStatus(toolCall.status);
+          const status =
+            projectedStatus ?? stoppedToolStatus(context, toolCall) ?? toolStatus(toolCall.status);
           const now = yield* DateTime.now;
           const nativeItemId = `${context.nativeThreadId}:tool:${toolCall.toolCallId}`;
           const ordinal = yield* resolveItemOrdinal(context, nativeItemId);
@@ -4898,7 +4918,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   }
                   continue;
                 }
-                yield* projectSubagentTool(subagent, notification.sessionId, toolCall);
+                yield* projectSubagentTool(
+                  subagent,
+                  notification.sessionId,
+                  toolCall,
+                  stoppedToolStatus(context, toolCall),
+                );
               }
               return;
             }

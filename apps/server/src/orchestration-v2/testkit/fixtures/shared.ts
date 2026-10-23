@@ -260,6 +260,8 @@ export type OrchestratorFixtureInputStep =
       readonly type: "interrupt";
       readonly targetRunIndex: number;
       readonly waitForTurnItemType?: OrchestrationV2TurnItem["type"];
+      /** With waitForTurnItemType: wait for it in one of the run's subagent threads. */
+      readonly inSubagentThread?: boolean;
     }
   | {
       readonly type: "stop_background_work";
@@ -854,6 +856,7 @@ export function materializeFixtureInput(input: {
               threadId: ids.threadId,
               runId: runIdFor(step.targetRunIndex),
               itemType: step.waitForTurnItemType,
+              ...(step.inSubagentThread === true ? { inSubagentThreads: true } : {}),
             });
           }
           pushDispatch(

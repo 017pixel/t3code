@@ -49,6 +49,8 @@ import {
   assertKiroFullAccessWriteOutput,
   assertKiroSupervisedWriteOutput,
 } from "./kiro_permission_modes/output.ts";
+import { kiroSubagentInterruptInput } from "./kiro_subagent_interrupt/input.ts";
+import { assertKiroSubagentInterruptOutput } from "./kiro_subagent_interrupt/output.ts";
 import { assertGrokAutoBlockedCommandOutput } from "./grok_auto_blocked_command/output.ts";
 import { grokBackgroundBashInput } from "./grok_background_bash/input.ts";
 import { assertGrokBackgroundBashOutput } from "./grok_background_bash/output.ts";
@@ -212,6 +214,7 @@ import { assertTurnInterruptMidToolClaudeOutput } from "./turn_interrupt_mid_too
 import { assertTurnInterruptMidToolCodexOutput } from "./turn_interrupt_mid_tool/codex_output.ts";
 import { assertTurnInterruptMidToolCursorOutput } from "./turn_interrupt_mid_tool/cursor_output.ts";
 import { turnInterruptMidToolInput } from "./turn_interrupt_mid_tool/input.ts";
+import { assertTurnInterruptMidToolKiroOutput } from "./turn_interrupt_mid_tool/kiro_output.ts";
 import { assertTurnInterruptMidToolPiOutput } from "./turn_interrupt_mid_tool/pi_output.ts";
 import { assertTurnInterruptRestartClaudeOutput } from "./turn_interrupt_restart/claude_output.ts";
 import { turnInterruptRestartInput } from "./turn_interrupt_restart/input.ts";
@@ -599,6 +602,21 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         ),
         modelSelection: KIRO_MODEL_SELECTION,
         assertOutput: assertKiroFullAccessWriteOutput,
+      },
+    ],
+  },
+  {
+    name: "kiro_subagent_interrupt",
+    buildInput: kiroSubagentInterruptInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("kiro"),
+        transcriptFile: new URL(
+          "./kiro_subagent_interrupt/kiro_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: KIRO_MODEL_SELECTION,
+        assertOutput: assertKiroSubagentInterruptOutput,
       },
     ],
   },
@@ -1780,6 +1798,15 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./turn_interrupt_mid_tool/pi_transcript.ndjson", import.meta.url),
         modelSelection: PI_MODEL_SELECTION,
         assertOutput: assertTurnInterruptMidToolPiOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("kiro"),
+        transcriptFile: new URL(
+          "./turn_interrupt_mid_tool/kiro_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: KIRO_MODEL_SELECTION,
+        assertOutput: assertTurnInterruptMidToolKiroOutput,
       },
     ],
   },
