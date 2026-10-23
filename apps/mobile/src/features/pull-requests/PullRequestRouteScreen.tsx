@@ -102,6 +102,7 @@ import {
 } from "./PullRequestPresentation";
 import { usePullRequestFilesSection } from "./PullRequestFiles";
 import { PullRequestDescription } from "./PullRequestDescription";
+import { PullRequestMediaVisibleContext } from "./PullRequestMedia";
 import { PullRequestMarkdownRepository } from "./PullRequestMarkdown";
 import {
   PullRequestStatusMenu,
@@ -702,7 +703,9 @@ export function PullRequestRouteScreen({ route }: StaticScreenProps<PullRequestP
                         listAnimationsReady && !item.key.endsWith(":body") ? PR_ROW_EXIT : undefined
                       }
                     >
-                      {item.content}
+                      <PullRequestMediaVisibleContext value={section === tab}>
+                        {item.content}
+                      </PullRequestMediaVisibleContext>
                     </Animated.View>
                   )}
                   recycleItems={false}
