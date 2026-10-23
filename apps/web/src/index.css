@@ -2127,6 +2127,15 @@ code {
   font-size: 0.75rem;
 }
 
+/* Inline code is also 0.75rem, so inside a table it matches the cell instead
+   of stepping down from it. Body copy is text-sm (0.875rem); 0.75/0.875 keeps
+   that ratio. The chip's vertical padding would still open the cell line. */
+.chat-markdown table :not(pre) > code {
+  font-size: calc(0.75 / 0.875 * 1em);
+  padding-block: 0;
+  padding-inline: 0.25rem;
+}
+
 .chat-markdown th,
 .chat-markdown td {
   padding: 0.45rem 0.75rem;

@@ -249,6 +249,50 @@ describe("ChatMarkdown headings", () => {
   });
 });
 
+describe("ChatMarkdown inline code", () => {
+  it("sizes inline code in a table under the cell, and leaves code blocks and file chips alone", async () => {
+    setup();
+    await using screen = await renderText(
+      [
+        "The lockfile pins in `pnpm-lock.yaml` are clean. See `apps/web/src/index.css`.",
+        "",
+        "| Status | Detail |",
+        "| --- | --- |",
+        "| None | The lockfile pins in `pnpm-lock.yaml` are clean. See `apps/web/src/index.css`. |",
+      ].join("\n"),
+    );
+    const { container } = screen;
+    const paragraph = container.querySelector("p");
+    const cell = container.querySelector("tbody td:last-child");
+    const paragraphCode = paragraph?.querySelector(":scope > code");
+    const cellCode = cell?.querySelector(":scope > code");
+    const paragraphChip = paragraph?.querySelector(".chat-markdown-file-link");
+    const cellChip = cell?.querySelector(".chat-markdown-file-link");
+    expect(paragraphCode).not.toBeNull();
+    expect(cellCode).not.toBeNull();
+    expect(paragraphChip).not.toBeNull();
+    expect(cellChip).not.toBeNull();
+    if (!paragraph || !paragraphCode || !cell || !cellCode || !paragraphChip || !cellChip) return;
+
+    const fontSize = (element: Element) => Number.parseFloat(getComputedStyle(element).fontSize);
+    const ratio = (code: Element, text: Element) => fontSize(code) / fontSize(text);
+    expect(fontSize(paragraphCode)).toBeLessThan(fontSize(paragraph));
+    expect(fontSize(cellCode)).toBeLessThan(fontSize(cell));
+    expect(ratio(cellCode, cell)).toBeCloseTo(ratio(paragraphCode, paragraph), 2);
+    expect(getComputedStyle(cellCode).paddingTop).toBe("0px");
+    expect(Number.parseFloat(getComputedStyle(paragraphCode).paddingTop)).toBeGreaterThan(0);
+    expect(ratio(paragraphChip, paragraph)).toBeCloseTo(0.86, 2);
+    expect(ratio(cellChip, cell)).toBeCloseTo(ratio(paragraphChip, paragraph), 2);
+
+    const block = document.createElement("pre");
+    const blockCode = document.createElement("code");
+    blockCode.textContent = "block";
+    block.append(blockCode);
+    cell.append(block);
+    expect(fontSize(blockCode)).toBeCloseTo(fontSize(cell), 2);
+  });
+});
+
 describe("ChatMarkdown Windows file links", () => {
   const environmentId = EnvironmentId.make("env-windows");
   const renderWindows = (text: string, parseRawHtml: boolean) =>
