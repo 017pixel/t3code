@@ -58,7 +58,7 @@ const traced =
     call(input).pipe(Effect.withSpan(`IssueService.${operation}`));
 
 /** A tracker may fail with no detail; the wire errors carry a non-empty one. */
-export function trackerDetail(error: IssueTrackerError): string {
+function trackerDetail(error: IssueTrackerError): string {
   return error.detail.trim() || "The issue tracker request failed.";
 }
 
