@@ -16,6 +16,9 @@ vi.mock(import("../ChatMarkdown"), async (importOriginal) => ({
 
 import { act, fakeTimers, render } from "../../../test/render";
 import { DraftId, useComposerDraftStore } from "../../composerDraftStore";
+import { formatInlineContextReference } from "../../lib/composerContextReferences";
+import { threadContextRecord, threadContextReference } from "../../lib/composerContextRecords";
+import { questionAttachmentDraftId } from "../../questionAttachments";
 import { makeThreadProjectionFixture } from "../../test-fixtures";
 import { usePendingThreadRequests } from "./usePendingThreadRequests";
 
@@ -186,38 +189,52 @@ it("isolates drafts by environment, thread and request and discards only resolve
   }
 });
 
-it("keeps a typed answer in the thread draft when the question is cancelled by Stop", async () => {
-  using _timers = fakeTimers();
-  const environmentId = EnvironmentId.make("stop-environment");
-  const projection = questionProjection(threadRef.threadId, ["first"]);
-  const answer = "Purple please. This typed question answer must survive Stop.";
-  const draftTarget = { environmentId, threadId: threadRef.threadId };
-  useComposerDraftStore.getState().setPrompt(draftTarget, "Earlier draft");
-  await using screen = await render(
-    <PendingRequestsProbe environmentId={environmentId} projection={projection} />,
-  );
-  await act(() => requests.onChangeActivePendingUserInputCustomAnswer("question-0", answer));
-  expect(requests.activePendingDraftAnswers["question-0"]?.customAnswer).toBe(answer);
+// Stop cancels an open question; a provider timeout expires it. Neither sends the answer.
+it.each(["cancelled", "expired"] as const)(
+  "keeps a typed answer and its thread chips in the thread draft when the question is %s",
+  async (status) => {
+    using _timers = fakeTimers();
+    const environmentId = EnvironmentId.make(`${status}-environment`);
+    const projection = questionProjection(threadRef.threadId, ["first"]);
+    const reference = threadContextRecord(
+      { environmentId, threadId: ThreadId.make("reference-thread") },
+      "Reference work",
+    );
+    const answer = `Purple please, like ${formatInlineContextReference(threadContextReference(reference))}`;
+    const draftTarget = { environmentId, threadId: threadRef.threadId };
+    useComposerDraftStore.getState().setPrompt(draftTarget, "Earlier draft");
+    useComposerDraftStore
+      .getState()
+      .setThreadContexts(
+        questionAttachmentDraftId(environmentId, threadRef.threadId, "first", "question-0"),
+        [reference],
+      );
+    await using screen = await render(
+      <PendingRequestsProbe environmentId={environmentId} projection={projection} />,
+    );
+    await act(() => requests.onChangeActivePendingUserInputCustomAnswer("question-0", answer));
+    expect(requests.activePendingDraftAnswers["question-0"]?.customAnswer).toBe(answer);
 
-  // Stop interrupts the turn, which cancels its open question without an answer.
-  await screen.rerender(
-    <PendingRequestsProbe
-      environmentId={environmentId}
-      projection={{
-        ...projection,
-        runtimeRequests: projection.runtimeRequests.map((request) => ({
-          ...request,
-          status: "cancelled",
-          resolvedAt: projection.updatedAt,
-        })),
-      }}
-    />,
-  );
-  expect(requests.activePendingUserInput).toBeNull();
-  expect(useComposerDraftStore.getState().getComposerDraft(draftTarget)?.prompt).toBe(
-    `Earlier draft\n\n${answer}`,
-  );
-});
+    await screen.rerender(
+      <PendingRequestsProbe
+        environmentId={environmentId}
+        projection={{
+          ...projection,
+          runtimeRequests: projection.runtimeRequests.map((request) => ({
+            ...request,
+            status,
+            resolvedAt: projection.updatedAt,
+          })),
+        }}
+      />,
+    );
+    expect(requests.activePendingUserInput).toBeNull();
+    expect(useComposerDraftStore.getState().getComposerDraft(draftTarget)).toMatchObject({
+      prompt: `Earlier draft\n\n${answer}`,
+      threadContexts: [reference],
+    });
+  },
+);
 
 it("does not return an answer to the thread draft once the question is resolved", async () => {
   using _timers = fakeTimers();
