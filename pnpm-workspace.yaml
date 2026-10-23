@@ -294,6 +294,7 @@ overrides:
   "@effect/platform-node": "catalog:"
   "@effect/platform-node-shared": "catalog:"
   "@effect/sql-pg": "catalog:"
+  "@effect/graphql-generator": "catalog:"
   "@effect/vitest": "catalog:"
   "@effect/vitest>vitest": "-"
   "@expo/dom-webview": 58.0.2
@@ -357,6 +358,7 @@ patchedDependencies:
   expo-audio@58.0.9: patches/expo-audio@58.0.9.patch
   expo-network@58.0.3: patches/expo-network@58.0.3.patch
   "@clerk/expo-native-components@0.4.0": patches/@clerk__expo-native-components@0.4.0.patch
+  "@effect/graphql-generator@4.0.5": patches/@effect__graphql-generator@4.0.5.patch
   "@effect/vitest@4.0.5": patches/@effect__vitest@4.0.5.patch
   "@expo/metro-config@58.0.14": patches/@expo__metro-config@58.0.14.patch
   expo-sharing@58.0.19: patches/expo-sharing@58.0.19.patch

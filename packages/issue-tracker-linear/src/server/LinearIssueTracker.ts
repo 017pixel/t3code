@@ -11,6 +11,7 @@
  * @module issue-tracker-linear/server/LinearIssueTracker
  */
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import {
   type IssueActor,
   type IssueCapabilities,
@@ -211,6 +212,8 @@ function toEvents(history: ReadonlyArray<LinearApi.LinearHistoryEntry>): IssueEv
 const PULL_REQUEST_URL =
   /^https:\/\/(?:github\.com\/([^/]+\/[^/]+)\/pull|gitlab\.com\/(.+?)\/-\/merge_requests)\/(\d+)\/?(?:[?#]|$)/u;
 
+const isJsonObject = Schema.is(Schema.Record(Schema.String, Schema.Json));
+
 /** Linear's GitHub and GitLab integrations record change requests as attachments. */
 function toLinkedPullRequests(
   attachments: ReadonlyArray<LinearApi.LinearAttachment>,
@@ -220,7 +223,8 @@ function toLinkedPullRequests(
     const match = PULL_REQUEST_URL.exec(attachment.url);
     if (match === null || seen.has(attachment.url)) return [];
     seen.add(attachment.url);
-    const status = attachment.metadata?.status;
+    const fields = isJsonObject(attachment.metadata) ? attachment.metadata : {};
+    const status = fields["status"];
     return [
       {
         repository: match[1] ?? match[2]!,
@@ -228,7 +232,7 @@ function toLinkedPullRequests(
         title: attachment.title.trim() || attachment.url,
         url: attachment.url,
         state: status === "merged" ? "merged" : status === "closed" ? "closed" : "open",
-        isDraft: status === "draft" || attachment.metadata?.draft === true,
+        isDraft: status === "draft" || fields["draft"] === true,
         closesIssue: false,
       } as const,
     ];
@@ -270,7 +274,7 @@ export function toTemplate(
 function involvementFilter(input: {
   readonly involvement: IssueInvolvement;
   readonly viewer: string;
-}): Record<string, unknown> {
+}): LinearApi.IssueFilter {
   switch (input.involvement) {
     case "assigned":
       return { assignee: { id: { eq: input.viewer } } };
@@ -390,25 +394,34 @@ export const make: Effect.Effect<StandaloneIssueTrackerApi, never, LinearApi.Lin
       getViewer: () => linear.viewer().pipe(Effect.map((data) => data.viewer.id)),
 
       listIssues: (input) => {
-        const filter: Record<string, unknown> = {
+        // `ENG-12`, `#12` or `12` asks for one issue of this team by number.
+        const reference =
+          input.query === undefined
+            ? null
+            : /^(?:[A-Za-z][A-Za-z0-9]*-|#)?(\d+)$/.exec(input.query.trim());
+        const filter: LinearApi.IssueFilter = {
           team: { key: { eq: input.scope.trim().toUpperCase() } },
           ...involvementFilter(input),
+          ...(input.state === "all"
+            ? {}
+            : {
+                state: {
+                  type:
+                    input.state === "closed"
+                      ? { in: CLOSED_STATE_TYPES }
+                      : { nin: CLOSED_STATE_TYPES },
+                },
+              }),
+          ...(input.query === undefined
+            ? {}
+            : {
+                or: [
+                  { title: { containsIgnoreCase: input.query } },
+                  { description: { containsIgnoreCase: input.query } },
+                  ...(reference === null ? [] : [{ number: { eq: Number(reference[1]) } }]),
+                ],
+              }),
         };
-        if (input.state !== "all") {
-          filter.state = {
-            type: { [input.state === "closed" ? "in" : "nin"]: CLOSED_STATE_TYPES },
-          };
-        }
-        if (input.query !== undefined) {
-          const or: unknown[] = [
-            { title: { containsIgnoreCase: input.query } },
-            { description: { containsIgnoreCase: input.query } },
-          ];
-          // `ENG-12`, `#12` or `12` asks for one issue of this team by number.
-          const reference = /^(?:[A-Za-z][A-Za-z0-9]*-|#)?(\d+)$/.exec(input.query.trim());
-          if (reference !== null) or.push({ number: { eq: Number(reference[1]) } });
-          filter.or = or;
-        }
         return linear.listIssues({ filter, first: input.limit, after: input.cursor }).pipe(
           Effect.map((page) => ({
             items: page.nodes.map(toSummary),
@@ -472,17 +485,20 @@ export const make: Effect.Effect<StandaloneIssueTrackerApi, never, LinearApi.Lin
 
       update: Effect.fn("LinearIssueTracker.update")(function* (input) {
         const { identifier } = yield* requireTeamIssue("update", input);
-        const patch: Record<string, unknown> = {};
-        if (input.title !== undefined) patch.title = input.title;
-        if (input.body !== undefined) patch.description = input.body;
-        if (input.labels !== undefined || input.assignees !== undefined) {
-          const scope = yield* requireTeam("update", input.scope);
-          if (input.labels !== undefined)
-            patch.labelIds = yield* labelIds("update", scope, input.labels);
-          if (input.assignees !== undefined)
-            patch.assigneeId = yield* assigneeId("update", scope, input.assignees);
-        }
-        yield* linear.updateIssue(identifier, patch);
+        const scope =
+          input.labels !== undefined || input.assignees !== undefined
+            ? yield* requireTeam("update", input.scope)
+            : null;
+        yield* linear.updateIssue(identifier, {
+          ...(input.title === undefined ? {} : { title: input.title }),
+          ...(input.body === undefined ? {} : { description: input.body }),
+          ...(scope === null || input.labels === undefined
+            ? {}
+            : { labelIds: yield* labelIds("update", scope, input.labels) }),
+          ...(scope === null || input.assignees === undefined
+            ? {}
+            : { assigneeId: yield* assigneeId("update", scope, input.assignees) }),
+        });
       }),
 
       setState: Effect.fn("LinearIssueTracker.setState")(function* (input) {
