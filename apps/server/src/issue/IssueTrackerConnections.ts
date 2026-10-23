@@ -26,6 +26,7 @@ import type { StandaloneIssueTrackerApi } from "@t3tools/issue-tracker-core/serv
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as IssueTrackerBindings from "../persistence/IssueTrackerBindings.ts";
+import * as IssueService from "./IssueService.ts";
 import { issueTrackerSecretName } from "./IssueTrackerHostLive.ts";
 import * as IssueTrackerRegistry from "./IssueTrackerRegistry.ts";
 
@@ -99,7 +100,7 @@ const make = Effect.gen(function* () {
           ...api.standalone,
           connected: true,
           account: null,
-          detail: error.detail,
+          detail: IssueService.trackerDetail(error),
           scopes: [],
         }),
       ),
@@ -148,7 +149,7 @@ const make = Effect.gen(function* () {
           new IssueTrackerConnectionError({
             tracker: input.tracker,
             reason: error.reason === "unauthenticated" ? "rejected" : "failed",
-            detail: error.detail,
+            detail: IssueService.trackerDetail(error),
             cause: error,
           }),
       ),
