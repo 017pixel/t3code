@@ -315,6 +315,36 @@ describe("AssetAccess", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("previews draft audio and video from relative workspace paths", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-draft-media-" });
+      for (const [name, mimeType] of [
+        ["video.mp4", "video/mp4"],
+        ["audio.wav", "audio/wav"],
+      ] as const) {
+        const filePath = path.join(root, name);
+        yield* fs.writeFileString(filePath, "media bytes");
+        const result = yield* issueAssetUrl({
+          resource: { _tag: "draft-workspace-file", cwd: root, path: name },
+          workspaceRoot: root,
+        });
+        const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+        const separator = suffix.indexOf("/");
+        const token = suffix.slice(0, separator);
+        const asset = yield* resolveAsset(token, suffix.slice(separator + 1));
+        expect(asset).toMatchObject({ kind: "file", path: yield* fs.realPath(filePath), mimeType });
+        if (asset?.kind !== "file") throw new Error("Expected draft media file");
+        const response = HttpServerResponse.toWeb(yield* assetFileResponse(asset));
+        expect(yield* Effect.promise(() => response.text())).toBe("media bytes");
+        expect(
+          yield* resolveAsset(token, name === "video.mp4" ? "audio.wav" : "video.mp4"),
+        ).toBeNull();
+      }
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("resolves home-relative media paths independently of the workspace", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
