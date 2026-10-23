@@ -1,12 +1,45 @@
 import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 
 import { appAtomRegistry } from "../../state/atom-registry";
 import { projectEnvironment } from "../../state/projects";
 import { useDebouncedValue } from "../../state/queries";
 import { useEnvironmentQuery } from "../../state/query";
+
+function createDirectories(cwd: string | null, environmentId: EnvironmentId | null) {
+  return {
+    cwd,
+    environmentId,
+    target: {},
+    entries: new Map<string, ReadonlyArray<ProjectEntry>>(),
+    errors: new Map<string, string>(),
+    loading: new Set<string>(),
+    isRefreshing: false,
+  };
+}
+
+function createRequests() {
+  return {
+    active: true,
+    refreshVersion: 0,
+    requested: new Set<string>(),
+    pending: new Map<string, AbortController>(),
+  };
+}
+
+function getRequests(
+  requestsByTarget: WeakMap<object, ReturnType<typeof createRequests>>,
+  target: object,
+) {
+  let requests = requestsByTarget.get(target);
+  if (!requests) {
+    requests = createRequests();
+    requestsByTarget.set(target, requests);
+  }
+  return requests;
+}
 
 export function useFileTreeEntries(input: {
   readonly cwd: string | null;
@@ -30,42 +63,49 @@ export function useFileTreeEntries(input: {
         })
       : null,
   );
-  const [, render] = useReducer((value: number) => value + 1, 0);
-  const [entriesRevision, entriesChanged] = useReducer((value: number) => value + 1, 0);
-  const refreshVersion = useRef(0);
-  const directories = {
-    cwd,
-    environmentId,
-    entries: new Map<string, ReadonlyArray<ProjectEntry>>(),
-    requested: new Set<string>(),
-    pending: new Map<string, AbortController>(),
-    errors: new Map<string, string>(),
-  };
-  const [refreshingDirectories, setRefreshingDirectories] = useState<typeof directories | null>(
-    null,
-  );
-  useEffect(
-    () => () => {
-      refreshVersion.current++;
-      for (const controller of directories.pending.values()) controller.abort();
-      directories.pending.clear();
-    },
-    [directories],
-  );
+  const [directories, setDirectories] = useState(() => createDirectories(cwd, environmentId));
+  if (directories.cwd !== cwd || directories.environmentId !== environmentId) {
+    setDirectories(createDirectories(cwd, environmentId));
+  }
+  const { target } = directories;
+  const requestsByTarget = useRef(new WeakMap<object, ReturnType<typeof createRequests>>());
+  // Cancel the old target before consumers' passive effects start new directory loads.
+  useLayoutEffect(() => {
+    const requests = getRequests(requestsByTarget.current, target);
+    requests.active = true;
+    return () => {
+      requests.active = false;
+      requests.refreshVersion++;
+      for (const controller of requests.pending.values()) controller.abort();
+      requests.pending.clear();
+      setDirectories((current) =>
+        current.target === target
+          ? { ...current, loading: new Set(), isRefreshing: false }
+          : current,
+      );
+    };
+  }, [target]);
+  const updateDirectories = (update: (current: typeof directories) => typeof directories) =>
+    setDirectories((current) => (current.target === target ? update(current) : current));
   const loadDirectory = (directoryPath: string, refresh = false) => {
+    const requests = getRequests(requestsByTarget.current, target);
     if (
+      !requests.active ||
       cwd === null ||
       environmentId === null ||
       (!refresh && directories.entries.has(directoryPath)) ||
-      directories.pending.has(directoryPath)
+      requests.pending.has(directoryPath)
     ) {
       return;
     }
     const controller = new AbortController();
-    directories.requested.add(directoryPath);
-    directories.pending.set(directoryPath, controller);
-    directories.errors.delete(directoryPath);
-    render();
+    requests.requested.add(directoryPath);
+    requests.pending.set(directoryPath, controller);
+    updateDirectories((current) => {
+      const errors = new Map(current.errors);
+      errors.delete(directoryPath);
+      return { ...current, errors, loading: new Set(current.loading).add(directoryPath) };
+    });
     const atom = projectEnvironment.listEntries({ environmentId, input: { cwd, directoryPath } });
     appAtomRegistry.refresh(atom);
     return executeAtomQuery(appAtomRegistry, atom, {
@@ -74,24 +114,31 @@ export function useFileTreeEntries(input: {
       reportDefect: false,
     }).then((result) => {
       if (controller.signal.aborted) return;
-      directories.pending.delete(directoryPath);
-      if (result._tag === "Success") {
-        directories.entries.set(
-          directoryPath,
-          result.value.entries.filter(
-            (entry) =>
-              entry.path.slice(0, Math.max(0, entry.path.lastIndexOf("/"))) === directoryPath,
-          ),
-        );
-        entriesChanged();
-      } else {
+      requests.pending.delete(directoryPath);
+      updateDirectories((current) => {
+        const loading = new Set(current.loading);
+        loading.delete(directoryPath);
+        if (result._tag === "Success") {
+          const entries = new Map(current.entries);
+          entries.set(
+            directoryPath,
+            result.value.entries.filter(
+              (entry) =>
+                entry.path.slice(0, Math.max(0, entry.path.lastIndexOf("/"))) === directoryPath,
+            ),
+          );
+          return { ...current, entries, loading };
+        }
         const error = Cause.squash(result.cause);
-        directories.errors.set(
-          directoryPath,
-          error instanceof Error ? error.message : "Files unavailable",
-        );
-      }
-      render();
+        return {
+          ...current,
+          loading,
+          errors: new Map(current.errors).set(
+            directoryPath,
+            error instanceof Error ? error.message : "Files unavailable",
+          ),
+        };
+      });
     });
   };
   const { refresh: refreshRoot, data: rootData } = root;
@@ -113,7 +160,6 @@ export function useFileTreeEntries(input: {
     };
     visit((rootData?.entries ?? []).filter((entry) => !entry.path.includes("/")));
     return {
-      revision: entriesRevision,
       entries: [...merged.values()],
       reachableDirectories,
       searchResultPaths: searching
@@ -123,19 +169,25 @@ export function useFileTreeEntries(input: {
   })();
 
   const refresh = () => {
+    const requests = getRequests(requestsByTarget.current, target);
+    if (!requests.active) return Promise.resolve();
     refreshRoot();
     if (searching) refreshSearch();
     const paths = new Set(
-      [...directories.requested].filter((path) => snapshot.reachableDirectories.has(path)),
+      [...requests.requested].filter((path) => snapshot.reachableDirectories.has(path)),
     );
-    for (const controller of directories.pending.values()) controller.abort();
-    directories.pending.clear();
-    directories.errors.clear();
-    const version = ++refreshVersion.current;
-    setRefreshingDirectories(directories);
+    for (const controller of requests.pending.values()) controller.abort();
+    requests.pending.clear();
+    const version = ++requests.refreshVersion;
+    updateDirectories((current) => ({
+      ...current,
+      errors: new Map(),
+      loading: new Set(),
+      isRefreshing: true,
+    }));
     const remaining = paths.values();
     const worker = async () => {
-      while (version === refreshVersion.current) {
+      while (requests.active && version === requests.refreshVersion) {
         const next = remaining.next();
         if (next.done) return;
         await loadDirectory(next.value, true);
@@ -161,16 +213,17 @@ export function useFileTreeEntries(input: {
       ),
       ...Array.from({ length: Math.min(4, paths.size) }, () => worker()),
     ];
-    render();
     return Promise.all(work).finally(() => {
-      if (version === refreshVersion.current) setRefreshingDirectories(null);
+      if (version === requests.refreshVersion) {
+        updateDirectories((current) => ({ ...current, isRefreshing: false }));
+      }
     });
   };
 
   return {
     entries: snapshot.entries,
     searchResultPaths: snapshot.searchResultPaths,
-    isRefreshing: refreshingDirectories === directories,
+    isRefreshing: directories.isRefreshing,
     error:
       root.error ??
       (searching ? search.error : null) ??
@@ -178,11 +231,11 @@ export function useFileTreeEntries(input: {
       null,
     isPending:
       root.isPending ||
-      directories.pending.size > 0 ||
+      directories.loading.size > 0 ||
       (searching && (query !== debouncedQuery || search.isPending)),
     searchTruncated: searching && (search.data?.truncated ?? false),
     loadedDirectories: new Set(directories.entries.keys()),
-    loadingDirectories: new Set(directories.pending.keys()),
+    loadingDirectories: directories.loading,
     loadDirectory,
     refresh,
   };
