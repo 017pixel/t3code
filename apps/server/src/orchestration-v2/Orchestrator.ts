@@ -147,6 +147,7 @@ import {
   ThreadForkServiceV2,
 } from "./ThreadForkService.ts";
 import { planThreadDeletion } from "./ThreadDeletion.ts";
+import { toolOutputFitsDetail } from "./WireProjection.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
 
@@ -7657,6 +7658,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Turn item ${command.turnItemId} does not show an MCP App.`,
         });
       }
+      const output = {
+        ...(Predicate.isObject(item.output) ? item.output : {}),
+        [MCP_APP_CALL_OUTPUT_KEY]: { arguments: command.arguments, result: command.result },
+      };
+      // Clients read an oversized output as truncated text, which would leave
+      // the app with neither result.
+      if (!toolOutputFitsDetail(output)) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `The MCP App call on turn item ${command.turnItemId} is too large to keep.`,
+        });
+      }
       const now = yield* DateTime.now;
       yield* emit(
         events,
@@ -7667,14 +7681,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(item.runId === null ? {} : { runId: item.runId }),
         ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
         occurredAt: now,
-        payload: {
-          ...item,
-          output: {
-            ...(Predicate.isObject(item.output) ? item.output : {}),
-            [MCP_APP_CALL_OUTPUT_KEY]: { arguments: command.arguments, result: command.result },
-          },
-          updatedAt: now,
-        },
+        payload: { ...item, output, updatedAt: now },
       });
     },
   );

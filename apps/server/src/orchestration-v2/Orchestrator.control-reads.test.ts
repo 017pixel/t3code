@@ -1299,13 +1299,13 @@ it.effect("keeps an MCP App's recorded call beside the tool's own result", () =>
       arguments: { title: "Shipped", _ui_submitted: true },
       result: { content: [{ type: "text", text: "Created issue #1" }] },
     };
-    const record = (turnItemId: TurnItemId) =>
+    const record = (turnItemId: TurnItemId, call = submitted) =>
       orchestrator.dispatch({
         type: "mcp_app.call.record",
-        commandId: CommandId.make(`record:${turnItemId}`),
+        commandId: CommandId.make(`record:${turnItemId}:${call.arguments.title}`),
         threadId,
         turnItemId,
-        ...submitted,
+        ...call,
       });
 
     // Clients refetch an item's detail when its update time moves.
@@ -1317,5 +1317,14 @@ it.effect("keeps an MCP App's recorded call beside the tool's own result", () =>
     assert.isTrue(DateTime.isGreaterThan(recorded.updatedAt, now));
     // Only a call that shows an app has an app to keep a call for.
     assert.isTrue(Result.isFailure(yield* record(plainItemId).pipe(Effect.result)));
+    // Clients would read an output this large as truncated text, losing both results.
+    const oversized = {
+      arguments: { title: "Oversized", _ui_submitted: true },
+      result: { content: [{ type: "text", text: "x".repeat(300 * 1024) }] },
+    };
+    assert.isTrue(Result.isFailure(yield* record(appItemId, oversized).pipe(Effect.result)));
+    const kept = yield* projections.getTurnItem({ threadId, itemId: appItemId });
+    assert(kept?.type === "dynamic_tool");
+    assert.deepInclude(kept.output, { t3McpAppCall: submitted });
   }).pipe(Effect.provide(layerTest)),
 );

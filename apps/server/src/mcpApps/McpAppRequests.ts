@@ -166,8 +166,12 @@ const make = Effect.gen(function* () {
         })
         .pipe(
           // The write already happened; failing the call would offer it again.
-          Effect.catch((cause) =>
-            Effect.logWarning("Could not record an MCP App's tool call", { cause }),
+          Effect.catch((error) =>
+            Effect.logWarning("Could not record an MCP App's tool call", {
+              threadId: input.threadId,
+              itemId: input.itemId,
+              error: error._tag,
+            }),
           ),
         );
     }

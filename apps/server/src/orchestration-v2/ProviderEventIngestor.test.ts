@@ -4,6 +4,7 @@ import {
   CheckpointId,
   CheckpointRef,
   CheckpointScopeId,
+  EventId,
   MessageId,
   GitCommandError,
   type ModelSelection,
@@ -1487,6 +1488,86 @@ layer("ProviderEventIngestorV2", (it) => {
         ),
         [{ mimeType: "image/png", data: screenshotBase64 }],
       );
+    }),
+  );
+
+  it.effect("keeps an MCP App's recorded call when the provider resends its tool call", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const eventStore = yield* EventStore.EventStoreV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadEvent = yield* threadCreatedEvent(now);
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadEvent.threadId,
+      });
+      const providerOutput = {
+        t3McpApp: {
+          attachmentId: "thread-app-html",
+          server: "github",
+          tool: "issue_write",
+          resourceUri: "ui://github/issue-write",
+        },
+        result: { content: [{ type: "text", text: "Form shown" }], isError: true },
+      };
+      const call = {
+        arguments: { title: "Shipped", _ui_submitted: true },
+        result: { content: [{ type: "text", text: "Created issue #1" }] },
+      };
+      const turnItem: OrchestrationV2TurnItem = {
+        id: TurnItemId.make("turn-item:mcp-app"),
+        threadId: threadEvent.threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        status: "failed",
+        title: "github.issue_write",
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "dynamic_tool",
+        toolName: "github.issue_write",
+        input: { title: "Draft" },
+        output: providerOutput,
+      };
+      const ingest = ingestor.ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadEvent.threadId,
+        event: { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem },
+      });
+
+      yield* eventSink.write({ events: [threadEvent] });
+      yield* ingest;
+      yield* projectionStore.apply({
+        id: EventId.make("event:mcp-app-call-recorded"),
+        type: "turn-item.updated",
+        threadId: threadEvent.threadId,
+        occurredAt: now,
+        payload: { ...turnItem, output: { ...providerOutput, t3McpAppCall: call } },
+      });
+      yield* ingest;
+
+      const projected = yield* projectionStore.getTurnItem({
+        threadId: threadEvent.threadId,
+        itemId: turnItem.id,
+      });
+      assert(projected?.type === "dynamic_tool");
+      assert.deepEqual(projected.output, { ...providerOutput, t3McpAppCall: call });
+      // The resent item's event carries the call too, so a replay keeps it.
+      const stored = yield* eventStore
+        .read({ threadId: threadEvent.threadId, eventType: "turn-item.updated" })
+        .pipe(Stream.runCollect);
+      const last = Array.from(stored).at(-1)?.event;
+      assert(last?.type === "turn-item.updated" && last.payload.type === "dynamic_tool");
+      assert.deepEqual(last.payload.output, { ...providerOutput, t3McpAppCall: call });
     }),
   );
 
