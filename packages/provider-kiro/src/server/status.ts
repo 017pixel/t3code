@@ -90,20 +90,20 @@ const snapshot = (
     probe,
   });
 
-export const buildInitialKiroProviderSnapshot = (
-  settings: KiroSettings,
-): Effect.Effect<ServerProviderDraft> =>
-  Effect.map(DateTime.now, (now) =>
-    snapshot(settings, DateTime.formatIso(now), {
-      installed: settings.enabled,
-      version: null,
-      status: "warning",
-      auth: { status: "unknown" },
-      message: settings.enabled
-        ? "Checking Kiro CLI availability..."
-        : "Kiro is disabled in T3 Code settings.",
-    }),
-  );
+export const buildInitialKiroProviderSnapshot = Effect.fn(
+  "KiroProvider.buildInitialKiroProviderSnapshot",
+)(function* (settings: KiroSettings): Effect.fn.Return<ServerProviderDraft> {
+  const now = yield* DateTime.now;
+  return snapshot(settings, DateTime.formatIso(now), {
+    installed: settings.enabled,
+    version: null,
+    status: "warning",
+    auth: { status: "unknown" },
+    message: settings.enabled
+      ? "Checking Kiro CLI availability..."
+      : "Kiro is disabled in T3 Code settings.",
+  });
+});
 
 const runKiroCli = Effect.fn("KiroProvider.runKiroCli")(function* (
   settings: KiroSettings,
