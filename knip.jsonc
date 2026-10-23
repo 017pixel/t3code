@@ -22,6 +22,8 @@
       // Windows verify script with esbuild through a path knip does not trace, and
       // electron-builder loads the macOS signer by path.
       "entry": [
+        // These fixture scripts are injected into a browser page by path.
+        "fixtures/issue-16534/*.js",
         "knip-schemas.ts",
         // Loaded directly by the evidence runner, provider subprocess and browser.
         "fixtures/issue-6508/*.mjs",
