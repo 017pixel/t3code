@@ -63,7 +63,9 @@ import {
   ThreadId,
   type TurnItemId,
 } from "@t3tools/contracts";
+import { MCP_APP_CALL_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
+import { mcpAppFromToolItem } from "@t3tools/shared/toolOutput";
 import {
   derivePendingBackgroundWork,
   pendingBackgroundTurnItems,
@@ -74,6 +76,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -497,6 +500,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.created.record":
       return command.parentThreadId;
     case "secret_request.record":
+    case "mcp_app.call.record":
       return command.threadId;
     case "thread.fork":
     case "thread.merge_back":
@@ -7634,6 +7638,47 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     },
   );
 
+  const dispatchMcpAppCallRecord = Effect.fn("orchestrationV2.dispatch.mcpAppCallRecord")(
+    function* (
+      command: Extract<OrchestrationV2InternalCommand, { readonly type: "mcp_app.call.record" }>,
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    ) {
+      const item = yield* projectionStore
+        .getTurnItem({ threadId: command.threadId, itemId: command.turnItemId })
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+          ),
+        );
+      if (item?.type !== "dynamic_tool" || mcpAppFromToolItem(item) === undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Turn item ${command.turnItemId} does not show an MCP App.`,
+        });
+      }
+      const now = yield* DateTime.now;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "turn-item.updated",
+        threadId: command.threadId,
+        ...(item.runId === null ? {} : { runId: item.runId }),
+        ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
+        occurredAt: now,
+        payload: {
+          ...item,
+          output: {
+            ...(Predicate.isObject(item.output) ? item.output : {}),
+            [MCP_APP_CALL_OUTPUT_KEY]: { arguments: command.arguments, result: command.result },
+          },
+          updatedAt: now,
+        },
+      });
+    },
+  );
+
   const dispatchRuntimeRequestRespond = Effect.fn("Orchestrator.dispatchRuntimeRequestRespond")(
     function* (
       command: Extract<OrchestrationV2Command, { readonly type: "runtime-request.respond" }>,
@@ -11558,6 +11603,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "secret_request.record":
         yield* dispatchSecretRequestRecord(command, events);
+        break;
+      case "mcp_app.call.record":
+        yield* dispatchMcpAppCallRecord(command, events);
         break;
       default:
         return yield* dispatchUnsupported(command);
