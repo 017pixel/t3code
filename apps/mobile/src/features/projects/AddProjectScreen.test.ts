@@ -3,6 +3,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeModule from "node:module";
+import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import type { NavigationState } from "@react-navigation/native";
 import { AuthOrchestrationOperateScope, AuthSourceControlWriteScope } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -18,7 +19,20 @@ const state = vi.hoisted(() => ({
   scopes: new Set<string>(),
   baseDirectory: "",
   projects: [] as string[],
+  existingProjects: [] as {
+    environmentId: string;
+    id: string;
+    title: string;
+    workspaceRoot: string;
+  }[],
   createResult: null as Promise<unknown> | null,
+  cloneResult: null as Promise<unknown> | null,
+  createNewResult: null as Promise<unknown> | null,
+  startCloneResult: null as Promise<unknown> | null,
+  loadComposerDrafts: vi.fn(async () => {}),
+  connectionStates: {} as Record<string, EnvironmentConnectionPhase>,
+  newProjectsRoot: null as string | null,
+  supportsCloneTracking: false,
   waitForProject: vi.fn(),
   dispatch: vi.fn(),
   alert: vi.fn(),
@@ -105,14 +119,18 @@ vi.mock("../../state/session", () => ({
   readEnvironmentScope: (_environmentId: string, scope: string) => state.scopes.has(scope),
 }));
 vi.mock("../../state/entities", () => ({
-  useProjects: () => [],
+  useProjects: () => state.existingProjects,
   waitForProject: state.waitForProject,
   useServerConfigs: () =>
     new Map([
       [
         "environment",
         {
-          environment: { platform: { os: "linux" }, capabilities: {} },
+          environment: {
+            platform: { os: "linux" },
+            capabilities: { projectCloneTracking: state.supportsCloneTracking },
+          },
+          newProjectsRoot: state.newProjectsRoot,
           settings: { addProjectBaseDirectory: state.baseDirectory },
         },
       ],
@@ -123,7 +141,7 @@ vi.mock("../../state/use-remote-environment-registry", () => ({
   useRemoteConnectionStatus: () => ({
     connectedEnvironments: state.environments.map((environment) => ({
       environmentId: environment.environmentId,
-      connectionState: "connected",
+      connectionState: state.connectionStates[environment.environmentId] ?? "connected",
     })),
   }),
   useSavedRemoteConnections: () => ({
@@ -142,7 +160,9 @@ vi.mock("../../state/filesystem", () => ({ filesystemEnvironment: {} }));
 vi.mock("../../state/sourceControl", () => ({
   sourceControlEnvironment: {
     discovery: (input: unknown) => input,
+    startProjectClone: () => state.startCloneResult,
     cloneRepository: async ({ input }: { input: { destinationPath: string } }) => {
+      if (state.cloneResult) return state.cloneResult;
       NodeFS.mkdirSync(input.destinationPath);
       return AsyncResult.success({ cwd: input.destinationPath });
     },
@@ -150,6 +170,7 @@ vi.mock("../../state/sourceControl", () => ({
 }));
 vi.mock("../../state/projects", () => ({
   projectEnvironment: {
+    createNew: () => state.createNewResult,
     create: ({ input }: { input: { workspaceRoot: string } }) => {
       if (!state.scopes.has(AuthOrchestrationOperateScope)) {
         return Promise.resolve(
@@ -162,17 +183,28 @@ vi.mock("../../state/projects", () => ({
   },
 }));
 
+vi.mock("../../state/use-composer-drafts", () => ({
+  waitForComposerDraftsLoaded: state.loadComposerDrafts,
+  createNewTaskDraft: () => "prompt-draft",
+  setComposerDraftText: () => {},
+}));
+
 import {
+  AddProjectNewScreen,
   AddProjectDestinationScreen,
   AddProjectLocalFolderScreen,
   AddProjectSourceScreen,
 } from "./AddProjectScreen";
 import { AddProjectSourceRoute } from "./AddProjectSourceRoute";
 
-function findAction(node: ReactNode, label: string): (() => unknown) | null {
+function findAction(
+  node: ReactNode,
+  label: string,
+  includeDisabled = false,
+): (() => unknown) | null {
   if (Array.isArray(node)) {
     for (const child of node) {
-      const action = findAction(child, label);
+      const action = findAction(child, label, includeDisabled);
       if (action) return action;
     }
     return null;
@@ -182,13 +214,16 @@ function findAction(node: ReactNode, label: string): (() => unknown) | null {
       label?: string;
       title?: string;
       onPress?: () => unknown;
+      disabled?: boolean;
       children?: ReactNode;
     }>(node)
   ) {
     return null;
   }
-  if ((node.props.label ?? node.props.title) === label) return node.props.onPress ?? null;
-  return findAction(node.props.children, label);
+  if ((node.props.label ?? node.props.title) === label) {
+    return node.props.disabled && !includeDisabled ? null : (node.props.onPress ?? null);
+  }
+  return findAction(node.props.children, label, includeDisabled);
 }
 
 function cloneAction() {
@@ -199,6 +234,7 @@ function cloneAction() {
       repositoryName: "repo",
     }),
     "Clone project",
+    true,
   );
   if (!action) throw new Error("Clone action missing");
   return action;
@@ -240,6 +276,116 @@ describe("clone project permissions", () => {
 });
 
 describe("add project source environment", () => {
+  it.each(["connecting", "reconnecting"] as const)(
+    "waits for the requested %s environment without offering actions on another host",
+    async (phase) => {
+      state.realHooks = true;
+      state.scopes = new Set([AuthOrchestrationOperateScope, AuthSourceControlWriteScope]);
+      state.dispatch.mockReset();
+      state.newProjectsRoot = "/projects";
+      state.environments = [
+        { environmentId: "environment", environmentLabel: "Environment" },
+        { environmentId: "another-environment", environmentLabel: "Another environment" },
+      ];
+      state.connectionStates = { environment: phase };
+      (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+      const root = createRoot(document.createElement("div"));
+      let screen: ReactNode;
+      function SourceObserver() {
+        screen = AddProjectSourceScreen({ environmentId: "environment" });
+        return null;
+      }
+      try {
+        await act(() => root.render(createElement(SourceObserver)));
+        expect(findAction(screen, "Local folder")).toBeNull();
+        expect(findAction(screen, "New project")).toBeNull();
+        expect(state.dispatch).not.toHaveBeenCalled();
+
+        state.connectionStates = {};
+        await act(() => root.render(createElement(SourceObserver)));
+        const local = findAction(screen, "Local folder");
+        if (!local) throw new Error("Local folder action missing after connection");
+        local();
+        expect(state.dispatch).toHaveBeenCalledExactlyOnceWith({
+          type: "PUSH",
+          payload: { name: "AddProjectLocal", params: { environmentId: "environment" } },
+        });
+      } finally {
+        await act(() => root.unmount());
+        state.realHooks = false;
+        state.connectionStates = {};
+        state.newProjectsRoot = null;
+        state.environments = [{ environmentId: "environment", environmentLabel: "Environment" }];
+      }
+    },
+  );
+
+  it("keeps a manual host selection when the requested host finishes connecting", async () => {
+    state.realHooks = true;
+    state.scopes = new Set([AuthOrchestrationOperateScope]);
+    state.dispatch.mockReset();
+    state.environments = [
+      { environmentId: "environment", environmentLabel: "Environment" },
+      { environmentId: "another-environment", environmentLabel: "Another environment" },
+    ];
+    state.connectionStates = { environment: "connecting" };
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    const root = createRoot(document.createElement("div"));
+    let screen: ReactNode;
+    function SourceObserver() {
+      screen = AddProjectSourceScreen({ environmentId: "environment" });
+      return null;
+    }
+    try {
+      await act(() => root.render(createElement(SourceObserver)));
+      const select = findAction(screen, "Another environment");
+      if (!select) throw new Error("Connected environment selection missing");
+      await act(() => select());
+      state.connectionStates = {};
+      await act(() => root.render(createElement(SourceObserver)));
+      const local = findAction(screen, "Local folder");
+      if (!local) throw new Error("Local folder action missing");
+      local();
+      expect(state.dispatch).toHaveBeenCalledExactlyOnceWith({
+        type: "PUSH",
+        payload: { name: "AddProjectLocal", params: { environmentId: "another-environment" } },
+      });
+    } finally {
+      await act(() => root.unmount());
+      state.realHooks = false;
+      state.connectionStates = {};
+      state.environments = [{ environmentId: "environment", environmentLabel: "Environment" }];
+    }
+  });
+
+  it.each(["offline", "available", "error", "unsupported"] as const)(
+    "falls back to a connected host when the requested host is %s",
+    (phase) => {
+      state.scopes = new Set([AuthOrchestrationOperateScope]);
+      state.dispatch.mockReset();
+      state.environments = [
+        { environmentId: "environment", environmentLabel: "Environment" },
+        { environmentId: "another-environment", environmentLabel: "Another environment" },
+      ];
+      state.connectionStates = { environment: phase };
+      try {
+        const local = findAction(
+          AddProjectSourceScreen({ environmentId: "environment" }),
+          "Local folder",
+        );
+        if (!local) throw new Error("Fallback local folder action missing");
+        local();
+        expect(state.dispatch).toHaveBeenCalledExactlyOnceWith({
+          type: "PUSH",
+          payload: { name: "AddProjectLocal", params: { environmentId: "another-environment" } },
+        });
+      } finally {
+        state.connectionStates = {};
+        state.environments = [{ environmentId: "environment", environmentLabel: "Environment" }];
+      }
+    },
+  );
+
   it("follows warm environment requests while preserving manual selection between requests", async () => {
     state.realHooks = true;
     state.scopes = new Set([AuthOrchestrationOperateScope]);
@@ -401,7 +547,12 @@ describe("local project navigation", () => {
     );
   });
 
-  function mountProjectFlow(withDraft: boolean, withChooser = true, withPullRequest = false) {
+  function mountProjectFlow(
+    withDraft: boolean,
+    withChooser = true,
+    withPullRequest = false,
+    screenName = "AddProjectLocal",
+  ) {
     const { StackRouter, StackActions, CommonActions } = loadRouters();
     const router = StackRouter({});
     const options = {
@@ -413,6 +564,8 @@ describe("local project navigation", () => {
         "NewTaskProject",
         "AddProject",
         "AddProjectLocal",
+        "AddProjectNew",
+        "AddProjectDestination",
       ],
       routeParamList: {},
       routeGetIdList: {},
@@ -423,6 +576,7 @@ describe("local project navigation", () => {
       const next = router.getStateForAction(current, action, options);
       if (!next || next.stale !== false) throw new Error("Navigation action rejected");
       current = next;
+      state.navigationState = current;
     };
     if (withPullRequest) {
       apply(StackActions.push("PullRequest", { number: 123 }));
@@ -433,11 +587,7 @@ describe("local project navigation", () => {
       apply(StackActions.push("Thread", { draft: { projectId: "previous-project" } }));
     }
     const draftKey = withDraft ? current.routes[current.index]!.key : null;
-    for (const name of [
-      ...(withChooser ? ["NewTaskProject"] : []),
-      "AddProject",
-      "AddProjectLocal",
-    ]) {
+    for (const name of [...(withChooser ? ["NewTaskProject"] : []), "AddProject", screenName]) {
       apply(StackActions.push(name));
     }
     state.navigationState = current;
@@ -450,8 +600,252 @@ describe("local project navigation", () => {
       flowRoutes: current.routes.slice(underlyingRoutes.length),
       getState: () => current,
       back: () => apply(StackActions.pop()),
+      push: (name: string) => apply(StackActions.push(name)),
     };
   }
+
+  it.each(["pop", "reopen", "cover"] as const)(
+    "does not reopen a local project draft after its route loses focus (%s)",
+    async (leave) => {
+      const { created, projected, submit } = setup();
+      const navigation = mountProjectFlow(false);
+      const submission = submit();
+      created.resolve(AsyncResult.success(undefined));
+      await created.promise;
+      expect(state.waitForProject).toHaveBeenCalled();
+      if (leave !== "cover") navigation.back();
+      if (leave === "reopen") navigation.push("AddProjectLocal");
+      if (leave === "cover") navigation.push("PullRequest");
+      const remaining = navigation.getState();
+      projected.resolve({ environmentId: "environment", id: "project" });
+      await submission;
+
+      expect(state.projects).toEqual(["/tmp/t3-mobile-audit-fixture"]);
+      expect(navigation.getState()).toEqual(remaining);
+      expect(state.dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([true, false])(
+    "completes a legacy clone without replacing a different route (leave: %s)",
+    async (leave) => {
+      const { created, projected } = setup();
+      state.scopes.add(AuthSourceControlWriteScope);
+      const cloned = Promise.withResolvers<unknown>();
+      state.cloneResult = cloned.promise;
+      const navigation = mountProjectFlow(false, true, true, "AddProjectDestination");
+      try {
+        const submission = cloneAction()();
+        if (leave) {
+          navigation.back();
+          navigation.push("AddProjectDestination");
+        }
+        const remaining = navigation.getState();
+        cloned.resolve(AsyncResult.success({ cwd: "/tmp/t3-mobile-audit-fixture/repo" }));
+        created.resolve(AsyncResult.success(undefined));
+        projected.resolve({ environmentId: "environment", id: "project" });
+        await submission;
+
+        expect(state.projects).toEqual(["/tmp/t3-mobile-audit-fixture/repo"]);
+        if (leave) {
+          expect(navigation.getState()).toEqual(remaining);
+          expect(state.dispatch).not.toHaveBeenCalled();
+        } else {
+          expect(navigation.getState().routes.at(-1)).toMatchObject({
+            name: "Thread",
+            params: {
+              draft: { environmentId: "environment", projectId: "project", title: "repo" },
+            },
+          });
+        }
+      } finally {
+        state.cloneResult = null;
+      }
+    },
+  );
+
+  it.each([
+    { pending: "projection", leave: true },
+    { pending: "prompt", leave: true },
+    { pending: "prompt", leave: false },
+  ])(
+    "completes a tracked clone without replacing a different route (wait: $pending, leave: $leave)",
+    async ({ pending, leave }) => {
+      const { projected } = setup();
+      state.scopes.add(AuthSourceControlWriteScope);
+      state.supportsCloneTracking = true;
+      state.startCloneResult = Promise.resolve(AsyncResult.success(undefined));
+      const composer = Promise.withResolvers<void>();
+      const loadingPrompt = Promise.withResolvers<void>();
+      state.loadComposerDrafts.mockImplementation(() => {
+        loadingPrompt.resolve();
+        return composer.promise;
+      });
+      const navigation = mountProjectFlow(false, true, true, "AddProjectDestination");
+      try {
+        const submit = findAction(
+          AddProjectDestinationScreen({
+            environmentId: "environment",
+            remoteUrl: "https://example.com/repo.git",
+            repositoryName: "repo",
+            ...(pending === "prompt" ? { prompt: "Review this repository" } : {}),
+          }),
+          "Clone project",
+        );
+        if (!submit) throw new Error("Clone action missing");
+        if (pending === "prompt") {
+          projected.resolve({ environmentId: "environment", id: "project" });
+        }
+        const submission = submit();
+        if (pending === "prompt") await loadingPrompt.promise;
+        else await state.startCloneResult;
+        expect(state.waitForProject).toHaveBeenCalled();
+        if (leave) {
+          navigation.back();
+          navigation.push("AddProjectDestination");
+        }
+        const remaining = navigation.getState();
+        projected.resolve({ environmentId: "environment", id: "project" });
+        composer.resolve();
+        await submission;
+
+        if (leave) {
+          expect(navigation.getState()).toEqual(remaining);
+          expect(state.dispatch).not.toHaveBeenCalled();
+        } else {
+          expect(navigation.getState().routes.at(-1)).toMatchObject({
+            name: "Thread",
+            params: {
+              draft: {
+                environmentId: "environment",
+                projectId: "project",
+                cloning: "1",
+                draftId: "prompt-draft",
+              },
+            },
+          });
+        }
+      } finally {
+        state.supportsCloneTracking = false;
+        state.startCloneResult = null;
+        state.loadComposerDrafts.mockResolvedValue(undefined);
+      }
+    },
+  );
+
+  it.each([true, false])(
+    "completes a new project without replacing a different route (leave: %s)",
+    async (leave) => {
+      const { projected } = setup();
+      state.realHooks = true;
+      state.newProjectsRoot = "/projects";
+      const created = Promise.withResolvers<unknown>();
+      const waitingForProject = Promise.withResolvers<void>();
+      state.createNewResult = created.promise;
+      state.waitForProject.mockImplementation(() => {
+        waitingForProject.resolve();
+        return projected.promise;
+      });
+      const navigation = mountProjectFlow(false, true, true, "AddProjectNew");
+      (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+      const root = createRoot(document.createElement("div"));
+      let screen: ReactNode;
+      function NewProjectObserver() {
+        screen = AddProjectNewScreen({ environmentId: "environment" });
+        return null;
+      }
+      function enterName(node: ReactNode): boolean {
+        if (Array.isArray(node)) return node.some(enterName);
+        if (
+          !isValidElement<{
+            placeholder?: string;
+            onChangeText?: (text: string) => void;
+            children?: ReactNode;
+          }>(node)
+        )
+          return false;
+        if (node.props.placeholder === "Project name") {
+          node.props.onChangeText!("new-project");
+          return true;
+        }
+        return enterName(node.props.children);
+      }
+      try {
+        await act(() => root.render(createElement(NewProjectObserver)));
+        await act(() => {
+          expect(enterName(screen)).toBe(true);
+        });
+        const submit = findAction(screen, "Create project");
+        if (!submit) throw new Error("Create project action missing");
+        await act(async () => {
+          submit();
+          created.resolve(
+            AsyncResult.success({
+              projectId: "project",
+              workspaceRoot: "/projects/new-project",
+            }),
+          );
+          await waitingForProject.promise;
+        });
+        if (leave) {
+          navigation.back();
+          navigation.push("AddProjectNew");
+        }
+        const remaining = navigation.getState();
+        await act(async () => {
+          projected.resolve({ environmentId: "environment", id: "project" });
+          await projected.promise;
+        });
+
+        if (leave) {
+          expect(navigation.getState()).toEqual(remaining);
+          expect(state.dispatch).not.toHaveBeenCalled();
+        } else {
+          expect(navigation.getState().routes.at(-1)).toMatchObject({
+            name: "Thread",
+            params: {
+              draft: { environmentId: "environment", projectId: "project", title: "new-project" },
+            },
+          });
+        }
+      } finally {
+        await act(() => root.unmount());
+        state.realHooks = false;
+        state.newProjectsRoot = null;
+        state.createNewResult = null;
+      }
+    },
+  );
+
+  it("opens an existing local project synchronously without waiting for projection", () => {
+    setup();
+    const navigation = mountProjectFlow(true);
+    state.existingProjects = [
+      {
+        environmentId: "environment",
+        id: "existing-project",
+        title: "Existing project",
+        workspaceRoot: state.baseDirectory,
+      },
+    ];
+    try {
+      const submit = findAction(
+        AddProjectLocalFolderScreen({ environmentId: "environment" }),
+        "Add project",
+      );
+      if (!submit) throw new Error("Add project action missing");
+      submit();
+      expect(state.projects).toEqual([]);
+      expect(state.waitForProject).not.toHaveBeenCalled();
+      expect(navigation.getState().routes.at(-1)).toMatchObject({
+        key: navigation.draftKey,
+        name: "Thread",
+        params: { draft: { environmentId: "environment", projectId: "existing-project" } },
+      });
+    } finally {
+      state.existingProjects = [];
+    }
+  });
 
   it("pops the project flow back to the same native Thread controller", async () => {
     const { created, projected, submit } = setup();
