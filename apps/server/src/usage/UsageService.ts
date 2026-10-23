@@ -44,7 +44,9 @@ import { resolveModelAliases, UsageAggregator } from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
   listTranscriptFiles,
+  DESKTOP_HOST_SCOPE_ENV,
   readDirectoryVolumeId,
+  readPhysicalSourceId,
   readTranscriptRecords,
 } from "./usageTranscriptReader.ts";
 import {
@@ -95,6 +97,7 @@ interface TranscriptSource {
   readonly format: TranscriptUsageFormat<unknown>;
   readonly dir: string;
   readonly volumeId: string;
+  readonly physicalSourceId?: string;
   readonly fileName?: string;
 }
 
@@ -192,6 +195,19 @@ export const make = Effect.gen(function* () {
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
   const hostEnvironment = yield* HostProcess.Environment;
+  const hostPlatform = yield* HostProcess.Platform;
+  const hostScope = hostEnvironment[DESKTOP_HOST_SCOPE_ENV]?.trim();
+  // A mount or a directory's on-disk name does not change under a running server.
+  const physicalSourceIds = new Map<string, Promise<string | undefined>>();
+  const physicalSourceId = (dir: string) =>
+    Effect.promise(() => {
+      let id = physicalSourceIds.get(dir);
+      if (id === undefined) {
+        id = readPhysicalSourceId(dir, hostScope, hostPlatform);
+        physicalSourceIds.set(dir, id);
+      }
+      return id;
+    });
   const readerContext = yield* Effect.context<BuiltInUsageReadersEnv>();
 
   const fileCache: ScanCache = new Map();
@@ -371,11 +387,13 @@ export const make = Effect.gen(function* () {
         const key = `${provider}\0${dir}`;
         if (seen.has(key)) continue;
         seen.add(key);
+        const sourceId = yield* physicalSourceId(dir);
         dirs.push({
           provider,
           format,
           dir,
           volumeId,
+          ...(sourceId === undefined ? {} : { physicalSourceId: sourceId }),
           ...(fileName === undefined ? {} : { fileName }),
         });
       }
@@ -557,6 +575,7 @@ export const make = Effect.gen(function* () {
     readonly provider: UsageProviderKind;
     readonly dir: string;
     readonly volumeId: string;
+    readonly physicalSourceId?: string;
     readonly hostId?: string;
     readonly status?: UsageSource["status"];
     readonly message?: string;
@@ -575,11 +594,17 @@ export const make = Effect.gen(function* () {
     source: TranscriptSource,
     windowStartMs: number,
   ) {
-    const { provider, format, dir, volumeId, fileName } = source;
+    const { provider, format, dir, volumeId, physicalSourceId, fileName } = source;
+    const identity = {
+      provider,
+      dir,
+      volumeId,
+      ...(physicalSourceId === undefined ? {} : { physicalSourceId }),
+    };
     const exists = yield* fileSystem
       .exists(dir)
       .pipe(Effect.catchCause(() => Effect.succeed(false)));
-    if (!exists) return { provider, dir, volumeId, files: null } satisfies ScannedDir;
+    if (!exists) return { ...identity, files: null } satisfies ScannedDir;
     const { files, failedPaths } = yield* Effect.promise(() =>
       listTranscriptFiles(dir, windowStartMs, fileName === undefined ? undefined : { fileName }),
     );
@@ -613,9 +638,7 @@ export const make = Effect.gen(function* () {
     });
     const unread = failedPaths + read.filter((file) => file.failed).length;
     return {
-      provider,
-      dir,
-      volumeId,
+      ...identity,
       files: parsedFiles,
       ...(unread > 0
         ? {
@@ -649,14 +672,19 @@ export const make = Effect.gen(function* () {
             Effect.flatMap((sources) =>
               Effect.forEach(sources, ({ volumeId, ...source }) =>
                 Effect.map(
+                  // A reader's own volumeId names a remote account, not a local directory.
                   volumeId === undefined
-                    ? Effect.promise(() => readDirectoryVolumeId(source.dir))
-                    : Effect.succeed(volumeId),
-                  (resolved): ScannedDir => ({
+                    ? Effect.all([
+                        Effect.promise(() => readDirectoryVolumeId(source.dir)),
+                        physicalSourceId(source.dir),
+                      ])
+                    : Effect.succeed([volumeId, undefined] as const),
+                  ([resolved, sourceId]): ScannedDir => ({
                     ...source,
                     files: source.files?.map((file) => ({ ...file, malformedRecords: 0 })) ?? null,
                     provider: reader.provider,
                     volumeId: resolved,
+                    ...(sourceId === undefined ? {} : { physicalSourceId: sourceId }),
                   }),
                 ),
               ),
@@ -818,7 +846,18 @@ export const make = Effect.gen(function* () {
 
     for (const [
       index,
-      { provider, dir, volumeId, files, status, message, action, refreshing, hostId: sourceHostId },
+      {
+        provider,
+        dir,
+        volumeId,
+        physicalSourceId,
+        files,
+        status,
+        message,
+        action,
+        refreshing,
+        hostId: sourceHostId,
+      },
     ] of scannedDirs.entries()) {
       let scannedFiles = 0;
       let skippedFiles = 0;
@@ -864,7 +903,13 @@ export const make = Effect.gen(function* () {
       const sourceMessage =
         message ?? (files === null ? "No transcript directory on this environment." : null);
       sources.push({
-        fingerprint: { hostId: sourceHostId ?? hostId, provider, resolvedHomePath: dir, volumeId },
+        fingerprint: {
+          hostId: sourceHostId ?? hostId,
+          provider,
+          resolvedHomePath: dir,
+          volumeId,
+          ...(physicalSourceId === undefined ? {} : { physicalSourceId }),
+        },
         status:
           files === null && scannedFiles === 0
             ? "missing"

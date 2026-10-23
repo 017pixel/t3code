@@ -663,6 +663,25 @@ describe("mergeUsage", () => {
       expect(merged.sessions).toBe(142);
       expect(merged.duplicateSources).toHaveLength(1);
     });
+
+    it("joins a legacy-only reading to the WSL one through the Windows reading", () => {
+      const { physicalSourceId: _omitted, ...legacy } = windows;
+      const environments = [
+        environment("standalone", {
+          ...summary([bucket({ sourcePath: legacy.homePath })], [legacy]),
+          readAt: "2026-08-07T00:09:00.000Z",
+        }),
+        environment("wsl", summary([bucket({ sourcePath: wsl.homePath })], [wsl])),
+        environment("windows", summary([bucket({ sourcePath: windows.homePath })], [windows])),
+      ];
+
+      for (const ordered of [environments, environments.toReversed()]) {
+        const merged = mergeUsage(ordered, USAGE_CONTRACT_VERSION);
+        expect(merged.costUsd).toBe(10);
+        expect(merged.sessions).toBe(142);
+        expect(merged.contributingEnvironments).toEqual(["standalone"]);
+      }
+    });
   });
 
   it("totals sessions from per-directory distinct counts, not per-bucket sums", () => {
