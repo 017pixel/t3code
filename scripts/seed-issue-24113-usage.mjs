@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 const sandbox = NodePath.resolve(process.argv[2] ?? ".t3");
 if (sandbox === NodePath.resolve(process.env.HOME, ".t3")) throw new Error("Refusing live T3 home");
 const homes = NodePath.join(sandbox, "usage-fixtures");
+await NodeFSP.mkdir(homes, { recursive: true });
 await NodeFSP.mkdir(NodePath.join(homes, "claude", "projects", "fixture"), { recursive: true });
 await NodeFSP.mkdir(NodePath.join(homes, "codex"), { recursive: true });
 await NodeFSP.mkdir(NodePath.join(homes, "config"), { recursive: true });
@@ -60,7 +61,7 @@ await NodeFSP.writeFile(
 );
 console.log("Seeded synthetic usage in", sandbox);
 
-// Cursor account history reads host environment rather than instance homePath.
+// Some usage readers ignore enabled and resolve history from the host environment.
 console.log(
-  `Start the verifier server with XDG_CONFIG_HOME=${NodePath.join(homes, "config")} AGENT_CLI_CREDENTIAL_STORE=memory`,
+  `Start the verifier server with HOME=${homes} XDG_CONFIG_HOME=${NodePath.join(homes, "config")} AGENT_CLI_CREDENTIAL_STORE=memory`,
 );
