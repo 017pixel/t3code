@@ -1,6 +1,8 @@
 import {
   ORCHESTRATION_CACHE_SCHEMA_VERSION,
   ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,
+  COMPACT_THREAD_CACHE_SCHEMA_VERSION,
+  StoredOrchestrationThreadSnapshot,
 } from "@t3tools/client-runtime/platform";
 import {
   CommandId,
@@ -8,6 +10,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnItemId,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ThreadDetailSnapshot,
   type ThreadPullRequestLink,
@@ -17,6 +20,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import * as MobileDatabase from "../persistence/mobile-database";
 import { make } from "./environment-cache-store";
@@ -26,6 +30,9 @@ const PROJECT_ID = ProjectId.make("project-1");
 const THREAD_ID = ThreadId.make("thread-1");
 const PROVIDER_INSTANCE_ID = ProviderInstanceId.make("codex");
 const NOW = DateTime.makeUnsafe("2026-07-29T12:00:00.000Z");
+const encodeLegacyThreadSnapshot = Schema.encodeEffect(
+  Schema.fromJsonString(StoredOrchestrationThreadSnapshot),
+);
 const SHELL_SNAPSHOT: OrchestrationV2ShellSnapshot = {
   schemaVersion: 1,
   snapshotSequence: 3,
@@ -152,6 +159,59 @@ function cacheId(
   return `${environmentId}:${kind}:${cacheKey}`;
 }
 
+function threadSnapshotWithItems(): OrchestrationV2ThreadDetailSnapshot {
+  const local = {
+    id: TurnItemId.make("local-notice"),
+    threadId: THREAD_ID,
+    runId: null,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: 10,
+    status: "completed" as const,
+    title: null,
+    startedAt: NOW,
+    completedAt: NOW,
+    updatedAt: NOW,
+    type: "system_notice" as const,
+    message: "A settled local notice.",
+  };
+  const hidden = { ...local, id: TurnItemId.make("hidden-notice"), ordinal: 11 };
+  const inherited = {
+    ...local,
+    id: TurnItemId.make("inherited-notice"),
+    threadId: ThreadId.make("parent-thread"),
+  };
+  return {
+    ...THREAD_SNAPSHOT,
+    historyCursor: "older-page",
+    hasMoreHistory: true,
+    latestLocalTurnOrdinal: 11,
+    projection: {
+      ...THREAD_SNAPSHOT.projection,
+      turnItems: [local, hidden],
+      visibleTurnItems: [
+        {
+          position: 0,
+          visibility: "inherited",
+          sourceThreadId: inherited.threadId,
+          sourceItemId: inherited.id,
+          item: inherited,
+        },
+        {
+          position: 1,
+          visibility: "local",
+          sourceThreadId: THREAD_ID,
+          sourceItemId: local.id,
+          item: local,
+        },
+      ],
+    },
+  };
+}
+
 function makeDatabase() {
   const values = new Map<string, string>();
   const schemaVersions = new Map<string, number>();
@@ -198,6 +258,79 @@ function makeDatabase() {
 }
 
 describe("mobile SQLite environment cache store", () => {
+  it.effect("loads a V4 record and migrates to V5 on the next save without losing items", () =>
+    Effect.gen(function* () {
+      const memory = makeDatabase();
+      const store = yield* make().pipe(
+        Effect.provideService(MobileDatabase.MobileDatabase, memory.database),
+      );
+      const snapshot = threadSnapshotWithItems();
+      const id = cacheId(ENVIRONMENT_ID, "thread", THREAD_ID);
+      const raw = yield* encodeLegacyThreadSnapshot({
+        schemaVersion: ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,
+        environmentId: ENVIRONMENT_ID,
+        threadId: THREAD_ID,
+        snapshot,
+      });
+      memory.values.set(id, raw);
+      const loaded = Option.getOrThrow(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID));
+      expect(loaded).toEqual(snapshot);
+      expect(memory.values.get(id)).toBe(raw);
+      yield* store.saveThread(ENVIRONMENT_ID, loaded);
+      expect(memory.schemaVersions.get(id)).toBe(COMPACT_THREAD_CACHE_SCHEMA_VERSION);
+      expect(Option.getOrThrow(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID))).toEqual(
+        snapshot,
+      );
+      expect(memory.removed).toEqual([]);
+    }),
+  );
+
+  it.effect(
+    "discards obsolete and corrupt thread records and rejects another environment's cache",
+    () =>
+      Effect.gen(function* () {
+        const memory = makeDatabase();
+        const store = yield* make().pipe(
+          Effect.provideService(MobileDatabase.MobileDatabase, memory.database),
+        );
+        const id = cacheId(ENVIRONMENT_ID, "thread", THREAD_ID);
+        yield* store.saveThread(ENVIRONMENT_ID, threadSnapshotWithItems());
+        const raw = memory.values.get(id)!;
+        for (const invalid of ["{broken", raw.replace('"schemaVersion":5', '"schemaVersion":3')]) {
+          memory.values.set(id, invalid);
+          expect(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID)).toEqual(Option.none());
+        }
+        expect(memory.removed).toEqual([id, id]);
+        memory.values.set(
+          id,
+          raw.replace('"environmentId":"environment-1"', '"environmentId":"other"'),
+        );
+        expect(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID)).toEqual(Option.none());
+        memory.values.set(id, raw.replace('"threadId":"thread-1"', '"threadId":"other"'));
+        expect(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID)).toEqual(Option.none());
+      }),
+  );
+
+  it.effect(
+    "persists each local timeline payload once and restores shared items before returning",
+    () =>
+      Effect.gen(function* () {
+        const memory = makeDatabase();
+        const store = yield* make().pipe(
+          Effect.provideService(MobileDatabase.MobileDatabase, memory.database),
+        );
+        const snapshot = threadSnapshotWithItems();
+        yield* store.saveThread(ENVIRONMENT_ID, snapshot);
+        const raw = memory.values.get(cacheId(ENVIRONMENT_ID, "thread", THREAD_ID))!;
+        expect(raw.match(/"id":"local-notice"/g)).toHaveLength(1);
+
+        const loaded = Option.getOrThrow(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID));
+        expect(loaded).toEqual(snapshot);
+        expect(loaded.projection.turnItems[0]).toBe(loaded.projection.visibleTurnItems[1]!.item);
+        expect(snapshot.projection.turnItems).toHaveLength(2);
+      }),
+  );
+
   it.effect("round-trips V2 shell and thread DateTime fields with the shared cache schema", () =>
     Effect.gen(function* () {
       const memory = makeDatabase();
@@ -229,7 +362,7 @@ describe("mobile SQLite environment cache store", () => {
         ORCHESTRATION_CACHE_SCHEMA_VERSION,
       );
       expect(memory.schemaVersions.get(cacheId(ENVIRONMENT_ID, "thread", THREAD_ID))).toBe(
-        ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,
+        COMPACT_THREAD_CACHE_SCHEMA_VERSION,
       );
     }),
   );
