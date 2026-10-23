@@ -28,7 +28,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { MCP_APP_CALL_OUTPUT_KEY, MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { replayAndBufferProjectedLiveEvents } from "./LiveStreamBudget.ts";
 import type { UnsequencedProjectEvent } from "../persistence/OrchestrationEventStore.ts";
-import { projectDomainEventForWire } from "./WireProjection.ts";
+import { projectDomainEventForWire, toolOutputFitsDetail } from "./WireProjection.ts";
 import { makeRunOutcomeRecorder, type RunOutcome } from "./RunMetrics.ts";
 
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
@@ -360,9 +360,12 @@ const layerBase: Layer.Layer<
             stored?.type === "dynamic_tool" && Predicate.isObject(stored.output)
               ? stored.output[MCP_APP_CALL_OUTPUT_KEY]
               : undefined;
-          return call === undefined
+          const merged = { ...output, [MCP_APP_CALL_OUTPUT_KEY]: call };
+          // Past the detail limit clients would read both results as truncated
+          // text, so the provider's own output wins.
+          return call === undefined || !toolOutputFitsDetail(merged)
             ? item
-            : { ...item, output: { ...output, [MCP_APP_CALL_OUTPUT_KEY]: call } };
+            : { ...item, output: merged };
         }),
       );
     };

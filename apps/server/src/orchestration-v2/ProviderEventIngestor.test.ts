@@ -1543,15 +1543,16 @@ layer("ProviderEventIngestorV2", (it) => {
         input: { title: "Draft" },
         output: providerOutput,
       };
-      const ingest = ingestor.ingestNormalized({
-        providerSessionId,
-        providerInstanceId: modelSelection.instanceId,
-        threadId: threadEvent.threadId,
-        event: { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem },
-      });
+      const ingest = (item = turnItem) =>
+        ingestor.ingestNormalized({
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId: threadEvent.threadId,
+          event: { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem: item },
+        });
 
       yield* eventSink.write({ events: [threadEvent] });
-      yield* ingest;
+      yield* ingest();
       yield* projectionStore.apply({
         id: EventId.make("event:mcp-app-call-recorded"),
         type: "turn-item.updated",
@@ -1559,7 +1560,7 @@ layer("ProviderEventIngestorV2", (it) => {
         occurredAt: now,
         payload: { ...turnItem, output: { ...providerOutput, t3McpAppCall: call } },
       });
-      yield* ingest;
+      yield* ingest();
 
       const projected = yield* projectionStore.getTurnItem({
         threadId: threadEvent.threadId,
@@ -1574,6 +1575,20 @@ layer("ProviderEventIngestorV2", (it) => {
       const last = Array.from(stored).at(-1)?.event;
       assert(last?.type === "turn-item.updated" && last.payload.type === "dynamic_tool");
       assert.deepEqual(last.payload.output, { ...providerOutput, t3McpAppCall: call });
+
+      // An output that clients read whole on its own, but not with the call
+      // beside it, wins over the call.
+      const largeOutput = {
+        ...providerOutput,
+        result: { content: [{ type: "text", text: "x".repeat(256 * 1024 - 500) }] },
+      };
+      yield* ingest({ ...turnItem, output: largeOutput });
+      const resent = yield* projectionStore.getTurnItem({
+        threadId: threadEvent.threadId,
+        itemId: turnItem.id,
+      });
+      assert(resent?.type === "dynamic_tool");
+      assert.deepEqual(resent.output, largeOutput);
     }),
   );
 
