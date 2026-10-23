@@ -1,16 +1,21 @@
 import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 // Public screenshot fixtures must never scan a contributor's provider homes.
-const sandbox = NodePath.resolve(process.argv[2] ?? ".t3");
+// A worktree's .t3 holds the developer's dev settings, so default to a fresh temp home.
+const sandbox = NodePath.resolve(
+  process.argv[2] ?? (await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-fixture-"))),
+);
 if (sandbox === NodePath.resolve(process.env.HOME, ".t3")) throw new Error("Refusing live T3 home");
 const homes = NodePath.join(sandbox, "usage-fixtures");
-await NodeFSP.mkdir(homes, { recursive: true });
+await NodeFSP.mkdir(NodePath.join(sandbox, "userdata"), { recursive: true });
+// Claim settings.json exclusively before writing anything, so an existing home is left untouched.
+const settings = await NodeFSP.open(NodePath.join(sandbox, "userdata", "settings.json"), "wx");
 await NodeFSP.mkdir(NodePath.join(homes, "claude", "projects", "fixture"), { recursive: true });
 await NodeFSP.mkdir(NodePath.join(homes, "codex"), { recursive: true });
 await NodeFSP.mkdir(NodePath.join(homes, "config"), { recursive: true });
 await NodeFSP.mkdir(NodePath.join(homes, "opencode"), { recursive: true });
-await NodeFSP.mkdir(NodePath.join(sandbox, "userdata"), { recursive: true });
 const now = new Date(process.argv[3] ?? "2026-10-23T12:00:00Z");
 const records = [0, 1, 5, 12, 25, 60].map((days, i) =>
   JSON.stringify({
@@ -29,8 +34,7 @@ await NodeFSP.writeFile(
   NodePath.join(homes, "claude", "projects", "fixture", "session.jsonl"),
   records.join("\n") + "\n",
 );
-await NodeFSP.writeFile(
-  NodePath.join(sandbox, "userdata", "settings.json"),
+await settings.writeFile(
   JSON.stringify(
     {
       providerInstances: {
@@ -59,6 +63,7 @@ await NodeFSP.writeFile(
     2,
   ) + "\n",
 );
+await settings.close();
 console.log("Seeded synthetic usage in", sandbox);
 
 // Some usage readers ignore enabled and resolve history from host env overrides
