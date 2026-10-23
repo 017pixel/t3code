@@ -15,9 +15,9 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { reportMarkdownActionFailure } from "./markdownActionFailure";
 
 /**
- * Whether any cell is clipped in the unwrapped layout. Only then does the wrap
+ * Whether any cell overflows the collapsed layout. Only then does the wrap
  * toggle change anything, so short tables hide it. Measures with the container
- * briefly unwrapped and restores it before the browser paints.
+ * briefly collapsed and restores it before the browser paints.
  */
 function tableHasClippedCells(container: HTMLElement, table: HTMLTableElement): boolean {
   const viewport = table.closest<HTMLElement>('[data-slot="scroll-area-viewport"]');
@@ -34,7 +34,7 @@ function tableHasClippedCells(container: HTMLElement, table: HTMLTableElement): 
   } finally {
     if (previous === undefined) delete container.dataset.expanded;
     else container.dataset.expanded = previous;
-    // The unwrapped layout can be narrower and clamp a sideways scroll.
+    // The collapsed layout can be narrower and clamp a sideways scroll.
     if (viewport && scrollLeft > 0) viewport.scrollLeft = scrollLeft;
   }
 }

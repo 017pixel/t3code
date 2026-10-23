@@ -2144,14 +2144,13 @@ code {
   border-bottom: 1px solid color-mix(in srgb, var(--contrast-border) 60%, transparent);
 }
 
-/* Collapsed (default): single-line cells truncate so arbitrary chat content
-   cannot blow the column out; the footer toggle expands cells to wrap. */
+/* Wrap instead of a one-line ellipsis. max-width keeps one long column from
+   taking the lane; the footer toggle stays when a cell still overflows. */
 .chat-markdown .chat-markdown-table-container[data-expanded="false"] th,
 .chat-markdown .chat-markdown-table-container[data-expanded="false"] td {
-  overflow: hidden;
   max-width: 24rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: break-word;
+  white-space: normal;
 }
 
 .chat-markdown .chat-markdown-table-container[data-expanded="true"] td {
@@ -2159,10 +2158,11 @@ code {
   overflow-wrap: anywhere;
 }
 
-/* Fit expanded tables to wide timeline lanes; narrow lanes keep horizontal
-   scrolling so prose columns remain readable. */
+/* Fit tables to wide timeline lanes so wrapped prose stays in view. Narrow
+   lanes keep horizontal scrolling so prose columns remain readable. */
 @container chat-lane (min-width: 36rem) {
-  .chat-markdown .chat-markdown-table-container[data-expanded="true"] table {
+  .chat-markdown .chat-markdown-table-container[data-expanded="true"] table,
+  .chat-markdown .chat-markdown-table-container[data-expanded="false"] table {
     min-width: 0;
   }
 
