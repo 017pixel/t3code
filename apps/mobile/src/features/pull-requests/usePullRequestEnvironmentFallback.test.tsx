@@ -138,3 +138,18 @@ it.each(["missing", "disabled", "offline", "error", "unsupported"] as const)(
     expect(mocks.navigation.setParams).toHaveBeenCalledTimes(1);
   },
 );
+
+it("retains a connecting target before its project snapshot arrives", () => {
+  using screen = setup();
+  const projects = mocks.projects;
+  mocks.projects = projects.filter((project) => project.environmentId !== "requested");
+  screen.render();
+  expect(screen.target).toBe("requested/original");
+  expect(mocks.navigation.setParams).not.toHaveBeenCalled();
+
+  mocks.projects = projects;
+  mocks.environments = [environment("requested", "connected"), environment("copy", "connected")];
+  screen.render();
+  expect(screen.target).toBe("requested/original");
+  expect(mocks.navigation.setParams).not.toHaveBeenCalled();
+});
