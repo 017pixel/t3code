@@ -160,6 +160,11 @@ files to packages with [ci-changes.cjs](../../.github/scripts/ci-changes.cjs), a
 compares against the merge base with `origin/main`, or with a ref you pass. CI still runs the full
 test suites and the jobs the summary lists, so a local pass does not promise a green CI run.
 
+`vp run pr-merge-check <pr>...` runs the same checks on current `origin/main` with the given PRs
+merged in order, in a temporary worktree. Run it right before merging, with the whole batch. The
+ruleset does not require branches to be up to date, because main takes too many merges a day, so a
+PR's green CI can be days old.
+
 While you iterate, run single checks:
 
 ```sh
