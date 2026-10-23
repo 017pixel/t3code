@@ -83,7 +83,7 @@ public struct ThreadDetailView: View {
     @State private var isUpdatingWorkflow = false
     @State private var workflowError: String?
     @State private var workflowTask: Task<Void, Never>?
-    @StateObject private var v2TimelineState = FeatureV2TimelineState()
+    @State private var v2TimelineState = FeatureV2TimelineState()
     @State private var visitCoordinator = FeatureThreadVisitCoordinator()
     // Plain state, not `FocusState`: the composer's UIKit text view owns
     // focus and mirrors it through this binding, because SwiftUI drops
@@ -3361,7 +3361,7 @@ private struct FeatureTranscriptCollectionView: UIViewRepresentable {
                     if stillFollowing, !userIsScrolling {
                         self.scrollToBottom(
                             collectionView,
-                            animated: !isInitialLoad && lastIDChanged
+                            animated: !isInitialLoad && lastIDChanged && !UIAccessibility.isReduceMotionEnabled
                         )
                     } else if !userIsScrolling, !stillFollowing, let prependAnchor {
                         self.restore(prependAnchor, in: collectionView, dataSource: dataSource)

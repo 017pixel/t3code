@@ -24,6 +24,7 @@ struct FeatureWorkspaceNavigationRequest: Equatable, Sendable {
 
 public struct WorkspaceView: View {
     @SwiftUI.Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @SwiftUI.Environment(\.accessibilityReduceMotion) private var reduceMotion
     @SwiftUI.Environment(\.openURL) private var openURL
 
     @Bindable var model: FeatureRootModel
@@ -306,7 +307,7 @@ public struct WorkspaceView: View {
                 }
                 if isSearching {
                     searchBar
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
                 }
                 threadList
             }

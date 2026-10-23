@@ -200,8 +200,9 @@ struct PlatformRootView: View {
     private var presentedIncomingShare: Binding<T3IncomingShareEnvelope?> {
         Binding(
             get: {
-                guard !incomingShareProjects.isEmpty else { return nil }
-                return incomingShareCoordinator.pendingEnvelope
+                guard let envelope = incomingShareCoordinator.pendingEnvelope,
+                      !DailyUXCreationContext.projects(in: model.snapshot).isEmpty else { return nil }
+                return envelope
             },
             set: { value in
                 guard value == nil, importedShareProjectID == nil else { return }
@@ -292,7 +293,7 @@ struct PlatformRootView: View {
 
     private func refreshIncomingShares() {
         guard !model.isLoading else { return }
-        let hasProjects = !incomingShareProjects.isEmpty
+        let hasProjects = !DailyUXCreationContext.projects(in: model.snapshot).isEmpty
         Task { @MainActor in
             if await incomingShareCoordinator.refresh(hasProjects: hasProjects) {
                 incomingShareNeedsProject = true

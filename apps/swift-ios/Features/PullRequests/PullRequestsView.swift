@@ -290,6 +290,7 @@ public struct PullRequestsView: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .disabled(model.isLoading)
+                .accessibilityLabel("Refresh pull requests")
             }
         }
         .t3NavigationChrome()
@@ -418,6 +419,8 @@ public struct PullRequestsView: View {
                 .font(.system(size: 18))
                 .foregroundStyle(hasExtraFilters ? T3Colors.accent : T3Colors.textSecondary)
         }
+        .accessibilityLabel("Filters")
+        .accessibilityValue(hasExtraFilters ? Text("Active") : Text("None"))
     }
 
     private func filterButton(
@@ -1030,6 +1033,7 @@ struct PullRequestDetailView: View {
                 Image(systemName: "ellipsis.circle")
             }
             .disabled(model.isActing)
+            .accessibilityLabel("Pull request actions")
         }
     }
 
@@ -1303,6 +1307,7 @@ private struct PullRequestReactionsView: View {
                     Image(systemName: "face.smiling")
                 }
                 .buttonStyle(.bordered)
+                .accessibilityLabel("Add reaction")
             }
         }
         .scrollIndicators(.hidden)
