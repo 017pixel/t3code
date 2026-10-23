@@ -8,10 +8,12 @@
 //
 //   vp run pr-merge-check <pr> [<pr>...]
 //
-// Merges origin/main and each PR head, in order, in a temporary worktree next
-// to this checkout, then runs check:changed against origin/main. Pass every PR
-// of a batch in one run. Exit 0 means merge them now, in the same order: each
-// new commit on main makes the result older.
+// Merges GitHub's main and each PR head, in order, in a temporary worktree
+// next to this checkout, then runs check:changed against that main. PR numbers
+// are GitHub's: with `origin` on the GitCafe mirror, fetches use the `github`
+// remote. Pass every PR of a batch in one run. Exit 0 prints the merge commands,
+// pinned to the tested heads. Run them now, in order: each new commit on main
+// makes the result older.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -40,31 +42,43 @@ const run = (command: string, args: ReadonlyArray<string>, cwd: string) =>
 const git = (cwd: string, ...args: Array<string>) =>
   NodeChildProcess.execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
-git(root, "fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main");
-const heads = prs.map((pr) => {
-  git(root, "fetch", "--quiet", "origin", `pull/${pr}/head`);
-  return { pr, sha: git(root, "rev-parse", "FETCH_HEAD") };
-});
+const hasGitHubRemote =
+  NodeChildProcess.spawnSync("git", ["remote", "get-url", "github"], { cwd: root }).status === 0;
+const remote = hasGitHubRemote ? "github" : "origin";
+// Signing can prompt or fail, which would read as a conflict.
+const merge = ["-c", "commit.gpgsign=false", "merge", "--quiet", "--no-ff"];
 
+// The worktree has its own FETCH_HEAD, so a fetch in this checkout or in
+// another run cannot swap the commit under test.
 const dir = NodePath.resolve(root, "..", `${NodePath.basename(root)}-merge-check-${process.pid}`);
-git(root, "worktree", "add", "--quiet", "--detach", dir, "origin/main");
-// Ctrl-C reaches the running child too. Staying alive lets `finally` remove the worktree.
-process.on("SIGINT", () => {});
+git(root, "worktree", "add", "--quiet", "--detach", "--no-checkout", dir);
+// A terminal signal reaches the running child too. Staying alive lets
+// `finally` remove the worktree. SIGKILL still leaves it behind.
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => {});
 
+const fetchHead = (ref: string) => {
+  git(dir, "fetch", "--quiet", remote, ref);
+  return git(dir, "rev-parse", "FETCH_HEAD");
+};
+
+const heads: Array<{ pr: string; sha: string }> = [];
 let ok = false;
 try {
-  const conflict = heads.find(
-    ({ pr, sha }) =>
-      !run("git", ["merge", "--quiet", "--no-ff", "-m", `merge-check #${pr}`, sha], dir),
-  );
+  const base = fetchHead("refs/heads/main");
+  git(dir, "checkout", "--quiet", "--detach", base);
+  const conflict = prs.find((pr) => {
+    const sha = fetchHead(`pull/${pr}/head`);
+    heads.push({ pr, sha });
+    return !run("git", [...merge, "-m", `merge-check #${pr}`, sha], dir);
+  });
   if (conflict) {
-    console.error(`\npr-merge-check: #${conflict.pr} does not merge cleanly onto main.`);
+    console.error(`\npr-merge-check: #${conflict} does not merge cleanly onto main.`);
   } else {
     // A lockfile that two PRs edited can merge as text and still not match
     // the manifests. The frozen install fails on that.
     ok =
       run("vp", ["i", "--frozen-lockfile", "--", "--yes"], dir) &&
-      run("node", ["scripts/check-changed.ts", "origin/main"], dir);
+      run("node", ["scripts/check-changed.ts", base], dir);
   }
 } finally {
   git(root, "worktree", "remove", "--force", dir);
@@ -72,9 +86,10 @@ try {
 }
 
 const list = prs.map((pr) => `#${pr}`).join(" ");
-console.log(
-  ok
-    ? `\npr-merge-check: ${list} pass on main. Merge them now, in this order.`
-    : `\npr-merge-check: ${list} fail on main. Do not merge.`,
-);
-if (!ok) process.exit(1);
+if (!ok) {
+  console.log(`\npr-merge-check: ${list} fail on main. Do not merge.`);
+  process.exit(1);
+}
+console.log(`\npr-merge-check: ${list} pass on main. Merge them now, in this order:`);
+for (const { pr, sha } of heads)
+  console.log(`  gh pr merge ${pr} --squash --match-head-commit ${sha}`);
