@@ -340,35 +340,35 @@ const layerBase: Layer.Layer<
         });
       });
 
-    // A provider's copy of a tool call never carries the call its MCP App
-    // recorded on it later. Merged here, inside the write's transaction, so a
-    // resent item can't drop a call recorded since it was read.
-    const keepRecordedMcpAppCall = (
-      item: OrchestrationV2TurnItem,
-    ): Effect.Effect<OrchestrationV2TurnItem, ProjectionStore.ProjectionStoreV2Error> => {
-      if (item.type !== "dynamic_tool") return Effect.succeed(item);
-      const output = Predicate.isObject(item.output) ? item.output : undefined;
-      if (
-        output === undefined ||
-        !(MCP_APP_OUTPUT_KEY in output) ||
-        MCP_APP_CALL_OUTPUT_KEY in output
-      )
-        return Effect.succeed(item);
-      return projectionStore.getTurnItem({ threadId: item.threadId, itemId: item.id }).pipe(
-        Effect.map((stored) => {
-          const call =
-            stored?.type === "dynamic_tool" && Predicate.isObject(stored.output)
-              ? stored.output[MCP_APP_CALL_OUTPUT_KEY]
-              : undefined;
-          const merged = { ...output, [MCP_APP_CALL_OUTPUT_KEY]: call };
-          // Past the detail limit clients would read both results as truncated
-          // text, so the provider's own output wins.
-          return call === undefined || !toolOutputFitsDetail(merged)
-            ? item
-            : { ...item, output: merged };
-        }),
-      );
-    };
+    // An MCP App's recorded call (`mcp_app.call.record`) belongs to the server
+    // and the rest of its tool call to the provider, and either writer may have
+    // read the item before the other changed it. Merged here, inside the
+    // write's transaction: a provider's copy keeps the stored call, and a
+    // recorded call lands on the provider's latest copy.
+    const mergeMcpAppCall =
+      /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
+      Effect.fnUntraced(function* (item: OrchestrationV2TurnItem) {
+        if (item.type !== "dynamic_tool") return item;
+        const output = Predicate.isObject(item.output) ? item.output : undefined;
+        if (output === undefined || !(MCP_APP_OUTPUT_KEY in output)) return item;
+        const stored = yield* projectionStore.getTurnItem({
+          threadId: item.threadId,
+          itemId: item.id,
+        });
+        if (stored?.type !== "dynamic_tool" || !Predicate.isObject(stored.output)) return item;
+        const recorded = MCP_APP_CALL_OUTPUT_KEY in output;
+        const call = (recorded ? output : stored.output)[MCP_APP_CALL_OUTPUT_KEY];
+        if (call === undefined) return item;
+        const base = recorded ? { ...stored, updatedAt: item.updatedAt } : item;
+        const merged = {
+          ...(Predicate.isObject(base.output) ? base.output : {}),
+          [MCP_APP_CALL_OUTPUT_KEY]: call,
+        };
+        // Past the detail limit clients would read both results as truncated
+        // text, so the provider's output wins over the call.
+        if (!toolOutputFitsDetail(merged)) return recorded ? stored : item;
+        return { ...base, output: merged };
+      });
 
     const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
       const runOrdinals = new Map(
@@ -388,7 +388,7 @@ const layerBase: Layer.Layer<
                   event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
                 )
                 .pipe(
-                  Effect.flatMap(keepRecordedMcpAppCall),
+                  Effect.flatMap(mergeMcpAppCall),
                   Effect.map((payload) => ({ ...event, payload })),
                 )
             : Effect.succeed(event),

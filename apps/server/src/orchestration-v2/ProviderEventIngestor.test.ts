@@ -1491,7 +1491,7 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 
-  it.effect("keeps an MCP App's recorded call when the provider resends its tool call", () =>
+  it.effect("merges an MCP App's recorded call with the provider's latest tool call", () =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;
       const eventSink = yield* EventSink.EventSinkV2;
@@ -1589,6 +1589,32 @@ layer("ProviderEventIngestorV2", (it) => {
       });
       assert(resent?.type === "dynamic_tool");
       assert.deepEqual(resent.output, largeOutput);
+
+      // A call recorded from a copy read before the provider's latest update
+      // lands on that update instead of restoring the copy.
+      const finalOutput = {
+        ...providerOutput,
+        result: { content: [{ type: "text", text: "Provider final" }] },
+      };
+      yield* ingest({ ...turnItem, status: "completed", output: finalOutput });
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("event:mcp-app-call-from-stale-copy"),
+            type: "turn-item.updated",
+            threadId: threadEvent.threadId,
+            occurredAt: now,
+            payload: { ...turnItem, output: { ...providerOutput, t3McpAppCall: call } },
+          },
+        ],
+      });
+      const latest = yield* projectionStore.getTurnItem({
+        threadId: threadEvent.threadId,
+        itemId: turnItem.id,
+      });
+      assert(latest?.type === "dynamic_tool");
+      assert.equal(latest.status, "completed");
+      assert.deepEqual(latest.output, { ...finalOutput, t3McpAppCall: call });
     }),
   );
 
