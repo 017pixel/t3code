@@ -1,4 +1,5 @@
 import type { ResourceTelemetryProcess } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
@@ -123,15 +124,14 @@ export const layer = Layer.effectDiscard(
       ),
     );
     const recordFailure = (error: ResourceTelemetry.ResourceTelemetryRefreshFailed) => {
-      const reason = error.cause instanceof Error ? error.cause.message : error.message;
+      const cause = Cause.fail(error);
       return Ref.getAndSet(failing, true).pipe(
         Effect.flatMap((wasFailing) =>
           wasFailing
-            ? Effect.logDebug("process group metrics sample failed", { reason })
-            : Effect.logWarning("process group metrics are not exported: sample failed", {
-                reason,
-              }),
+            ? Effect.logDebug("process group metrics sample failed", cause)
+            : Effect.logWarning("process group metrics are not exported: sample failed", cause),
         ),
+        Effect.annotateLogs({ operation: error.operation }),
       );
     };
     yield* sample().pipe(
