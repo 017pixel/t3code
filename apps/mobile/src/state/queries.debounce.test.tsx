@@ -99,7 +99,9 @@ it("still debounces a changed path query before searching", () => {
   harness.render(null);
   harness.render(" src ");
   expect(harness.isPending).toBe(true);
-  act(() => vi.advanceTimersByTime(199));
+  act(() => vi.advanceTimersByTime(100));
+  harness.render("src");
+  act(() => vi.advanceTimersByTime(99));
   expect(mocks.searchEntries).not.toHaveBeenCalled();
 
   act(() => vi.advanceTimersByTime(1));
