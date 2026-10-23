@@ -3,6 +3,7 @@ import {
   type EnvironmentId,
   type IssueComment,
   type IssueListEntry,
+  type IssueListProjectError,
   type IssueListResult,
   type IssueRef,
 } from "@t3tools/contracts";
@@ -39,6 +40,16 @@ export function mergeIssueListPage(
   for (const entry of held) byKey.set(issueEntryKey(entry), entry);
   for (const entry of page) byKey.set(issueEntryKey(entry), entry);
   return [...byKey.values()].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
+/** A continuation's failures for a project replace the ones it reported before. */
+export function mergeIssueListErrors(
+  held: ReadonlyArray<IssueListProjectError>,
+  page: ReadonlyArray<IssueListProjectError>,
+): ReadonlyArray<IssueListProjectError> {
+  if (page.length === 0) return held;
+  const replaced = new Set(page.map((error) => error.projectId));
+  return [...held.filter((error) => !replaced.has(error.projectId)), ...page];
 }
 
 /** Older comments go in front: the detail carries the newest page and pages walk backwards. */
