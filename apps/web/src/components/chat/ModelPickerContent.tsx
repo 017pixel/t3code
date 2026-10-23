@@ -1,11 +1,12 @@
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
-  type ProviderInstanceId,
+  ProviderInstanceId,
   type EnvironmentId,
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
   MODEL_PICKER_JUMP_KEYBINDING_COMMANDS,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { resolveSelectableModel } from "@t3tools/shared/model";
 import { useAtomValue } from "@effect/atom-react";
 import { formatProviderUpdateRequiredNotice } from "@t3tools/client-runtime/providerUpdateRequiredModels";
@@ -52,6 +53,7 @@ import {
   useEnvironmentModelPreferences,
   useToggleEnvironmentModelFavorite,
 } from "~/hooks/useSettings";
+import { getLocalStorageItem, setLocalStorageItem } from "~/hooks/useLocalStorage";
 import { cn } from "~/lib/utils";
 import { getVirtualizedScrollFadeClassName } from "../ui/scroll-area";
 import { TooltipProvider } from "../ui/tooltip";
@@ -59,7 +61,9 @@ import { InlineButton } from "../ui/button";
 import {
   isProviderInstancePickerReady,
   isProviderInstancePickerVisible,
+  type ModelPickerTab,
   type ProviderInstanceEntry,
+  resolveModelPickerTab,
 } from "../../providerInstances";
 import { providerModelKey, sortProviderModelItems } from "../../modelOrdering";
 
@@ -157,6 +161,26 @@ function adjacentModelPickerProvider(input: {
         : providers.length - 1
       : (index + input.direction + providers.length) % providers.length
   ]!;
+}
+
+const LAST_PICKED_TAB_STORAGE_KEY = "t3code:model-picker-last-tab:v1";
+const ModelPickerTabSchema = Schema.Union([Schema.Literal("favorites"), ProviderInstanceId]);
+
+function readLastPickedTab(): ModelPickerTab | null {
+  try {
+    return getLocalStorageItem(LAST_PICKED_TAB_STORAGE_KEY, ModelPickerTabSchema);
+  } catch (error) {
+    console.error("Could not read the last model picker tab.", error);
+    return null;
+  }
+}
+
+function writeLastPickedTab(tab: ModelPickerTab): void {
+  try {
+    setLocalStorageItem(LAST_PICKED_TAB_STORAGE_KEY, tab, ModelPickerTabSchema);
+  } catch (error) {
+    console.error("Could not persist the last model picker tab.", error);
+  }
 }
 
 const EMPTY_MODEL_JUMP_LABELS = new Map<string, string>();
@@ -417,18 +441,21 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       activeEntry,
       modelOptionsByInstance.get(props.activeInstanceId) ?? [],
     );
-  const [selectedInstanceId, setSelectedInstanceId] = useState<ProviderInstanceId | "favorites">(
-    () => {
-      if (
-        props.lockedProvider !== null ||
-        activeInstanceHasSelectableUnavailableModel ||
-        activeInstanceNeedsSetup
-      ) {
-        return props.activeInstanceId;
-      }
-      return favorites.length > 0 ? "favorites" : props.activeInstanceId;
-    },
-  );
+  const [lastPickedTab] = useState(readLastPickedTab);
+  const [chosenTab, setChosenTab] = useState<ModelPickerTab | null>(null);
+  const selectedInstanceId = resolveModelPickerTab({
+    activeInstanceId: props.activeInstanceId,
+    chosenTab,
+    lastPickedTab,
+    hasFavorites: favorites.length > 0,
+    keepActiveInstance:
+      props.lockedProvider !== null ||
+      activeInstanceHasSelectableUnavailableModel ||
+      activeInstanceNeedsSetup,
+    visibleInstanceIds: new Set(
+      instanceEntries.filter(isProviderInstancePickerVisible).map((entry) => entry.instanceId),
+    ),
+  });
   const favoritesSet = new Set(favorites.map((fav) => providerModelKey(fav.provider, fav.model)));
   const [expandedLegacyInstances, setExpandedLegacyInstances] = useState(
     () =>
@@ -449,7 +476,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   };
 
   const handleSelectInstance = (instanceId: ProviderInstanceId | "favorites") => {
-    setSelectedInstanceId(instanceId);
+    setChosenTab(instanceId);
     window.requestAnimationFrame(() => {
       focusSearchInput();
     });
@@ -499,6 +526,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     }
     const resolvedModel = resolveSelectableModel(entry.driverKind, modelSlug, options);
     if (resolvedModel) {
+      // Search results span every tab, so a pick from them keeps the remembered tab.
+      if (!isSearching) {
+        writeLastPickedTab(selectedInstanceId);
+      }
       if (additive && onToggleModel) {
         onToggleModel(instanceId, resolvedModel);
       } else {

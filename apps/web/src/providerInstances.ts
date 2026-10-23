@@ -77,17 +77,27 @@ export function isProviderInstancePickerVisible(entry: ProviderInstanceEntry): b
 
 export type ModelPickerTab = ProviderInstanceId | "favorites";
 
-// Takeover baseline stub: main's current initial-tab rule, so the tests fail on behavior.
+// Favorites can load after the picker opens, so the default follows them until the user picks a tab.
 export function resolveModelPickerTab(input: {
   activeInstanceId: ProviderInstanceId;
   chosenTab: ModelPickerTab | null;
-  lastPickedFrom: "favorites" | "instance" | null;
+  lastPickedTab: ModelPickerTab | null;
   hasFavorites: boolean;
   keepActiveInstance: boolean;
-  activeInstanceVisible: boolean;
+  visibleInstanceIds: ReadonlySet<ProviderInstanceId>;
 }): ModelPickerTab {
+  if (input.chosenTab !== null) {
+    return input.chosenTab;
+  }
   if (input.keepActiveInstance) {
     return input.activeInstanceId;
+  }
+  if (
+    input.lastPickedTab !== null &&
+    input.lastPickedTab !== "favorites" &&
+    input.visibleInstanceIds.has(input.lastPickedTab)
+  ) {
+    return input.lastPickedTab;
   }
   return input.hasFavorites ? "favorites" : input.activeInstanceId;
 }

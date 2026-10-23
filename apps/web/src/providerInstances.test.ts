@@ -609,35 +609,40 @@ describe("provider icon metadata", () => {
 
 describe("resolveModelPickerTab", () => {
   const activeInstanceId = ProviderInstanceId.make("claudeAgent_personal");
+  const otherInstanceId = ProviderInstanceId.make("codex_work");
   const opening = {
     activeInstanceId,
     chosenTab: null,
-    lastPickedFrom: null,
+    lastPickedTab: null,
     hasFavorites: true,
     keepActiveInstance: false,
-    activeInstanceVisible: true,
+    visibleInstanceIds: new Set([activeInstanceId, otherInstanceId]),
   } as const;
 
   it("reopens on the tab the last model was picked from", () => {
-    expect(resolveModelPickerTab({ ...opening, lastPickedFrom: "favorites" })).toBe("favorites");
-    expect(resolveModelPickerTab({ ...opening, lastPickedFrom: "instance" })).toBe(
+    expect(resolveModelPickerTab({ ...opening, lastPickedTab: "favorites" })).toBe("favorites");
+    expect(resolveModelPickerTab({ ...opening, lastPickedTab: activeInstanceId })).toBe(
       activeInstanceId,
     );
-    // Locked and setup-needed accounts, and a hidden active account, keep today's tab.
+    // An additive pick leaves another account active, so the tab is remembered by account.
+    expect(resolveModelPickerTab({ ...opening, lastPickedTab: otherInstanceId })).toBe(
+      otherInstanceId,
+    );
+    // Locked and setup-needed accounts, and a hidden remembered account, keep today's tab.
     expect(
-      resolveModelPickerTab({ ...opening, lastPickedFrom: "favorites", keepActiveInstance: true }),
+      resolveModelPickerTab({ ...opening, lastPickedTab: "favorites", keepActiveInstance: true }),
     ).toBe(activeInstanceId);
     expect(
       resolveModelPickerTab({
         ...opening,
-        lastPickedFrom: "instance",
-        activeInstanceVisible: false,
+        lastPickedTab: otherInstanceId,
+        visibleInstanceIds: new Set([activeInstanceId]),
       }),
     ).toBe("favorites");
   });
 
   it("lands on favorites once they load unless a tab was chosen", () => {
-    const beforeLoad = { ...opening, lastPickedFrom: "favorites", hasFavorites: false } as const;
+    const beforeLoad = { ...opening, lastPickedTab: "favorites", hasFavorites: false } as const;
     expect(resolveModelPickerTab(beforeLoad)).toBe(activeInstanceId);
     expect(resolveModelPickerTab({ ...beforeLoad, hasFavorites: true })).toBe("favorites");
     expect(
