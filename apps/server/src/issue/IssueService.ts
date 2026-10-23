@@ -308,7 +308,11 @@ const make = Effect.gen(function* () {
     const recordFailure = (project: SupportedProject, failure: IssueTrackerError) => {
       const existing = trackers.get(project.host);
       if (existing !== undefined && isTrackerUnusable(failure))
-        trackers.set(project.host, { ...existing, configured: false, detail: failure.detail });
+        trackers.set(project.host, {
+          ...existing,
+          configured: false,
+          detail: trackerDetail(failure),
+        });
     };
 
     yield* Effect.forEach(
