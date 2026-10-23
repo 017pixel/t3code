@@ -405,12 +405,17 @@ function useEnvironmentOptions(): ReadonlyArray<EnvironmentOption> {
   })();
 }
 
-function useSelectedEnvironment(): {
+function useSelectedEnvironment(requestedEnvironmentId: EnvironmentId | null): {
   readonly environmentOptions: ReadonlyArray<EnvironmentOption>;
   readonly selectedEnvironment: EnvironmentOption | null;
   readonly setSelectedEnvironmentId: (environmentId: EnvironmentId) => void;
 } {
-  const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<EnvironmentId | null>(null);
+  const [selectedEnvironmentId, setSelectedEnvironmentId] = useState(requestedEnvironmentId);
+  const [previousRequest, setPreviousRequest] = useState(requestedEnvironmentId);
+  if (previousRequest !== requestedEnvironmentId) {
+    setPreviousRequest(requestedEnvironmentId);
+    setSelectedEnvironmentId(requestedEnvironmentId);
+  }
   const environmentOptions = useEnvironmentOptions();
   const selectedEnvironment =
     environmentOptions.find(
@@ -504,10 +509,10 @@ function SourceControlRow(props: {
   );
 }
 
-export function AddProjectSourceScreen() {
+export function AddProjectSourceScreen(props: { readonly environmentId?: string | string[] }) {
   const navigation = useNavigation();
   const { environmentOptions, selectedEnvironment, setSelectedEnvironmentId } =
-    useSelectedEnvironment();
+    useSelectedEnvironment(stringParam(props.environmentId) as EnvironmentId | null);
   const canWriteSourceControl = useEnvironmentScope(
     selectedEnvironment?.environmentId ?? null,
     AuthSourceControlWriteScope,
@@ -668,10 +673,17 @@ function openNewTaskDraft(
 ) {
   const state = navigation.getState();
   if (!state) return;
-  const threadIndex = state.routes.findLastIndex((route) => route.name === "Thread");
+  const activeRoutes = state.routes.slice(0, state.index + 1);
+  const threadIndex = activeRoutes.findLastIndex((route) => route.name === "Thread");
+  const flowIndex = activeRoutes.findIndex(
+    (route) => route.name === "NewTaskProject" || route.name.startsWith("AddProject"),
+  );
+  const startIndex = threadIndex >= 0 ? threadIndex : flowIndex >= 0 ? flowIndex : state.index;
+  // Native screen identity is the route key, even when its name changes. Reuse
+  // the draft or first flow controller so completion only pops its children.
   const routes = [
-    ...state.routes.slice(0, threadIndex < 0 ? state.index : threadIndex),
-    { key: uuidv4(), name: "Thread", params: { draft: params } },
+    ...activeRoutes.slice(0, startIndex),
+    { key: activeRoutes[startIndex]!.key, name: "Thread", params: { draft: params } },
   ];
   navigation.dispatch(CommonActions.reset({ ...state, index: routes.length - 1, routes }));
 }
@@ -731,6 +743,19 @@ function useCreateProject(environment: EnvironmentOption | null) {
       input: command,
     });
     if (AsyncResult.isFailure(result)) {
+      return result;
+    }
+    // A successful command can precede its project in the client store. The
+    // draft treats a missing project as a reason to return to the chooser.
+    const project = await waitForProject(
+      { environmentId: environment.environmentId, projectId },
+      15_000,
+    );
+    if (project === null) {
+      Dialog.alert(
+        "Project added",
+        "The project was created but has not reached this device yet. It will appear in the project list once the connection catches up.",
+      );
       return result;
     }
     openNewTaskDraft(navigation, {
