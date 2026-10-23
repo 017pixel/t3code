@@ -1,5 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
-import { issueEntryKey, mergeIssueListPage } from "@t3tools/client-runtime/state/issues";
+import {
+  issueEntryKey,
+  mergeIssueListErrors,
+  mergeIssueListPage,
+} from "@t3tools/client-runtime/state/issues";
 import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 import type {
   EnvironmentId,
@@ -7,6 +11,7 @@ import type {
   IssueListCursors,
   IssueListEntry,
   IssueListInput,
+  IssueListProjectError,
   IssueListResult,
   IssueListState,
   IssueTrackerKind,
@@ -26,7 +31,7 @@ import {
   UserCheckIcon,
   UsersIcon,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type ReactNode } from "react";
 
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { IssueCreateDialog, type IssueCreateScope } from "~/components/issue/IssueCreateDialog";
@@ -82,6 +87,7 @@ import {
   type RightPanelSurface,
 } from "~/rightPanelStore";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { useProjects } from "~/state/entities";
 import { useEnvironments, useIssuesSupported } from "~/state/environments";
@@ -161,7 +167,10 @@ export const Route = createFileRoute("/_chat/issues")({
 interface HeldPage {
   readonly answer: IssueListResult;
   readonly entries: ReadonlyArray<IssueListEntry>;
+  readonly errors: ReadonlyArray<IssueListProjectError>;
   readonly nextCursors: IssueListCursors;
+  /** Why the last "Load more" failed, until a retry succeeds or a new first page arrives. */
+  readonly moreFailure: string | null;
 }
 
 function trackerKey(tracker: Pick<IssueTrackerSummary, "tracker" | "host">): string {
@@ -180,7 +189,13 @@ function holdPages(
       environmentId,
       previous?.answer === answer
         ? previous
-        : { answer, entries: answer.entries, nextCursors: answer.nextCursors },
+        : {
+            answer,
+            entries: answer.entries,
+            errors: answer.errors,
+            nextCursors: answer.nextCursors,
+            moreFailure: null,
+          },
     );
   }
   return next;
@@ -224,7 +239,7 @@ function groupIssues(
         continue;
       group.rows.push({ ...entry, environmentId });
     }
-    for (const error of page.answer.errors) {
+    for (const error of page.errors) {
       const project = projects.find(
         (p) => p.environmentId === environmentId && p.id === error.projectId,
       );
@@ -341,14 +356,24 @@ function IssuesRoute() {
       input: { ...listInput, cursors: page.nextCursors },
     });
     setLoadingMore(null);
-    if (result._tag === "Failure") return;
+    const failure = result._tag === "Failure" ? squashAtomCommandFailure(result) : null;
     setPages((current) => {
       const next = new Map(current);
-      next.set(environmentId, {
-        answer: page.answer,
-        entries: mergeIssueListPage(page.entries, result.value.entries),
-        nextCursors: result.value.nextCursors,
-      });
+      next.set(
+        environmentId,
+        result._tag === "Failure"
+          ? {
+              ...page,
+              moreFailure: failure instanceof Error ? failure.message : "The next page failed.",
+            }
+          : {
+              answer: page.answer,
+              entries: mergeIssueListPage(page.entries, result.value.entries),
+              errors: mergeIssueListErrors(page.errors, result.value.errors),
+              nextCursors: result.value.nextCursors,
+              moreFailure: null,
+            },
+      );
       return next;
     });
   };
@@ -575,18 +600,29 @@ function IssuesRoute() {
                 />
               );
             })}
-            {group.more.map((environmentId) => (
-              <Button
-                key={environmentId}
-                size="sm"
-                variant="ghost-muted"
-                className="self-start"
-                disabled={loadingMore !== null}
-                onClick={() => void loadMore(environmentId)}
-              >
-                {loadingMore === environmentId ? "Loading…" : "Load more"}
-              </Button>
-            ))}
+            {group.more.map((environmentId) => {
+              const moreFailure = held.get(environmentId)?.moreFailure ?? null;
+              return (
+                <Fragment key={environmentId}>
+                  {moreFailure === null ? null : (
+                    <p className="px-3 text-xs text-destructive">{moreFailure}</p>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="ghost-muted"
+                    className="self-start"
+                    disabled={loadingMore !== null}
+                    onClick={() => void loadMore(environmentId)}
+                  >
+                    {loadingMore === environmentId
+                      ? "Loading…"
+                      : moreFailure === null
+                        ? "Load more"
+                        : "Retry"}
+                  </Button>
+                </Fragment>
+              );
+            })}
           </section>
         );
       })}
