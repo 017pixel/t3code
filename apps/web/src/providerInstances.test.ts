@@ -616,7 +616,11 @@ describe("resolveModelPickerTab", () => {
     lastPickedTab: null,
     hasFavorites: true,
     keepActiveInstance: false,
-    visibleInstanceIds: new Set([activeInstanceId, otherInstanceId]),
+    instanceEntries: deriveProviderInstanceEntries([
+      provider({ provider: ProviderDriverKind.make("claudeAgent"), instanceId: activeInstanceId }),
+      provider({ provider: ProviderDriverKind.make("codex"), instanceId: otherInstanceId }),
+    ]),
+    selectableUnavailableInstanceIds: undefined,
   } as const;
 
   it("reopens on the tab the last model was picked from", () => {
@@ -636,9 +640,37 @@ describe("resolveModelPickerTab", () => {
       resolveModelPickerTab({
         ...opening,
         lastPickedTab: otherInstanceId,
-        visibleInstanceIds: new Set([activeInstanceId]),
+        instanceEntries: opening.instanceEntries.filter(
+          (entry) => entry.instanceId === activeInstanceId,
+        ),
       }),
     ).toBe("favorites");
+  });
+
+  it("does not reopen on a remembered account that is enabled but unavailable", () => {
+    const remembered = {
+      ...opening,
+      lastPickedTab: otherInstanceId,
+      instanceEntries: deriveProviderInstanceEntries([
+        provider({
+          provider: ProviderDriverKind.make("claudeAgent"),
+          instanceId: activeInstanceId,
+        }),
+        provider({
+          provider: ProviderDriverKind.make("codex"),
+          instanceId: otherInstanceId,
+          status: "error",
+        }),
+      ]),
+    } as const;
+    expect(resolveModelPickerTab(remembered)).toBe("favorites");
+    // Still reachable when the sidebar offers its setup action or a selectable unavailable model.
+    expect(
+      resolveModelPickerTab({
+        ...remembered,
+        selectableUnavailableInstanceIds: new Set([otherInstanceId]),
+      }),
+    ).toBe(otherInstanceId);
   });
 
   it("lands on favorites once they load unless a tab was chosen", () => {

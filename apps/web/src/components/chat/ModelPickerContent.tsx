@@ -441,20 +441,37 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       activeEntry,
       modelOptionsByInstance.get(props.activeInstanceId) ?? [],
     );
+  const selectableUnavailableInstanceIds = (() => {
+    const instanceIds = new Set<ProviderInstanceId>();
+    if (activeInstanceHasSelectableUnavailableModel) {
+      instanceIds.add(props.activeInstanceId);
+    }
+    if (onOpenProviderSetup !== undefined) {
+      for (const entry of instanceEntries) {
+        if (
+          shouldOfferModelPickerSetup(entry, modelOptionsByInstance.get(entry.instanceId) ?? [])
+        ) {
+          instanceIds.add(entry.instanceId);
+        }
+      }
+    }
+    return instanceIds.size > 0 ? instanceIds : undefined;
+  })();
+
   const [lastPickedTab] = useState(readLastPickedTab);
   const [chosenTab, setChosenTab] = useState<ModelPickerTab | null>(null);
+  const keepActiveInstance =
+    props.lockedProvider !== null ||
+    activeInstanceHasSelectableUnavailableModel ||
+    activeInstanceNeedsSetup;
   const selectedInstanceId = resolveModelPickerTab({
     activeInstanceId: props.activeInstanceId,
     chosenTab,
     lastPickedTab,
     hasFavorites: favorites.length > 0,
-    keepActiveInstance:
-      props.lockedProvider !== null ||
-      activeInstanceHasSelectableUnavailableModel ||
-      activeInstanceNeedsSetup,
-    visibleInstanceIds: new Set(
-      instanceEntries.filter(isProviderInstancePickerVisible).map((entry) => entry.instanceId),
-    ),
+    keepActiveInstance,
+    instanceEntries,
+    selectableUnavailableInstanceIds,
   });
   const favoritesSet = new Set(favorites.map((fav) => providerModelKey(fav.provider, fav.model)));
   const [expandedLegacyInstances, setExpandedLegacyInstances] = useState(
@@ -469,7 +486,14 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const serverKeybindings = useAtomValue(primaryServerKeybindingsAtom);
   const keybindings = providedKeybindings ?? serverKeybindings;
   const [searchHeight, setSearchHeight] = useState(0);
-  const toggleFavorite = useToggleEnvironmentModelFavorite(props.environmentId);
+  const toggleEnvironmentModelFavorite = useToggleEnvironmentModelFavorite(props.environmentId);
+  // Pins the open tab so the first or last favorite does not move the default tab under the cursor.
+  const toggleFavorite = (instanceId: ProviderInstanceId, slug: string) => {
+    if (chosenTab === null && !keepActiveInstance) {
+      setChosenTab(selectedInstanceId);
+    }
+    return toggleEnvironmentModelFavorite(instanceId, slug);
+  };
 
   const focusSearchInput = () => {
     searchInputRef.current?.focus({ preventScroll: true });
@@ -526,8 +550,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     }
     const resolvedModel = resolveSelectableModel(entry.driverKind, modelSlug, options);
     if (resolvedModel) {
-      // Search results span every tab, so a pick from them keeps the remembered tab.
-      if (!isSearching) {
+      // Search results span every tab, and a forced locked or setup tab is not a habit, so
+      // neither replaces the remembered tab.
+      if (!isSearching && (chosenTab !== null || !keepActiveInstance)) {
         writeLastPickedTab(selectedInstanceId);
       }
       if (additive && onToggleModel) {
@@ -556,23 +581,6 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     if (!lockedContinuationGroupKey) return true;
     return entry.continuationGroupKey === lockedContinuationGroupKey;
   };
-
-  const selectableUnavailableInstanceIds = (() => {
-    const instanceIds = new Set<ProviderInstanceId>();
-    if (activeInstanceHasSelectableUnavailableModel) {
-      instanceIds.add(props.activeInstanceId);
-    }
-    if (canOpenProviderSetup) {
-      for (const entry of instanceEntries) {
-        if (
-          shouldOfferModelPickerSetup(entry, modelOptionsByInstance.get(entry.instanceId) ?? [])
-        ) {
-          instanceIds.add(entry.instanceId);
-        }
-      }
-    }
-    return instanceIds.size > 0 ? instanceIds : undefined;
-  })();
 
   const flatModels = (() => {
     const out: ModelPickerItem[] = [];

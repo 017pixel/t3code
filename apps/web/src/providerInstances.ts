@@ -84,7 +84,8 @@ export function resolveModelPickerTab(input: {
   lastPickedTab: ModelPickerTab | null;
   hasFavorites: boolean;
   keepActiveInstance: boolean;
-  visibleInstanceIds: ReadonlySet<ProviderInstanceId>;
+  instanceEntries: ReadonlyArray<ProviderInstanceEntry>;
+  selectableUnavailableInstanceIds: ReadonlySet<ProviderInstanceId> | undefined;
 }): ModelPickerTab {
   if (input.chosenTab !== null) {
     return input.chosenTab;
@@ -92,12 +93,19 @@ export function resolveModelPickerTab(input: {
   if (input.keepActiveInstance) {
     return input.activeInstanceId;
   }
+  const lastPickedTab = input.lastPickedTab;
+  // Only a tab the sidebar leaves enabled, so the picker never opens on an empty, unpickable list.
+  const lastPickedEntry =
+    lastPickedTab === null || lastPickedTab === "favorites"
+      ? undefined
+      : input.instanceEntries.find((entry) => entry.instanceId === lastPickedTab);
   if (
-    input.lastPickedTab !== null &&
-    input.lastPickedTab !== "favorites" &&
-    input.visibleInstanceIds.has(input.lastPickedTab)
+    lastPickedEntry !== undefined &&
+    isProviderInstancePickerVisible(lastPickedEntry) &&
+    (isProviderInstancePickerReady(lastPickedEntry) ||
+      input.selectableUnavailableInstanceIds?.has(lastPickedEntry.instanceId))
   ) {
-    return input.lastPickedTab;
+    return lastPickedEntry.instanceId;
   }
   return input.hasFavorites ? "favorites" : input.activeInstanceId;
 }
