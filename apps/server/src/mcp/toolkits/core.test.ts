@@ -126,6 +126,52 @@ it.effect("checks capability through the production registration", () =>
   ),
 );
 
+it.effect("mark_unread on the calling thread defers until its turn ends", () => {
+  const marked: Array<boolean> = [];
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const call = (args: Record<string, unknown>) =>
+      server
+        .callTool({ name: "t3_thread_organize", arguments: args })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    const own = yield* call({ action: "mark_unread" });
+    const otherId = ThreadId.make("mcp-core-other-thread");
+    const other = yield* call({ action: "mark_unread", threadId: otherId });
+
+    expect(own.isError).toBe(false);
+    expect(own.structuredContent).toEqual({ marksUnreadWhenTurnEnds: true });
+    expect(other.isError).toBe(false);
+    expect(other.structuredContent).toMatchObject({ sequence: 4 });
+    expect(marked).toEqual([true, false]);
+  }).pipe(
+    Effect.provide(
+      layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (id) => Effect.succeed(McpToolAccessTestkit.liveThreadShell(id)),
+            getProjectThreadRecords: ({ threadId: id }) =>
+              Effect.succeed(
+                McpToolAccessTestkit.idleThreadProjection(McpToolAccessTestkit.liveThreadShell(id)),
+              ),
+            markThreadUnread: (input) =>
+              Effect.sync(() => {
+                marked.push(input.byOwnAgent);
+                return input.byOwnAgent
+                  ? { marksUnreadWhenTurnEnds: true as const }
+                  : { sequence: 4 };
+              }),
+          }),
+        ),
+      ),
+    ),
+  );
+});
+
 it.effect("an answered question reports already answered instead of not found", () => {
   const shell = McpToolAccessTestkit.liveThreadShell(threadId);
   const requestId = RuntimeRequestId.make("answered-question");

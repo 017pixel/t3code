@@ -3700,6 +3700,110 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("marks a thread unread once its own agent's turn completes", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadManagement = yield* ThreadManagementService.ThreadManagementService;
+      const projectId = ProjectId.make("runtime-layer-mark-unread-after-run-project");
+      const threadId = ThreadId.make("runtime-layer-mark-unread-after-run-thread");
+
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-mark-unread-after-run-create"),
+        threadId,
+        projectId,
+        title: "Mark unread after run",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: "/tmp/runtime-layer-mark-unread-after-run",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-mark-unread-after-run-message"),
+        threadId,
+        messageId: MessageId.make("runtime-layer-mark-unread-after-run-message"),
+        text: "Flag this result unread when the turn ends.",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+      });
+      const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0];
+      if (run === undefined) return yield* Effect.die(new Error("Run missing."));
+
+      const rejected = yield* orchestrator
+        .dispatch({
+          type: "thread.mark-unread",
+          commandId: CommandId.make("runtime-layer-mark-unread-after-run-direct"),
+          threadId,
+        })
+        .pipe(Effect.flip);
+      assert.equal(rejected._tag, "OrchestratorDispatchError");
+      assert.equal(rejected.cause, `Thread ${threadId} has no completed run to mark unread.`);
+
+      const otherCaller = yield* threadManagement
+        .markThreadUnread({
+          threadId,
+          commandId: CommandId.make("runtime-layer-mark-unread-after-run-other"),
+          byOwnAgent: false,
+        })
+        .pipe(Effect.flip);
+      assert.equal(otherCaller._tag, "OrchestratorDispatchError");
+      assert.equal(otherCaller.cause, `Thread ${threadId} has no completed run to mark unread.`);
+
+      const marked = yield* orchestrator
+        .streamStoredEventsFrom({ threadId, afterSequence: 0, eventType: "thread.marked-unread" })
+        .pipe(Stream.runHead, Effect.forkChild);
+      const visitedDuringRun = (yield* orchestrator.getThreadProjection(threadId)).thread
+        .lastVisitedAt;
+      if (visitedDuringRun === null)
+        return yield* Effect.die(new Error("Visit watermark missing."));
+      const result = yield* threadManagement.markThreadUnread({
+        threadId,
+        commandId: CommandId.make("runtime-layer-mark-unread-after-run-own"),
+        byOwnAgent: true,
+      });
+      assert.deepEqual(result, { marksUnreadWhenTurnEnds: true });
+      assert.deepEqual(
+        (yield* orchestrator.getThreadProjection(threadId)).thread.lastVisitedAt,
+        visitedDuringRun,
+      );
+      // The completion has to land after the in-run visit, or the rewind is
+      // indistinguishable from the watermark message dispatch already wrote.
+      yield* TestClock.adjust("1 second");
+      const now = yield* DateTime.now;
+      yield* eventSink.write({
+        commandId: CommandId.make("runtime-layer-mark-unread-after-run-completed"),
+        events: [
+          {
+            id: EventId.make("runtime-layer-mark-unread-after-run-completed"),
+            type: "run.updated",
+            threadId,
+            runId: run.id,
+            occurredAt: now,
+            payload: { ...run, status: "completed", startedAt: now, completedAt: now },
+          },
+        ],
+      });
+      yield* Fiber.join(marked);
+
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      const completedAt = projection.runs[0]?.completedAt ?? null;
+      const lastVisitedAt = projection.thread.lastVisitedAt;
+      if (completedAt === null || lastVisitedAt === null) {
+        return yield* Effect.die(new Error("Unread watermark missing."));
+      }
+      assert.equal(DateTime.toEpochMillis(lastVisitedAt), DateTime.toEpochMillis(completedAt) - 1);
+      assert.ok(DateTime.toEpochMillis(lastVisitedAt) > DateTime.toEpochMillis(visitedDuringRun));
+    }),
+  );
+
   it.effect("settles past held automatic runs but not held user messages", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

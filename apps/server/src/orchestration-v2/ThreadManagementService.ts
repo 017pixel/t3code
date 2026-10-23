@@ -415,6 +415,25 @@ export interface ThreadManagementServiceShape {
     { readonly sequence: number } | { readonly settlesWhenTurnEnds: true },
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
   >;
+  /**
+   * Marking unread rewinds the visit watermark to just before the latest
+   * completed run. An agent marking its own thread has no such run yet, so
+   * this waits for its turn to end. A run that ends any other way leaves the
+   * read state unchanged, as does anything `thread.mark-unread` refuses then.
+   */
+  readonly markUnreadAfterRun: (input: {
+    readonly projectId: ProjectId;
+    readonly threadId: ThreadId;
+    readonly runId: RunId;
+  }) => Effect.Effect<void, ThreadManagementFailure>;
+  readonly markThreadUnread: (input: {
+    readonly threadId: ThreadId;
+    readonly commandId: CommandId;
+    readonly byOwnAgent: boolean;
+  }) => Effect.Effect<
+    { readonly sequence: number } | { readonly marksUnreadWhenTurnEnds: true },
+    Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
+  >;
   readonly interruptThread: (
     input: ThreadManagementInterruptInput,
   ) => Effect.Effect<ThreadManagementInterruptResult, ThreadManagementFailure>;
@@ -961,6 +980,38 @@ const make = Effect.gen(function* () {
     return { sequence: result.sequence };
   });
 
+  const markUnreadAfterRun: ThreadManagementServiceShape["markUnreadAfterRun"] = Effect.fn(
+    "orchestrationV2.threadManagement.markUnreadAfterRun",
+  )(function* (input) {
+    const { run } = yield* waitForThread({ ...input, timeoutMs: SETTLE_AFTER_RUN_WAIT_MS });
+    if (run?.status !== "completed") return;
+    yield* dispatch({
+      type: "thread.mark-unread",
+      commandId: CommandId.make(`server:mark-unread-after-run:${input.runId}`),
+      threadId: input.threadId,
+    });
+  });
+
+  const markThreadUnread: ThreadManagementServiceShape["markThreadUnread"] = Effect.fn(
+    "orchestrationV2.threadManagement.markThreadUnread",
+  )(function* (input) {
+    const shell = input.byOwnAgent ? yield* orchestrator.getThreadShell(input.threadId) : null;
+    if (shell != null && shell.activeRunId !== null) {
+      yield* markUnreadAfterRun({
+        projectId: shell.projectId,
+        threadId: shell.id,
+        runId: shell.activeRunId,
+      }).pipe(Effect.ignoreCause({ log: true }), Effect.forkIn(layerScope));
+      return { marksUnreadWhenTurnEnds: true } as const;
+    }
+    const result = yield* dispatch({
+      type: "thread.mark-unread",
+      commandId: input.commandId,
+      threadId: input.threadId,
+    });
+    return { sequence: result.sequence };
+  });
+
   const interruptThread: ThreadManagementServiceShape["interruptThread"] = Effect.fn(
     "ThreadManagementService.interruptThread",
   )(function* (input) {
@@ -1186,6 +1237,8 @@ const make = Effect.gen(function* () {
     waitForThread,
     settleAfterRun,
     settleThread,
+    markUnreadAfterRun,
+    markThreadUnread,
     interruptThread,
     stopDelegatedTasks,
     stopWorkflow,
