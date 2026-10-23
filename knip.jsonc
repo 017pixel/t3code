@@ -24,6 +24,8 @@
       "entry": [
         // These fixture scripts are injected into a browser page by path.
         "fixtures/issue-16534/*.js",
+        // Run by hand to seed screenshot usage fixtures.
+        "seed-issue-24113-usage.mjs",
         "knip-schemas.ts",
         "mobile-native-client.ts",
         "setup-worktree.ts",

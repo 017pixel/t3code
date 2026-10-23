@@ -61,7 +61,8 @@ await NodeFSP.writeFile(
 );
 console.log("Seeded synthetic usage in", sandbox);
 
-// Some usage readers ignore enabled and resolve history from the host environment.
+// Some usage readers ignore enabled and resolve history from host env overrides
+// (CODEX_HOME, GROK_HOME, PI_CODING_AGENT_DIR, ...), so start from an empty env.
 console.log(
-  `Start the verifier server with HOME=${homes} XDG_CONFIG_HOME=${NodePath.join(homes, "config")} AGENT_CLI_CREDENTIAL_STORE=memory`,
+  `Start the verifier server under: env -i PATH="$PATH" HOME=${homes} XDG_CONFIG_HOME=${NodePath.join(homes, "config")} XDG_DATA_HOME=${NodePath.join(homes, "data")} XDG_STATE_HOME=${NodePath.join(homes, "state")} AGENT_CLI_CREDENTIAL_STORE=memory`,
 );
