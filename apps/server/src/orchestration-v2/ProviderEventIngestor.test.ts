@@ -1513,9 +1513,15 @@ layer("ProviderEventIngestorV2", (it) => {
         },
         result: { content: [{ type: "text", text: "Form shown" }], isError: true },
       };
+      // The recorded result's image must survive the provider's image stripping.
       const call = {
         arguments: { title: "Shipped", _ui_submitted: true },
-        result: { content: [{ type: "text", text: "Created issue #1" }] },
+        result: {
+          content: [
+            { type: "text", text: "Created issue #1" },
+            { type: "image", mimeType: "image/png", data: Buffer.alloc(300, 7).toString("base64") },
+          ],
+        },
       };
       const turnItem: OrchestrationV2TurnItem = {
         id: TurnItemId.make("turn-item:mcp-app"),

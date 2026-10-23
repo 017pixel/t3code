@@ -7,7 +7,6 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2Subagent,
-  type OrchestrationV2TurnItem,
   type OrchestrationV2ThreadProjection,
   type ModelSelection,
   type RuntimeMode,
@@ -25,11 +24,9 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
 import { AgentScope } from "@t3tools/shared/AgentScope";
-import { MCP_APP_CALL_OUTPUT_KEY, MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { isTemporaryWorktreeBranch } from "@t3tools/shared/git";
 import { getModelSelectionStringOptionValue, modelSelectionsEqual } from "@t3tools/shared/model";
 import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
@@ -307,28 +304,6 @@ export const layer: Layer.Layer<
     const eventSink = yield* EventSink.EventSinkV2;
     const git = yield* GitVcsDriver.GitVcsDriver;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
-    // A provider's copy of a tool call never carries the call its MCP App
-    // recorded on it later, so an update would otherwise drop that call.
-    const keepRecordedMcpAppCall = Effect.fn("ProviderEventIngestor.keepRecordedMcpAppCall")(
-      function* (item: OrchestrationV2TurnItem) {
-        if (
-          item.type !== "dynamic_tool" ||
-          !Predicate.isObject(item.output) ||
-          !(MCP_APP_OUTPUT_KEY in item.output) ||
-          MCP_APP_CALL_OUTPUT_KEY in item.output
-        ) {
-          return item;
-        }
-        const stored = yield* projections.getTurnItem({ threadId: item.threadId, itemId: item.id });
-        const call =
-          stored?.type === "dynamic_tool" && Predicate.isObject(stored.output)
-            ? stored.output[MCP_APP_CALL_OUTPUT_KEY]
-            : undefined;
-        return call === undefined
-          ? item
-          : { ...item, output: { ...item.output, [MCP_APP_CALL_OUTPUT_KEY]: call } };
-      },
-    );
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
     const analytics = yield* ProviderTurnAnalytics;
@@ -662,9 +637,7 @@ export const layer: Layer.Layer<
                   type: "turn-item.updated",
                   threadId: input.event.turnItem.threadId,
                   payload: boundFileChangeForStorage(
-                    stripUnservedToolOutputImageBytes(
-                      yield* keepRecordedMcpAppCall(input.event.turnItem),
-                    ),
+                    stripUnservedToolOutputImageBytes(input.event.turnItem),
                   ),
                   runId: input.event.turnItem.runId,
                   nodeId: input.event.turnItem.nodeId,

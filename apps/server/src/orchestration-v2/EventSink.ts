@@ -3,6 +3,7 @@ import {
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2TurnItem,
   OrchestrationV2StoredEvent,
   ProviderThreadId,
   RunAttemptId,
@@ -17,12 +18,14 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as PubSub from "effect/PubSub";
 import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { MCP_APP_CALL_OUTPUT_KEY, MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { replayAndBufferProjectedLiveEvents } from "./LiveStreamBudget.ts";
 import type { UnsequencedProjectEvent } from "../persistence/OrchestrationEventStore.ts";
 import { projectDomainEventForWire } from "./WireProjection.ts";
@@ -337,6 +340,33 @@ const layerBase: Layer.Layer<
         });
       });
 
+    // A provider's copy of a tool call never carries the call its MCP App
+    // recorded on it later. Merged here, inside the write's transaction, so a
+    // resent item can't drop a call recorded since it was read.
+    const keepRecordedMcpAppCall = (
+      item: OrchestrationV2TurnItem,
+    ): Effect.Effect<OrchestrationV2TurnItem, ProjectionStore.ProjectionStoreV2Error> => {
+      if (item.type !== "dynamic_tool") return Effect.succeed(item);
+      const output = Predicate.isObject(item.output) ? item.output : undefined;
+      if (
+        output === undefined ||
+        !(MCP_APP_OUTPUT_KEY in output) ||
+        MCP_APP_CALL_OUTPUT_KEY in output
+      )
+        return Effect.succeed(item);
+      return projectionStore.getTurnItem({ threadId: item.threadId, itemId: item.id }).pipe(
+        Effect.map((stored) => {
+          const call =
+            stored?.type === "dynamic_tool" && Predicate.isObject(stored.output)
+              ? stored.output[MCP_APP_CALL_OUTPUT_KEY]
+              : undefined;
+          return call === undefined
+            ? item
+            : { ...item, output: { ...output, [MCP_APP_CALL_OUTPUT_KEY]: call } };
+        }),
+      );
+    };
+
     const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
       const runOrdinals = new Map(
         events.flatMap((event) =>
@@ -354,7 +384,10 @@ const layerBase: Layer.Layer<
                   event.payload,
                   event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
                 )
-                .pipe(Effect.map((payload) => ({ ...event, payload })))
+                .pipe(
+                  Effect.flatMap(keepRecordedMcpAppCall),
+                  Effect.map((payload) => ({ ...event, payload })),
+                )
             : Effect.succeed(event),
         { concurrency: 1 },
       );
