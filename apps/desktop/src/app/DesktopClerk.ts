@@ -13,6 +13,7 @@ import { receiveCodexAuthCallback, CodexAuthCallbackError } from "./CodexAuthCal
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import { providerAuthReturnUrl } from "@t3tools/shared/providerAuthReturnUrl";
 import { promptLinkAppPath } from "@t3tools/shared/promptLinks";
+import { readPairingAppLink } from "@t3tools/shared/remote";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
 import * as ElectronApp from "../electron/ElectronApp.ts";
@@ -196,7 +197,8 @@ export const make = Effect.gen(function* () {
         return true;
       };
       const openAppLink = (value: string | undefined) => {
-        if (!value || promptLinkAppPath(value) === null) return false;
+        if (!value || (promptLinkAppPath(value) === null && readPairingAppLink(value) === null))
+          return false;
         void runPromise(webLinks.receive(value));
         return true;
       };

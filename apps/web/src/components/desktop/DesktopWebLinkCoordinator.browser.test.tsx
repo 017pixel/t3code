@@ -8,6 +8,8 @@ const state = vi.hoisted(() => ({
   projects: [] as never[],
   navigate: vi.fn(async (): Promise<void> => undefined),
   openScratchProject: vi.fn(async () => null),
+  confirm: vi.fn(async (_message: string) => true),
+  connectPairing: vi.fn(async (_input: { pairingUrl: string }) => ({ _tag: "Success" })),
 }));
 
 // One connected primary environment that can read pull requests. Its project list and
@@ -52,6 +54,25 @@ vi.mock(import("../../hooks/useScratchProject"), async (original) => ({
   })) as never,
 }));
 
+vi.mock(import("../../confirmDialog"), async (original) => ({
+  ...(await original()),
+  requestConfirmDialog: state.confirm,
+}));
+vi.mock(import("../../connection/onboarding"), async (original) => ({
+  ...(await original()),
+  connectPairing: "connectPairing" as never,
+}));
+vi.mock(import("../../state/use-atom-command"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    useAtomCommand: ((command: unknown, options: never) =>
+      command === "connectPairing"
+        ? state.connectPairing
+        : actual.useAtomCommand(command as never, options)) as never,
+  };
+});
+
 import { AppAtomRegistryProvider, appAtomRegistry } from "../../rpc/atomRegistry";
 import { allReachableShellsLiveAtom } from "../../state/shell";
 import { DesktopWebLinkCoordinator } from "./DesktopWebLinkCoordinator";
@@ -87,8 +108,12 @@ const pullRequestView = {
   },
 };
 
+const pairingUrl = "https://vps.example.com/pair#token=ABC123";
+const pairLink = `t3code://pair?pairingUrl=${encodeURIComponent(pairingUrl)}`;
+
 function setup() {
   vi.clearAllMocks();
+  state.confirm.mockResolvedValue(true);
   state.projects = [];
   appAtomRegistry.set(discoverySettled, false);
 }
@@ -137,4 +162,26 @@ it("holds a launch PR link until project discovery settles, then opens the PR vi
   });
   expect(state.navigate).toHaveBeenCalledExactlyOnceWith(pullRequestView);
   expect(state.openScratchProject).not.toHaveBeenCalled();
+});
+
+it("adds the backend from a pairing link after the user confirms its host", async () => {
+  setup();
+  await using _coordinator = await mount(pairLink);
+  await vi.waitFor(() =>
+    expect(state.connectPairing).toHaveBeenCalledExactlyOnceWith({ pairingUrl }),
+  );
+  expect(state.confirm).toHaveBeenCalledExactlyOnceWith("Add the backend at vps.example.com?");
+  expect(state.navigate).not.toHaveBeenCalled();
+});
+
+it("does not spend the pairing token when the user declines", async () => {
+  setup();
+  const otherPairingUrl = "https://other.example.com/pair#token=XYZ789";
+  state.confirm.mockResolvedValueOnce(false);
+  await using _coordinator = await mount(
+    pairLink,
+    `t3code://pair?pairingUrl=${encodeURIComponent(otherPairingUrl)}`,
+  );
+  await vi.waitFor(() => expect(state.connectPairing).toHaveBeenCalled());
+  expect(state.connectPairing).toHaveBeenCalledExactlyOnceWith({ pairingUrl: otherPairingUrl });
 });

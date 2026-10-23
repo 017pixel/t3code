@@ -1,8 +1,12 @@
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import { promptLinkAppPath } from "@t3tools/shared/promptLinks";
+import { readPairingAppLink, resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import { useRouter } from "@tanstack/react-router";
 import * as Effect from "effect/Effect";
 import { AtomRegistry } from "effect/reactivity";
@@ -11,6 +15,8 @@ import { useEffect, useEffectEvent, useRef } from "react";
 
 import { openFileInPreview, openUrlInPreview } from "../../browser/openFileInPreview";
 import { isPreviewAvailableFor } from "../../browser/previewRuntime";
+import { requestConfirmDialog } from "../../confirmDialog";
+import { connectPairing } from "../../connection/onboarding";
 import { useComposerDraftStore } from "../../composerDraftStore";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { useScratchProject } from "../../hooks/useScratchProject";
@@ -82,6 +88,7 @@ export function DesktopWebLinkCoordinator() {
     reportFailure: false,
     refresh: true,
   });
+  const connectPairingEnvironment = useAtomCommand(connectPairing, { reportFailure: false });
   const httpBaseUrl = useEnvironmentHttpBaseUrl(primaryEnvironment?.environmentId ?? null);
   const queueRef = useRef(Promise.resolve());
   const webLinks = window.desktopBridge?.webLinks;
@@ -94,6 +101,38 @@ export function DesktopWebLinkCoordinator() {
     toastManager.add(
       stackedThreadToast({ type: "error", title: "Could not open the link", description }),
     );
+
+  const reportPairingFailure = (error: unknown) =>
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: "Could not add backend",
+        description: error instanceof Error ? error.message : "Failed to add backend.",
+      }),
+    );
+
+  // Any page can open a pairing link, so the user confirms the host before its one-time token is spent.
+  const pairFromLink = async (pairingUrl: string) => {
+    let host: string;
+    try {
+      host = new URL(resolveRemotePairingTarget({ pairingUrl }).httpBaseUrl).host;
+    } catch (error) {
+      reportPairingFailure(error);
+      return;
+    }
+    const confirmed = (await requestConfirmDialog(`Add the backend at ${host}?`)) ?? false;
+    if (!confirmed) return;
+    const result = await connectPairingEnvironment({ pairingUrl });
+    if (result._tag === "Failure") {
+      if (!isAtomCommandInterrupted(result)) reportPairingFailure(squashAtomCommandFailure(result));
+      return;
+    }
+    toastManager.add({
+      type: "success",
+      title: "Backend added",
+      description: "The environment is saved and will reconnect on app startup.",
+    });
+  };
 
   const startThread = async (url: string): Promise<ScopedThreadRef | null> => {
     const environmentId = scratchEnvironmentId(primaryEnvironment?.environmentId ?? null);
@@ -114,6 +153,11 @@ export function DesktopWebLinkCoordinator() {
   };
 
   const openLink = useEffectEvent(async (url: string) => {
+    const pairingUrl = readPairingAppLink(url);
+    if (pairingUrl !== null) {
+      await pairFromLink(pairingUrl);
+      return;
+    }
     const appPath = promptLinkAppPath(url);
     if (appPath !== null) {
       await router.navigate({ href: appPath });

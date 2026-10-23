@@ -427,6 +427,7 @@ it.effect("hands web and app links to the renderer and leaves other links alone"
         }),
     } as unknown as ElectronApp.ElectronApp["Service"];
     const received: Array<string> = [];
+    const pairLink = "t3code://pair?pairingUrl=https%3A%2F%2Fvps.example.com%2F%23token%3Dabc";
     yield* Effect.gen(function* () {
       const clerk = yield* DesktopClerk.DesktopClerk;
       yield* clerk.configure;
@@ -439,6 +440,8 @@ it.effect("hands web and app links to the renderer and leaves other links alone"
       assert.strictEqual(open("http://localhost:3000/"), 1);
       assert.strictEqual(open("t3code://new?prompt=hi"), 1);
       assert.strictEqual(open("t3code://threads/env-1/thread-1"), 1);
+      assert.strictEqual(open(pairLink), 1);
+      assert.strictEqual(open("t3code://pair"), 0);
       assert.strictEqual(open("mailto:hello@example.com"), 0);
       assert.strictEqual(open("t3code://somewhere-else"), 0);
       yield* Effect.yieldNow;
@@ -447,6 +450,7 @@ it.effect("hands web and app links to the renderer and leaves other links alone"
         "http://localhost:3000/",
         "t3code://new?prompt=hi",
         "t3code://threads/env-1/thread-1",
+        pairLink,
       ]);
     }).pipe(
       Effect.provide(layerDesktopClerk(true, [], "darwin", undefined, undefined, listeners)),
