@@ -91,6 +91,7 @@ export function DesktopWebLinkCoordinator() {
   const connectPairingEnvironment = useAtomCommand(connectPairing, { reportFailure: false });
   const httpBaseUrl = useEnvironmentHttpBaseUrl(primaryEnvironment?.environmentId ?? null);
   const queueRef = useRef(Promise.resolve());
+  const pairedUrlsRef = useRef(new Set<string>());
   const webLinks = window.desktopBridge?.webLinks;
   const ready =
     webLinks !== undefined &&
@@ -113,20 +114,24 @@ export function DesktopWebLinkCoordinator() {
 
   // Any page can open a pairing link, so the user confirms the host before its one-time token is spent.
   const pairFromLink = async (pairingUrl: string) => {
-    let host: string;
+    // A repeated click would only ask again and then fail on the spent one-time token.
+    if (pairedUrlsRef.current.has(pairingUrl)) return;
+    // The origin keeps the scheme visible, so a plain HTTP backend is not mistaken for HTTPS.
+    let origin: string;
     try {
-      host = new URL(resolveRemotePairingTarget({ pairingUrl }).httpBaseUrl).host;
+      origin = new URL(resolveRemotePairingTarget({ pairingUrl }).httpBaseUrl).origin;
     } catch (error) {
       reportPairingFailure(error);
       return;
     }
-    const confirmed = (await requestConfirmDialog(`Add the backend at ${host}?`)) ?? false;
+    const confirmed = (await requestConfirmDialog(`Add the backend at ${origin}?`)) ?? false;
     if (!confirmed) return;
     const result = await connectPairingEnvironment({ pairingUrl });
     if (result._tag === "Failure") {
       if (!isAtomCommandInterrupted(result)) reportPairingFailure(squashAtomCommandFailure(result));
       return;
     }
+    pairedUrlsRef.current.add(pairingUrl);
     toastManager.add({
       type: "success",
       title: "Backend added",

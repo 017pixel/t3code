@@ -170,7 +170,9 @@ it("adds the backend from a pairing link after the user confirms its host", asyn
   await vi.waitFor(() =>
     expect(state.connectPairing).toHaveBeenCalledExactlyOnceWith({ pairingUrl }),
   );
-  expect(state.confirm).toHaveBeenCalledExactlyOnceWith("Add the backend at vps.example.com?");
+  expect(state.confirm).toHaveBeenCalledExactlyOnceWith(
+    "Add the backend at https://vps.example.com?",
+  );
   expect(state.navigate).not.toHaveBeenCalled();
 });
 
@@ -183,5 +185,24 @@ it("does not spend the pairing token when the user declines", async () => {
     `t3code://pair?pairingUrl=${encodeURIComponent(otherPairingUrl)}`,
   );
   await vi.waitFor(() => expect(state.connectPairing).toHaveBeenCalled());
+  expect(state.confirm).toHaveBeenCalledTimes(2);
   expect(state.connectPairing).toHaveBeenCalledExactlyOnceWith({ pairingUrl: otherPairingUrl });
+});
+
+it("skips a repeat of a pairing link that already paired", async () => {
+  setup();
+  const otherPairingUrl = "https://other.example.com/pair#token=XYZ789";
+  await using _coordinator = await mount(
+    pairLink,
+    pairLink,
+    `t3code://pair?pairingUrl=${encodeURIComponent(otherPairingUrl)}`,
+  );
+  await vi.waitFor(() =>
+    expect(state.connectPairing).toHaveBeenLastCalledWith({ pairingUrl: otherPairingUrl }),
+  );
+  expect(state.confirm).toHaveBeenCalledTimes(2);
+  expect(state.connectPairing.mock.calls).toEqual([
+    [{ pairingUrl }],
+    [{ pairingUrl: otherPairingUrl }],
+  ]);
 });

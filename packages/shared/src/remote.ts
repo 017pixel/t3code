@@ -187,7 +187,7 @@ export const readHostedPairingRequest = (url: URL): HostedPairingRequest | null 
   };
 };
 
-/** Wraps a pairing URL in the `t3code://pair` link that desktop and mobile open. */
+/** Wraps a pairing URL in the `t3code://pair` link that desktop opens and mobile scans. */
 export const buildPairingAppLink = (pairingUrl: string): string =>
   `t3code://pair?${new URLSearchParams([[PAIRING_APP_LINK_PARAM, pairingUrl]])}`;
 
@@ -196,6 +196,7 @@ export const readPairingAppLink = (value: string): string | null => {
   if (!URL.canParse(value)) return null;
   const url = new URL(value);
   if (!APP_LINK_PROTOCOL.test(url.protocol) || url.host !== "pair") return null;
+  if (url.pathname !== "" && url.pathname !== "/") return null;
   return url.searchParams.get(PAIRING_APP_LINK_PARAM)?.trim() || null;
 };
 
