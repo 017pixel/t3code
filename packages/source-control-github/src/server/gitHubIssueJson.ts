@@ -1,5 +1,6 @@
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import { TrimmedNonEmptyString } from "@t3tools/contracts";
 import type {
   IssueActor,
   IssueComment,
@@ -330,7 +331,7 @@ export function toIssueTemplates(
 }
 
 const decodeCreatedIssue = decodeJsonResult(
-  Schema.Struct({ number: Schema.Int, html_url: Schema.String }),
+  Schema.Struct({ number: Schema.Int, html_url: TrimmedNonEmptyString }),
 );
 
 export function decodeCreatedIssueJson(raw: string) {
