@@ -13,6 +13,7 @@ import {
   getDefaultProviderInstanceModel,
   isProviderInstancePickerReady,
   resolveDefaultProviderModelSelection,
+  resolveModelPickerTab,
   resolveProviderCatalogAvailability,
   resolveSelectableProviderInstance,
   shouldShowInstanceBadge,
@@ -603,5 +604,44 @@ describe("provider icon metadata", () => {
     expect(restoredEntry?.acpRegistryAgentId).toBe("swe-agent");
     expect(restoredEntry?.acpRegistryIconUrl).toBe(iconUrl);
     expect(restoredEntry?.enabled).toBe(true);
+  });
+});
+
+describe("resolveModelPickerTab", () => {
+  const activeInstanceId = ProviderInstanceId.make("claudeAgent_personal");
+  const opening = {
+    activeInstanceId,
+    chosenTab: null,
+    lastPickedFrom: null,
+    hasFavorites: true,
+    keepActiveInstance: false,
+    activeInstanceVisible: true,
+  } as const;
+
+  it("reopens on the tab the last model was picked from", () => {
+    expect(resolveModelPickerTab({ ...opening, lastPickedFrom: "favorites" })).toBe("favorites");
+    expect(resolveModelPickerTab({ ...opening, lastPickedFrom: "instance" })).toBe(
+      activeInstanceId,
+    );
+    // Locked and setup-needed accounts, and a hidden active account, keep today's tab.
+    expect(
+      resolveModelPickerTab({ ...opening, lastPickedFrom: "favorites", keepActiveInstance: true }),
+    ).toBe(activeInstanceId);
+    expect(
+      resolveModelPickerTab({
+        ...opening,
+        lastPickedFrom: "instance",
+        activeInstanceVisible: false,
+      }),
+    ).toBe("favorites");
+  });
+
+  it("lands on favorites once they load unless a tab was chosen", () => {
+    const beforeLoad = { ...opening, lastPickedFrom: "favorites", hasFavorites: false } as const;
+    expect(resolveModelPickerTab(beforeLoad)).toBe(activeInstanceId);
+    expect(resolveModelPickerTab({ ...beforeLoad, hasFavorites: true })).toBe("favorites");
+    expect(
+      resolveModelPickerTab({ ...beforeLoad, hasFavorites: true, chosenTab: activeInstanceId }),
+    ).toBe(activeInstanceId);
   });
 });

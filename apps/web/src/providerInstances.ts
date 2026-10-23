@@ -75,6 +75,23 @@ export function isProviderInstancePickerVisible(entry: ProviderInstanceEntry): b
   return entry.enabled;
 }
 
+export type ModelPickerTab = ProviderInstanceId | "favorites";
+
+// Takeover baseline stub: main's current initial-tab rule, so the tests fail on behavior.
+export function resolveModelPickerTab(input: {
+  activeInstanceId: ProviderInstanceId;
+  chosenTab: ModelPickerTab | null;
+  lastPickedFrom: "favorites" | "instance" | null;
+  hasFavorites: boolean;
+  keepActiveInstance: boolean;
+  activeInstanceVisible: boolean;
+}): ModelPickerTab {
+  if (input.keepActiveInstance) {
+    return input.activeInstanceId;
+  }
+  return input.hasFavorites ? "favorites" : input.activeInstanceId;
+}
+
 export function deriveProviderInstanceEntries(
   providers: ReadonlyArray<ServerProvider>,
 ): ReadonlyArray<ProviderInstanceEntry> {
