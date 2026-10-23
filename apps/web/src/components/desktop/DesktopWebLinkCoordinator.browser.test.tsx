@@ -10,6 +10,7 @@ const state = vi.hoisted(() => ({
   openScratchProject: vi.fn(async () => null),
   confirm: vi.fn(async (_message: string) => true),
   connectPairing: vi.fn(async (_input: { pairingUrl: string }) => ({ _tag: "Success" })),
+  localEnvironmentDisabled: false,
 }));
 
 // One connected primary environment that can read pull requests. Its project list and
@@ -22,11 +23,17 @@ vi.mock(import("@tanstack/react-router"), async (original) => ({
 vi.mock(import("../../state/environments"), async (original) => ({
   ...(await original()),
   usePrimaryEnvironmentId: () => "local" as EnvironmentId,
-  usePrimaryEnvironment: (() => ({
-    environmentId: "local",
-    connection: { phase: "connected" },
-    serverConfig: {},
-  })) as never,
+  usePrimaryEnvironment: (() =>
+    state.localEnvironmentDisabled
+      ? null
+      : {
+          environmentId: "local",
+          connection: { phase: "connected" },
+          serverConfig: {},
+        }) as never,
+}));
+vi.mock(import("../../localEnvironment"), () => ({
+  isLocalEnvironmentDisabled: () => state.localEnvironmentDisabled,
 }));
 vi.mock(import("../../state/server"), async (original) => {
   const { Atom } = await import("effect/reactivity");
@@ -114,6 +121,7 @@ const pairLink = `t3code://pair?pairingUrl=${encodeURIComponent(pairingUrl)}`;
 function setup() {
   vi.clearAllMocks();
   state.confirm.mockResolvedValue(true);
+  state.localEnvironmentDisabled = false;
   state.projects = [];
   appAtomRegistry.set(discoverySettled, false);
 }
@@ -205,4 +213,13 @@ it("skips a repeat of a pairing link that already paired", async () => {
     [{ pairingUrl }],
     [{ pairingUrl: otherPairingUrl }],
   ]);
+});
+
+it("pairs with Local environment disabled, where there is no primary environment to wait for", async () => {
+  setup();
+  state.localEnvironmentDisabled = true;
+  await using _coordinator = await mount(pairLink);
+  await vi.waitFor(() =>
+    expect(state.connectPairing).toHaveBeenCalledExactlyOnceWith({ pairingUrl }),
+  );
 });

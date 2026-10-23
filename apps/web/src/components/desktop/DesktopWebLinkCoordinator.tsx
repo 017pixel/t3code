@@ -17,6 +17,7 @@ import { openFileInPreview, openUrlInPreview } from "../../browser/openFileInPre
 import { isPreviewAvailableFor } from "../../browser/previewRuntime";
 import { requestConfirmDialog } from "../../confirmDialog";
 import { connectPairing } from "../../connection/onboarding";
+import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import { useComposerDraftStore } from "../../composerDraftStore";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { useScratchProject } from "../../hooks/useScratchProject";
@@ -93,10 +94,13 @@ export function DesktopWebLinkCoordinator() {
   const queueRef = useRef(Promise.resolve());
   const pairedUrlsRef = useRef(new Set<string>());
   const webLinks = window.desktopBridge?.webLinks;
+  // With Local environment disabled there is no primary to wait for, so links run against the
+  // saved remote environments instead of waiting forever.
   const ready =
     webLinks !== undefined &&
-    primaryEnvironment?.connection.phase === "connected" &&
-    primaryEnvironment.serverConfig !== null;
+    (isLocalEnvironmentDisabled() ||
+      (primaryEnvironment?.connection.phase === "connected" &&
+        primaryEnvironment.serverConfig !== null));
 
   const reportFailure = (url: string, description = url) =>
     toastManager.add(
