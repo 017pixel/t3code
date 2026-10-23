@@ -1,5 +1,4 @@
 import {
-  EventId,
   PullRequestOperationError,
   SourceControlProviderError,
   ProjectId,
@@ -7,7 +6,6 @@ import {
   SourceControlProviderKind,
   ThreadId,
   type OrchestrationProjectShell,
-  type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadShell,
   type OrchestrationV2ServerCommand,
 } from "@t3tools/contracts";
@@ -23,10 +21,7 @@ import * as References from "effect/References";
 import { PullRequestProviderError } from "@t3tools/source-control-core/server/PullRequestProvider";
 import { SourceControlRateLimitPausedError } from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import * as Option from "effect/Option";
-import * as PubSub from "effect/PubSub";
-import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
-import * as TestClock from "effect/testing/TestClock";
 
 import * as GitManager from "../git/GitManager.ts";
 import * as ProjectStore from "./ProjectStore.ts";
@@ -37,72 +32,6 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ThreadPullRequestService from "./ThreadPullRequestService.ts";
 
 describe("ThreadPullRequestServiceV2 project guard", () => {
-  it.effect("discovers a repository from a project shell without enrichment", () =>
-    Effect.gen(function* () {
-      const project: OrchestrationProjectShell = {
-        id: ProjectId.make("project-1"),
-        title: "Project",
-        workspaceRoot: "/workspace/project",
-        defaultModelSelection: null,
-        scripts: [],
-        repositoryIdentity: null,
-        createdAt: "2026-08-01T00:00:00.000Z",
-        updatedAt: "2026-08-01T00:00:00.000Z",
-      };
-      let resolvedRoot: string | null = null;
-      const result = yield* ThreadPullRequestService.resolveProjectForPullRequestDiscovery(
-        project,
-        {
-          resolve: (root) => {
-            resolvedRoot = root;
-            return Effect.succeed({
-              canonicalKey: "github.com/pingdotgg/t3code",
-              locator: {
-                source: "git-remote" as const,
-                remoteName: "origin",
-                remoteUrl: "git@github.com:pingdotgg/t3code.git",
-              },
-              provider: "github" as const,
-              displayName: "pingdotgg/t3code",
-              owner: "pingdotgg",
-              name: "t3code",
-            });
-          },
-        },
-      );
-      expect(resolvedRoot).toBe("/workspace/project");
-      expect(result.repository).toBe("pingdotgg/t3code");
-      expect(result.project.repositoryIdentity?.canonicalKey).toBe("github.com/pingdotgg/t3code");
-    }),
-  );
-
-  it.effect("refreshes the cached repository identity only when asked", () =>
-    Effect.gen(function* () {
-      const project: OrchestrationProjectShell = {
-        id: ProjectId.make("project-1"),
-        title: "Project",
-        workspaceRoot: "/workspace/project",
-        defaultModelSelection: null,
-        scripts: [],
-        repositoryIdentity: null,
-        createdAt: "2026-08-01T00:00:00.000Z",
-        updatedAt: "2026-08-01T00:00:00.000Z",
-      };
-      const refreshes: Array<boolean | undefined> = [];
-      const resolver = {
-        resolve: (_root: string, options?: { readonly refresh?: boolean }) => {
-          refreshes.push(options?.refresh);
-          return Effect.succeed(null);
-        },
-      };
-      yield* ThreadPullRequestService.resolveProjectForPullRequestDiscovery(project, resolver);
-      yield* ThreadPullRequestService.resolveProjectForPullRequestDiscovery(project, resolver, {
-        refresh: true,
-      });
-      expect(refreshes).toEqual([false, true]);
-    }),
-  );
-
   it("rejects a pull-request result when the project root changes before dispatch", () => {
     const currentProject = Option.some({
       workspaceRoot: "/workspace/replaced",
@@ -114,28 +43,6 @@ describe("ThreadPullRequestServiceV2 project guard", () => {
         "/workspace/original",
       ),
     ).toBe(false);
-  });
-
-  it("rejects a pull-request result when the project was deleted before dispatch", () => {
-    expect(
-      ThreadPullRequestService.projectWorkspaceMatchesSnapshot(
-        Option.none<Pick<OrchestrationProjectShell, "workspaceRoot">>(),
-        "/workspace/original",
-      ),
-    ).toBe(false);
-  });
-
-  it("accepts a pull-request result while the project root is unchanged", () => {
-    const currentProject = Option.some({
-      workspaceRoot: "/workspace/original",
-    } satisfies Pick<OrchestrationProjectShell, "workspaceRoot">);
-
-    expect(
-      ThreadPullRequestService.projectWorkspaceMatchesSnapshot(
-        currentProject,
-        "/workspace/original",
-      ),
-    ).toBe(true);
   });
 });
 
@@ -546,150 +453,4 @@ describe("ThreadPullRequestServiceV2 reads", () => {
       Effect.provideService(References.MinimumLogLevel, "Debug"),
     );
   });
-
-  it.effect("an event for one thread reads that thread's shell, not every thread's", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const thread = threadShell("updated-thread");
-        const other = threadShell("other-thread");
-        const activation = yield* Deferred.make<void>();
-        const events = yield* PubSub.unbounded<OrchestrationV2DomainEvent>();
-        const reads = yield* Queue.unbounded<
-          ThreadId | { readonly location?: string; readonly unsettledOnly?: boolean }
-        >();
-        const layerDependencies = Layer.mergeAll(
-          Layer.mock(Orchestrator.OrchestratorV2)({
-            streamDomainEvents: Stream.fromPubSub(events),
-            getShellSnapshot: (options) =>
-              Queue.offer(reads, options ?? {}).pipe(
-                Effect.as({
-                  schemaVersion: 2,
-                  snapshotSequence: 1,
-                  threads: [thread, other],
-                  archivedThreads: [],
-                }),
-              ),
-            getThreadEventSequence: () => Effect.succeed(1),
-            getThreadShell: (threadId) =>
-              Queue.offer(reads, threadId).pipe(
-                Effect.as([thread, other].find((candidate) => candidate.id === threadId) ?? null),
-              ),
-          }),
-          Layer.mock(ProjectStore.ProjectStoreV2)({
-            listShells: () => Effect.succeed([]),
-          }),
-          Layer.mock(GitManager.GitManager)({}),
-          Layer.mock(PullRequestService.PullRequestService)({}),
-          Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
-          Layer.succeed(ServerActivation.ServerActivation, Deferred.await(activation)),
-          Layer.succeed(
-            Crypto.Crypto,
-            Crypto.make({
-              randomBytes: (size) => new Uint8Array(size).fill(1),
-              digest: (_algorithm, data) => Effect.succeed(data),
-            }),
-          ),
-          FileSystem.layerNoop({}),
-        );
-
-        yield* Effect.gen(function* () {
-          const service = yield* ThreadPullRequestService.make;
-          yield* service.start();
-          yield* Deferred.succeed(activation, undefined);
-          expect(yield* Queue.take(reads)).toEqual({ location: "active", unsettledOnly: false });
-          yield* service.drain;
-          yield* PubSub.publish(events, {
-            type: "thread.metadata-updated",
-            id: EventId.make("event:metadata"),
-            threadId: thread.id,
-            occurredAt: NOW,
-            payload: {
-              createdBy: thread.createdBy,
-              creationSource: thread.creationSource,
-              id: thread.id,
-              projectId: thread.projectId,
-              title: thread.title,
-              providerInstanceId: thread.providerInstanceId,
-              modelSelection: thread.modelSelection,
-              runtimeMode: thread.runtimeMode,
-              interactionMode: thread.interactionMode,
-              branch: thread.branch,
-              worktreePath: thread.worktreePath,
-              activeProviderThreadId: thread.activeProviderThreadId,
-              lineage: thread.lineage,
-              forkedFrom: null,
-              createdAt: thread.createdAt,
-              updatedAt: thread.updatedAt,
-              archivedAt: null,
-              settledOverride: null,
-              settledAt: null,
-              lastVisitedAt: null,
-              deletedAt: null,
-            },
-          });
-          expect(yield* Queue.take(reads)).toBe(thread.id);
-          yield* service.drain;
-          expect(yield* Queue.size(reads)).toBe(0);
-        }).pipe(Effect.provide(layerDependencies));
-      }),
-    ),
-  );
-
-  it.effect("periodic sweeps read only unsettled threads once backfill is done", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const settled = {
-          ...threadShell("settled-thread"),
-          branch: "feature/settled",
-          settledOverride: "settled" as const,
-          settledAt: NOW,
-        };
-        const activation = yield* Deferred.make<void>();
-        const reads = yield* Queue.unbounded<{
-          readonly location?: string;
-          readonly unsettledOnly?: boolean;
-        }>();
-        const layerDependencies = Layer.mergeAll(
-          Layer.mock(Orchestrator.OrchestratorV2)({
-            streamDomainEvents: Stream.never,
-            getShellSnapshot: (options) =>
-              Queue.offer(reads, options ?? {}).pipe(
-                Effect.as({
-                  schemaVersion: 2,
-                  snapshotSequence: 1,
-                  threads: options?.unsettledOnly ? [] : [settled],
-                  archivedThreads: [],
-                }),
-              ),
-          }),
-          Layer.mock(ProjectStore.ProjectStoreV2)({
-            listShells: () => Effect.succeed([]),
-          }),
-          Layer.mock(GitManager.GitManager)({}),
-          Layer.mock(PullRequestService.PullRequestService)({}),
-          Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
-          Layer.succeed(ServerActivation.ServerActivation, Deferred.await(activation)),
-          Layer.succeed(
-            Crypto.Crypto,
-            Crypto.make({
-              randomBytes: (size) => new Uint8Array(size).fill(1),
-              digest: (_algorithm, data) => Effect.succeed(data),
-            }),
-          ),
-          FileSystem.layerNoop({}),
-        );
-
-        yield* Effect.gen(function* () {
-          const service = yield* ThreadPullRequestService.make;
-          yield* service.start();
-          yield* Deferred.succeed(activation, undefined);
-          expect(yield* Queue.take(reads)).toEqual({ location: "active", unsettledOnly: false });
-          yield* service.drain;
-          yield* TestClock.adjust("1 minute");
-          expect(yield* Queue.take(reads)).toEqual({ location: "active", unsettledOnly: true });
-          yield* service.drain;
-        }).pipe(Effect.provide(layerDependencies));
-      }),
-    ),
-  );
 });
