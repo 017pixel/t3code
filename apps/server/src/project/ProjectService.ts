@@ -17,6 +17,11 @@ import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
+import {
+  orchestrationCommandDuration,
+  orchestrationCommandsTotal,
+  withMetrics,
+} from "../observability/Metrics.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
@@ -210,7 +215,7 @@ export const make = Effect.gen(function* () {
         ),
       );
 
-  const commit = Effect.fn("ProjectService.commit")(function* (command: ProjectCommand) {
+  const commitEffect = Effect.fn("ProjectService.commit")(function* (command: ProjectCommand) {
     const { projectId } = command;
     const dispatchError = (cause: unknown) =>
       new ProjectOperationError({ operation: "dispatch-project-command", projectId, cause });
@@ -253,12 +258,18 @@ export const make = Effect.gen(function* () {
         error: encodeProjectCommandRejection(planned.failure),
       });
     });
+    const timedPlanAndCommit = planAndCommit.pipe(
+      withMetrics({
+        timer: orchestrationCommandDuration,
+        attributes: { commandType: command.type },
+      }),
+    );
     const receipt = yield* projectLocks
       .withLock(
         projectId,
         workspaceRoot === undefined
-          ? planAndCommit
-          : workspaceLocks.withLock(workspaceRoot, planAndCommit),
+          ? timedPlanAndCommit
+          : workspaceLocks.withLock(workspaceRoot, timedPlanAndCommit),
       )
       .pipe(Effect.mapError(dispatchError));
     if (receipt.projectId !== projectId || receipt.commandType !== command.type) {
@@ -285,6 +296,14 @@ export const make = Effect.gen(function* () {
         );
     }
   });
+
+  const commit = (command: ProjectCommand) =>
+    commitEffect(command).pipe(
+      withMetrics({
+        counter: orchestrationCommandsTotal,
+        attributes: { commandType: command.type },
+      }),
+    );
 
   const readCommitted = Effect.fn("ProjectService.readCommitted")(function* (projectId: ProjectId) {
     const row = yield* readRow(projectId, { includeDeleted: true });
