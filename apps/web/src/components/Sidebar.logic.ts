@@ -613,6 +613,7 @@ type ThreadStatusInput = Pick<
   | "hasPendingApprovals"
   | "hasPendingUserInput"
   | "pendingSubagentRequest"
+  | "pendingGuestMessageCount"
   | "interactionMode"
   | "latestRun"
   | "runtime"
@@ -892,6 +893,7 @@ type SidebarThreadStatusInput = Pick<
   | "hasPendingApprovals"
   | "hasPendingUserInput"
   | "pendingSubagentRequest"
+  | "pendingGuestMessageCount"
   | "runtime"
   | "blockedOnThreadWait"
 >;
@@ -900,7 +902,11 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
     return "approval";
   }
-  if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
+  if (
+    thread.hasPendingUserInput ||
+    thread.pendingSubagentRequest === "user_input" ||
+    (thread.pendingGuestMessageCount ?? 0) > 0
+  ) {
     return "input";
   }
   if (thread.runtime?.status === "running" && thread.blockedOnThreadWait === true) {
@@ -1083,7 +1089,11 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
-  if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
+  if (
+    thread.hasPendingUserInput ||
+    thread.pendingSubagentRequest === "user_input" ||
+    (thread.pendingGuestMessageCount ?? 0) > 0
+  ) {
     return {
       label: "Awaiting Input",
       colorClass: "text-indigo-600 dark:text-indigo-300/90",
