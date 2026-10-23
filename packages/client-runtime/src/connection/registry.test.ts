@@ -1959,6 +1959,46 @@ describe("EnvironmentRegistry routes", () => {
   );
 
   it.effect(
+    "pairing a different environment at a saved address keeps the old one's other routes",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness(
+          [LAN_TARGET, RELAY_TARGET],
+          [LAN_PROFILE],
+          [[LAN_TARGET.connectionId, BEARER_CREDENTIAL]],
+        );
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          const replacementId = EnvironmentId.make("environment-lan-replacement");
+          const replacement = new BearerConnectionTarget({
+            environmentId: replacementId,
+            label: "Replacement",
+            connectionId: `bearer:${replacementId}:http://192.168.1.10:3773`,
+          });
+          yield* registry.register(
+            lanRegistration(
+              replacement,
+              new BearerConnectionProfile({
+                ...LAN_PROFILE,
+                connectionId: replacement.connectionId,
+                environmentId: replacementId,
+                label: replacement.label,
+              }),
+            ),
+          );
+
+          expect(routesOf(yield* Ref.get(harness.storedTargets), LAN_TARGET.environmentId)).toEqual(
+            [RELAY_TARGET],
+          );
+          expect([...(yield* SubscriptionRef.get(registry.entries)).keys()]).toEqual([
+            LAN_TARGET.environmentId,
+            replacementId,
+          ]);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
+
+  it.effect(
     "adding a saved SSH host again replaces its route, whatever id it was saved under",
     () =>
       Effect.gen(function* () {

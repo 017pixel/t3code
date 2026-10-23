@@ -539,7 +539,7 @@ export const make = Effect.gen(function* () {
   ) {
     const registered = connectionRegistrationCatalogEntry(registration);
     const environmentId = registered.target.environmentId;
-    return yield* withLeaseLock(
+    const installed = yield* withLeaseLock(
       environmentId,
       Effect.gen(function* () {
         if ((yield* Ref.get(platformEnvironmentIds)).has(environmentId)) {
@@ -570,7 +570,50 @@ export const make = Effect.gen(function* () {
         return true;
       }),
     );
+    if (installed && registration._tag === "BearerConnectionRegistration") {
+      yield* removeStaleRoutesToAddress({ target: registered.target, profile: registered.profile });
+    }
+    return installed;
   });
+
+  /**
+   * A different server now answers at this address, so another environment's route to it is
+   * stale. Runs after the registration commits, outside its lock, so locks never nest. SSH is
+   * left alone: removing the old route would disconnect the tunnel the new one just opened.
+   */
+  const removeStaleRoutesToAddress = Effect.fn("EnvironmentRegistry.removeStaleRoutesToAddress")(
+    function* (route: ConnectionRoute) {
+      const stale = [...(yield* SubscriptionRef.get(entries)).values()].flatMap((entry) => {
+        if (entry.target.environmentId === route.target.environmentId) return [];
+        const existing = findRouteToSameAddress(connectionRoutes(entry), route);
+        return existing === undefined
+          ? []
+          : [
+              {
+                environmentId: entry.target.environmentId,
+                routeId: connectionRouteId(existing.target),
+              },
+            ];
+      });
+      yield* Effect.forEach(
+        stale,
+        ({ environmentId, routeId }) =>
+          removeRoute(environmentId, routeId).pipe(
+            Effect.catchTags({
+              EnvironmentNotRegisteredError: () => Effect.void,
+              PlatformEnvironmentRemovalError: () => Effect.void,
+            }),
+            Effect.catch((error) =>
+              Effect.logWarning("Could not remove a stale route to a re-paired address.", {
+                environmentId,
+                error,
+              }),
+            ),
+          ),
+        { discard: true },
+      );
+    },
+  );
 
   const replaceRoutesLocked = Effect.fn("EnvironmentRegistry.replaceRoutesLocked")(function* (
     previous: ConnectionCatalogEntry,
