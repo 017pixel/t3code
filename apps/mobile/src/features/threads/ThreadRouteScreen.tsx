@@ -27,8 +27,8 @@ import {
   projectScriptRuntimeEnv,
   projectScriptTerminalInput,
   resolveProjectScripts,
-  threadAgentCwd,
 } from "@t3tools/shared/projectScripts";
+import { useThreadAgentCwd } from "./useThreadAgentCwd";
 import { Platform, ScrollView } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useConnectionsReady } from "../../state/workspace";
@@ -287,6 +287,11 @@ function ThreadRouteContent(
   const canOperateThread = useEnvironmentScope(
     selectedThread?.environmentId ?? null,
     AuthOrchestrationOperateScope,
+  );
+  const agentCwd = useThreadAgentCwd(
+    selectedThread?.environmentId ?? null,
+    selectedThreadProject ?? null,
+    selectedThread?.worktreePath ?? null,
   );
   const canReadTerminal = useEnvironmentScope(
     selectedThread?.environmentId ?? null,
@@ -988,15 +993,7 @@ function ThreadRouteContent(
           environmentId={selectedThread.environmentId}
           projectWorkspaceRoot={selectedThreadProject?.workspaceRoot ?? null}
           threadCwd={selectedThreadCwd}
-          agentCwd={
-            selectedThreadProject
-              ? threadAgentCwd({
-                  projectRoot: selectedThreadProject.workspaceRoot,
-                  repositoryRoot: selectedThreadProject.repositoryRoot,
-                  worktreePath: selectedThread.worktreePath ?? null,
-                })
-              : null
-          }
+          agentCwd={agentCwd}
           selectedThreadQueueCount={composer.selectedThreadQueueCount}
           queuedMessages={
             selectedThreadCreation && selectedThreadCreation.outcome?.kind !== "delivered"

@@ -100,11 +100,7 @@ import {
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
 import { formatModelSlugName, resolveSelectableModel } from "@t3tools/shared/model";
-import {
-  projectScriptCwd,
-  resolveProjectScripts,
-  threadAgentCwd,
-} from "@t3tools/shared/projectScripts";
+import { projectScriptCwd, resolveProjectScripts } from "@t3tools/shared/projectScripts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveThreadReferenceCopyTarget } from "@t3tools/client-runtime/thread-reference";
 import { resolveTerminalSessionLabel } from "@t3tools/shared/terminalLabels";
@@ -144,6 +140,8 @@ import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { subscribeSnapShotComposerFocus } from "../lib/desktopSnapShot";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { FileMetadataThreadProvider } from "../hooks/FileMetadataThreadProvider";
+import { useThreadAgentCwd } from "../hooks/useThreadAgentCwd";
+import { FilePanelRootContext } from "./chat/FilePanelRootContext";
 import {
   RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY,
   type ThreadPanelPresentation,
@@ -1583,13 +1581,11 @@ export default function ChatView(props: ChatViewProps) {
     : null;
   // The agent's cwd: a subdirectory project stays in that subdirectory of the
   // thread's worktree. Skills, composer paths, and links in replies follow it.
-  const agentCwd = activeProject
-    ? threadAgentCwd({
-        projectRoot: activeProject.workspaceRoot,
-        repositoryRoot: activeProject.repositoryRoot,
-        worktreePath: activeThread?.worktreePath ?? null,
-      })
-    : null;
+  const agentCwd = useThreadAgentCwd(
+    environmentId,
+    activeProject ?? null,
+    activeThread?.worktreePath ?? null,
+  );
   const gitStatusCwd = activeThread?.worktreePath ?? gitCwd;
   const gitStatusQuery = useEnvironmentQuery(
     gitStatusCwd === null
@@ -3932,7 +3928,7 @@ export default function ChatView(props: ChatViewProps) {
       cwd={activeWorkspaceRoot}
       checkpoints={serverProjection?.checkpoints}
     >
-      {content}
+      <FilePanelRootContext value={activeWorkspaceRoot}>{content}</FilePanelRootContext>
     </FileMetadataThreadProvider>
   );
 }

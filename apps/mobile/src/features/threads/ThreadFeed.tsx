@@ -64,6 +64,7 @@ import {
 } from "@t3tools/shared/codexArtifactTemplates";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import { isMarkdownFileLinkLabel } from "@t3tools/shared/markdownLinks";
+import { rebaseWorkspaceFilePath } from "@t3tools/shared/path";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import {
   executeAtomQuery,
@@ -339,7 +340,11 @@ export interface ThreadFeedProps {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly threadTitle: string;
+  // Where the agent works, which relative links in replies resolve against.
   readonly workspaceRoot?: string | null;
+  // The thread file route's root; a subdirectory project's worktree thread
+  // works below it.
+  readonly fileRouteRoot?: string | null;
   readonly feed: ReadonlyArray<ThreadFeedEntry>;
   readonly pendingHandoff?: HandoffEndpoints | null;
   readonly contentPresentation: ThreadContentPresentation;
@@ -2270,7 +2275,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         navigation.navigate("ThreadFile", {
           environmentId: String(props.environmentId),
           threadId: String(props.threadId),
-          path: fileRoutePathSegments(target),
+          path: fileRoutePathSegments(
+            rebaseWorkspaceFilePath(target, props.workspaceRoot, props.fileRouteRoot),
+          ),
           ...(presentation.line ? { line: String(presentation.line) } : {}),
         });
       };

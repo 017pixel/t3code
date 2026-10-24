@@ -1485,7 +1485,8 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
             <ThreadFeed
               environmentId={props.environmentId}
               threadId={props.selectedThread.id}
-              workspaceRoot={props.threadCwd}
+              workspaceRoot={props.agentCwd ?? props.threadCwd}
+              fileRouteRoot={props.threadCwd}
               feed={props.selectedThreadFeed}
               pendingHandoff={props.pendingHandoff}
               worktreeSetup={props.worktreeSetup}
@@ -1789,6 +1790,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                         canStopThread={props.canStopThread}
                         environmentId={props.environmentId}
                         projectCwd={props.agentCwd}
+                        workspaceRoot={props.threadCwd}
                         // Follow-ups typed before the server creates the thread wait in
                         // the draft: queueing them against a thread id the server may
                         // still reject would strand them in the outbox.
