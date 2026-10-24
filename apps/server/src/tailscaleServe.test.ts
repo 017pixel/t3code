@@ -161,7 +161,9 @@ describe("TailscaleServe", () => {
       // CLI timeout.
       yield* Scope.close(scope, Exit.void);
 
-      assert.equal(state.disables, 1);
+      // No attempt succeeded, so any existing mapping on this port is not ours
+      // to turn off.
+      assert.equal(state.disables, 0);
     }),
   );
 });
