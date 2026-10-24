@@ -251,6 +251,15 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   };
   if (resumeCache?.owner === owner) resumeCache.snapshot = committed;
   const awaitingCompletion = yield* Ref.make(false);
+  // A resume replays the events after the held cursor. When that replay dies
+  // (an event this client cannot decode), the same cursor dies the same way on
+  // every attempt, including after a relaunch from the saved cache. Retry it
+  // with the full snapshot, which moves the cursor past it. forceSnapshot holds
+  // until a snapshot applies, so an expected-failure retry or a replacement
+  // session during the reload does not go back to the broken cursor.
+  const resuming = yield* Ref.make(false);
+  const resumeDied = yield* Ref.make(false);
+  const forceSnapshot = yield* Ref.make(false);
   const applyLock = yield* Semaphore.make(1);
   // Save only completed data/cursor updates. A canceled scope must not cache
   // a cursor whose event has not reached the data yet.
@@ -597,6 +606,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     }
 
     if (item.kind === "snapshot") {
+      yield* Ref.set(forceSnapshot, false);
       yield* SubscriptionRef.set(lastSequence, item.snapshotSequence);
       const hasProgressiveHistory =
         item.historyCursor !== undefined ||
@@ -946,7 +956,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         }
 
         const sequence = yield* SubscriptionRef.get(lastSequence);
-        const canResume = Option.isSome(current.data);
+        const canResume = Option.isSome(current.data) && !(yield* Ref.get(forceSnapshot));
+        yield* Ref.set(resuming, canResume);
         const acceptBoundedSnapshot = yield* Ref.get(acceptsBoundedSocketSnapshots);
         if (!supportsCompletionMarker && canResume) {
           yield* SubscriptionRef.update(state, (value) => ({
@@ -966,12 +977,33 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         };
       }),
       {
-        onDefect: () => setStreamError("Could not synchronize the thread."),
+        // Classified here rather than after the stream fails: switchMap can
+        // buffer the failure past a replacement session's makeInput.
+        onDefect: Effect.fn("EnvironmentThreadState.onSubscriptionDefect")(function* (cause) {
+          if (Cause.hasDies(cause) && (yield* Ref.get(resuming))) {
+            yield* Ref.set(resumeDied, true);
+          } else {
+            yield* setStreamError("Could not synchronize the thread.");
+          }
+        }),
         onExpectedFailure: (cause) => setStreamError(formatThreadError(cause)),
         retryExpectedFailureAfter: "250 millis",
         resubscribe: foregroundResubscriptions,
       },
-    ).pipe(Stream.runForEachArray(applyItems)),
+    ).pipe(
+      Stream.runForEachArray(applyItems),
+      Effect.as(false),
+      // A defect on the snapshot attempt reports its error and stays terminal,
+      // so recovery cannot loop.
+      Effect.catchCause((cause) =>
+        Ref.getAndSet(resumeDied, false).pipe(
+          Effect.flatMap((died) =>
+            died ? Ref.set(forceSnapshot, true).pipe(Effect.as(true)) : Effect.failCause(cause),
+          ),
+        ),
+      ),
+      Effect.repeat({ while: (retry) => retry }),
+    ),
   );
 
   return state;

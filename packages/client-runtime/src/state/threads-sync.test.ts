@@ -1744,6 +1744,29 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
+  it.effect("keeps reloading the snapshot when the reload after a failed resume fails", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_PROJECTION, completionMarker: true });
+      expect(yield* Queue.take(harness.subscriptions)).toBe(CACHED_SNAPSHOT_SEQUENCE);
+      yield* Queue.offer(harness.inputs, new TestStreamDefect("Replayed event did not decode"));
+      expect(yield* Queue.take(harness.subscriptions)).toBeUndefined();
+
+      // The expected-failure retry must not go back to the cursor that died.
+      yield* Queue.offer(harness.inputs, new Error("Snapshot timed out"));
+      yield* awaitThreadState(harness.observed, (value) => Option.isSome(value.error));
+      yield* TestClock.adjust("250 millis");
+      expect(yield* Queue.take(harness.subscriptions)).toBeUndefined();
+
+      yield* Queue.offerAll(harness.inputs, [
+        snapshot(BASE_PROJECTION, CACHED_SNAPSHOT_SEQUENCE + 5),
+        synchronized(),
+      ]);
+      yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+      yield* harness.replaceSession;
+      expect(yield* Queue.take(harness.subscriptions)).toBe(CACHED_SNAPSHOT_SEQUENCE + 5);
+    }),
+  );
+
   it.effect("shows an error when the snapshot reload after a failed resume hits a defect", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({ cached: BASE_PROJECTION, completionMarker: true });
