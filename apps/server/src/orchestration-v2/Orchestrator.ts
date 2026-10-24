@@ -2650,6 +2650,36 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     },
   );
 
+  const hasLiveBackgroundWork = Effect.fnUntraced(function* (
+    threadId: ThreadId,
+    sessionIds: ReadonlySet<ProviderSessionId>,
+  ) {
+    let providerThreads: ReadonlyArray<OrchestrationV2ProviderThread> | undefined;
+    for (const sessionId of sessionIds) {
+      const session = yield* providerSessions
+        .get(sessionId)
+        .pipe(Effect.orElseSucceed(() => Option.none()));
+      if (Option.isNone(session)) continue;
+      const { hasPendingBackgroundWork, hasPendingBackgroundWorkForThread } = session.value;
+      // A pooled session can serve other threads; only this thread's work counts.
+      const probes =
+        hasPendingBackgroundWorkForThread === undefined
+          ? hasPendingBackgroundWork === undefined
+            ? []
+            : [hasPendingBackgroundWork]
+          : (providerThreads ??= (yield* projectionStore.getThreadRecords(threadId, [
+              "providerThreads",
+            ])).providerThreads)
+              .filter((thread) => thread.providerSessionId === sessionId)
+              .map(hasPendingBackgroundWorkForThread);
+      for (const probe of probes) {
+        // A failed probe cannot confirm that the work ended.
+        if (yield* probe.pipe(Effect.catchCause(() => Effect.succeed(true)))) return true;
+      }
+    }
+    return false;
+  });
+
   const dispatchThreadMutation = Effect.fn("orchestrationV2.dispatch.threadMutation")(function* (
     command: Extract<
       OrchestrationV2ServerCommand,
@@ -2989,6 +3019,47 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               .pipe(mapDispatchError(command));
           })
         : null;
+
+    // Settle joins archive here: both mean "done with this
+    // thread", so a live provider session must not keep running background
+    // work (PR monitors, dev servers, subagent fleets) after any of them
+    // lands. The settle guard above already rejects active or blocked runs,
+    // so for settle this only ever stops an idle session; commands are
+    // decided serially against the projection, so a turn start that
+    // re-engages the thread cannot race this detach.
+    const detachSessionIds = new Set(
+      command.type === "thread.archive" || command.type === "thread.settle"
+        ? (providerContext?.providerSessions ?? []).map((session) => session.id)
+        : command.type === "thread.metadata.update" &&
+            command.worktreePath !== undefined &&
+            command.worktreePath !== thread.worktreePath
+          ? (providerContext?.providerSessions ?? []).map((session) => session.id)
+          : command.type === "thread.runtime-mode.set"
+            ? (providerContext?.providerSessions ?? [])
+                .filter(
+                  (session) => !session.capabilities.sessions.supportsRuntimeModeSwitchInSession,
+                )
+                .map((session) => session.id)
+            : (providerSwitchPlan?.releaseProviderSessionIds ?? []),
+    );
+    // A settings change must not end the process running this thread's
+    // background agents and shells (#16000). Ask the live adapter: the
+    // projected roster is not authoritative while a turn runs. Archive and
+    // settle are deliberate ends, like Stop.
+    if (
+      command.type !== "thread.archive" &&
+      command.type !== "thread.settle" &&
+      detachSessionIds.size > 0 &&
+      (yield* hasLiveBackgroundWork(command.threadId, detachSessionIds).pipe(
+        mapDispatchError(command),
+      ))
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} has background work running that this change would end. Try again once it finishes, or stop the thread first.`,
+      });
+    }
 
     const now = yield* DateTime.now;
     if (command.type === "thread.metadata.update" && command.limitRecovery != null) {
@@ -3699,28 +3770,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
 
-    // Settle joins archive here: both mean "done with this
-    // thread", so a live provider session must not keep running background
-    // work (PR monitors, dev servers, subagent fleets) after any of them
-    // lands. The settle guard above already rejects active or blocked runs,
-    // so for settle this only ever stops an idle session; commands are
-    // decided serially against the projection, so a turn start that
-    // re-engages the thread cannot race this detach.
-    const detachSessionIds = new Set(
-      command.type === "thread.archive" || command.type === "thread.settle"
-        ? (providerContext?.providerSessions ?? []).map((session) => session.id)
-        : command.type === "thread.metadata.update" &&
-            command.worktreePath !== undefined &&
-            command.worktreePath !== thread.worktreePath
-          ? (providerContext?.providerSessions ?? []).map((session) => session.id)
-          : command.type === "thread.runtime-mode.set"
-            ? (providerContext?.providerSessions ?? [])
-                .filter(
-                  (session) => !session.capabilities.sessions.supportsRuntimeModeSwitchInSession,
-                )
-                .map((session) => session.id)
-            : (providerSwitchPlan?.releaseProviderSessionIds ?? []),
-    );
     if (detachSessionIds.size > 0) {
       const liveSessions = (providerContext?.providerSessions ?? []).filter(
         (session) =>

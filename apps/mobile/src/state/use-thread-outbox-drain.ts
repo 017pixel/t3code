@@ -183,8 +183,14 @@ function findCreationProject(
   );
 }
 
-function settingsCommandId(message: QueuedThreadMessage, setting: string): CommandId {
-  return CommandId.make(`${message.commandId}:${setting}`);
+// A refused settings change stays refused under its command id, so each retry
+// needs its own: the server can refuse one while background work runs.
+function settingsCommandId(
+  message: QueuedThreadMessage,
+  setting: string,
+  attempt: number,
+): CommandId {
+  return CommandId.make(`${message.commandId}:${setting}:${attempt}`);
 }
 
 export async function prepareQueuedMessageAttachments(
@@ -758,7 +764,11 @@ export function useThreadOutboxDrain(): void {
         const runtimeResult = await setThreadRuntimeMode({
           environmentId: queuedMessage.environmentId,
           input: {
-            commandId: settingsCommandId(queuedMessage, "runtime-mode"),
+            commandId: settingsCommandId(
+              queuedMessage,
+              "runtime-mode",
+              retryAttemptRef.current.get(queuedMessage.messageId) ?? 0,
+            ),
             threadId: queuedMessage.threadId,
             runtimeMode: settings.runtimeMode,
             createdAt: queuedMessage.createdAt,
@@ -775,7 +785,11 @@ export function useThreadOutboxDrain(): void {
         const interactionResult = await setThreadInteractionMode({
           environmentId: queuedMessage.environmentId,
           input: {
-            commandId: settingsCommandId(queuedMessage, "interaction-mode"),
+            commandId: settingsCommandId(
+              queuedMessage,
+              "interaction-mode",
+              retryAttemptRef.current.get(queuedMessage.messageId) ?? 0,
+            ),
             threadId: queuedMessage.threadId,
             interactionMode: settings.interactionMode,
             createdAt: queuedMessage.createdAt,
