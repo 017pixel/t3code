@@ -250,7 +250,7 @@ it("closes a thread's in-app toast once the route opens that thread", async () =
   expect(state.closeToast).toHaveBeenCalledWith("toast-1");
 });
 
-it("closes outstanding in-app toasts when in-app notifications are disabled", async () => {
+it("closes outstanding in-app toasts when all notifications are disabled", async () => {
   await using app = setup();
   state.mode = "off";
   state.inApp = true;
