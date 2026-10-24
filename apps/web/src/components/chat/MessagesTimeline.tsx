@@ -677,7 +677,11 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const onAppFullscreenChange = (rowId: string, fullscreen: boolean) => {
     setFullscreenAppRowId((current) => (fullscreen ? rowId : current === rowId ? null : current));
   };
-  const alwaysRenderIndices = restoringAlwaysRender?.indices ?? [];
+  const selectedRowSpan = useSelectedTimelineRowSpan(timelineViewportElement);
+  const alwaysRenderIndices = [
+    ...(restoringAlwaysRender?.indices ?? []),
+    ...timelineRowSpanIndices(rows, selectedRowSpan),
+  ];
   const alwaysRenderKeys = [
     ...(citationAlwaysRender?.keys ?? []),
     ...(fullscreenAppRowId === null ? [] : [fullscreenAppRowId]),
@@ -1212,6 +1216,55 @@ function TimelineHistoryControl(props: MessagesTimelineHistoryControls) {
       </div>
     </div>
   );
+}
+
+// LegendList hands a row's container to another row once it scrolls out of the
+// buffer, which removes the text a native selection starts or ends in and moves
+// that end onto whatever row reuses the container. Keeping every row between
+// the selection's ends mounted lets a drag-scrolled selection stay put and copy
+// whole; the span is only as large as what the user selected.
+function useSelectedTimelineRowSpan(viewport: HTMLElement | null) {
+  const [span, setSpan] = useState<{ anchor: string; focus: string } | null>(null);
+  useEffect(() => {
+    if (!viewport) return;
+    const rowIdAt = (node: Node | null) => {
+      const element = node instanceof Element ? node : (node?.parentElement ?? null);
+      if (!element || !viewport.contains(element)) return null;
+      return (
+        element.closest("[data-timeline-row-id]")?.getAttribute("data-timeline-row-id") ?? null
+      );
+    };
+    const update = () => {
+      const selection = document.getSelection();
+      if (!selection || selection.isCollapsed || !viewport.contains(selection.anchorNode)) {
+        setSpan(null);
+        return;
+      }
+      const anchor = rowIdAt(selection.anchorNode);
+      const focus = rowIdAt(selection.focusNode);
+      // An end can sit between rows while the list moves containers; keep the
+      // last resolved span until it lands in a row again.
+      if (anchor === null || focus === null) return;
+      setSpan((current) =>
+        current?.anchor === anchor && current.focus === focus ? current : { anchor, focus },
+      );
+    };
+    document.addEventListener("selectionchange", update);
+    return () => document.removeEventListener("selectionchange", update);
+  }, [viewport]);
+  return span;
+}
+
+function timelineRowSpanIndices(
+  rows: readonly MessagesTimelineRow[],
+  span: { anchor: string; focus: string } | null,
+) {
+  if (!span) return [];
+  const anchorIndex = rows.findIndex((row) => row.id === span.anchor);
+  const focusIndex = rows.findIndex((row) => row.id === span.focus);
+  if (anchorIndex < 0 || focusIndex < 0) return [];
+  const start = Math.min(anchorIndex, focusIndex);
+  return Array.from({ length: Math.abs(focusIndex - anchorIndex) + 1 }, (_, i) => start + i);
 }
 
 function keyExtractor(item: MessagesTimelineRow) {
