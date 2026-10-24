@@ -140,9 +140,6 @@ export function useFileTreeEntries(input: {
           ...savedDirectories,
           target: {},
           validatedDirectories: new Set<string>(),
-          completeDirectories: new Set<string>(),
-          searchAtValidation: new Map<string, object | null>(),
-          rootListing: null,
           errors: new Map<string, string>(),
           loading: new Set<string>(),
           isRefreshing: false,
@@ -287,6 +284,7 @@ export function useFileTreeEntries(input: {
     root.failure instanceof ProjectListEntriesError &&
     root.failure.failure === "workspace_root_not_found";
   const rootData = missingRoot ? null : root.data;
+  const rootListing = root.successResult ?? directories.rootListing;
   if (
     missingRoot &&
     (directories.entries.size > 0 ||
@@ -338,12 +336,12 @@ export function useFileTreeEntries(input: {
         const entry = listing?.find((item) => item.path === child);
         if (complete && listing && !entry) {
           const validatedSearch =
-            index === 0 && directories.rootListing !== rootData
+            index === 0 && directories.rootListing !== rootListing
               ? searchData
               : directories.searchAtValidation.get(parent);
           // Search can discover paths added since a cached listing. A later listing wins.
           const retained =
-            !(index === 0 && directories.rootListing !== rootData) &&
+            !(index === 0 && directories.rootListing !== rootListing) &&
             [...directories.discoveries.keys()].some(
               (path) => path === child || path.startsWith(`${child}/`),
             );
@@ -367,7 +365,7 @@ export function useFileTreeEntries(input: {
     const reconciled = (() => {
       const current = directories;
       const discoveries = new Map(current.discoveries);
-      if (current.rootListing !== rootData && !rootData.truncated) {
+      if (current.rootListing !== rootListing && !rootData.truncated) {
         for (const path of discoveries.keys()) {
           if (contradictsListing(path, "", rootData.entries)) discoveries.delete(path);
         }
@@ -400,7 +398,7 @@ export function useFileTreeEntries(input: {
         errors.size === current.errors.size &&
         expandedPaths.size === current.expandedPaths.size &&
         selectedPath === current.selectedPath &&
-        current.rootListing === rootData &&
+        current.rootListing === rootListing &&
         discoveries.size === current.discoveries.size &&
         [...discoveries].every(([path, entry]) => current.discoveries.get(path) === entry)
       )
@@ -410,13 +408,13 @@ export function useFileTreeEntries(input: {
       );
       return {
         ...current,
-        rootListing: rootData,
+        rootListing,
         discoveries,
         searchAtValidation: new Map(
           [...current.searchAtValidation].filter(([path]) => path === "" || entries.has(path)),
         ).set(
           "",
-          current.rootListing === rootData
+          current.rootListing === rootListing
             ? (current.searchAtValidation.get("") ?? null)
             : searchData,
         ),

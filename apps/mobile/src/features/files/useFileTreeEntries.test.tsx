@@ -92,16 +92,41 @@ function setup(withBrowser = false) {
     "../../state/queries": { useDebouncedValue: (value: string) => value },
   };
   const queryExports = {} as typeof import("../../state/query");
+  const results = new WeakMap<
+    object,
+    {
+      data: ProjectListEntriesResult;
+      error: string | null;
+      pending: boolean;
+      result: AsyncResult.AsyncResult<ProjectListEntriesResult, Error>;
+    }
+  >();
   const queryModules: Record<string, unknown> = {
     "react/compiler-runtime": require("react/compiler-runtime"),
     "@effect/atom-react": {
       useAtomValue: (atom: Query) => {
         const result = atom.input?.query === undefined ? rootQuery : searchQuery;
-        return result.error
+        const cached = results.get(result);
+        if (
+          cached &&
+          cached.data === result.data &&
+          cached.error === result.error &&
+          cached.pending === result.isPending
+        ) {
+          return cached.result;
+        }
+        const value = result.error
           ? AsyncResult.fail(result.failure ?? new Error(result.error), {
               previousSuccess: Option.some(AsyncResult.success(result.data)),
             })
-          : AsyncResult.success(result.data);
+          : AsyncResult.success(result.data, { waiting: result.isPending, timestamp: 1 });
+        results.set(result, {
+          data: result.data,
+          error: result.error,
+          pending: result.isPending,
+          result: value,
+        });
+        return value;
       },
       useAtomRefresh: () => rootQuery.refresh,
     },
@@ -482,13 +507,29 @@ describe("file tree workspace state", () => {
         expect(screen.current.entries).toContainEqual({ kind: "file", path: `${path}/other.ts` });
       }
 
+      screen.render();
+      for (const target of [{ cwd: "/second" }, { environmentId: EnvironmentId.make("second") }]) {
+        screen.render(target);
+        screen.render();
+        expect(screen.current.selectedPath).toBe(`${path}/file.ts`);
+        expect([...screen.current.expandedPaths]).toEqual(expanded);
+        expect([...screen.current.loadedDirectories]).toEqual(["src", path]);
+        expect(screen.current.entries).toContainEqual({ kind: "file", path: `${path}/other.ts` });
+      }
+
       // A later parent listing wins over retained discovery evidence.
       if (path.includes("/")) {
         screen.load("src", true);
         await screen.succeed(2, []);
       } else {
-        screen.rootQuery.data = { entries: rootEntries, truncated: false };
-        screen.render({ searchQuery: "new" });
+        const cachedData = screen.rootQuery.data;
+        screen.rootQuery.isPending = true;
+        screen.render();
+        expect(screen.current.selectedPath).toBe(`${path}/file.ts`);
+        screen.rootQuery.isPending = false;
+        // A successful refresh can retain the exact data object through structural sharing.
+        expect(screen.rootQuery.data).toBe(cachedData);
+        screen.render();
       }
       expect(screen.current.selectedPath).toBeNull();
       expect([...screen.current.expandedPaths]).toEqual(path.includes("/") ? ["src"] : []);
