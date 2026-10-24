@@ -7350,6 +7350,17 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           if (!rosterChanged) {
             return false;
           }
+          // An idle notification held for its wake run stays published until that run (or the
+          // next turn) ends: an empty roster now lets a delegated child finalize on its pre-wake
+          // result. finalizeActiveTurn publishes the cleared roster.
+          if (
+            input.activeContext === null &&
+            message.type === "system" &&
+            message.subtype === "task_notification" &&
+            (yield* Ref.get(wakeBuffers)).get(input.nativeThreadId)?.messages.includes(message)
+          ) {
+            return true;
+          }
 
           const baseThread =
             input.activeContext?.input.providerThread ??
