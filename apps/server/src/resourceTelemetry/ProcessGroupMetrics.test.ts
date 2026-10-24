@@ -69,13 +69,21 @@ describe("groupProcesses", () => {
 });
 
 describe("ProcessGroupMetrics.layer", () => {
-  it.effect("logs the first failed sample and the recovery, not every repeat", () => {
+  it.effect("warns with the reason once per outage, debugs repeats, and reports recovery", () => {
     const logs: Array<string> = [];
-    const logger = Logger.make(({ logLevel, message }) => {
-      logs.push(`${logLevel.toUpperCase()} ${String([message].flat()[0])}`);
+    const renderedLogs: Array<string> = [];
+    const logger = Logger.make((options) => {
+      logs.push(`${options.logLevel.toUpperCase()} ${String([options.message].flat()[0])}`);
+      renderedLogs.push(Logger.formatSimple.log(options));
     });
     return Effect.gen(function* () {
-      const outcomes = yield* Ref.make<ReadonlyArray<"fail" | "ok">>(["fail", "fail", "ok"]);
+      const outcomes = yield* Ref.make<ReadonlyArray<"fail" | "ok">>([
+        "fail",
+        "fail",
+        "ok",
+        "ok",
+        "fail",
+      ]);
       const refresh = Ref.modify(outcomes, ([next = "ok", ...rest]) => [next, rest] as const).pipe(
         Effect.flatMap((next) =>
           next === "fail"
@@ -100,13 +108,26 @@ describe("ProcessGroupMetrics.layer", () => {
           ),
         ),
       );
-      yield* TestClock.adjust("3 minutes");
+      yield* TestClock.adjust("0 seconds");
+      const warning = "WARN process group metrics are not exported: sample failed";
+      const repeat = "DEBUG process group metrics sample failed";
+      const recovery = "INFO process group metrics sample recovered";
+      const reason = "Resource monitor binary was not found for darwin/arm64.";
+      assert.deepStrictEqual(logs, [warning]);
+      assert.include(renderedLogs[0], reason);
 
-      assert.deepStrictEqual(logs, [
-        "WARN process group metrics are not exported: sample failed",
-        "DEBUG process group metrics sample failed",
-        "INFO process group metrics sample recovered",
-      ]);
+      yield* TestClock.adjust("1 minute");
+      assert.deepStrictEqual(logs, [warning, repeat]);
+
+      yield* TestClock.adjust("1 minute");
+      assert.deepStrictEqual(logs, [warning, repeat, recovery]);
+
+      yield* TestClock.adjust("1 minute");
+      assert.deepStrictEqual(logs, [warning, repeat, recovery]);
+
+      yield* TestClock.adjust("1 minute");
+      assert.deepStrictEqual(logs, [warning, repeat, recovery, warning]);
+      assert.include(renderedLogs[3], reason);
     }).pipe(
       Effect.scoped,
       Effect.provide(
