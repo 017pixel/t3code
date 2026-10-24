@@ -1709,7 +1709,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     const viewer = viewers.get(viewerId);
     if (viewer) {
       viewer.streams += 1;
-      if (grid) viewer.grid = grid;
+      // After a viewer's first size, resizes own it; attach retries resend the original size.
+      viewer.grid ??= grid;
     } else {
       viewers.set(viewerId, { streams: 1, grid });
     }

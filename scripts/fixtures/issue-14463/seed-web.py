@@ -2,6 +2,7 @@
 """Seed stopped, isolated test homes; never touches live T3 home."""
 import argparse
 import json
+import os
 from pathlib import Path
 import socket
 import sqlite3
@@ -11,7 +12,10 @@ p.add_argument('--server-port',type=int,required=True)
 p.add_argument('--workspace',type=Path,required=True)
 a=p.parse_args()
 home=a.home.resolve()
-if str(home).startswith(str(Path.home()/'.t3')):
+# Compare lexical and resolved forms of both sides, so a symlinked ~/.t3 or test home cannot alias it.
+live=Path.home()/'.t3'
+lives={Path(os.path.abspath(live)),live.resolve()}
+if any(h.is_relative_to(l) for h in (Path(os.path.abspath(a.home)),home) for l in lives):
     raise SystemExit('Refusing live T3 home')
 with socket.socket() as s:
     if s.connect_ex(('127.0.0.1',a.server_port))==0:
