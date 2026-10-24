@@ -281,6 +281,18 @@ describe("pending question queues", () => {
     ]);
   };
 
+  it("orders pending questions by creation time, not projection order", () => {
+    expect(
+      queue([
+        { id: "newer", createdAt: 2 },
+        { id: "older", createdAt: 1 },
+      ]),
+    ).toEqual([
+      ["older", 0, 2],
+      ["newer", 1, 2],
+    ]);
+  });
+
   it("counts simultaneous single-question requests as one queue", () => {
     const ids = ["a", "b", "c", "d", "e"];
     expect(queue(ids.map((id, index) => ({ id, createdAt: index })))).toEqual(

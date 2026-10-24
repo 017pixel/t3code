@@ -179,6 +179,8 @@ export function derivePendingThreadRequests(
     });
   }
 
+  // Consumers activate the first entry; queue positions count in creation order.
+  userInputs.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   return { approvals, userInputs };
 }
 
