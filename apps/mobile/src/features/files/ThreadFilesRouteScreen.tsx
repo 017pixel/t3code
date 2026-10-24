@@ -494,11 +494,8 @@ export function ThreadFilesTreeScreen(props: ThreadFilesRouteScreenProps) {
         environmentId={environmentId}
         headerInset={headerInset}
         projectName={projectName}
-        selectedPath={entriesQuery.selectedPath}
-        onSelectFile={(path) => {
-          entriesQuery.selectPath(path);
-          handleSelectFile(path);
-        }}
+        selectedPath={null}
+        onSelectFile={handleSelectFile}
       />
     ) : null;
   const handlePreviewFile = (relativePath: string) => {
@@ -770,7 +767,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
         projectName={directoryPath ?? projectName}
         selectedPath={directoryPath === null ? relativePath : null}
         onSelectFile={(path) => {
-          entriesQuery.selectPath(path);
+          if (directoryPath !== null) entriesQuery.selectPath(path);
           handleSelectFile(path);
         }}
       />

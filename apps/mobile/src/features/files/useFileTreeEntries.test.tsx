@@ -20,7 +20,11 @@ type Hook = typeof import("./useFileTreeEntries").useFileTreeEntries;
 type Input = Parameters<Hook>[0];
 type Query = {
   readonly environmentId: EnvironmentId;
-  readonly input: { readonly cwd: string; readonly directoryPath?: string };
+  readonly input: {
+    readonly cwd: string;
+    readonly query?: string;
+    readonly directoryPath?: string;
+  };
 };
 type Result =
   | { readonly _tag: "Success"; readonly value: ProjectListEntriesResult }
@@ -68,6 +72,7 @@ function setup(withBrowser = false) {
     isPending: false,
     refresh: vi.fn(),
   };
+  const searchQuery = { ...rootQuery, data: { entries: [] as ProjectEntry[], truncated: false } };
   const modules: Record<string, unknown> = {
     "@t3tools/contracts": { ProjectListEntriesError },
     react: React,
@@ -90,12 +95,14 @@ function setup(withBrowser = false) {
   const queryModules: Record<string, unknown> = {
     "react/compiler-runtime": require("react/compiler-runtime"),
     "@effect/atom-react": {
-      useAtomValue: () =>
-        rootQuery.error
-          ? AsyncResult.fail(rootQuery.failure ?? new Error(rootQuery.error), {
-              previousSuccess: Option.some(AsyncResult.success(rootQuery.data)),
+      useAtomValue: (atom: Query) => {
+        const result = atom.input?.query === undefined ? rootQuery : searchQuery;
+        return result.error
+          ? AsyncResult.fail(result.failure ?? new Error(result.error), {
+              previousSuccess: Option.some(AsyncResult.success(result.data)),
             })
-          : AsyncResult.success(rootQuery.data),
+          : AsyncResult.success(result.data);
+      },
       useAtomRefresh: () => rootQuery.refresh,
     },
     "effect/Cause": Cause,
@@ -170,6 +177,7 @@ function setup(withBrowser = false) {
   return {
     requests,
     rootQuery,
+    searchQuery,
     updateView(expanded: string[], selected: string) {
       renders = 0;
       act(() => {
@@ -186,10 +194,10 @@ function setup(withBrowser = false) {
       const probe = <Probe {...firstTarget} searchQuery="" {...target} />;
       act(() => root.render(probe));
     },
-    load(path = "src") {
+    load(path = "src", refresh = false) {
       renders = 0;
       act(() => {
-        void current.loadDirectory(path);
+        void current.loadDirectory(path, refresh);
       });
     },
     async succeed(index: number, entries: ProjectEntry[] = []) {
@@ -405,6 +413,43 @@ describe("file tree workspace state", () => {
       await screen.succeed(1, []);
       expect(screen.current.entries.map((entry) => entry.path)).toEqual(["src"]);
       expect(screen.current.selectedPath).toBeNull();
+    },
+  );
+
+  it.each(["new", "src/new"])(
+    "keeps search discovery %s until its parent listing revalidates it",
+    async (path) => {
+      using screen = setup();
+      screen.render();
+      screen.load();
+      await screen.succeed(0, []);
+      screen.searchQuery.data = {
+        entries: [
+          { kind: "directory", path },
+          { kind: "file", path: `${path}/file.ts` },
+        ],
+        truncated: false,
+      };
+      screen.render({ searchQuery: "new" });
+      const expanded = path.includes("/") ? ["src", path] : [path];
+      screen.updateView(expanded, `${path}/file.ts`);
+      expect(screen.current.selectedPath).toBe(`${path}/file.ts`);
+      expect([...screen.current.expandedPaths]).toEqual(expanded);
+      screen.load(path);
+      await screen.succeed(1, [{ kind: "file", path: `${path}/file.ts` }]);
+      expect([...screen.current.loadedDirectories]).toEqual(["src", path]);
+
+      // A later parent listing wins over the unchanged search response.
+      if (path.includes("/")) {
+        screen.load("src", true);
+        await screen.succeed(2, []);
+      } else {
+        screen.rootQuery.data = { entries: rootEntries, truncated: false };
+        screen.render({ searchQuery: "new" });
+      }
+      expect(screen.current.selectedPath).toBeNull();
+      expect([...screen.current.expandedPaths]).toEqual(path.includes("/") ? ["src"] : []);
+      expect([...screen.current.loadedDirectories]).toEqual(["src"]);
     },
   );
 

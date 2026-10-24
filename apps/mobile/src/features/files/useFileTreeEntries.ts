@@ -14,6 +14,8 @@ function createDirectories() {
     entries: new Map<string, ReadonlyArray<ProjectEntry>>(),
     errors: new Map<string, string>(),
     completeDirectories: new Set<string>(),
+    searchAtValidation: new Map<string, object | null>(),
+    rootListing: null as object | null,
     validatedDirectories: new Set<string>(),
     loading: new Set<string>(),
     expandedPaths: new Set<string>(),
@@ -49,6 +51,9 @@ function boundDirectories(current: ReturnType<typeof createDirectories>, preserv
     ),
     validatedDirectories: new Set(
       [...current.validatedDirectories].filter((path) => !isEvicted(path)),
+    ),
+    searchAtValidation: new Map(
+      [...current.searchAtValidation].filter(([path]) => !isEvicted(path)),
     ),
   };
 }
@@ -96,6 +101,10 @@ export function useFileTreeEntries(input: {
         })
       : null,
   );
+  const latestSearchData = useRef(search.data);
+  useLayoutEffect(() => {
+    latestSearchData.current = search.data;
+  }, [search.data]);
   const workspaceKey = JSON.stringify([environmentId, cwd]);
   const [cache, setCache] = useState(() => ({
     key: workspaceKey,
@@ -111,6 +120,8 @@ export function useFileTreeEntries(input: {
           target: {},
           validatedDirectories: new Set<string>(),
           completeDirectories: new Set<string>(),
+          searchAtValidation: new Map<string, object | null>(),
+          rootListing: null,
           errors: new Map<string, string>(),
           loading: new Set<string>(),
           isRefreshing: false,
@@ -218,7 +229,17 @@ export function useFileTreeEntries(input: {
           const completeDirectories = new Set(current.completeDirectories);
           if (result.value.truncated) completeDirectories.delete(directoryPath);
           else completeDirectories.add(directoryPath);
-          return { ...current, entries, loading, completeDirectories, validatedDirectories };
+          return {
+            ...current,
+            entries,
+            loading,
+            completeDirectories,
+            validatedDirectories,
+            searchAtValidation: new Map(current.searchAtValidation).set(
+              directoryPath,
+              latestSearchData.current,
+            ),
+          };
         }
         const error = Cause.squash(result.cause);
         return {
@@ -283,7 +304,23 @@ export function useFileTreeEntries(input: {
         const complete =
           index === 0 ? !rootData.truncated : directories.completeDirectories.has(parent);
         const entry = listing?.find((item) => item.path === child);
-        if (complete && listing && !entry) return true;
+        if (complete && listing && !entry) {
+          const validatedSearch =
+            index === 0 && directories.rootListing !== rootData
+              ? searchData
+              : directories.searchAtValidation.get(parent);
+          // Search can discover paths added since a cached listing. A later listing wins.
+          const discovered =
+            searching &&
+            query === debouncedQuery &&
+            search.isSuccess &&
+            !search.isPending &&
+            searchData !== validatedSearch &&
+            searchData?.entries.some(
+              (item) => item.path === child || item.path.startsWith(`${child}/`),
+            );
+          if (!discovered) return true;
+        }
         if (entry && (directory || index < parts.length - 1) && entry.kind !== "directory")
           return true;
       }
@@ -304,7 +341,8 @@ export function useFileTreeEntries(input: {
         entries.size === current.entries.size &&
         errors.size === current.errors.size &&
         expandedPaths.size === current.expandedPaths.size &&
-        selectedPath === current.selectedPath
+        selectedPath === current.selectedPath &&
+        current.rootListing === rootData
       )
         return current;
       const completeDirectories = new Set(
@@ -312,6 +350,15 @@ export function useFileTreeEntries(input: {
       );
       return {
         ...current,
+        rootListing: rootData,
+        searchAtValidation: new Map(
+          [...current.searchAtValidation].filter(([path]) => path === "" || entries.has(path)),
+        ).set(
+          "",
+          current.rootListing === rootData
+            ? (current.searchAtValidation.get("") ?? null)
+            : searchData,
+        ),
         entries,
         errors,
         expandedPaths,
