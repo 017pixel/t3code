@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
+import type * as CodexUsageHistory from "../../usage/CodexUsageHistory.ts";
 import { makeCodexTextGeneration } from "../../textGeneration/CodexTextGeneration.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
@@ -52,6 +53,7 @@ import {
 import { makeManagedCodexProvider } from "./CodexManagedProvider.ts";
 import { codexUsageReader } from "./codexUsage.ts";
 import * as CodexInstallation from "../CodexInstallation.ts";
+import * as CodexManagedTokenBroker from "../CodexManagedTokenBroker.ts";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -75,6 +77,7 @@ function makeCodexMaintenanceResolver(sharedHomePath: string) {
     nativeUpdate: {
       args: ["update"],
       isCommandPath: isCodexStandaloneCommandPath,
+      requiresCommandPath: true,
       env: { CODEX_HOME: sharedHomePath },
     },
   });
@@ -95,9 +98,14 @@ export type CodexDriverEnv =
   | ServerConfig.ServerConfig
   | ServerSecretStore.ServerSecretStore
   | ServerEnvironment.ServerEnvironmentIdentity
-  | CodexInstallation.CodexInstallation;
+  | CodexInstallation.CodexInstallation
+  | CodexManagedTokenBroker.CodexManagedTokenBroker;
 
-export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv, Path.Path> = {
+export const CodexDriver: ProviderDriver<
+  CodexSettings,
+  CodexDriverEnv,
+  Path.Path | CodexUsageHistory.CodexUsageHistory
+> = {
   driverKind: DRIVER_KIND,
   metadata: {
     displayName: "Codex",

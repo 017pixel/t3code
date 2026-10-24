@@ -183,6 +183,7 @@ export interface CursorRuntimeAgentPolicy {
 
 export function cursorRuntimeAgentPolicy(
   runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+  platform: NodeJS.Platform,
 ): CursorRuntimeAgentPolicy {
   const sandboxPolicyType =
     typeof runtimePolicy.sandboxPolicy === "object" &&
@@ -191,14 +192,17 @@ export function cursorRuntimeAgentPolicy(
     typeof runtimePolicy.sandboxPolicy.type === "string"
       ? runtimePolicy.sandboxPolicy.type
       : undefined;
+  const autoReview =
+    runtimePolicy.approvalPolicy === undefined
+      ? runtimePolicy.runtimeMode === "approval-required" || runtimePolicy.runtimeMode === "auto"
+      : runtimePolicy.approvalPolicy !== "never";
   return {
-    autoReview:
-      runtimePolicy.approvalPolicy === undefined
-        ? runtimePolicy.runtimeMode === "approval-required" || runtimePolicy.runtimeMode === "auto"
-        : runtimePolicy.approvalPolicy !== "never",
+    autoReview,
+    // The Windows SDK has no filesystem sandbox; omit the default only when
+    // Auto-review still gates execution. Explicit policies remain authoritative.
     sandboxEnabled:
       runtimePolicy.sandboxPolicy === undefined
-        ? runtimePolicy.runtimeMode !== "full-access"
+        ? runtimePolicy.runtimeMode !== "full-access" && !(platform === "win32" && autoReview)
         : sandboxPolicyType !== "dangerFullAccess",
   };
 }
@@ -307,8 +311,9 @@ export function makeCursorAgentOptions(input: {
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
   readonly threadId: ThreadId;
   readonly mcpSession: McpProviderSession.McpProviderSessionConfig | undefined;
+  readonly platform: NodeJS.Platform;
 }): AgentOptions {
-  const policy = cursorRuntimeAgentPolicy(input.runtimePolicy);
+  const policy = cursorRuntimeAgentPolicy(input.runtimePolicy, input.platform);
   const mcpServers = cursorMcpServers(input.mcpSession);
   return {
     model: cursorSdkModelSelection(input.modelSelection),
@@ -819,6 +824,11 @@ interface CursorProjectionTarget {
 // Fallback final output when Cursor's result carries none. The persisted row only
 // ever shows a bounded tail, so keep a little more than that.
 const MAX_CURSOR_STREAMED_OUTPUT_CHARS = 256 * 1024;
+// After a turn ends, a retryable stream error can make Cursor's SDK resume from
+// an older checkpoint inside the same run. When those resumes save nothing, it
+// ends the run with this error even though the answer was already delivered.
+const CURSOR_RESUME_NO_PROGRESS_MESSAGE =
+  "Agent turn stopped after repeated resume attempts made no progress";
 
 interface ActiveCursorToolCall {
   readonly callId: string;
@@ -862,10 +872,12 @@ interface ActiveCursorTurn {
   readonly tools: Map<string, ActiveCursorToolCall>;
   readonly subagents: Map<string, ActiveCursorSubagent>;
   readonly assistant: ActiveCursorTextStream;
-  readonly assistantReply: CursorTransportFailure;
+  assistantReply: CursorTransportFailure;
   readonly reasoning: ActiveCursorTextStream;
   interrupted: boolean;
   finalized: boolean;
+  /** The agent's latest turn ended and no new work has started since. */
+  turnEnded: boolean;
 }
 
 interface CursorLiveAgent {
@@ -887,6 +899,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
   const path = yield* Path.Path;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const runner = yield* CursorAgentSdk.CursorAgentSdkRunner;
+  const platform = yield* HostProcess.Platform;
   const host = yield* ProviderHost.ProviderHost;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const adapterOptions = options;
@@ -910,6 +923,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
         });
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const liveAgent = yield* Ref.make<CursorLiveAgent | null>(null);
+        const warnedUnsupportedSandbox = yield* Ref.make(false);
         const activeTurn = yield* Ref.make<ActiveCursorTurn | null>(null);
         const planIds = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact["id"]>());
 
@@ -1321,7 +1335,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                     })
                   : {}),
                 toolName: cursorToolName(toolCall),
-                input: toolCall.args,
+                input: toolCall.type === "mcp" ? (toolCall.args.args ?? {}) : toolCall.args,
                 ...(cursorToolOutput(toolCall) === undefined
                   ? {}
                   : { output: cursorToolOutput(toolCall) }),
@@ -1907,8 +1921,25 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           if (context.finalized) {
             return;
           }
+          if (update.type === "turn-ended") {
+            context.turnEnded = true;
+          } else if (
+            update.type === "step-started" ||
+            update.type === "user-message-appended" ||
+            update.type === "text-delta" ||
+            update.type === "thinking-delta" ||
+            update.type === "partial-tool-call" ||
+            update.type === "tool-call-started"
+          ) {
+            context.turnEnded = false;
+          }
           switch (update.type) {
             case "text-delta":
+              // Classify each assistant message on its own, so earlier
+              // commentary does not hide a later standalone transport dump.
+              if (context.assistant.current === null) {
+                context.assistantReply = new CursorTransportFailure();
+              }
               context.assistantReply.push(update.text);
               yield* completeReasoning(context);
               yield* appendTextSegment({
@@ -2087,6 +2118,11 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           yield* Deferred.succeed(input.context.completed, undefined);
         });
 
+        const isResumeFailureAfterTurnEnded = (context: ActiveCursorTurn, result: RunResult) =>
+          context.turnEnded &&
+          result.status === "error" &&
+          result.error?.message === CURSOR_RESUME_NO_PROGRESS_MESSAGE;
+
         const terminalStatus = (
           context: ActiveCursorTurn,
           result: RunResult,
@@ -2103,7 +2139,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             case "cancelled":
               return "cancelled";
             case "error":
-              return "failed";
+              return isResumeFailureAfterTurnEnded(context, result) ? "completed" : "failed";
           }
         };
 
@@ -2126,17 +2162,30 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             yield* existing.session.close.pipe(Effect.ignore);
             yield* Ref.set(liveAgent, null);
           }
+          const options = makeCursorAgentOptions({
+            ...(apiKey === undefined ? {} : { apiKey }),
+            modelSelection: openInput.modelSelection,
+            runtimePolicy: openInput.runtimePolicy,
+            platform,
+            threadId: openInput.threadId,
+            mcpSession: yield* mcpSessions.read(openInput.threadId),
+          });
+          if (
+            platform === "win32" &&
+            openInput.runtimePolicy.sandboxPolicy === undefined &&
+            openInput.runtimePolicy.runtimeMode !== "full-access" &&
+            options.local?.sandboxOptions?.enabled === false &&
+            !(yield* Ref.getAndSet(warnedUnsupportedSandbox, true))
+          ) {
+            yield* Effect.logWarning(
+              "Cursor cannot sandbox the filesystem on Windows; this thread runs without filesystem isolation.",
+            );
+          }
           const sdkSession = yield* runner
             .open({
               operation: openInput.operation,
               ...(openInput.agentId === undefined ? {} : { agentId: openInput.agentId }),
-              options: makeCursorAgentOptions({
-                ...(apiKey === undefined ? {} : { apiKey }),
-                modelSelection: openInput.modelSelection,
-                runtimePolicy: openInput.runtimePolicy,
-                threadId: openInput.threadId,
-                mcpSession: yield* mcpSessions.read(openInput.threadId),
-              }),
+              options,
               threadId: openInput.threadId,
               providerSessionId: input.providerSessionId,
             })
@@ -2294,6 +2343,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               },
               interrupted: false,
               finalized: false,
+              turnEnded: false,
             };
             yield* Ref.set(activeTurn, context);
             yield* emitProviderEvent({
@@ -2325,6 +2375,8 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                   if (
                     context !== null &&
                     context.assistant.nextSegment === 0 &&
+                    // Text from a resume that made no progress is not the turn's answer.
+                    !isResumeFailureAfterTurnEnded(context, result) &&
                     result.result !== undefined &&
                     result.result.length > 0
                   ) {
@@ -2335,6 +2387,16 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                       kind: "assistant",
                       text: result.result,
                     });
+                  }
+                  if (context !== null && isResumeFailureAfterTurnEnded(context, result)) {
+                    yield* Effect.logWarning(
+                      "orchestration-v2.cursor-resume-failed-after-turn-ended",
+                      {
+                        providerSessionId: input.providerSessionId,
+                        providerThreadId: turnInput.providerThread.id,
+                        providerTurnId,
+                      },
+                    );
                   }
                   if (context !== null) {
                     const transportFailure = context.assistantReply.failure;

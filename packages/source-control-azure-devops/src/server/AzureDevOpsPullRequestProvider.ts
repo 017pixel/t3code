@@ -1,4 +1,4 @@
-import { SourceControlProviderKind } from "@t3tools/contracts";
+import { resolvePullRequestAuthorFilter, SourceControlProviderKind } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Semaphore from "effect/Semaphore";
 import type { PullRequestCapabilities, PullRequestViewerPermissions } from "@t3tools/contracts";
@@ -33,7 +33,7 @@ import type {
   AzureDevOpsPullRequest,
   AzureDevOpsRepositoryLocation,
 } from "./azureDevOpsPullRequestJson.ts";
-import { definition } from "../client/definition.ts";
+import { definition } from "../shared/definition.ts";
 
 /**
  * Every file is two `az` invocations, each paying a Python interpreter's start-up, so reading them
@@ -70,6 +70,12 @@ const CAPABILITIES: PullRequestCapabilities = {
   viewedFiles: "environment",
 };
 
+const UNAVAILABLE_REQUIREMENT = {
+  missing:
+    "Azure CLI (`az`) with the Azure DevOps extension is required. Install `az`, then run `az extension add --name azure-devops`.",
+  unauthenticated: "Azure CLI is not signed in. Run `az login` and retry.",
+};
+
 /**
  * Azure DevOps states no permission anywhere `az repos pr show` or `az repos pr list` reach: the
  * answer lives in the security namespaces, behind identity descriptors and token paths that would
@@ -83,7 +89,7 @@ const AZURE_DEVOPS_VIEWER_PERMISSIONS: PullRequestViewerPermissions = {
   requestReviewers: CAPABILITIES.reviewers.request,
 };
 
-export function azureDevOpsProviderFailure(
+function azureDevOpsProviderFailure(
   error: AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCliError,
 ): PullRequestProviderFailure {
   if (error._tag === "AzureDevOpsCliUnavailableError") return { reason: "missing-tool" };
@@ -259,6 +265,7 @@ export const make = Effect.gen(function* () {
   const provider: PullRequestProviderApi = {
     kind: SourceControlProviderKind.make("azure-devops"),
     capabilities: CAPABILITIES,
+    unavailableRequirement: UNAVAILABLE_REQUIREMENT,
     // The bare repository name repeats across an organization; the project path does not.
     repositoryKey: ({ canonicalKey }) => canonicalKey,
 
@@ -275,6 +282,10 @@ export const make = Effect.gen(function* () {
           viewer: input.viewer,
           limit: input.limit,
           cursor: input.cursor,
+          author:
+            input.filters?.author === undefined
+              ? undefined
+              : resolvePullRequestAuthorFilter(input.filters.author, input.viewer),
         })
         .pipe(
           Effect.mapError(fail("listChangeRequests")),

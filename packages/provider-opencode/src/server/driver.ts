@@ -350,6 +350,9 @@ export const OpenCodeDriver: ProviderDriver<
           host.paths.cwd,
           runtimeProbe.refresh,
           loadOpenCode2Models,
+        ).pipe(
+          Effect.annotateLogs({ providerInstanceId: instanceId }),
+          Effect.annotateSpans({ providerInstanceId: instanceId }),
         ),
         usageLimits: readOpenCodeGoUsageLimits({
           enabled: effectiveConfig.enabled,
@@ -378,19 +381,24 @@ export const OpenCodeDriver: ProviderDriver<
       Effect.all(
         {
           skills: openCodeRuntime.loadOpenCodeSkills(client),
-          commands: OpenCodeRuntime.loadOpenCodeCommands(client).pipe(
-            Effect.timeout("10 seconds"),
-            Effect.option,
+          commandInventory: OpenCodeRuntime.loadOpenCodeCommands(client).pipe(
+            Effect.timeoutOption("10 seconds"),
+            Effect.map((commands) => ({
+              commands: Option.getOrElse(commands, () => []),
+              slashCommandsPending: Option.isNone(commands),
+            })),
+            // SDK errors leave command discovery to the provider's health.
+            Effect.orElseSucceed(() => ({
+              commands: [],
+              slashCommandsPending: undefined,
+            })),
           ),
         },
         { concurrency: "unbounded" },
       ).pipe(
-        // Only a finished lookup is reported as complete. A failed one leaves
-        // the flag unset, so the registry decides from the provider's health.
-        Effect.map(({ skills, commands }) => ({
+        Effect.map(({ skills, commandInventory }) => ({
           skills,
-          commands: Option.getOrElse(commands, () => []),
-          slashCommandsPending: Option.isSome(commands) ? false : undefined,
+          ...commandInventory,
         })),
       );
     const loadWorkspaceForCwd = (cwd: string) =>
@@ -435,7 +443,13 @@ export const OpenCodeDriver: ProviderDriver<
       streamSettings: snapshotSettings.streamSettings,
       haveSettingsChanged: haveProviderSnapshotSettingsChanged,
       checkProviderOnSettingsChange: () => false,
-      refreshOnInterval: false,
+      // A failed or still-loading catalog must recover without a manual
+      // refresh. Healthy instances need no recurring server starts.
+      refreshOnInterval: (snapshot) =>
+        snapshot.enabled &&
+        snapshot.installed &&
+        snapshot.status !== "ready" &&
+        snapshot.auth.status === "unknown",
       initialSnapshot: (settings) =>
         makePendingOpenCodeProvider(settings.provider).pipe(Effect.map(stampIdentity)),
       checkProvider,
