@@ -197,13 +197,13 @@ const SHOWN: ReadonlyArray<readonly [string, Record<string, unknown>, Record<str
     "a command and how it ended, without its output",
     {
       type: "command_execution",
-      input: `cd ${ROOT} && cat ${ROOT}/.env`,
+      input: `cd ${ROOT} && cat ${ROOT}/.env && cd "${ROOT}/" && ls ${ROOT}/`,
       output: "TOKEN=1",
       exitCode: 1,
     },
     {
       type: "command_execution",
-      input: "cd . && cat .env",
+      input: 'cd . && cat .env && cd "." && ls .',
       outputIndicatesFailure: true,
       exitCode: 1,
     },

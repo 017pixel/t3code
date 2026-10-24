@@ -57,7 +57,11 @@ function guestText(text: string, roots: GuestPathRoots): string {
     // The root itself, or the root plus a separator, but not a sibling such as `<root>-old`.
     result = result.replace(
       new RegExp(`${escapeRegExp(root)}(?:[\\\\/]|(?![\\w.-]))`, "gu"),
-      (match) => (match.length > root.length ? "" : "."),
+      // `<root>/src` becomes `src`; the root alone, or with only a trailing separator, is `.`.
+      (match, offset: number, source: string) => {
+        const rest = source.slice(offset + match.length);
+        return match.length > root.length && rest !== "" && !/^[\s"'`]/u.test(rest) ? "" : ".";
+      },
     );
   }
   return result;
