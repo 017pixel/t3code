@@ -13,8 +13,8 @@ import type {
 } from "@t3tools/contracts";
 
 import * as AzureDevOpsCli from "./AzureDevOpsCli.ts";
-import { decodeBuildPolicyChecksJson } from "./azureDevOpsPullRequestChecks.ts";
 import {
+  decodeBuildPolicyChecksJson,
   decodeItemContentJson,
   decodeIterationChangesJson,
   decodeIterationsJson,
