@@ -599,7 +599,7 @@ export const make = Effect.gen(function* () {
         ),
       ),
 
-    listBuildChecks: Effect.fnUntraced(function* (input) {
+    listBuildChecks: Effect.fn("AzureDevOpsPullRequestCli.listBuildChecks")(function* (input) {
       const checks: PullRequestCheck[] = [];
       // The CLI resolves the PR's project ID and scopes evaluations to its CodeReview artifact.
       // Page all policies before filtering builds so a later required check cannot be missed.
