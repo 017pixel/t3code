@@ -894,8 +894,18 @@ it.effect.each([
             "application/json",
           ),
         });
-        const body = yield* listed.text;
-        const names = [...body.matchAll(/"name":"([a-z_]+)"/g)].map((match) => match[1]!);
+        const { result } = yield* listed.json.pipe(
+          Effect.flatMap(
+            Schema.decodeUnknownEffect(
+              Schema.Struct({
+                result: Schema.Struct({
+                  tools: Schema.Array(Schema.Struct({ name: Schema.String })),
+                }),
+              }),
+            ),
+          ),
+        );
+        const names = result.tools.map((tool) => tool.name);
 
         expect(names).toContain("probe");
         expect(names.some((name) => name.startsWith("preview_"))).toBe(preview);
