@@ -134,22 +134,16 @@ async function install(name, version, entry) {
 }
 (async () => {
   const ios = process.platform === 'darwin' && run('xcrun', ['simctl', 'help']).status === 0;
-  const sdk = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || path.join(os.homedir(), process.platform === 'darwin' ? 'Library/Android/sdk' : 'Android/Sdk');
-  const tool = (relative) => {
-    try {
-      const file = path.join(sdk, relative);
-      if (!fs.statSync(file).isFile()) return false;
-      if (process.platform !== 'win32') fs.accessSync(file, fs.constants.X_OK);
-      return true;
-    } catch { return false; }
-  };
-  const suffix = process.platform === 'win32' ? '.exe' : '';
-  const androidReason = !tool('platform-tools/adb' + suffix) ? 'Android SDK Platform-Tools are missing from ' + sdk + '. Install the Android SDK or set ANDROID_HOME to it.'
-    : !tool('emulator/emulator' + suffix) ? 'Android Emulator is missing from ' + sdk + '. Install it in Android Studio SDK Manager.'
-    : !tool('cmdline-tools/latest/bin/avdmanager' + (process.platform === 'win32' ? '.bat' : '')) ? 'Android SDK Command-line Tools (latest) are missing from ' + sdk + '. Install them in Android Studio SDK Manager.'
+  // The SSH shell setup chose ANDROID_HOME, so later commands use the SDK accepted here.
+  const sdk = process.env.ANDROID_HOME;
+  const executable = (relative) => { try { fs.accessSync(path.join(sdk, relative), fs.constants.X_OK); return true; } catch { return false; } };
+  const androidReason = !sdk ? 'Android SDK was not found. Install it with Android Studio or set ANDROID_HOME on the SSH host.'
+    : !executable('platform-tools/adb') ? 'Android SDK Platform-Tools are missing from ' + sdk + '. Install them in Android Studio SDK Manager.'
+    : !executable('emulator/emulator') ? 'Android Emulator is missing from ' + sdk + '. Install it in Android Studio SDK Manager.'
+    : !executable('cmdline-tools/latest/bin/avdmanager') ? 'Android SDK Command-line Tools (latest) are missing from ' + sdk + '. Install them in Android Studio SDK Manager.'
+    : run(path.join(sdk, 'platform-tools', 'adb'), ['version']).status !== 0 ? 'adb in ' + sdk + ' failed to run. Reinstall Android SDK Platform-Tools.'
     : null;
   const android = androidReason === null;
-  if (android) process.env.ANDROID_HOME = sdk;
   const platforms = [
     { platform: 'ios', available: ios, ...(!ios ? { reason: 'iOS needs macOS with Xcode and working xcrun simctl.' } : {}) },
     { platform: 'android', available: android, ...(!android ? { reason: androidReason } : {}) },
