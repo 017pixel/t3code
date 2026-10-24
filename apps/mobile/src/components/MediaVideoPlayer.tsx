@@ -27,17 +27,18 @@ function LoadedMediaVideo(props: {
     player.bufferOptions = { preferredForwardBufferDuration: 5 };
   });
   const { status } = useEvent(player, "statusChange", { status: player.status });
-  const { playIfActive, onFullscreenEnter, onFullscreenExit } = useMediaVideoPlayback(
+  const { createPlayRequest, onFullscreenEnter, onFullscreenExit } = useMediaVideoPlayback(
     player,
     props,
   );
   const loadSource = useEffectEvent(async (signal: AbortSignal) => {
+    const playIfUninterrupted = createPlayRequest();
     const uri = props.resolvePlaybackUri ? await props.resolvePlaybackUri() : props.uri;
     if (signal.aborted) return;
     if (uri === null) throw new Error("Video unavailable");
     player.pause();
     await player.replaceAsync({ uri, contentType: "progressive" });
-    if (!signal.aborted && props.playRequested) playIfActive();
+    if (!signal.aborted && props.playRequested) playIfUninterrupted();
   });
 
   useEffect(() => {
