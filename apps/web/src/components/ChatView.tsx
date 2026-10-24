@@ -4,7 +4,6 @@ import { announcedRun, isDetailBehindShell } from "./chat/threadActivityAnnounce
 import {
   deriveAvailableRevertTurnCounts,
   deriveThreadPendingBackgroundTasks,
-  foregroundRunOwnsStop,
   deriveWorkspaceMutationId,
   presentThreadShellFromProjection,
 } from "./ChatView.logic";
@@ -2467,10 +2466,8 @@ export default function ChatView(props: ChatViewProps) {
     serverConfig,
     runtimeMode,
     isWorking,
-    runIsLive: foregroundRunOwnsStop({
-      runtime: activeRuntime,
-      localRunWork: isSendBusy || isConnecting || isCompacting,
-    }),
+    // A waiting run is checkpoint drain; Stop there reaches its background work.
+    runIsLive: (isWorking && activeRuntime?.status !== "waiting") || phase === "connecting",
     pendingBackgroundTasks,
     activePendingApproval,
     activePendingUserInput,

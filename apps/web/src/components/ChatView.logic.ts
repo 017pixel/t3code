@@ -16,7 +16,6 @@ import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import type {
   EnvironmentThread,
   ThreadStructure,
-  ThreadStructureRuntime,
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import {
@@ -1683,23 +1682,6 @@ export function presentThreadShellFromProjection(
     latestRun,
     runtime,
   };
-}
-
-/**
- * Whether a run owns Stop, so background-work Stop must wait for the composer's.
- * Runless provider-subagent work has no run to stop first, and a waiting run is
- * checkpoint drain, where Stop reaches its background work.
- */
-export function foregroundRunOwnsStop(input: {
-  readonly runtime: ThreadStructureRuntime | null;
-  /** A local send, connect, or compaction this client started. */
-  readonly localRunWork: boolean;
-}): boolean {
-  const phase = derivePhase(input.runtime);
-  return (
-    ((phase === "running" || input.localRunWork) && input.runtime?.status !== "waiting") ||
-    phase === "connecting"
-  );
 }
 
 // Excludes `waiting`: that is post-terminal checkpoint drain, so its agent turn is over.
