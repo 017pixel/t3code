@@ -1,3 +1,4 @@
+import type { ListRunsOptions } from "@cursor/sdk";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderSessionId, ThreadId } from "@t3tools/contracts";
@@ -64,7 +65,7 @@ const cursorSdkMock = vi.hoisted(() => {
     send,
     close: agentClose,
   }));
-  const listRuns = vi.fn(async (_agentId: string, options?: { readonly limit?: number }) => {
+  const listRuns = vi.fn(async (_agentId: string, options?: ListRunsOptions) => {
     runOperations.push("agent.listRuns");
     const runs = staleRunActive ? storedRuns : [];
     return { items: options?.limit === undefined ? runs : runs.slice(0, options.limit) };
@@ -170,7 +171,7 @@ describe("CursorAgentSdkRunner", () => {
       ]);
       assert.deepStrictEqual(cursorSdkMock.listRuns.mock.calls[0], [
         "agent-cursor-agent-sdk-test",
-        { runtime: "local", cwd: process.cwd(), limit: 1 },
+        { runtime: "local", cwd: process.cwd() },
       ]);
       assert.deepStrictEqual(cursorSdkMock.cancelRun.mock.calls[0], [
         "run-stale",
