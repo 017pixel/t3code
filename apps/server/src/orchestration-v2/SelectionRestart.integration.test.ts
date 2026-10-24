@@ -541,11 +541,8 @@ it.live("a workspace handoff during a run does not leave the run interrupted", (
       );
 
       assert.equal(projection.thread.worktreePath, handoffCwd);
-      assert.notInclude(
-        ["interrupted", "failed"],
-        projection.runs[0]?.status,
-        "an intentional workspace handoff must not settle the handing-off run as interrupted or failed",
-      );
+      assert.equal(projection.runs[0]?.status, "completed");
+      assert.isNotNull(projection.runs[0]?.checkpointId ?? null);
       assert.isFalse(
         projection.turnItems.some((item) => item.type === "run_interrupt_result"),
         "an intentional workspace handoff must not project an interrupt result",

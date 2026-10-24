@@ -625,6 +625,7 @@ export const layer: Layer.Layer<
         readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
         readonly loadRunInterruptReason?: () => Effect.Effect<string | undefined, never>;
         readonly openRunOwnedSubagents?: OpenRunOwnedSubagentProjection;
+        readonly openRunOwnedSubagentsTerminal?: ProviderTerminalEvent;
         readonly interruptedProviderTurn?: OrchestrationV2ProviderTurn;
         readonly terminal: ProviderTerminalEvent;
         readonly completedAt?: DateTime.Utc;
@@ -692,14 +693,15 @@ export const layer: Layer.Layer<
           open.turnItems.size > 0 ||
           open.childTurnItems.size > 0 ||
           open.nodes.size > 0;
+        const subagentTerminal = input.openRunOwnedSubagentsTerminal ?? input.terminal;
         const cascadedSubagentEvents =
-          isRunOwnedSubagentTerminalStatus(input.terminal.status) &&
-          !childTurnsContinue(input.terminal) &&
+          isRunOwnedSubagentTerminalStatus(subagentTerminal.status) &&
+          !childTurnsContinue(subagentTerminal) &&
           hasOpenSubagentProjection
             ? yield* cascadeTerminalizeRunOwnedSubagents({
                 run: input.run,
                 open,
-                status: input.terminal.status,
+                status: subagentTerminal.status,
                 completedAt,
                 allocateEventId,
               })
@@ -1052,6 +1054,8 @@ export const layer: Layer.Layer<
           // Moving the thread to another workspace detaches its provider
           // session, which stops the turn that asked for the move. That ends
           // the turn as the handoff intended; only a Stop makes it an interrupt.
+          // Its native subagents died with the session, so they still settle as
+          // interrupted from the raw terminal.
           const settledTerminal: ProviderTerminalEvent =
             terminal.status === "interrupted" &&
             input.hasWorkspaceMoved !== undefined &&
@@ -1087,16 +1091,14 @@ export const layer: Layer.Layer<
               ? {}
               : { loadRunInterruptReason: input.loadRunInterruptReason }),
             openRunOwnedSubagents: openSubagents,
+            openRunOwnedSubagentsTerminal: terminal,
             terminal: settledTerminal,
             failureItemPersisted: settledTerminal.status === "failed",
             refreshAfterTurn,
           }).pipe(
             Effect.mapError((cause) => new RunExecutionIngestError({ runId: input.run.id, cause })),
           );
-          if (
-            isRunOwnedSubagentTerminalStatus(settledTerminal.status) &&
-            !childTurnsContinue(settledTerminal)
-          ) {
+          if (isRunOwnedSubagentTerminalStatus(terminal.status) && !childTurnsContinue(terminal)) {
             yield* Ref.set(openRunOwnedSubagents, emptyOpenRunOwnedSubagentProjection());
           }
           yield* Ref.set(rootRunFinalized, true);
