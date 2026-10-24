@@ -542,19 +542,21 @@ describe("guestCommandOutputFrames", () => {
       EMPTY_TERMINAL_OUTPUT,
     );
 
-  it("keeps a long log to small appends once its tail starts dropping lines", () => {
+  it("keeps a long log exact once its tail starts dropping lines", () => {
     const rewrite = guestCommandOutputFrames(roots);
     const line = (index: number) => `line ${String(index).padStart(6, "0")} ${"x".repeat(1009)}\n`;
     const frames = Array.from({ length: 200 }, (_, index) =>
       rewrite(frame(index === 0 ? "replace" : "append", line(index))),
     );
-    for (const next of frames.slice(1)) {
-      expect(next?.kind).toBe("append");
-      expect(next!.text.length).toBeLessThan(2 * 1024);
-    }
+    // Before the tail fills, growth is appended.
+    expect(frames.slice(1, 30).every((next) => next?.kind === "append")).toBe(true);
+    const owner = frames.reduce(
+      (state, _next, index) => appendTerminalOutput(state, line(index)),
+      EMPTY_TERMINAL_OUTPUT,
+    );
     const state = client(frames);
     expect(state.truncated).toBe(true);
-    expect(state.text.endsWith(line(199))).toBe(true);
+    expect(state.text).toBe(owner.text);
   });
 
   it("redraws only the lines a progress bar or a multi-line reporter changed", () => {
@@ -590,6 +592,24 @@ describe("guestCommandOutputFrames", () => {
     expect(client(frames).text).toBe(suffix);
     frames.push(rewrite(frame("replace", suffix, false)));
     expect(client(frames).text).toBe(suffix);
+  });
+
+  it("never keeps a line a screen erase removed from a full tail", () => {
+    const line = `${"x".repeat(1600)}\n`;
+    const rewrite = guestCommandOutputFrames(roots);
+    const frames = [
+      rewrite(frame("replace", `${line.repeat(90)}OLD\n${line.repeat(40)}`)),
+      rewrite(frame("append", "\u001b[2J", false)),
+    ];
+    expect(client(frames).text).not.toContain("OLD");
+    const split = guestCommandOutputFrames(roots);
+    const suffix = `${"x".repeat(1023)}\n`.repeat(40);
+    const cleared = [
+      split(frame("replace", `${"discard\n".repeat(8192)}OLD\n${suffix}`)),
+      split(frame("append", "\u001b[3")),
+      split(frame("append", `;1J\u001b[2J${suffix}`, false)),
+    ];
+    expect(client(cleared).text).toBe(suffix);
   });
 
   it("falls back to a replace when repeated lines make the overlap ambiguous", () => {

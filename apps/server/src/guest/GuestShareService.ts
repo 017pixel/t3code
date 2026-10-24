@@ -63,6 +63,7 @@ const INVITE_SIGNATURE_BYTES = 16;
 const SNAPSHOT_ROW_LIMIT = 600;
 const HOST_RECHECK_INTERVAL = Duration.seconds(30);
 const SNAPSHOT_USER_TURN_LIMIT = 20;
+const GUEST_COMMAND_OUTPUT_BYTES_PER_SECOND = 128 * 1024;
 // Streaming text and running tools update many times a second; the owner's stream batches the
 // same way (see ThreadLiveEventCoalescer).
 const LIVE_COALESCE_WINDOW = Duration.millis(50);
@@ -557,6 +558,16 @@ const make = Effect.gen(function* () {
     return commandOutputs.subscribe({ threadId: thread.id, itemId: item.id }).pipe(
       Stream.map(guestCommandOutputFrames(roots)),
       Stream.filter((frame) => frame !== null),
+      // A replace carries the whole tail. Waiting here slows the pull, and the owner's stream
+      // coalesces output meanwhile, so a busy command costs a guest about what it costs an owner
+      // whose client fell behind.
+      Stream.rechunk(1),
+      Stream.throttle({
+        cost: (frames) => frames.reduce((total, frame) => total + frame.text.length, 0),
+        units: GUEST_COMMAND_OUTPUT_BYTES_PER_SECOND,
+        duration: Duration.seconds(1),
+        strategy: "shape",
+      }),
       // A lost hub stream ends the output; the row reloads it when reopened.
       Stream.catchCause(() => Stream.empty),
       Stream.interruptWhen(Effect.race(untilExpiredOrHostLost(share), untilClosed)),

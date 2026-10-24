@@ -17,7 +17,6 @@ import {
   appendTerminalOutput,
   EMPTY_TERMINAL_OUTPUT,
   LIVE_LINES,
-  TERMINAL_OUTPUT_TAIL_CHARS,
   type TerminalOutputState,
 } from "@t3tools/shared/terminalOutput";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
@@ -435,61 +434,38 @@ const countLines = (text: string) => {
   return count;
 };
 
-// Matching a tail that dropped lines from the front: lines tried, and full comparisons allowed.
-// Past either, a replace is cheaper than the search.
-const MAX_TRIMMED_LINES = 4096;
-const MAX_TRIMMED_COMPARISONS = 8;
-const TRIMMED_PROBE_CHARS = 256;
-
 /**
- * The text that turns what the guest's client shows (`previous`) into `shown`, through the same
+ * The text that turns what the guest's client shows (`previous`) into `shown` through the same
  * terminal model, or null when only a replace can. Plain growth is appended as is. A change in
  * the last lines, such as a progress bar, moves the cursor up to the first changed line, erases
- * from there, and writes the rest. When the tail dropped lines from the front (`trimmed`), the
- * match may start further into `previous`: the client trims its own front, so the lines it keeps
- * above the match are the same older output. A cleared screen shares nothing and is replaced.
+ * from there, and writes the rest. Anything else, such as a tail that dropped lines from the front
+ * or a cleared screen, is a replace: guessing which lines the client may keep is how stale text
+ * survived an erase.
  */
-function guestOutputDelta(previous: string, shown: string, trimmed: boolean): string | null {
-  let start = 0;
-  let comparisons = 0;
-  for (let lines = 0; lines <= MAX_TRIMMED_LINES; lines += 1) {
-    const base = previous.slice(start);
-    const probe = base.slice(0, TRIMMED_PROBE_CHARS);
-    if (start === 0 || (base.length > 0 && shown.startsWith(probe))) {
-      if (start > 0 && (comparisons += 1) > MAX_TRIMMED_COMPARISONS) return null;
-      const common = commonPrefixLength(base, shown);
-      if (common === base.length && (start === 0 || common > 0)) return shown.slice(common);
-      const lineStart = base.lastIndexOf("\n", common - 1) + 1;
-      const below = common > 0 ? countLines(base.slice(lineStart)) : LIVE_LINES;
-      if (below < LIVE_LINES) {
-        return `${below > 0 ? `\u001b[${below}A` : ""}\r\u001b[J${shown.slice(lineStart)}`;
-      }
-    }
-    if (!trimmed) return null;
-    const next = previous.indexOf("\n", start);
-    if (next === -1 || next + 1 >= previous.length) return null;
-    start = next + 1;
-  }
-  return null;
+function guestOutputDelta(previous: string, shown: string): string | null {
+  const common = commonPrefixLength(previous, shown);
+  if (common === previous.length) return shown.slice(common);
+  if (common === 0) return null;
+  const lineStart = previous.lastIndexOf("\n", common - 1) + 1;
+  const below = countLines(previous.slice(lineStart));
+  return below < LIVE_LINES
+    ? `${below > 0 ? `\u001b[${below}A` : ""}\r\u001b[J${shown.slice(lineStart)}`
+    : null;
 }
 
 /**
  * Rewrites live command output frames for a guest. The server keeps the terminal state the
  * guest's client would build from the owner's frames, rewrites paths in what it displays, and
- * sends the smallest frame that brings the guest's client to the same text. Text at the end that
- * could still grow into a root waits for the next frame. A settled frame holds nothing back.
+ * sends the smallest frame that brings the guest's client to exactly that text. Text at the end
+ * that could still grow into a root waits for the next frame. A settled frame holds nothing back.
+ * A long log's tail drops lines on nearly every frame, which needs a replace; the guest's route
+ * caps the bytes per second, and the owner's stream coalesces while it waits.
  */
-// Erase in display, mode 3: the terminal drops its scrollback, so lines the guest's client kept
-// above the tail must go too. Only a replace does that.
-const CLEAR_SCROLLBACK = /\u001b\[0*3J/u;
-
 export function guestCommandOutputFrames(roots: GuestPathRoots) {
   let terminal = EMPTY_TERMINAL_OUTPUT;
+  // What the guest's client holds: every frame sent keeps it equal to a text the server showed.
   let sent: { readonly text: string; readonly truncated: boolean } | null = null;
   return (frame: OrchestrationV2CommandOutputFrame): OrchestrationV2CommandOutputFrame | null => {
-    // An escape split across frames waits in `pending`, so the check sees it whole.
-    const clearsScrollback =
-      frame.kind === "append" && CLEAR_SCROLLBACK.test(terminal.pending + frame.text);
     terminal = appendTerminalOutput(
       frame.kind === "replace" ? EMPTY_TERMINAL_OUTPUT : terminal,
       frame.text,
@@ -500,24 +476,15 @@ export function guestCommandOutputFrames(roots: GuestPathRoots) {
       roots,
     );
     const truncated = terminal.truncated || frame.truncated;
-    const previous = sent;
-    // The owner's client starts over on a replace from the server, and so does the guest's.
-    const delta =
-      previous === null || frame.kind === "replace" || clearsScrollback
-        ? null
-        : guestOutputDelta(
-            previous.text,
-            shown,
-            // Only a tail near its limit drops lines from the front.
-            truncated && plain.length >= TERMINAL_OUTPUT_TAIL_CHARS / 2,
-          );
+    const delta = sent === null ? null : guestOutputDelta(sent.text, shown);
     if (delta === null) {
       sent = { text: shown, truncated };
       return { kind: "replace", text: shown, truncated, running: frame.running };
     }
-    sent = { text: shown, truncated: previous!.truncated || truncated };
+    const unchanged = delta === "" && truncated === sent!.truncated;
+    sent = { text: shown, truncated: sent!.truncated || truncated };
     // Nothing new to show still reports output that scrolled out, or the command settling.
-    return delta === "" && frame.running && truncated === previous!.truncated
+    return unchanged && frame.running
       ? null
       : { kind: "append", text: delta, truncated, running: frame.running };
   };
