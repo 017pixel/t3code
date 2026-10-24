@@ -909,9 +909,6 @@ importers:
       effect:
         specifier: 4.0.5
         version: 4.0.5
-      ignore:
-        specifier: 7.0.5
-        version: 7.0.5
       jose:
         specifier: 'catalog:'
         version: 6.2.2

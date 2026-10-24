@@ -12,6 +12,8 @@ import type {
   MixedSearchResult,
   Result,
   SearchResult,
+  WatchEvent,
+  WatchUnsubscribe,
 } from "@ff-labs/fff-node";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -31,10 +33,10 @@ import type {
   ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
 import { isProjectFaviconPath } from "@t3tools/shared/projectFavicon";
-import createIgnore, { type Ignore } from "ignore";
 import { scoreSubsequenceMatch } from "@t3tools/shared/searchRanking";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { type IgnoreDecision, type IgnoreFile, parseIgnoreFile } from "./IgnorePatterns.ts";
 
 // fff-node stays external to the CLI bundle because it dlopens a native
 // library. A static `import` of an external package is a hard error inside a
@@ -370,37 +372,54 @@ const scanDirectory = Effect.fn("WorkspaceSearchIndex.scanDirectory")(function* 
 const isWithin = (entryPath: string, directory: string) =>
   directory === "" || entryPath.startsWith(`${directory}/`);
 
-/** fff reads `.ignore` files alongside git's rules, so links named by one are dropped too. */
-function isIgnoredByIgnoreFiles(
+/**
+ * fff reads `.ignore` files alongside git's rules, and like ripgrep the nearest one that matches
+ * decides, ahead of any `.gitignore`. `ignoreFiles` is ordered deepest folder first.
+ */
+function decideByIgnoreFiles(
   entry: ProjectEntry,
-  matchers: ReadonlyArray<{ readonly directory: string; readonly matcher: Ignore }>,
-): boolean {
-  return matchers.some(({ directory, matcher }) => {
-    if (!isWithin(entry.path, directory) || entry.path === directory) return false;
+  ignoreFiles: ReadonlyArray<{ readonly directory: string; readonly file: IgnoreFile }>,
+): IgnoreDecision | undefined {
+  for (const { directory, file } of ignoreFiles) {
+    if (!isWithin(entry.path, directory) || entry.path === directory) continue;
     const relative = directory ? entry.path.slice(directory.length + 1) : entry.path;
-    return matcher.ignores(entry.kind === "directory" ? `${relative}/` : relative);
-  });
+    const decision = file.decide(relative, entry.kind === "directory");
+    if (decision) return decision;
+  }
+  return undefined;
 }
 
 /** Places each symlink before the first index result that matches the query less closely. */
 function mergeSymlinkMatches(
   indexed: ProjectSearchEntriesResult,
+  allSymlinks: ReadonlyArray<ProjectEntry>,
   symlinks: ReadonlyArray<ProjectEntry>,
   query: string,
   limit: number,
 ): ProjectSearchEntriesResult {
+  if (allSymlinks.length === 0) return indexed;
+  // fff's watcher indexes links created after its scan, under a kind of its own choosing, so a
+  // path it already returned takes the link's kind (or drops out of a kind-filtered search).
+  const allSymlinkPaths = new Set(allSymlinks.map((entry) => entry.path));
+  const symlinkByPath = new Map(symlinks.map((entry) => [entry.path, entry]));
   const score = (entry: ProjectEntry) =>
     scoreSubsequenceMatch(entry.path.toLowerCase(), query) ?? Number.POSITIVE_INFINITY;
+  const indexedPaths = new Set(indexed.entries.map((entry) => entry.path));
   const pending = symlinks
     .flatMap((entry) => {
       const entryScore = score(entry);
-      return Number.isFinite(entryScore) ? [{ entry, score: entryScore }] : [];
+      return Number.isFinite(entryScore) && !indexedPaths.has(entry.path)
+        ? [{ entry, score: entryScore }]
+        : [];
     })
     .toSorted((left, right) => left.score - right.score);
-  if (pending.length === 0) return indexed;
   const entries: ProjectEntry[] = [];
   let nextPending = 0;
-  for (const entry of indexed.entries) {
+  for (const indexedEntry of indexed.entries) {
+    const entry = allSymlinkPaths.has(indexedEntry.path)
+      ? symlinkByPath.get(indexedEntry.path)
+      : indexedEntry;
+    if (!entry) continue;
     const entryScore = score(entry);
     while (nextPending < pending.length && pending[nextPending]!.score < entryScore) {
       entries.push(pending[nextPending++]!.entry);
@@ -536,7 +555,8 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
   const listIndexedDirectories = Effect.fn("WorkspaceSearchIndex.listIndexedDirectories")(
     function* () {
       const directories: string[] = [];
-      for (let pageIndex = 0; ; pageIndex += 1) {
+      // fff's pageIndex is an offset into the results, not a page number.
+      for (let pageIndex = 0; ; pageIndex += WORKSPACE_INDEX_PAGE_SIZE) {
         const result = yield* Effect.try(() =>
           finder.directorySearch("", { pageIndex, pageSize: WORKSPACE_INDEX_PAGE_SIZE }),
         ).pipe(Effect.orElseSucceed(() => undefined));
@@ -610,8 +630,13 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
     const candidates = scanned.flatMap((directory) => directory.links);
     if (candidates.length === 0) return { entries: candidates, indexComplete };
 
-    const ignoreMatchers = scanned.flatMap(({ directory, ignoreFile }) =>
-      ignoreFile === undefined ? [] : [{ directory, matcher: createIgnore().add(ignoreFile) }],
+    const ignoreFiles = scanned
+      .flatMap(({ directory, ignoreFile }) =>
+        ignoreFile === undefined ? [] : [{ directory, file: parseIgnoreFile(ignoreFile) }],
+      )
+      .toSorted((left, right) => right.directory.length - left.directory.length);
+    const decisions = new Map(
+      candidates.map((entry) => [entry.path, decideByIgnoreFiles(entry, ignoreFiles)]),
     );
     const repositories = [
       "",
@@ -620,7 +645,7 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
       ),
     ].toSorted((left, right) => right.length - left.length);
     const entriesByRepository = Map.groupBy(
-      candidates.filter((entry) => !isIgnoredByIgnoreFiles(entry, ignoreMatchers)),
+      candidates.filter((entry) => decisions.get(entry.path) === undefined),
       (entry) =>
         repositories.find(
           (repository) => isWithin(entry.path, repository) && entry.path !== repository,
@@ -634,32 +659,59 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
       )).flat(),
     );
     return {
-      entries: [...entriesByRepository.values()].flat().filter((entry) => !ignored.has(entry.path)),
+      entries: candidates.filter((entry) =>
+        decisions.get(entry.path) === undefined
+          ? !ignored.has(entry.path)
+          : decisions.get(entry.path) === "included",
+      ),
       indexComplete,
     };
   });
 
   // Concurrent callers share one scan, and it stops once all of them are interrupted. The
-  // watcher reports link changes too, so any batch drops the scan; a scan still in flight then
-  // only answers the callers already waiting on it.
-  let symlinkScan: Effect.Effect<Effect.Success<ReturnType<typeof scanSymlinkEntries>>> | undefined;
+  // watcher reports link changes too, so a batch that could move a link or an ignore rule drops
+  // the scan; a scan still in flight then only answers the callers already waiting on it.
+  let symlinkScan:
+    | {
+        readonly scan: Effect.Effect<Effect.Success<ReturnType<typeof scanSymlinkEntries>>>;
+        readonly watched: boolean;
+      }
+    | undefined;
   const invalidateSymlinkScan = () => {
     symlinkScan = undefined;
   };
-  const watching = yield* Effect.acquireRelease(
-    Effect.try(() => finder.watch(invalidateSymlinkScan)).pipe(
-      Effect.map((result) => (result.ok ? result.value : undefined)),
-      Effect.orElseSucceed(() => undefined),
-    ),
-    (unwatch) => Effect.sync(() => unwatch?.()),
-  );
+  const onWatchBatch = (events: ReadonlyArray<WatchEvent>) => {
+    const editsOnly = events.every(
+      (event) => event.kind === "modified" && !/(^|[\\/])\.(git)?ignore$/.test(event.path),
+    );
+    if (!editsOnly) invalidateSymlinkScan();
+  };
+  // fff refuses subscriptions until its watcher is up, which can trail the initial scan, so
+  // each read retries until one is in place.
+  let unwatch: WatchUnsubscribe | undefined;
+  yield* Effect.addFinalizer(() => Effect.sync(() => unwatch?.()));
+  const ensureWatching = () => {
+    if (unwatch) return true;
+    try {
+      const result = finder.watch(onWatchBatch);
+      if (result.ok) unwatch = result.value;
+    } catch {
+      // Not ready yet; the next read tries again.
+    }
+    return unwatch !== undefined;
+  };
   const listSymlinkEntries = Effect.fn("WorkspaceSearchIndex.listSymlinkEntries")(function* () {
-    const scan =
-      symlinkScan ?? (yield* Effect.cachedWithTTL(scanSymlinkEntries(), Duration.infinity));
-    symlinkScan = scan;
-    const result = yield* scan;
+    // Subscribing before the scan starts means no change during it goes unseen.
+    const current = symlinkScan ?? {
+      watched: ensureWatching(),
+      scan: yield* Effect.cachedWithTTL(scanSymlinkEntries(), Duration.infinity),
+    };
+    symlinkScan = current;
+    const result = yield* current.scan;
     // Without a watcher, or before fff has seen every folder, the result cannot be kept.
-    if ((!watching || !result.indexComplete) && symlinkScan === scan) invalidateSymlinkScan();
+    if ((!current.watched || !result.indexComplete) && symlinkScan === current) {
+      invalidateSymlinkScan();
+    }
     return result.entries;
   });
 
@@ -719,7 +771,8 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
   )(function* (query, limit, kind, imageOnly) {
     const pageSize = imageOnly ? WORKSPACE_INDEX_PAGE_SIZE : Math.max(1, limit + 1);
     const incompleteBeforeQuery = hasIncompleteInitialScan();
-    const symlinks = (yield* listSymlinkEntries()).filter((entry) =>
+    const allSymlinks = yield* listSymlinkEntries();
+    const symlinks = allSymlinks.filter((entry) =>
       imageOnly
         ? entry.kind === "file" && isProjectFaviconPath(entry.path)
         : kind === undefined || entry.kind === kind,
@@ -731,6 +784,7 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
       const mapped = mapFileSearchResult(result, limit, imageOnly);
       return mergeSymlinkMatches(
         { ...mapped, truncated: incompleteBeforeQuery || mapped.truncated },
+        allSymlinks,
         symlinks,
         query,
         limit,
@@ -743,6 +797,7 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
       const mapped = mapDirectorySearchResult(result, limit);
       return mergeSymlinkMatches(
         { ...mapped, truncated: incompleteBeforeQuery || mapped.truncated },
+        allSymlinks,
         symlinks,
         query,
         limit,
@@ -754,6 +809,7 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
     const mapped = mapMixedSearchResult(result, limit);
     return mergeSymlinkMatches(
       { ...mapped, truncated: incompleteBeforeQuery || mapped.truncated },
+      allSymlinks,
       symlinks,
       query,
       limit,
