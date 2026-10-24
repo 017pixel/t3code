@@ -14,9 +14,9 @@ function createDirectories() {
     entries: new Map<string, ReadonlyArray<ProjectEntry>>(),
     errors: new Map<string, string>(),
     completeDirectories: new Set<string>(),
-    searchAtValidation: new Map<string, object | null>(),
+    listingCompletedAt: new Map<string, number>(),
     discoveries: new Map<string, ProjectEntry>(),
-    rootListing: null as object | null,
+    rootListing: null as { readonly timestamp: number } | null,
     validatedDirectories: new Set<string>(),
     loading: new Set<string>(),
     expandedPaths: new Set<string>(),
@@ -65,8 +65,8 @@ function boundDirectories(current: ReturnType<typeof createDirectories>, preserv
     validatedDirectories: new Set(
       [...current.validatedDirectories].filter((path) => !isEvicted(path)),
     ),
-    searchAtValidation: new Map(
-      [...current.searchAtValidation].filter(([path]) => !isEvicted(path)),
+    listingCompletedAt: new Map(
+      [...current.listingCompletedAt].filter(([path]) => !isEvicted(path)),
     ),
   };
 }
@@ -122,10 +122,6 @@ export function useFileTreeEntries(input: {
         })
       : null,
   );
-  const latestSearchResult = useRef(search.successResult);
-  useLayoutEffect(() => {
-    latestSearchResult.current = search.successResult;
-  }, [search.successResult]);
   const workspaceKey = JSON.stringify([environmentId, cwd]);
   const [cache, setCache] = useState(() => ({
     key: workspaceKey,
@@ -261,9 +257,9 @@ export function useFileTreeEntries(input: {
                   ),
                 ),
             validatedDirectories,
-            searchAtValidation: new Map(current.searchAtValidation).set(
+            listingCompletedAt: new Map(current.listingCompletedAt).set(
               directoryPath,
-              latestSearchResult.current,
+              result.timestamp,
             ),
           };
         }
@@ -335,11 +331,12 @@ export function useFileTreeEntries(input: {
           index === 0 ? !rootData.truncated : directories.completeDirectories.has(parent);
         const entry = listing?.find((item) => item.path === child);
         if (complete && listing && !entry) {
-          const validatedSearch =
+          const listingCompletedAt =
             index === 0 && directories.rootListing !== rootListing
-              ? searchResult
-              : directories.searchAtValidation.get(parent);
-          // Search can discover paths added since a cached listing. A later listing wins.
+              ? rootListing?.timestamp
+              : directories.listingCompletedAt.get(parent);
+          // Cached queries keep their completion time across query switches.
+          // Equal-millisecond responses cannot prove a path postdates the listing.
           const retained =
             !(index === 0 && directories.rootListing !== rootListing) &&
             [...directories.discoveries.keys()].some(
@@ -350,7 +347,7 @@ export function useFileTreeEntries(input: {
             (searching &&
               query === debouncedQuery &&
               searchResult !== null &&
-              searchResult !== validatedSearch &&
+              searchResult.timestamp > (listingCompletedAt ?? -Infinity) &&
               searchData?.entries.some(
                 (item) => item.path === child || item.path.startsWith(`${child}/`),
               ));
@@ -409,13 +406,13 @@ export function useFileTreeEntries(input: {
         ...current,
         rootListing,
         discoveries,
-        searchAtValidation: new Map(
-          [...current.searchAtValidation].filter(([path]) => path === "" || entries.has(path)),
+        listingCompletedAt: new Map(
+          [...current.listingCompletedAt].filter(([path]) => path === "" || entries.has(path)),
         ).set(
           "",
           current.rootListing === rootListing
-            ? (current.searchAtValidation.get("") ?? null)
-            : searchResult,
+            ? (current.listingCompletedAt.get("") ?? -Infinity)
+            : (rootListing?.timestamp ?? -Infinity),
         ),
         entries,
         errors,

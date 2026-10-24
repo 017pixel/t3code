@@ -27,7 +27,11 @@ type Query = {
   };
 };
 type Result =
-  | { readonly _tag: "Success"; readonly value: ProjectListEntriesResult }
+  | {
+      readonly _tag: "Success";
+      readonly value: ProjectListEntriesResult;
+      readonly timestamp: number;
+    }
   | { readonly _tag: "Failure"; readonly cause: Cause.Cause<Error> };
 
 const require = NodeModule.createRequire(import.meta.url);
@@ -65,14 +69,19 @@ function setup(withBrowser = false) {
     readonly signal?: AbortSignal;
     readonly resolve: (result: Result) => void;
   }[] = [];
+  let responseTimestamp = 0;
   const rootQuery = {
+    success: null as AsyncResult.Success<ProjectListEntriesResult, Error> | null,
     data: { entries: rootEntries, truncated: false },
     error: null as string | null,
     failure: null as ProjectListEntriesError | null,
     isPending: false,
     refresh: vi.fn(),
   };
-  const searchQuery = { ...rootQuery, data: { entries: [] as ProjectEntry[], truncated: false } };
+  const searchQuery = {
+    ...rootQuery,
+    data: { entries: [] as ReadonlyArray<ProjectEntry>, truncated: false },
+  };
   const modules: Record<string, unknown> = {
     "@t3tools/contracts": { ProjectListEntriesError },
     react: React,
@@ -106,6 +115,7 @@ function setup(withBrowser = false) {
     "@effect/atom-react": {
       useAtomValue: (atom: Query) => {
         const result = atom.input?.query === undefined ? rootQuery : searchQuery;
+        if (result.success) return result.success;
         const cached = results.get(result);
         if (
           cached &&
@@ -119,7 +129,10 @@ function setup(withBrowser = false) {
           ? AsyncResult.fail(result.failure ?? new Error(result.error), {
               previousSuccess: Option.some(AsyncResult.success(result.data)),
             })
-          : AsyncResult.success(result.data, { waiting: result.isPending, timestamp: 1 });
+          : AsyncResult.success(result.data, {
+              waiting: result.isPending,
+              timestamp: ++responseTimestamp,
+            });
         results.set(result, {
           data: result.data,
           error: result.error,
@@ -204,6 +217,14 @@ function setup(withBrowser = false) {
     requests,
     rootQuery,
     searchQuery,
+    get searchSuccess() {
+      const result = searchQuery.success ?? results.get(searchQuery)?.result;
+      if (result?._tag !== "Success") throw new Error("Search has not succeeded");
+      return result;
+    },
+    get responseTimestamp() {
+      return responseTimestamp;
+    },
     controlSelection(path: string) {
       controlledSelection = path;
     },
@@ -232,7 +253,11 @@ function setup(withBrowser = false) {
     async succeed(index: number, entries: ProjectEntry[] = []) {
       renders = 0;
       await act(async () => {
-        requests[index]!.resolve({ _tag: "Success", value: { entries, truncated: false } });
+        requests[index]!.resolve({
+          _tag: "Success",
+          value: { entries, truncated: false },
+          timestamp: ++responseTimestamp,
+        });
       });
     },
     async fail(index: number, message = "Directory unavailable") {
@@ -497,6 +522,7 @@ describe("file tree workspace state", () => {
       ]);
       expect([...screen.current.loadedDirectories]).toEqual(["src", path]);
 
+      const cachedSearch = screen.searchSuccess;
       for (const searchQuery of ["", "other"]) {
         screen.searchQuery.data = { entries: [], truncated: false };
         screen.render({ searchQuery });
@@ -542,6 +568,33 @@ describe("file tree workspace state", () => {
         expect(screen.current.selectedPath).toBeNull();
         expect([...screen.current.expandedPaths]).toEqual(path.includes("/") ? ["src"] : []);
         expect([...screen.current.loadedDirectories]).toEqual(["src"]);
+
+        // Cover an older cache and the timestamp's ambiguous same-millisecond boundary.
+        for (const success of [
+          cachedSearch,
+          AsyncResult.success(cachedSearch.value, { timestamp: screen.responseTimestamp }),
+        ]) {
+          screen.searchQuery.data = { entries: [], truncated: false };
+          screen.render({ searchQuery: "other" });
+          screen.searchQuery.success = success;
+          screen.searchQuery.data = success.value;
+          screen.render({ searchQuery: "new" });
+          screen.updateView(expanded, `${path}/file.ts`);
+          const requestCount = screen.requests.length;
+          screen.load(path);
+          expect(screen.requests).toHaveLength(requestCount + 1);
+          await screen.fail(requestCount);
+          screen.searchQuery.success = null;
+          screen.render();
+          expect(screen.current.selectedPath).toBeNull();
+          expect([...screen.current.expandedPaths]).toEqual(path.includes("/") ? ["src"] : []);
+          expect([...screen.current.loadedDirectories]).toEqual(["src"]);
+          expect(
+            screen.current.entries.some(
+              (entry) => entry.path === path || entry.path.startsWith(`${path}/`),
+            ),
+          ).toBe(false);
+        }
 
         const cachedSearchData = screen.searchQuery.data;
         screen.searchQuery.isPending = true;
