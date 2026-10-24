@@ -50,7 +50,6 @@ import {
 import { scopedProjectKey } from "../../lib/scopedEntities";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { projectEnvironment } from "../../state/projects";
-import { serverEnvironment } from "../../state/server";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
 import {
@@ -96,8 +95,10 @@ import {
 import {
   setPendingConnectionError,
   useRemoteConnectionStatus,
+  useRemoteEnvironmentRuntime,
   useSavedRemoteConnections,
 } from "../../state/use-remote-environment-registry";
+import { useProjectModelsRefresh } from "./use-project-models-refresh";
 import { availableScratchWorkspaceRoot } from "@t3tools/client-runtime/operations/projects";
 import {
   isAtomCommandInterrupted,
@@ -609,30 +610,14 @@ export function NewTaskFlowProvider(
   const selectedModelKey = selectedModel
     ? `${selectedModel.instanceId}:${selectedModel.model}`
     : null;
-  // The composer scans its project once a thread exists; a new task needs the
-  // project's catalog before that. The server reuses scans inside its TTL.
-  const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
-    reportFailure: false,
-  });
-  const projectModelsRequestKeyRef = useRef<string | null>(null);
-  const projectModelsInstanceId = selectedModel?.instanceId ?? null;
   const projectEnvironmentId = selectedProject?.environmentId ?? null;
-  useEffect(() => {
-    if (!projectEnvironmentId || !selectedProjectCwd || !projectModelsInstanceId) return;
-    const key = JSON.stringify([projectEnvironmentId, selectedProjectCwd]);
-    if (projectModelsRequestKeyRef.current === key) return;
-    projectModelsRequestKeyRef.current = key;
-    void refreshProviders({
-      environmentId: projectEnvironmentId,
-      input: { instanceId: projectModelsInstanceId, cwd: selectedProjectCwd },
-    });
-  }, [
-    projectEnvironmentId,
-    projectModelsInstanceId,
-    projectModelsRequestKeyRef,
-    refreshProviders,
-    selectedProjectCwd,
-  ]);
+  const projectEnvironmentRuntime = useRemoteEnvironmentRuntime(projectEnvironmentId);
+  useProjectModelsRefresh({
+    environmentId: projectEnvironmentId,
+    cwd: selectedProjectCwd,
+    instanceId: selectedModel?.instanceId ?? null,
+    connected: projectEnvironmentRuntime?.connectionState === "connected",
+  });
 
   const selectedModelOption =
     modelOptions.find(

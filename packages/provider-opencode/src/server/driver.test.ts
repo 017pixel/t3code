@@ -242,6 +242,7 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
   const workspaceModelServer = (input: {
     readonly project: string;
     readonly failProject?: boolean;
+    readonly hangProject?: { current: boolean };
   }) =>
     Effect.sync(() => {
       const model = (providerID: string, id: string, name: string) => ({
@@ -287,6 +288,7 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
           if (directory === input.project && input.failProject) {
             return json({ error: "unreadable opencode.jsonc" }, 500);
           }
+          if (directory === input.project && input.hangProject?.current) return Effect.never;
           return json({
             location: { directory },
             data: directory === input.project ? [globalModel, projectModel] : [globalModel],
@@ -367,6 +369,26 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
       yield* TestClock.adjust("30 seconds");
       yield* settled(instance.modelsForCwd!(project));
       assert.ok(server.projectRequests.length > attempts);
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("retries a project catalog that timed out instead of caching it as empty", () =>
+    Effect.gen(function* () {
+      const project = "/work/slow-config";
+      const hangProject = { current: true };
+      const server = yield* workspaceModelServer({ project, hangProject });
+      const instance = yield* readyInstance(server.client);
+
+      const timedOut = yield* Effect.forkChild(instance.modelsForCwd!(project));
+      yield* TestClock.adjust("5 seconds");
+      assert.strictEqual(yield* Fiber.join(timedOut), undefined);
+
+      hangProject.current = false;
+      yield* TestClock.adjust("30 seconds");
+      assert.deepStrictEqual(
+        (yield* settled(instance.modelsForCwd!(project)))?.map((entry) => entry.slug),
+        ["opencode/big-pickle", "uni/medium-gpt"],
+      );
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 

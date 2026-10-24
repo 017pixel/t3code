@@ -520,8 +520,13 @@ export const OpenCodeDriver: ProviderDriver<
                     ),
                   ).pipe(
                     Effect.flatten,
-                    Effect.map((catalog) => openCode2ProviderModels(effectiveConfig, catalog)),
-                    Effect.option,
+                    // The loader times out to an empty catalog; that is unreadable,
+                    // not empty, even once custom models are added to it.
+                    Effect.map((catalog) =>
+                      catalog.length === 0
+                        ? Option.none()
+                        : Option.some(openCode2ProviderModels(effectiveConfig, catalog)),
+                    ),
                   ),
             ),
             Effect.orElseSucceed(() => Option.none<ReadonlyArray<ServerProviderModel>>()),
