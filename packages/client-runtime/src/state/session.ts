@@ -1,4 +1,5 @@
 import type { AuthSessionState, EnvironmentId, ServerConfig } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -13,6 +14,7 @@ import type { PreparedConnection } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as ManagedRelay from "../relay/managedRelay.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
+import { RemoteEnvironmentAuthTimeoutError } from "../rpc/http.ts";
 import { executeAuthenticatedEnvironmentHttpRequest } from "./environmentHttpAuth.ts";
 import { followStreamInEnvironment } from "./environmentStreams.ts";
 
@@ -33,6 +35,22 @@ function initialConfigOption<E>(
       ),
     ),
   );
+}
+
+/**
+ * The session whose grants the client may act on. A recheck that timed out got
+ * no answer, so the environment's last answer still stands; any other failure,
+ * including a rejected credential, revokes it. The server stays authoritative.
+ */
+export function currentSessionGrant(
+  result: AsyncResult.AsyncResult<AuthSessionState, unknown>,
+): AuthSessionState | null {
+  const timedOut =
+    result._tag === "Failure" &&
+    Option.getOrNull(Cause.findErrorOption(result.cause)) instanceof
+      RemoteEnvironmentAuthTimeoutError;
+  if (result._tag === "Failure" && !timedOut) return null;
+  return Option.getOrNull(AsyncResult.value(result));
 }
 
 const DEFAULT_SESSION_STATE_TIMEOUT_MS = 6_000;

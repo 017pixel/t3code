@@ -28,7 +28,8 @@ import { RemoteEnvironmentAuthFetchError, RemoteEnvironmentAuthTimeoutError } fr
 import { createCommandPermissions } from "./commandPermissions.ts";
 import { createEnvironmentRpcCommand } from "./runtime.ts";
 
-vi.mock("./session.ts", () => ({
+vi.mock("./session.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./session.ts")>()),
   createEnvironmentSessionAtoms: () => ({ sessionStateAtom: sessions }),
 }));
 const sessions = Atom.family((_id: EnvironmentId) =>
