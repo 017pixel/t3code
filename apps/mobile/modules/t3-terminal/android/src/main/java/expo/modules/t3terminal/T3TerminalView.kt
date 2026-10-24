@@ -75,12 +75,16 @@ class T3TerminalView(context: Context, appContext: AppContext) : ExpoView(contex
       recreateTerminal()
     }
 
+  // Expo sets a batch's props in no fixed order, so the buffer waits for the whole batch:
+  // output fed before the same batch's sharedGrid lands would be drawn, and clipped, at the
+  // previous grid.
   var initialBuffer: String = ""
     set(value) {
       if (field == value) return
       field = value
-      feedPendingBuffer()
+      hasPendingBuffer = true
     }
+  private var hasPendingBuffer = false
 
   var fontSize: Float = 10f
     set(value) {
@@ -369,7 +373,7 @@ class T3TerminalView(context: Context, appContext: AppContext) : ExpoView(contex
       )
     }
     emitResponse(response)
-    feedPendingBuffer()
+    if (!hasPendingBuffer) feedPendingBuffer()
     renderSnapshot()
   }
 
@@ -393,7 +397,7 @@ class T3TerminalView(context: Context, appContext: AppContext) : ExpoView(contex
     if (terminalHandle == 0L) return
     destroyTerminal()
     createTerminal()
-    feedPendingBuffer()
+    if (!hasPendingBuffer) feedPendingBuffer()
     renderSnapshot()
   }
 
@@ -403,6 +407,12 @@ class T3TerminalView(context: Context, appContext: AppContext) : ExpoView(contex
     terminalHandle = 0L
     fedBuffer = ""
     terminalCanvas.resetSelectionState()
+  }
+
+  fun applyPendingBuffer() {
+    if (!hasPendingBuffer) return
+    hasPendingBuffer = false
+    feedPendingBuffer()
   }
 
   private fun feedPendingBuffer() {

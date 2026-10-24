@@ -67,6 +67,10 @@ class T3TerminalModule : Module() {
       }
       Events("onInput", "onResize", "onCapture")
 
+      OnViewDidUpdateProps { view: T3TerminalView ->
+        view.applyPendingBuffer()
+      }
+
       OnViewDestroys { view: T3TerminalView ->
         view.cleanup()
       }
