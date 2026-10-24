@@ -87,7 +87,11 @@ const OVERRIDABLE_CERTIFICATE_ERRORS: ReadonlyMap<string, string> = new Map([
   ["net::ERR_CERT_DATE_INVALID", "This certificate has expired or is not valid yet."],
 ]);
 
-/** A `wss:` socket reaches the same TLS endpoint as the page, so it shares the `https:` origin. */
+/**
+ * A `wss:` socket reaches the same TLS endpoint as the page, so it shares the
+ * `https:` origin. It must: a socket is never a main frame, so it could not be
+ * approved on its own, and a page's dev-server socket would stay blocked.
+ */
 const certificateOrigin = (rawUrl: string): string | null => {
   try {
     const url = new URL(rawUrl);
@@ -127,6 +131,8 @@ interface CertificateTrust {
   /** `null` for an incognito Session, whose approvals end with the process. */
   readonly file: string | null;
   readonly approvals: Map<string, CertificateApproval>;
+  /** Bumped by each revocation, so an answer to an older prompt cannot restore trust. */
+  revocations: number;
 }
 
 export class BrowserSessionPartitionDerivationError extends Schema.TaggedError<BrowserSessionPartitionDerivationError>()(
@@ -209,6 +215,10 @@ export class BrowserSession extends Context.Service<
     /** Omit `partitions` to clear every known partition. */
     readonly clearCookies: (
       partitions?: ReadonlyArray<string>,
+    ) => Effect.Effect<void, BrowserSessionStorageClearError>;
+    /** For cookies cleared outside `clearCookies`, such as over a tab's CDP session. */
+    readonly cookiesCleared: (
+      browserSession: Session,
     ) => Effect.Effect<void, BrowserSessionStorageClearError>;
     readonly clearCache: (
       partitions?: ReadonlyArray<string>,
@@ -335,24 +345,52 @@ export const make = Effect.gen(function* BrowserSessionMake() {
         approvals: new Map(
           approvals.map((approval) => [certificateApprovalKey(approval), approval]),
         ),
+        revocations: 0,
       })),
     );
   };
-  /** Rewrites the file from memory under one lock, so a slower write cannot restore stale data. */
-  const saveCertificateApprovals = (trust: CertificateTrust) =>
+  const writeApprovalsFile = (file: string, approvals: ReadonlyMap<string, CertificateApproval>) =>
+    approvals.size === 0
+      ? fileSystem.remove(file, { force: true })
+      : Effect.gen(function* () {
+          yield* fileSystem.makeDirectory(path.dirname(file), { recursive: true });
+          yield* fileSystem.writeFileString(
+            file,
+            yield* encodeCertificateApprovals([...approvals.values()]),
+          );
+        });
+  /**
+   * Saved before it is trusted, so a failed write cannot leave an approval that
+   * silently ends at restart. Writes share one lock, so a slower write cannot
+   * restore stale data.
+   */
+  const rememberCertificate = (
+    trust: CertificateTrust,
+    key: string,
+    approval: CertificateApproval,
+    revocations: number,
+  ) =>
     writeCertificateApprovals.withPermits(1)(
       Effect.gen(function* () {
-        if (trust.file === null) return;
-        if (trust.approvals.size === 0) {
-          yield* fileSystem.remove(trust.file, { force: true });
-          return;
+        if (trust.revocations !== revocations) return false;
+        if (trust.file !== null) {
+          yield* writeApprovalsFile(trust.file, new Map(trust.approvals).set(key, approval));
+          // A revocation during the write queues its own rewrite behind this one.
+          if (trust.revocations !== revocations) return false;
         }
-        yield* fileSystem.makeDirectory(path.dirname(trust.file), { recursive: true });
-        yield* fileSystem.writeFileString(
-          trust.file,
-          yield* encodeCertificateApprovals([...trust.approvals.values()]),
-        );
+        trust.approvals.set(key, approval);
+        return true;
       }),
+    );
+  /**
+   * Rewrites the file from memory. Clearing cookies runs this even when memory
+   * is already empty, so retrying after a failed removal still deletes the file.
+   */
+  const saveCertificateApprovals = (trust: CertificateTrust) =>
+    writeCertificateApprovals.withPermits(1)(
+      Effect.suspend(() =>
+        trust.file === null ? Effect.void : writeApprovalsFile(trust.file, trust.approvals),
+      ),
     );
 
   // One prompt at a time; tabs that hit the same certificate wait on it.
@@ -386,6 +424,7 @@ export const make = Effect.gen(function* BrowserSessionMake() {
         for (const waiter of prompt.callbacks) waiter(trusted);
       });
     const host = new URL(approval.origin).host;
+    const revocations = trust.revocations;
     runFork(
       electronDialog
         .showMessageBox(
@@ -411,18 +450,22 @@ export const make = Effect.gen(function* BrowserSessionMake() {
           platform === "win32" ? undefined : previewHostWindow(contents),
         )
         .pipe(
-          Effect.map(({ response }) => response === 0),
-          Effect.tap((trusted) =>
-            trusted
-              ? Effect.suspend(() => {
-                  trust.approvals.set(key, approval);
-                  return saveCertificateApprovals(trust);
-                }).pipe(
+          Effect.flatMap(({ response }) =>
+            response === 0
+              ? rememberCertificate(trust, key, approval, revocations).pipe(
                   Effect.catch((cause) =>
-                    Effect.logWarning("Failed to save a certificate approval.", { cause }),
+                    Effect.logWarning("Failed to save a certificate approval.", { cause }).pipe(
+                      Effect.andThen(
+                        electronDialog.showErrorBox(
+                          `Could not trust the certificate for ${host}`,
+                          "T3 Code could not save this approval, so the page stays blocked. Check that the disk is not full and its data folder is writable, then try again.",
+                        ),
+                      ),
+                      Effect.as(false),
+                    ),
                   ),
                 )
-              : Effect.void,
+              : Effect.succeed(false),
           ),
           Effect.orElseSucceed(() => false),
           Effect.flatMap(settle),
@@ -461,6 +504,28 @@ export const make = Effect.gen(function* BrowserSessionMake() {
       confirmCertificate(contents, trust, approval, certificate, reason, callback);
     },
   );
+
+  /** Clearing a profile's cookies also forgets the certificates its user trusted. */
+  const revokeCertificates = Effect.fn("BrowserSession.revokeCertificates")(function* (
+    partition: string,
+    browserSession: Session,
+  ) {
+    const trust = certificateTrust.get(browserSession);
+    if (trust === undefined) return;
+    const hadApprovals = trust.approvals.size > 0;
+    trust.revocations += 1;
+    trust.approvals.clear();
+    // An open connection already passed its certificate check.
+    if (hadApprovals) {
+      yield* Effect.tryPromise({
+        try: () => browserSession.closeAllConnections(),
+        catch: (cause) => new BrowserSessionStorageClearError({ partition, cause }),
+      });
+    }
+    yield* saveCertificateApprovals(trust).pipe(
+      Effect.mapError((cause) => new BrowserSessionStorageClearError({ partition, cause })),
+    );
+  });
 
   const sessionsRef = yield* SynchronizedRef.make<ReadonlyMap<string, Session>>(new Map());
 
@@ -561,20 +626,16 @@ export const make = Effect.gen(function* BrowserSessionMake() {
                   cause,
                 }),
             });
-            const trust = certificateTrust.get(browserSession);
-            if (trust === undefined || trust.approvals.size === 0) return;
-            trust.approvals.clear();
-            yield* saveCertificateApprovals(trust).pipe(
-              Effect.mapError((cause) => new BrowserSessionStorageClearError({ partition, cause })),
-            );
-            // An open connection already passed its certificate check.
-            yield* Effect.tryPromise({
-              try: () => browserSession.closeAllConnections(),
-              catch: (cause) => new BrowserSessionStorageClearError({ partition, cause }),
-            });
+            yield* revokeCertificates(partition, browserSession);
           }),
         { concurrency: "unbounded", discard: true },
       );
+    }),
+    cookiesCleared: Effect.fn("BrowserSession.cookiesCleared")(function* (browserSession) {
+      const sessions = yield* SynchronizedRef.get(sessionsRef);
+      for (const [partition, candidate] of sessions) {
+        if (candidate === browserSession) yield* revokeCertificates(partition, browserSession);
+      }
     }),
     clearCache: Effect.fn("BrowserSession.clearCache")(function* (partitions?) {
       const sessions = yield* SynchronizedRef.get(sessionsRef);

@@ -52,17 +52,24 @@ import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as BrowserSession from "./BrowserSession.ts";
 
-const { showMessageBox } = vi.hoisted(() => ({
+const { showMessageBox, showErrorBox } = vi.hoisted(() => ({
   showMessageBox: vi.fn<
-    (options: Electron.MessageBoxOptions, owner?: Electron.BrowserWindow) => number
+    (
+      options: Electron.MessageBoxOptions,
+      owner?: Electron.BrowserWindow,
+    ) => number | Promise<number>
   >(() => 1),
+  showErrorBox: vi.fn<(title: string, content: string) => void>(),
 }));
 const layerDialog = Layer.succeed(ElectronDialog.ElectronDialog, {
   pickFolder: () => Effect.die("unused"),
   pickFiles: () => Effect.die("unused"),
   showMessageBox: (options, owner) =>
-    Effect.sync(() => ({ response: showMessageBox(options, owner), checkboxChecked: false })),
-  showErrorBox: () => Effect.void,
+    Effect.promise(async () => ({
+      response: await showMessageBox(options, owner),
+      checkboxChecked: false,
+    })),
+  showErrorBox: (title, content) => Effect.sync(() => showErrorBox(title, content)),
 });
 const layer = BrowserSession.layer.pipe(
   Layer.provide(Layer.mergeAll(NodeServices.layer, layerDialog, ElectronApp.layer)),
@@ -79,7 +86,11 @@ const selfSignedCertificate = {
 /** Raises Electron's `certificate-error` for a preview guest in `browserSession`. */
 const certificateError = (
   browserSession: unknown,
-  input: { readonly url: string; readonly certificate?: Electron.Certificate },
+  input: {
+    readonly url: string;
+    readonly certificate?: Electron.Certificate;
+    readonly isMainFrame?: boolean;
+  },
 ) => {
   const listener = appListeners.get("certificate-error");
   assert.isDefined(listener, "preview sessions should handle certificate errors");
@@ -96,7 +107,7 @@ const certificateError = (
     "net::ERR_CERT_AUTHORITY_INVALID",
     input.certificate ?? selfSignedCertificate,
     callback,
-    true,
+    input.isMainFrame ?? true,
   );
   return { event, callback, trusted: Deferred.await(decision) };
 };
@@ -113,6 +124,7 @@ describe("BrowserSession", () => {
     sessions.clear();
     appListeners.clear();
     storage.root = "";
+    showErrorBox.mockReset();
     fromPartition.mockReset();
     fromPartition.mockImplementation((partition: string) => {
       const browserSession = {
@@ -338,6 +350,18 @@ describe("BrowserSession", () => {
       const again = certificateError(browserSession, { url: "https://localhost:18443/other" });
       assert.isTrue(yield* again.trusted);
       assert.strictEqual(showMessageBox.mock.calls.length, 1);
+      // Its sockets reach the same TLS endpoint, and cannot ask on their own.
+      const socket = certificateError(browserSession, {
+        url: "wss://localhost:18443/hmr",
+        isMainFrame: false,
+      });
+      assert.isTrue(yield* socket.trusted);
+      const otherSocket = certificateError(browserSession, {
+        url: "wss://localhost:18444/hmr",
+        isMainFrame: false,
+      });
+      assert.isFalse(yield* otherSocket.trusted);
+      assert.strictEqual(showMessageBox.mock.calls.length, 1);
 
       showMessageBox.mockReset();
       showMessageBox.mockReturnValue(1);
@@ -414,5 +438,94 @@ describe("BrowserSession", () => {
         assert.strictEqual(showMessageBox.mock.calls.length, 1);
       }).pipe(Effect.provide(layer));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("an answer to a prompt opened before cookies were cleared does not trust", () =>
+    Effect.gen(function* () {
+      storage.root = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped();
+      const browserSessions = yield* BrowserSession.BrowserSession;
+      const partition = yield* browserSessions.getPartition("scope-a");
+      yield* browserSessions.getSession("scope-a");
+      const browserSession = sessions.get(partition);
+      const url = "https://localhost:18443/";
+
+      const asked = yield* Deferred.make<void>();
+      let answer = () => {};
+      const answered = new Promise<void>((resolve) => {
+        answer = resolve;
+      });
+      showMessageBox.mockReset();
+      showMessageBox.mockImplementation((options) => {
+        Deferred.doneUnsafe(asked, Effect.void);
+        return answered.then(() => trustCertificateButton(options));
+      });
+      const pending = certificateError(browserSession, { url });
+      yield* Deferred.await(asked);
+      yield* browserSessions.clearCookies([partition]);
+      answer();
+      assert.isFalse(yield* pending.trusted);
+
+      showMessageBox.mockReset();
+      showMessageBox.mockReturnValue(1);
+      assert.isFalse(yield* certificateError(browserSession, { url }).trusted);
+      assert.strictEqual(showMessageBox.mock.calls.length, 1);
+      assert.isFalse(
+        yield* (yield* FileSystem.FileSystem).exists(
+          `${browserSession!.storagePath}/t3code-certificate-approvals.json`,
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(layer, NodeServices.layer))),
+  );
+
+  it.effect("does not trust a certificate whose approval cannot be saved", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      // A file where the profile directory should be makes every write fail.
+      const root = yield* fileSystem.makeTempDirectoryScoped();
+      yield* fileSystem.writeFileString(`${root}/Partitions`, "");
+      storage.root = root;
+      const browserSessions = yield* BrowserSession.BrowserSession;
+      const partition = yield* browserSessions.getPartition("scope-a");
+      yield* browserSessions.getSession("scope-a");
+      const browserSession = sessions.get(partition);
+      const url = "https://localhost:18443/";
+
+      showMessageBox.mockReset();
+      showMessageBox.mockImplementation(trustCertificateButton);
+      assert.isFalse(yield* certificateError(browserSession, { url }).trusted);
+      assert.strictEqual(showErrorBox.mock.calls.length, 1);
+      // Nothing was trusted for this run either, so the next visit asks again.
+      showMessageBox.mockReset();
+      showMessageBox.mockReturnValue(1);
+      assert.isFalse(yield* certificateError(browserSession, { url }).trusted);
+      assert.strictEqual(showMessageBox.mock.calls.length, 1);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(layer, NodeServices.layer))),
+  );
+
+  it.effect("clearing cookies deletes a saved approval even when none are loaded", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      storage.root = yield* fileSystem.makeTempDirectoryScoped();
+      const browserSessions = yield* BrowserSession.BrowserSession;
+      const partition = yield* browserSessions.getPartition("scope-a");
+      yield* browserSessions.getSession("scope-a");
+      const browserSession = sessions.get(partition);
+      // What a clear whose removal failed leaves behind: memory forgot, the file did not.
+      const file = `${browserSession!.storagePath}/t3code-certificate-approvals.json`;
+      yield* fileSystem.makeDirectory(browserSession!.storagePath!, { recursive: true });
+      yield* fileSystem.writeFileString(
+        file,
+        JSON.stringify([
+          {
+            origin: "https://localhost:18443",
+            fingerprint: selfSignedCertificate.fingerprint,
+            error: "net::ERR_CERT_AUTHORITY_INVALID",
+          },
+        ]),
+      );
+
+      yield* browserSessions.clearCookies([partition]);
+      assert.isFalse(yield* fileSystem.exists(file));
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(layer, NodeServices.layer))),
   );
 });
