@@ -101,6 +101,13 @@ function setup() {
   const unmount = () => act(() => root.unmount());
   return {
     requests,
+    rootQuery,
+    updateView(expanded: string[], selected: string) {
+      act(() => {
+        current.setExpandedPaths(() => new Set(expanded));
+        current.selectPath(selected);
+      });
+    },
     unmount,
     get current() {
       return current;
@@ -156,7 +163,11 @@ describe("file tree workspace state", () => {
       screen.load();
       await screen.succeed(0, [{ kind: "file", path: "src/first.ts" }]);
 
+      screen.updateView(["src"], "src/first.ts");
+      const firstView = screen.current;
       screen.render(target);
+      expect([...screen.current.expandedPaths]).toEqual([]);
+      expect(screen.current.selectedPath).toBeNull();
       expect(screen.current.entries.map((entry) => entry.path)).toEqual(["src"]);
       expect([...screen.current.loadedDirectories]).toEqual([]);
       expect([...screen.current.loadingDirectories]).toEqual([]);
@@ -167,13 +178,20 @@ describe("file tree workspace state", () => {
       });
       await screen.succeed(1, [{ kind: "file", path: "src/second.ts" }]);
 
+      screen.updateView([], "src/second.ts");
+      expect([...firstView.expandedPaths]).toEqual(["src"]);
+      expect(firstView.selectedPath).toBe("src/first.ts");
       screen.render();
+      expect([...screen.current.expandedPaths]).toEqual(["src"]);
+      expect(screen.current.selectedPath).toBe("src/first.ts");
       expect(screen.current.entries.map((entry) => entry.path)).toEqual(["src", "src/first.ts"]);
       expect([...screen.current.loadedDirectories]).toEqual(["src"]);
       screen.load();
       expect(screen.requests).toHaveLength(2);
 
       screen.render(target);
+      expect([...screen.current.expandedPaths]).toEqual([]);
+      expect(screen.current.selectedPath).toBe("src/second.ts");
       expect(screen.current.entries.map((entry) => entry.path)).toEqual(["src", "src/second.ts"]);
       expect([...screen.current.loadedDirectories]).toEqual(["src"]);
     },
@@ -200,5 +218,56 @@ describe("file tree workspace state", () => {
     expect(screen.current.error).toBeNull();
     expect(screen.current.isPending).toBe(false);
     expect([...screen.current.loadingDirectories]).toEqual([]);
+  });
+  it("evicts the least recently visited workspace instead of retaining unbounded history", async () => {
+    using screen = setup();
+    screen.render();
+    screen.load();
+    const nested = Array.from({ length: 65 }, (_, index) => `src/directory-${index}`);
+    await screen.succeed(0, [
+      { kind: "file", path: "src/first.ts" },
+      ...nested.map((path) => ({ kind: "directory" as const, path })),
+    ]);
+    screen.render({ cwd: "/second" });
+    screen.render();
+    for (const path of nested) {
+      screen.load(path);
+      await screen.succeed(screen.requests.length - 1);
+    }
+    screen.updateView(nested, "src/first.ts");
+    expect(screen.current.loadedDirectories.size).toBe(66);
+    screen.render({ cwd: "/second" });
+    screen.render();
+    expect(screen.current.loadedDirectories.size).toBe(64);
+    expect(screen.current.expandedPaths.size).toBe(64);
+    expect(screen.current.selectedPath).toBe("src/first.ts");
+    for (let index = 1; index <= 8; index++) screen.render({ cwd: `/workspace-${index}` });
+    screen.render();
+    expect([...screen.current.loadedDirectories]).toEqual([]);
+    expect([...screen.current.expandedPaths]).toEqual([]);
+    expect(screen.current.selectedPath).toBeNull();
+  });
+
+  it("prunes deleted directory contents, expansion and selection after a fresh parent listing", async () => {
+    using screen = setup();
+    screen.render();
+    screen.load();
+    await screen.succeed(0, [{ kind: "directory", path: "src/nested" }]);
+    screen.load("src/nested");
+    await screen.succeed(1, [{ kind: "file", path: "src/nested/file.ts" }]);
+    screen.updateView(["src", "src/nested"], "src/nested/file.ts");
+    screen.rootQuery.data = { entries: [], truncated: true };
+    screen.render();
+    expect([...screen.current.loadedDirectories]).toEqual(["src", "src/nested"]);
+    expect(screen.current.selectedPath).toBe("src/nested/file.ts");
+    screen.rootQuery.data = { entries: [], truncated: false };
+    screen.render();
+    expect(screen.current.entries).toEqual([]);
+    expect([...screen.current.loadedDirectories]).toEqual([]);
+    expect([...screen.current.expandedPaths]).toEqual([]);
+    expect(screen.current.selectedPath).toBeNull();
+    screen.rootQuery.data = { entries: rootEntries, truncated: false };
+    screen.render();
+    expect(screen.current.entries.map((entry) => entry.path)).toEqual(["src"]);
   });
 });

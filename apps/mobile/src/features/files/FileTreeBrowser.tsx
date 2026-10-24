@@ -106,6 +106,10 @@ const FileTreeRow = function FileTreeRow(props: {
 };
 
 export function FileTreeBrowser(props: {
+  readonly expandedPaths: ReadonlySet<string>;
+  readonly setExpandedPaths: (
+    update: (current: ReadonlySet<string>) => ReadonlySet<string>,
+  ) => void;
   readonly entries: ReadonlyArray<ProjectEntry>;
   readonly error: string | null;
   readonly isPending: boolean;
@@ -120,7 +124,7 @@ export function FileTreeBrowser(props: {
   readonly onRefresh: () => void;
   readonly onSelectFile: (path: string) => void;
 }) {
-  const [expandedPaths, setExpandedPaths] = useState<ReadonlySet<string>>(() => new Set());
+  const { expandedPaths, setExpandedPaths } = props;
   const [pendingSelection, setPendingSelection] = useState<{
     readonly path: string;
     readonly selectedPathAtPress: string | null;
@@ -163,7 +167,7 @@ export function FileTreeBrowser(props: {
       }
       return next;
     });
-  }, [controlledSelectedPath]);
+  }, [controlledSelectedPath, setExpandedPaths]);
 
   useEffect(() => {
     for (const path of expandedPaths) onLoadDirectory(path);
