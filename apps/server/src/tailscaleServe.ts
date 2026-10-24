@@ -77,9 +77,6 @@ export const layer = (options: {
       let lastFailure: string | undefined;
       const attempt = ensureTailscaleServe({ localPort, servePort, localHost }).pipe(
         Effect.tap(() => Ref.set(configured, true)),
-        // An interrupted attempt may have configured Serve anyway. Turning off
-        // a port that was never served is harmless, so assume it did.
-        Effect.onInterrupt(() => Ref.set(configured, true)),
         Effect.tap(() => Effect.logInfo("Tailscale Serve configured", { localPort, servePort })),
         Effect.tapError((cause) => {
           const key = failureKey(cause);
