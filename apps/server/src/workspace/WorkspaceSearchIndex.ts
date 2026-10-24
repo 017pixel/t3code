@@ -383,7 +383,8 @@ function decideByIgnoreFiles(
   for (const { directory, file } of ignoreFiles) {
     if (!isWithin(entry.path, directory) || entry.path === directory) continue;
     const relative = directory ? entry.path.slice(directory.length + 1) : entry.path;
-    const decision = file.decide(relative, entry.kind === "directory");
+    // Like git and ripgrep, a link is never a folder to a folder-only rule, whatever it targets.
+    const decision = file.decide(relative, false);
     if (decision) return decision;
   }
   return undefined;

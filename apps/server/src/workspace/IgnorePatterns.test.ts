@@ -18,12 +18,16 @@ describe("parseIgnoreFile", () => {
     expect(decide("/link", "link")).toBe("ignored");
     expect(decide("a/link", "x/a/link")).toBeUndefined();
     expect(decide("a/*.ts", "a/b/c.ts")).toBeUndefined();
+    expect(decide("link", "blink")).toBeUndefined();
+    expect(decide("link", "a/blink")).toBeUndefined();
   });
 
   it("supports globstars, classes, escapes, and folder-only patterns", () => {
     expect(decide("**/gen/*.ts", "gen/a.ts")).toBe("ignored");
     expect(decide("a/**/b", "a/x/y/b")).toBe("ignored");
     expect(decide("a/**/b", "a/b")).toBe("ignored");
+    expect(decide("foo/**/bar", "foo/xbar")).toBeUndefined();
+    expect(decide("foo/**/bar", "foo/x/ybar")).toBeUndefined();
     expect(decide("out/**", "out/x/y")).toBe("ignored");
     expect(decide("link-[0-9]", "link-7")).toBe("ignored");
     expect(decide("link-[!0-9]", "link-7")).toBeUndefined();
@@ -41,5 +45,12 @@ describe("parseIgnoreFile", () => {
     expect(decide(pattern, `${"a".repeat(200)}c`)).toBeUndefined();
     expect(decide(pattern.repeat(50), `${"a".repeat(1_000)}c`)).toBeUndefined();
     expect(decide(pattern, `${"a".repeat(200)}b`)).toBe("ignored");
+  });
+
+  it("parses unclosed classes in linear time", () => {
+    // Rescanning the rest of the line for each `[` stalls for over a minute here; linear takes ms.
+    expect(decide("[".repeat(30_000), "[".repeat(30_000))).toBe("ignored");
+    expect(decide(`${"[".repeat(30_000)}]`, "x")).toBeUndefined();
+    expect(decide("[a][", "a[")).toBe("ignored");
   });
 });

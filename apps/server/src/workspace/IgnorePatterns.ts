@@ -64,6 +64,9 @@ function parseLine(rawLine: string): Pattern | undefined {
 
   const chars = Array.from(line);
   const tokens: Token[] = anchored ? [] : [{ type: "folders" }];
+  // A `[` that never closes leaves every later `[` unclosed too, so one failed scan settles them
+  // all; rescanning the suffix for each would make `[[[[…` quadratic.
+  let classesClose = true;
   for (let index = 0; index < chars.length; index += 1) {
     const char = chars[index]!;
     if (char === "*" && chars[index + 1] === "*") {
@@ -83,7 +86,8 @@ function parseLine(rawLine: string): Pattern | undefined {
     if (char === "*") tokens.push({ type: "star" });
     else if (char === "?") tokens.push({ type: "one" });
     else if (char === "[") {
-      const parsed = parseClass(chars, index);
+      const parsed = classesClose ? parseClass(chars, index) : undefined;
+      if (!parsed) classesClose = false;
       if (parsed) {
         tokens.push(parsed.token);
         index = parsed.end;
@@ -95,6 +99,10 @@ function parseLine(rawLine: string): Pattern | undefined {
   return { tokens, negated, folderOnly };
 }
 
+/**
+ * States are token positions. A `folders` token that has consumed part of a segment is `~position`
+ * instead: it may only finish after the next `/`, so an inner globstar never matches `xbar` as `bar`.
+ */
 function matches(tokens: ReadonlyArray<Token>, path: ReadonlyArray<string>): boolean {
   let states = new Set<number>();
   const add = (set: Set<number>, position: number) => {
@@ -108,7 +116,8 @@ function matches(tokens: ReadonlyArray<Token>, path: ReadonlyArray<string>): boo
   add(states, 0);
   for (const char of path) {
     const next = new Set<number>();
-    for (const position of states) {
+    for (const state of states) {
+      const position = state < 0 ? ~state : state;
       const token = tokens[position];
       if (!token) continue;
       switch (token.type) {
@@ -133,8 +142,8 @@ function matches(tokens: ReadonlyArray<Token>, path: ReadonlyArray<string>): boo
           add(next, position);
           break;
         case "folders":
-          add(next, position);
-          if (char === "/") add(next, position + 1);
+          if (char === "/") add(next, position);
+          else next.add(~position);
           break;
       }
     }

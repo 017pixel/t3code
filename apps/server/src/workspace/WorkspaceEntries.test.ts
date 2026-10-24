@@ -496,6 +496,32 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         );
       }),
     );
+    it.effect("matches .ignore rules against whole names and treats folder links as links", () =>
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) === "win32") return;
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-symlinks-", git: true });
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* writeTextFile(cwd, "src/index.ts", "export {};");
+        yield* writeTextFile(cwd, ".gitignore", "blink\n");
+        // `!link` must not re-include `blink`, and `folder-link/` does not apply to a link.
+        yield* writeTextFile(cwd, ".ignore", "!link\nfolder-link/\n");
+        yield* fileSystem.symlink("src", path.join(cwd, "blink"));
+        yield* fileSystem.symlink("src", path.join(cwd, "folder-link"));
+        yield* writeTextFile(cwd, "sub/blink", "regular");
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const searched = yield* searchWorkspaceEntries({ cwd, query: "link", limit: 100 });
+        const listed = yield* workspaceEntries.list({ cwd });
+
+        for (const entries of [searched.entries, listed.entries]) {
+          const paths = entries.map((entry) => entry.path);
+          expect(paths).not.toContain("blink");
+          expect(paths).not.toContain("sub/blink");
+          expect(paths).toContain("folder-link");
+        }
+      }),
+    );
   });
 
   describe("searchContents", () => {
