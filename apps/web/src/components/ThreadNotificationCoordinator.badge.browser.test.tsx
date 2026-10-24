@@ -271,3 +271,58 @@ it("closes outstanding in-app toasts when in-app notifications are disabled", as
   await app.render();
   expect(state.closeToast).toHaveBeenCalledWith("toast-1");
 });
+
+it("closes only notices for the opened environment and thread, including repeated notices", async () => {
+  await using app = setup();
+  state.inApp = true;
+  focused = true;
+  setParams({ environmentId: "two", threadId: "other" });
+  state.shells.set("one", shell({}, { id: "unrelated" }));
+  state.toast
+    .mockReturnValueOnce("one-completed")
+    .mockReturnValueOnce("one-approval")
+    .mockReturnValueOnce("one-unrelated")
+    .mockReturnValueOnce("two-completed");
+  await app.render();
+
+  const completed = {
+    latestTurn: { turnId: "turn", state: "completed", completedAt: "2026-09-13T07:01:00Z" },
+  };
+  state.shells.set("one", shell(completed, { id: "unrelated" }));
+  await app.render();
+  expect(state.toast).toHaveBeenCalledTimes(1);
+  state.shells.set("one", shell({ ...completed, hasPendingApprovals: true }, { id: "unrelated" }));
+  await app.render();
+  expect(state.toast).toHaveBeenCalledTimes(2);
+  state.shells.set(
+    "one",
+    shell({ ...completed, hasPendingApprovals: true }, { ...completed, id: "unrelated" }),
+  );
+  await app.render();
+  expect(state.toast).toHaveBeenCalledTimes(3);
+  state.shells.set("two", shell(completed));
+  await app.render();
+  expect(state.toast).toHaveBeenCalledTimes(4);
+  expect(state.closeToast).not.toHaveBeenCalled();
+
+  setParams({ environmentId: "one", threadId: "thread" });
+  await app.render();
+  expect(state.closeToast.mock.calls).toEqual([["one-completed"], ["one-approval"]]);
+
+  setParams({ environmentId: "two", threadId: "thread" });
+  await app.render();
+  expect(state.closeToast.mock.calls).toEqual([
+    ["one-completed"],
+    ["one-approval"],
+    ["two-completed"],
+  ]);
+
+  setParams({ environmentId: "one", threadId: "unrelated" });
+  await app.render();
+  expect(state.closeToast.mock.calls).toEqual([
+    ["one-completed"],
+    ["one-approval"],
+    ["two-completed"],
+    ["one-unrelated"],
+  ]);
+});

@@ -79,7 +79,7 @@ export async function capture(tools, { tabId, config }) {
       selector: 'button:has-text("Open thread")',
     }),
   );
-  mark("hover expands notification; visible timeout continues");
+  mark("hover expands notification");
   check(
     await tools.mcp__t3_code__preview_evaluate({
       tabId: tab,
