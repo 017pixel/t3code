@@ -14,6 +14,8 @@ const cursorSdkMock = vi.hoisted(() => {
   const runOperations: Array<string> = [];
   let agentCloseFailure: unknown;
   let staleRunActive = false;
+  // The local store lists runs oldest first, like the real SDK.
+  let storedRuns: Array<{ readonly id: string; readonly status: string }> = [];
   const runWait = vi.fn(async () => ({
     id: "run-cursor-agent-sdk-test",
     requestId: "request-cursor-agent-sdk-test",
@@ -62,15 +64,17 @@ const cursorSdkMock = vi.hoisted(() => {
     send,
     close: agentClose,
   }));
-  const listRuns = vi.fn(async () => {
+  const listRuns = vi.fn(async (_agentId: string, options?: { readonly limit?: number }) => {
     runOperations.push("agent.listRuns");
-    return {
-      items: staleRunActive ? [{ id: "run-stale", status: "running" }] : [],
-    };
+    const runs = staleRunActive ? storedRuns : [];
+    return { items: options?.limit === undefined ? runs : runs.slice(0, options.limit) };
   });
-  const cancelRun = vi.fn(async () => {
+  const cancelRun = vi.fn(async (runId: string) => {
     runOperations.push("agent.cancelRun");
-    staleRunActive = false;
+    storedRuns = storedRuns.map((run) =>
+      run.id === runId ? { ...run, status: "cancelled" } : run,
+    );
+    staleRunActive = storedRuns.some((run) => run.status === "running");
   });
 
   return {
@@ -89,6 +93,11 @@ const cursorSdkMock = vi.hoisted(() => {
     },
     setStaleRunActive: (active: boolean) => {
       staleRunActive = active;
+      storedRuns = active ? [{ id: "run-stale", status: "running" }] : [];
+    },
+    setStoredRuns: (runs: Array<{ readonly id: string; readonly status: string }>) => {
+      storedRuns = runs;
+      staleRunActive = runs.some((run) => run.status === "running");
     },
   };
 });
@@ -170,6 +179,36 @@ describe("CursorAgentSdkRunner", () => {
           cwd: process.cwd(),
         },
       ]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("cancels the abandoned run when an older cancelled run precedes it", () =>
+    Effect.gen(function* () {
+      cursorSdkMock.runOperations.length = 0;
+      cursorSdkMock.cancelRun.mockClear();
+      cursorSdkMock.setStoredRuns([
+        { id: "run-cancelled-on-first-restart", status: "cancelled" },
+        { id: "run-abandoned-on-second-restart", status: "running" },
+      ]);
+
+      const runner = yield* CursorAgentSdk.CursorAgentSdkRunner;
+      const session = yield* runner.open({
+        operation: "resume",
+        agentId: "agent-cursor-agent-sdk-test",
+        options: { model: { id: "default" }, mode: "agent", local: { cwd: process.cwd() } },
+        threadId: ThreadId.make("thread-cursor-agent-sdk-second-stale-run-test"),
+        providerSessionId: ProviderSessionId.make(
+          "provider-session-cursor-agent-sdk-second-stale-run-test",
+        ),
+      });
+      const run = yield* session.send({ message: "continue" });
+      yield* run.wait;
+
+      assert.deepStrictEqual(
+        cursorSdkMock.cancelRun.mock.calls[0]?.[0],
+        "run-abandoned-on-second-restart",
+      );
+      assert.deepStrictEqual(cursorSdkMock.runOperations.at(-1), "run.start");
     }).pipe(Effect.provide(layerTest)),
   );
 });
