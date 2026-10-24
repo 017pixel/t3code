@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Create an offline native presentation fixture in an isolated checkout only.
-Usage: python seed-native-fixture.py /absolute/isolated/checkout
+Usage: python seed-native.py /absolute/isolated/checkout
 Does not change the renderer, use a server, or seed a live database.
 """
 import json, subprocess, sys
