@@ -219,22 +219,49 @@ export interface ClaudeEffortCapSource {
 }
 
 const CLAUDE_1M_SUFFIX = "[1m]";
+const CLAUDE_CODE_FAMILY_ALIASES: ReadonlySet<string> = new Set([
+  "opus",
+  "sonnet",
+  "haiku",
+  "fable",
+]);
 
 /**
- * Keys `modelSettings` caps by canonical slug. Claude Code matches a key's aliases and `[1m]`
- * spelling case-insensitively, and keeps the lowest cap when several keys name one model.
+ * Names the model a `modelSettings` key caps the way Claude Code does, which is narrower than the
+ * catalog's aliases: only a family alias (optionally `[1m]`) resolves as an alias, and any other key
+ * names the most specific model id it contains, so `claude-opus-5-5-20260101` and Bedrock ids match
+ * while `claude-opus-5.5` matches nothing.
  */
+function resolveClaudeModelSettingsKey(
+  catalog: ClaudeModelCatalog,
+  key: string,
+): string | undefined {
+  const lowered = key.trim().toLowerCase();
+  const unsuffixed = lowered.endsWith(CLAUDE_1M_SUFFIX)
+    ? lowered.slice(0, -CLAUDE_1M_SUFFIX.length)
+    : lowered;
+  if (CLAUDE_CODE_FAMILY_ALIASES.has(unsuffixed)) {
+    return catalog.models.find(
+      (entry) => !entry.model.isCustom && entry.model.aliases?.includes(unsuffixed),
+    )?.model.slug;
+  }
+  let match: string | undefined;
+  for (const { model } of catalog.models) {
+    if (!model.isCustom && lowered.includes(model.slug) && model.slug.length > (match?.length ?? 0))
+      match = model.slug;
+  }
+  return match;
+}
+
+/** Keys `modelSettings` caps by canonical slug, keeping the lowest cap when several keys name one model. */
 function resolveClaudeModelMaxEffortLevels(
   catalog: ClaudeModelCatalog,
   levels: ReadonlyMap<string, ClaudeEffortLevel> | undefined,
 ): ReadonlyMap<string, ClaudeEffortLevel> {
   const resolved = new Map<string, ClaudeEffortLevel>();
   for (const [key, level] of levels ?? []) {
-    const lowered = key.trim().toLowerCase();
-    const slug = resolveClaudeModelSlug(
-      catalog,
-      lowered.endsWith(CLAUDE_1M_SUFFIX) ? lowered.slice(0, -CLAUDE_1M_SUFFIX.length) : lowered,
-    );
+    const slug = resolveClaudeModelSettingsKey(catalog, key);
+    if (!slug) continue;
     const current = resolved.get(slug);
     if (!current || claudeEffortRank(level) < claudeEffortRank(current)) resolved.set(slug, level);
   }

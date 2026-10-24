@@ -382,7 +382,7 @@ describe("Claude model catalog", () => {
       slug: "claude-opus-5-5",
       name: "Opus 5.5",
       isCustom: false,
-      aliases: ["opus"],
+      aliases: ["opus", "opus-5.5", "claude-opus-5.5"],
       capabilities: {
         optionDescriptors: [
           {
@@ -400,7 +400,19 @@ describe("Claude model catalog", () => {
       },
     };
     const catalog: ClaudeModelCatalog = {
-      models: [{ model: opus, runtime: {}, compatibility: {} }],
+      models: [
+        { model: opus, runtime: {}, compatibility: {} },
+        {
+          model: {
+            slug: "claude-opus-5",
+            name: "Opus 5",
+            isCustom: false,
+            capabilities: { optionDescriptors: [] },
+          },
+          runtime: {},
+          compatibility: {},
+        },
+      ],
     };
     const maxLabel = (sources: Parameters<typeof capClaudeCatalogEffort>[2]) => {
       const effort = capClaudeCatalogEffort(catalog, [opus], sources)[0]?.capabilities
@@ -417,6 +429,20 @@ describe("Claude model catalog", () => {
       maxLabel([perModel({ "claude-opus-5-5[1M]": "medium" })]),
       "Max (capped to Medium)",
     );
+    assert.strictEqual(maxLabel([perModel({ " OPUS[1m] ": "medium" })]), "Max (capped to Medium)");
+    // Other keys name the most specific model id they contain, so dated and provider-prefixed ids
+    // match while the catalog's dotted aliases and a less specific model id do not.
+    for (const key of [
+      "claude-opus-5-5-20260101",
+      "CLAUDE-OPUS-5-5-20260101[1m]",
+      "us.anthropic.claude-opus-5-5-v1:0",
+      "claude-opus-5-5-latest",
+    ]) {
+      assert.strictEqual(maxLabel([perModel({ [key]: "medium" })]), "Max (capped to Medium)", key);
+    }
+    for (const key of ["claude-opus-5.5", "opus-5.5", "opus-5-5", "opus [1m]", "claude-opus-5"]) {
+      assert.strictEqual(maxLabel([perModel({ [key]: "medium" })]), "Max", key);
+    }
     // Keys naming the same model keep the lowest cap, and a `max` key does not exempt it.
     assert.strictEqual(
       maxLabel([perModel({ opus: "max", "claude-opus-5-5": "low" })]),
