@@ -49,6 +49,29 @@ export function projectScriptCwd(input: {
   return input.worktreePath ?? input.project.cwd;
 }
 
+/**
+ * Where an agent works for a thread. A worktree checks out the whole
+ * repository, so a project rooted in a repository subdirectory keeps that
+ * subdirectory inside the worktree; its files and skills live there.
+ * `repositoryRoot` is the checkout containing `projectRoot`, when known.
+ */
+export function threadAgentCwd(input: {
+  readonly projectRoot: string;
+  readonly repositoryRoot?: string | null | undefined;
+  readonly worktreePath: string | null;
+}): string {
+  const { projectRoot, repositoryRoot, worktreePath } = input;
+  if (worktreePath === null) return projectRoot;
+  if (!repositoryRoot) return worktreePath;
+  const separator = projectRoot.includes("\\") && !projectRoot.includes("/") ? "\\" : "/";
+  const root = repositoryRoot.replace(/[\\/]+$/, "");
+  if (projectRoot.length <= root.length + 1 || !projectRoot.startsWith(root)) return worktreePath;
+  if (!/[\\/]/.test(projectRoot[root.length] ?? "")) return worktreePath;
+  const relative = projectRoot.slice(root.length + 1).replace(/[\\/]+$/, "");
+  if (relative === "" || relative.split(/[\\/]/).includes("..")) return worktreePath;
+  return `${worktreePath.replace(/[\\/]+$/, "")}${separator}${relative}`;
+}
+
 export function projectScriptRuntimeEnv(
   input: ProjectScriptRuntimeEnvInput,
 ): Record<string, string> {

@@ -258,6 +258,8 @@ export interface ThreadDetailScreenProps {
   readonly environmentId: EnvironmentId;
   readonly projectWorkspaceRoot: string | null;
   readonly threadCwd: string | null;
+  // Where the agent works; a subdirectory project's skills live there.
+  readonly agentCwd: string | null;
   readonly selectedThreadQueueCount: number;
   readonly queuedMessages: ReadonlyArray<QueuedThreadMessage>;
   readonly dispatchingMessageId: MessageId | null;
@@ -1208,9 +1210,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     const provider = props.serverConfig?.providers.find(
       (candidate) => candidate.instanceId === selectedInstanceId,
     );
-    return provider
-      ? resolveProviderSkillsForCwd(provider, props.threadCwd ?? props.projectWorkspaceRoot)
-      : [];
+    return provider ? resolveProviderSkillsForCwd(provider, props.agentCwd) : [];
   })();
 
   useLayoutEffect(() => {
@@ -1788,7 +1788,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                         activeThreadBusy={props.activeThreadBusy}
                         canStopThread={props.canStopThread}
                         environmentId={props.environmentId}
-                        projectCwd={props.threadCwd ?? props.projectWorkspaceRoot}
+                        projectCwd={props.agentCwd}
                         // Follow-ups typed before the server creates the thread wait in
                         // the draft: queueing them against a thread id the server may
                         // still reject would strand them in the outbox.

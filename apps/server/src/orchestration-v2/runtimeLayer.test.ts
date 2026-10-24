@@ -340,12 +340,14 @@ const layerProjectDeletionTest = Layer.mergeAll(
         Effect.succeed({
           repositoryIdentity: null,
           faviconPath: null,
+          repositoryRoot: null,
           repositoryIdentityResolved: false,
         }),
       getAvailable: () =>
         Effect.succeed({
           repositoryIdentity: null,
           faviconPath: null,
+          repositoryRoot: null,
           repositoryIdentityResolved: false,
         }),
       invalidate: () => Effect.void,
@@ -612,6 +614,7 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
         Effect.succeed({
           repositoryIdentity: null,
           faviconPath: null,
+          repositoryRoot: null,
           repositoryIdentityResolved: false,
         }),
       request: () => Effect.void,
@@ -619,6 +622,7 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
         Effect.succeed({
           repositoryIdentity: null,
           faviconPath: null,
+          repositoryRoot: null,
           repositoryIdentityResolved: false,
         }),
       invalidate: () => Effect.void,

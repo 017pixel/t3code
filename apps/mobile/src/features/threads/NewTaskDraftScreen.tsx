@@ -48,6 +48,7 @@ import {
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText as Text } from "../../components/ui/AppText";
 import { threadContextsOutsideEnvironment } from "@t3tools/shared/composerContextReferences";
+import { threadAgentCwd } from "@t3tools/shared/projectScripts";
 
 import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
 
@@ -1240,6 +1241,15 @@ export function NewTaskDraftScreen(props: {
         onRemoveQueuedEditAttachment={() => {}}
         projectWorkspaceRoot={selectedProject.workspaceRoot}
         threadCwd={composerWorkspaceCwd}
+        agentCwd={
+          flow.workspaceMode === "worktree"
+            ? selectedProject.workspaceRoot
+            : threadAgentCwd({
+                projectRoot: selectedProject.workspaceRoot,
+                repositoryRoot: selectedProject.repositoryRoot,
+                worktreePath: flow.selectedWorktreePath ?? null,
+              })
+        }
         selectedThreadQueueCount={0}
         queuedMessages={[]}
         dispatchingMessageId={null}

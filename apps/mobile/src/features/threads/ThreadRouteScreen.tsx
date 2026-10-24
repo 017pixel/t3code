@@ -27,6 +27,7 @@ import {
   projectScriptRuntimeEnv,
   projectScriptTerminalInput,
   resolveProjectScripts,
+  threadAgentCwd,
 } from "@t3tools/shared/projectScripts";
 import { Platform, ScrollView } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -987,6 +988,15 @@ function ThreadRouteContent(
           environmentId={selectedThread.environmentId}
           projectWorkspaceRoot={selectedThreadProject?.workspaceRoot ?? null}
           threadCwd={selectedThreadCwd}
+          agentCwd={
+            selectedThreadProject
+              ? threadAgentCwd({
+                  projectRoot: selectedThreadProject.workspaceRoot,
+                  repositoryRoot: selectedThreadProject.repositoryRoot,
+                  worktreePath: selectedThread.worktreePath ?? null,
+                })
+              : null
+          }
           selectedThreadQueueCount={composer.selectedThreadQueueCount}
           queuedMessages={
             selectedThreadCreation && selectedThreadCreation.outcome?.kind !== "delivered"

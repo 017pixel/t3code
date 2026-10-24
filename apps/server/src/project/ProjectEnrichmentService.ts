@@ -5,8 +5,10 @@ import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -14,6 +16,7 @@ import type * as Scope from "effect/Scope";
 
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
+import { findRepositoryRoot } from "./repositoryRoot.ts";
 
 const DEFAULT_CACHE_CAPACITY = 512;
 const DEFAULT_MAX_PENDING = 512;
@@ -27,6 +30,9 @@ const DEFAULT_FAILURE_TTL = Duration.seconds(5);
 
 export interface ProjectEnrichment {
   readonly repositoryIdentity: RepositoryIdentity | null;
+  // The checkout containing the project, found without a remote, so clients can
+  // place a subdirectory project inside a thread's worktree.
+  readonly repositoryRoot: string | null;
   readonly faviconPath: string | null;
   readonly repositoryIdentityResolved: boolean;
 }
@@ -96,8 +102,22 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
   const failureTtl = options.failureTtl ?? DEFAULT_FAILURE_TTL;
   const faviconTtl = options.faviconTtl ?? DEFAULT_FAVICON_TTL;
 
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const repositoryIdentityCache = yield* Cache.makeWith(
-    (workspaceRoot: string) => Effect.exit(repositoryIdentityResolver.resolve(workspaceRoot)),
+    (workspaceRoot: string) =>
+      Effect.exit(
+        Effect.all(
+          {
+            repositoryIdentity: repositoryIdentityResolver.resolve(workspaceRoot),
+            repositoryRoot: findRepositoryRoot(workspaceRoot).pipe(
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.provideService(Path.Path, path),
+            ),
+          },
+          { concurrency: "unbounded" },
+        ),
+      ),
     {
       capacity: cacheCapacity,
       timeToLive: Exit.match({
@@ -171,7 +191,9 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
         workspaceRoot,
         repositoryIdentityResolved,
         enrichment: {
-          repositoryIdentity: availableValue(Option.some(repositoryIdentity)),
+          repositoryIdentity:
+            availableValue(Option.some(repositoryIdentity))?.repositoryIdentity ?? null,
+          repositoryRoot: availableValue(Option.some(repositoryIdentity))?.repositoryRoot ?? null,
           faviconPath: availableValue(faviconPath),
           repositoryIdentityResolved,
         },
@@ -240,8 +262,10 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
       ] as const,
       { concurrency: "unbounded" },
     );
+    const repository = availableValue(repositoryIdentity);
     return {
-      repositoryIdentity: availableValue(repositoryIdentity),
+      repositoryIdentity: repository?.repositoryIdentity ?? null,
+      repositoryRoot: repository?.repositoryRoot ?? null,
       faviconPath: availableValue(faviconPath),
       repositoryIdentityResolved: isSuccessfullyResolved(repositoryIdentity),
     };

@@ -1,8 +1,3 @@
-import * as NodeChildProcess from "node:child_process";
-import * as NodeFS from "node:fs";
-import * as NodeOS from "node:os";
-import * as NodePath from "node:path";
-
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -16,8 +11,10 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
@@ -138,40 +135,48 @@ it.layer(layerTest)("RuntimePolicyV2", (it) => {
   );
 });
 
-// A project rooted in a repository subdirectory, with a thread in a worktree of that repository.
-function makeSubdirectoryProjectRepo() {
-  const base = NodeFS.realpathSync(
-    NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "runtime-policy-subdir-")),
-  );
-  const repoRoot = NodePath.join(base, "repo");
-  const worktreePath = NodePath.join(base, "worktree");
-  NodeFS.mkdirSync(NodePath.join(repoRoot, "ios"), { recursive: true });
-  NodeFS.writeFileSync(NodePath.join(repoRoot, "ios", "README.md"), "ios\n");
-  const git = (...args: string[]) =>
-    NodeChildProcess.execFileSync("git", ["-C", repoRoot, ...args], { stdio: "ignore" });
-  git("init", "-q", "-b", "main");
-  git("add", ".");
-  git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "init");
-  git("worktree", "add", "-q", "-b", "t3-subdir", worktreePath);
-  return { projectRoot: NodePath.join(repoRoot, "ios"), worktreePath };
-}
+// A project rooted in a repository subdirectory, with a thread in a worktree of
+// that repository. A clone's `.git` is a directory and a worktree's is a file.
+const makeSubdirectoryProject = Effect.fn(function* (options: {
+  readonly worktreeHasIos: boolean;
+}) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const base = yield* fileSystem.makeTempDirectoryScoped({ prefix: "runtime-policy-subdir-" });
+  const repoRoot = path.join(base, "repo");
+  const worktreePath = path.join(base, "worktree");
+  yield* fileSystem.makeDirectory(path.join(repoRoot, ".git"), { recursive: true });
+  yield* fileSystem.makeDirectory(path.join(repoRoot, "ios"), { recursive: true });
+  yield* fileSystem.makeDirectory(worktreePath, { recursive: true });
+  yield* fileSystem.writeFileString(path.join(worktreePath, ".git"), "gitdir: elsewhere\n");
+  if (options.worktreeHasIos) yield* fileSystem.makeDirectory(path.join(worktreePath, "ios"));
+  return { projectRoot: path.join(repoRoot, "ios"), worktreePath, path };
+});
 
-const subdirectoryRepo = makeSubdirectoryProjectRepo();
+const resolveWorktreeCwd = (options: { readonly worktreeHasIos: boolean }) =>
+  Effect.gen(function* () {
+    const fixture = yield* makeSubdirectoryProject(options);
+    const now = yield* DateTime.now;
+    const resolved = yield* Effect.gen(function* () {
+      const policy = yield* RuntimePolicy.RuntimePolicyV2;
+      return yield* policy.resolve({
+        thread: makeThread({ now, worktreePath: fixture.worktreePath }),
+        modelSelection,
+      });
+    }).pipe(Effect.provide(layerWithProjectRoot(fixture.projectRoot)));
+    return { cwd: resolved.cwd, ...fixture };
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
 
-it.layer(layerWithProjectRoot(subdirectoryRepo.projectRoot))(
-  "RuntimePolicyV2 for a project in a repository subdirectory",
-  (it) => {
-    it.effect("starts worktree threads in the same subdirectory of the worktree", () =>
-      Effect.gen(function* () {
-        const policy = yield* RuntimePolicy.RuntimePolicyV2;
-        const now = yield* DateTime.now;
-        const resolved = yield* policy.resolve({
-          thread: makeThread({ now, worktreePath: subdirectoryRepo.worktreePath }),
-          modelSelection,
-        });
+it.effect("starts worktree threads in the project's subdirectory of the worktree", () =>
+  Effect.gen(function* () {
+    const { cwd, worktreePath, path } = yield* resolveWorktreeCwd({ worktreeHasIos: true });
+    assert.equal(cwd, path.join(worktreePath, "ios"));
+  }),
+);
 
-        assert.equal(resolved.cwd, NodePath.join(subdirectoryRepo.worktreePath, "ios"));
-      }),
-    );
-  },
+it.effect("starts at the worktree root when its branch lacks the project's subdirectory", () =>
+  Effect.gen(function* () {
+    const { cwd, worktreePath } = yield* resolveWorktreeCwd({ worktreeHasIos: false });
+    assert.equal(cwd, worktreePath);
+  }),
 );

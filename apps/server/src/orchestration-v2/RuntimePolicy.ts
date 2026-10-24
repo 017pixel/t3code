@@ -13,6 +13,9 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
+import { threadAgentCwd } from "@t3tools/shared/projectScripts";
+
+import { findRepositoryRoot } from "../project/repositoryRoot.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProjectStore from "./ProjectStore.ts";
@@ -86,35 +89,29 @@ export const layerFromProjectStore: Layer.Layer<
     const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const exists = (candidate: string) =>
-      fileSystem.exists(candidate).pipe(Effect.orElseSucceed(() => false));
-
-    // The project root's path inside its checkout, such as `ios` for a project
-    // added at `repo/ios`. A worktree checks out the whole repository, so its
-    // agent must start in the same subdirectory to see that project's files
-    // and skills.
-    const projectPathInCheckout = Effect.fn("RuntimePolicyV2.projectPathInCheckout")(function* (
-      projectRoot: string,
-    ) {
-      const resolvedRoot = path.resolve(projectRoot);
-      let current = resolvedRoot;
-      while (!(yield* exists(path.join(current, ".git")))) {
-        const parent = path.dirname(current);
-        if (parent === current) return "";
-        current = parent;
-      }
-      return path.relative(current, resolvedRoot);
-    });
-
     const worktreeCwd = Effect.fn("RuntimePolicyV2.worktreeCwd")(function* (
       worktreePath: string,
       projectRoot: string,
     ) {
-      const relative = yield* projectPathInCheckout(projectRoot);
-      if (relative === "") return worktreePath;
-      const candidate = path.join(worktreePath, relative);
+      const candidate = threadAgentCwd({
+        projectRoot: path.resolve(projectRoot),
+        repositoryRoot: yield* findRepositoryRoot(projectRoot).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        ),
+        worktreePath,
+      });
       // A worktree on a branch without the subdirectory still starts at its root.
-      return (yield* exists(candidate)) ? candidate : worktreePath;
+      if (candidate === worktreePath) return worktreePath;
+      const candidateExists = yield* fileSystem.exists(candidate).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Could not check the thread's working directory", {
+            path: candidate,
+            cause,
+          }).pipe(Effect.as(false)),
+        ),
+      );
+      return candidateExists ? candidate : worktreePath;
     });
 
     return RuntimePolicyV2.of({
@@ -124,7 +121,7 @@ export const layerFromProjectStore: Layer.Layer<
           instance === undefined
             ? undefined
             : (yield* instance.snapshot.getSnapshot).supportedRuntimeModes;
-        const projectRoot = yield* projects.get(input.thread.projectId).pipe(
+        const project = yield* projects.get(input.thread.projectId).pipe(
           Effect.mapError(
             (cause) =>
               new RuntimePolicyResolveError({
@@ -133,24 +130,20 @@ export const layerFromProjectStore: Layer.Layer<
                 cause,
               }),
           ),
-          Effect.flatMap(
-            Option.match({
-              onNone: () =>
-                Effect.fail(
-                  new RuntimePolicyResolveError({
-                    projectId: input.thread.projectId,
-                    providerInstanceId: input.modelSelection.instanceId,
-                    cause: "Project not found.",
-                  }),
-                ),
-              onSome: (project) => Effect.succeed(project.workspaceRoot),
-            }),
-          ),
         );
+        const worktreePath = input.thread.worktreePath;
         const cwd =
-          input.thread.worktreePath === null
-            ? projectRoot
-            : yield* worktreeCwd(input.thread.worktreePath, projectRoot);
+          worktreePath !== null
+            ? Option.isSome(project)
+              ? yield* worktreeCwd(worktreePath, project.value.workspaceRoot)
+              : worktreePath
+            : Option.isSome(project)
+              ? project.value.workspaceRoot
+              : yield* new RuntimePolicyResolveError({
+                  projectId: input.thread.projectId,
+                  providerInstanceId: input.modelSelection.instanceId,
+                  cause: "Project not found.",
+                });
         return ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
           runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
           interactionMode: input.thread.interactionMode,
