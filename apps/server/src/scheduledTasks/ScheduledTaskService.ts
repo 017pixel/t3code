@@ -691,14 +691,23 @@ export const layer = Layer.effect(
       readonly error: string | null;
       readonly startedAtIso: string;
       readonly pause: boolean;
+      /** Pauses only while the task still targets this gone destination; an edit may rebind it mid-run. */
+      readonly pauseIfBoundTo: { readonly projectId: string; readonly threadId: string } | null;
       readonly consecutiveFailures: number;
-    }) =>
+    }) => {
+      const pause = input.pause ? 1 : 0;
+      const goneProjectId = input.pauseIfBoundTo?.projectId ?? null;
+      const goneThreadId = input.pauseIfBoundTo?.threadId ?? null;
       // A pause may land mid-run; it must not be undone by the next occurrence.
-      sql`
+      return sql`
         UPDATE scheduled_tasks
         SET updated_at = ${input.completedAtIso},
-            enabled = CASE WHEN ${input.pause ? 1 : 0} = 1 THEN 0 ELSE enabled END,
-            next_run_at = CASE WHEN enabled = 1 THEN ${input.nextRunAtIso} ELSE NULL END,
+            enabled = CASE
+              WHEN ${pause} = 1 OR (project_id = ${goneProjectId} AND thread_id = ${goneThreadId}) THEN 0
+              ELSE enabled END,
+            next_run_at = CASE
+              WHEN enabled = 0 OR ${pause} = 1 OR (project_id = ${goneProjectId} AND thread_id = ${goneThreadId}) THEN NULL
+              ELSE ${input.nextRunAtIso} END,
             last_run_status = ${input.status},
             -- markRunning cleared the error, so one present now is a mid-run pause note.
             last_run_error = CASE WHEN enabled = 0 AND last_run_error IS NOT NULL
@@ -714,6 +723,7 @@ export const layer = Layer.effect(
           taskError("Could not record schedule task run.", { taskId: input.id, cause }),
         ),
       );
+    };
 
     // Best-effort escape hatch: if anything fails between markRunning and
     // markCompleted, write a full terminal record so runDueTasks neither skips
@@ -923,15 +933,19 @@ export const layer = Layer.effect(
           !destinationGone &&
           active.schedule.type !== "webhook" &&
           consecutiveFailures >= MAX_CONSECUTIVE_FAILED_RUNS;
-        const pause = destinationGone || failuresExhausted;
         const lastRunError = runSucceeded
           ? null
           : failuresExhausted
             ? `${errorMessage(result.cause)} Paused after ${MAX_CONSECUTIVE_FAILED_RUNS} failed runs in a row.`
             : errorMessage(result.cause);
         const current = yield* findTask(task.id);
+        const pausesCurrent =
+          failuresExhausted ||
+          (destinationGone &&
+            current?.projectId === active.projectId &&
+            current.threadId === active.threadId);
         const scheduleSource =
-          current === null ? task : pause ? { ...current, enabled: false } : current;
+          current === null ? task : pausesCurrent ? { ...current, enabled: false } : current;
         const completed: ScheduledTask = {
           ...scheduleSource,
           updatedAt: iso(completedAt),
@@ -948,11 +962,16 @@ export const layer = Layer.effect(
           const completion = markCompleted({
             id: task.id,
             completedAtIso: completed.updatedAt,
-            nextRunAtIso: completed.nextRunAt,
+            // The UPDATE re-checks the binding, so pass the unpaused occurrence.
+            nextRunAtIso: nextRunAt(current, completedAt),
             status: lastRunStatus,
             error: lastRunError,
             startedAtIso,
-            pause,
+            pause: failuresExhausted,
+            pauseIfBoundTo:
+              destinationGone && active.threadId !== null
+                ? { projectId: active.projectId, threadId: active.threadId }
+                : null,
             consecutiveFailures,
           });
           if (webhook === undefined) yield* completion;
