@@ -15,6 +15,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as TestClock from "effect/testing/TestClock";
 import { RpcClientError } from "effect/rpc";
 
 import {
@@ -263,6 +264,58 @@ describe("environment RPC", () => {
       expect(subscriptions).toEqual(["first", "second"]);
       expect(yield* Ref.get(retryCount)).toBe(0);
     }),
+  );
+
+  it.effect(
+    "asks the supervisor for a new session when a durable subscription loses its transport",
+    () =>
+      Effect.gen(function* () {
+        const subscribed = yield* Deferred.make<void>();
+        const recoveryRequested = yield* Deferred.make<void>();
+        // The session itself stays healthy (`closed` never resolves), as when the RPC client fails
+        // to decode one stream chunk, so nothing else will replace it.
+        const client = {
+          [WS_METHODS.subscribeTerminalEvents]: () =>
+            Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
+              Stream.drain,
+              Stream.concat(
+                Stream.fail(
+                  new RpcClientError.RpcClientError({
+                    reason: new RpcClientError.RpcClientDefect({
+                      message: "Failed to decode stream chunk",
+                      cause: new Error("invalid stream item"),
+                    }),
+                  }),
+                ),
+              ),
+            ),
+        } as unknown as WsRpcProtocolClient;
+        const harness = yield* makeHarness();
+        const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+          ...harness.supervisor,
+          retryNow: Deferred.succeed(recoveryRequested, undefined).pipe(Effect.asVoid),
+        });
+
+        yield* SubscriptionRef.set(harness.activeSession, Option.some(session(client)));
+        const subscriptionFiber = yield* subscribe(WS_METHODS.subscribeTerminalEvents, {}).pipe(
+          Stream.runDrain,
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(subscribed);
+        const recoveryFiber = yield* Deferred.await(recoveryRequested).pipe(
+          Effect.timeoutOption("1 second"),
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust("1 second");
+        const recovery = yield* Fiber.join(recoveryFiber);
+        yield* Fiber.interrupt(subscriptionFiber);
+
+        expect(
+          Option.isSome(recovery),
+          "durable subscription drained after a transport RpcClientError without requesting a replacement session",
+        ).toBe(true);
+      }),
   );
 
   it.effect("surfaces domain subscription failures without reconnecting", () =>
