@@ -56,6 +56,11 @@ export const writeFileStringAtomically = (input: {
       const targetDirectory = path.dirname(targetPath);
 
       yield* fs.makeDirectory(targetDirectory, { recursive: true });
+      // Opened before anything is written, so a directory that cannot be opened
+      // (one without read permission) fails the save while the target is intact.
+      // Windows cannot open a directory to sync it.
+      const directory =
+        platform === "win32" ? undefined : yield* fs.open(targetDirectory, { flag: "r" });
       // The temp directory is cleanup, not part of the write: failing to remove
       // it (a virus scanner holding it on Windows) must not fail a write that
       // already landed.
@@ -83,14 +88,12 @@ export const writeFileStringAtomically = (input: {
         Effect.flatMap((file) => file.sync),
         Effect.scoped,
       );
-      if (platform !== "win32") {
+      if (directory !== undefined) {
         yield* fs.rename(tempPath, targetPath);
-        // Persists the rename. Windows cannot open a directory to sync it. Only a
-        // filesystem that cannot sync a directory at all is let through: the rename
-        // is visible, but a failed sync means it may not survive a crash.
-        return yield* fs.open(targetDirectory, { flag: "r" }).pipe(
-          Effect.flatMap((directory) => directory.sync),
-          Effect.scoped,
+        // Persists the rename. Only a filesystem that cannot sync a directory at all
+        // is let through: the rename is visible, but a failed sync means it may not
+        // survive a crash.
+        return yield* directory.sync.pipe(
           Effect.catchIf(isUnsupportedSync, (error) => Effect.logWarning(error)),
         );
       }

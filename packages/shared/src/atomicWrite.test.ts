@@ -222,42 +222,73 @@ it.layer(NodeServices.layer)("writeFileStringAtomically", (it) => {
       );
     }),
   );
+  // EIO means the rename may not survive a crash. ENOTSUP means the filesystem
+  // cannot sync a directory at all, so the save stands.
+  it.effect.each(
+    HostProcess.Platform.defaultValue() === "win32"
+      ? []
+      : [
+          { code: "EIO", fails: true },
+          { code: "ENOTSUP", fails: false },
+        ],
+  )("handles a directory sync failing with $code after the rename", ({ code, fails }) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-atomic-write-" });
+      const filePath = path.join(root, "settings.json");
+      const syncFailure = PlatformError.systemError({
+        _tag: "Unknown",
+        module: "FileSystem",
+        method: "sync",
+        pathOrDescriptor: root,
+        cause: Object.assign(new Error(`${code}, fsync`), { code }),
+      });
+      const failingDirectorySync = FileSystem.make({
+        ...fs,
+        open: (openedPath, options) =>
+          fs
+            .open(openedPath, options)
+            .pipe(
+              Effect.map((file): FileSystem.File =>
+                openedPath === root
+                  ? Object.create(file, { sync: { value: Effect.fail(syncFailure) } })
+                  : file,
+              ),
+            ),
+      });
+
+      const exit = yield* writeFileStringAtomically({ filePath, contents: "after" }).pipe(
+        Effect.provideService(FileSystem.FileSystem, failingDirectorySync),
+        Effect.exit,
+      );
+
+      assert.deepStrictEqual(exit, fails ? Exit.fail(syncFailure) : Exit.void);
+      assert.strictEqual(yield* fs.readFileString(filePath), "after");
+    }),
+  );
+
+  // Write and search but no read: the directory cannot be opened to sync it, which
+  // has to fail the save before the rename rather than after it.
   it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
-    "fails when the directory cannot be synced after the rename",
+    "leaves the target intact when its directory cannot be opened for the sync",
     () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-atomic-write-" });
         const filePath = path.join(root, "settings.json");
-        const syncFailure = PlatformError.systemError({
-          _tag: "Unknown",
-          module: "FileSystem",
-          method: "sync",
-          pathOrDescriptor: root,
-          cause: Object.assign(new Error("EIO, fsync"), { code: "EIO" }),
-        });
-        const failingDirectorySync = FileSystem.make({
-          ...fs,
-          open: (openedPath, options) =>
-            fs
-              .open(openedPath, options)
-              .pipe(
-                Effect.map((file): FileSystem.File =>
-                  openedPath === root
-                    ? Object.create(file, { sync: { value: Effect.fail(syncFailure) } })
-                    : file,
-                ),
-              ),
-        });
+        yield* fs.writeFileString(filePath, "before");
+        yield* Effect.acquireRelease(fs.chmod(root, 0o300), () =>
+          fs.chmod(root, 0o700).pipe(Effect.orDie),
+        );
 
         const failure = yield* writeFileStringAtomically({ filePath, contents: "after" }).pipe(
-          Effect.provideService(FileSystem.FileSystem, failingDirectorySync),
           Effect.flip,
         );
 
-        assert.strictEqual(failure, syncFailure);
-        assert.strictEqual(yield* fs.readFileString(filePath), "after");
+        assert.strictEqual(failure.reason._tag, "PermissionDenied");
+        assert.strictEqual(yield* fs.readFileString(filePath), "before");
       }),
   );
 
