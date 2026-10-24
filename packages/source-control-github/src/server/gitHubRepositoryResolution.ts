@@ -1,4 +1,4 @@
-import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
+import { normalizeGitRemoteUrl, parseGitRemoteRepository } from "@t3tools/shared/git";
 import { isSshRemoteUrl } from "@t3tools/shared/sourceControl";
 import { parseGitRemoteHost } from "@t3tools/source-control-core/shared/definition";
 import { definition } from "../shared/definition.ts";
@@ -36,7 +36,10 @@ export function selectGitHubBaseRepository(input: {
   const host = input.host.toLowerCase();
   const repositories = new Map<string, { readonly owner: string; readonly name: string }>();
   for (const remote of parseFetchRemotes(input.remotes)) {
-    if (parseGitRemoteHost(remote.url) === null) continue;
+    // A userless SCP remote (`github.com:me/web`) has no host for parseGitRemoteHost, but gh reads one.
+    if (parseGitRemoteRepository(remote.url) === null && parseGitRemoteHost(remote.url) === null) {
+      continue;
+    }
     const [remoteHost, owner, name, ...rest] = normalizeGitRemoteUrl(remote.url).split("/");
     if (remoteHost !== host || !owner || !name || rest.length > 0) return null;
     repositories.set(remote.name, { owner, name });
