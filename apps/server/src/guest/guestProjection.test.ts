@@ -408,7 +408,7 @@ describe("projectTurnItemForGuestDetail", () => {
       item({
         type: "command_execution",
         input: `ls ${ROOT}/src`,
-        output: `${ROOT}/src/auth.ts\n${HOME}/.config/app.json\n`,
+        output: `${ROOT}/src/auth.ts\n\u001b[32m${HOME}\u001b[0m/.config/app.json\n`,
         exitCode: 0,
       }),
       roots,
@@ -483,6 +483,22 @@ describe("guestCommandOutputFrames", () => {
     const rewrite = guestCommandOutputFrames(roots);
     const frames = [rewrite(frame("append", `cp ${ROOT}`)), rewrite(frame("append", "-old/a .\n"))];
     expect(shown(frames)).toBe("cp ~/code/secret-project-old/a .\n");
+  });
+
+  it("sends plain text, so colors inside a path cannot hide it", () => {
+    const color = (text: string) => `\u001b[01;31m\u001b[K${text}\u001b[m\u001b[K`;
+    const colored = `${ROOT.slice(0, 7)}${color("owner")}${ROOT.slice(12)}/private.txt\n`;
+    expect(ROOT.slice(7, 12)).toBe("owner");
+    const rewrite = guestCommandOutputFrames(roots);
+    const frames = [
+      rewrite(frame("replace", "")),
+      // The frame boundary falls inside an escape sequence.
+      rewrite(frame("append", colored.slice(0, 10))),
+      rewrite(frame("append", colored.slice(10))),
+    ];
+    expect(shown(frames)).toBe("private.txt\n");
+    const link = `\u001b]8;;file://${ROOT}/a.ts\u0007a.ts\u001b]8;;\u0007\n`;
+    expect(shown([rewrite(frame("replace", link, false))])).toBe("a.ts\n");
   });
 
   it("holds nothing back once the command settles", () => {

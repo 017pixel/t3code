@@ -370,7 +370,28 @@ export function projectTurnItemForGuestDetail(
   const detail = projectTurnItemForDetail(item);
   return detail.type !== "command_execution" || detail.output === undefined
     ? guest
-    : { ...guest, output: guestText(detail.output, roots) };
+    : { ...guest, output: guestText(stripTerminalEscapes(detail.output), roots) };
+}
+
+// CSI (`ESC [` or the 8-bit form), OSC up to BEL or ST (OSC 8 links can carry file URLs), and the
+// other two-byte escapes. Colors split paths, so a guest gets plain text and paths rewrite whole.
+const TERMINAL_ESCAPE =
+  /(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/gu;
+
+/** Guest output is plain text; see `TERMINAL_ESCAPE`. */
+function stripTerminalEscapes(text: string): string {
+  return text.replace(TERMINAL_ESCAPE, "");
+}
+
+/** Where an escape sequence that the next frame may finish starts, or the text length. */
+function unfinishedEscapeStart(text: string): number {
+  const start = Math.max(text.lastIndexOf("\u001b"), text.lastIndexOf("\u009b"));
+  if (start === -1) return text.length;
+  const tail = text.slice(start);
+  TERMINAL_ESCAPE.lastIndex = 0;
+  const match = TERMINAL_ESCAPE.exec(tail);
+  TERMINAL_ESCAPE.lastIndex = 0;
+  return match !== null && match.index === 0 ? text.length : start;
 }
 
 /**
@@ -393,16 +414,19 @@ function rootPrefixAtEnd(text: string, roots: GuestPathRoots): number {
 }
 
 /**
- * Rewrites live command output frames for a guest, with paths as in its command text. A frame can
- * end partway through a root, so text that could still become one waits for the next frame; the
- * client receives the same bytes in the same order, only later. A settled frame holds nothing back.
+ * Rewrites live command output frames for a guest: plain text, with paths as in its command text.
+ * A frame can end partway through a root or an escape sequence, so text that could still become
+ * one waits for the next frame. A settled frame holds nothing back.
  */
 export function guestCommandOutputFrames(roots: GuestPathRoots) {
   let held = "";
   return (frame: OrchestrationV2CommandOutputFrame): OrchestrationV2CommandOutputFrame | null => {
-    const text = (frame.kind === "replace" ? "" : held) + frame.text;
+    const raw = (frame.kind === "replace" ? "" : held) + frame.text;
+    const escapeStart = frame.running ? unfinishedEscapeStart(raw) : raw.length;
+    const text = stripTerminalEscapes(raw.slice(0, escapeStart));
     const cut = text.length - (frame.running ? rootPrefixAtEnd(text, roots) : 0);
-    held = text.slice(cut);
+    // Held text is already plain, except an unfinished escape at the end.
+    held = text.slice(cut) + raw.slice(escapeStart);
     const shown = guestText(text.slice(0, cut), roots);
     if (frame.kind === "append" && shown === "") return null;
     return { kind: frame.kind, text: shown, truncated: frame.truncated, running: frame.running };
