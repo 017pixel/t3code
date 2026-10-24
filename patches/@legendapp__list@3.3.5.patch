@@ -1619,7 +1619,7 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..d7cbe1cb43449cc29822b2646deabbdd
      }
    }
 diff --git a/react.js b/react.js
-index 914d2dafaafa001c9ab6791a0a0581659295e333..199aae77b3620b7c4bb2ecd96b82978c0430059a 100644
+index 914d2dafaafa001c9ab6791a0a0581659295e333..44341b8160b6dd05c573272d5501d29964f3f733 100644
 --- a/react.js
 +++ b/react.js
 @@ -4702,7 +4702,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
@@ -1718,7 +1718,86 @@ index 914d2dafaafa001c9ab6791a0a0581659295e333..199aae77b3620b7c4bb2ecd96b82978c
        }
      }
    }
-@@ -6446,8 +6480,8 @@ function ScrollAdjust() {
+@@ -5734,35 +5768,64 @@ function findLIS(arr) {
+ }
+ 
+ // src/hooks/useDOMOrder.ts
++// T3 patch: a native selection follows DOM order, so while one reaches into the
++// list, sort containers on the next frame instead of once scrolling settles,
++// and put back any selection end that a move collapsed.
++function selectionReaches(parent) {
++  const selection = typeof document === "undefined" ? null : document.getSelection();
++  return !!selection && !selection.isCollapsed && selection.rangeCount > 0 && selection.getRangeAt(0).intersectsNode(parent);
++}
++function sortDOMElementsKeepingSelection(container, indexByElement) {
++  const selection = document.getSelection();
++  const ends = selection && !selection.isCollapsed ? [selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset] : null;
++  sortDOMElements(container, indexByElement);
++  if (!ends || !ends[0].isConnected || !ends[2].isConnected) return;
++  if (selection.anchorNode !== ends[0] || selection.anchorOffset !== ends[1] || selection.focusNode !== ends[2] || selection.focusOffset !== ends[3]) {
++    selection.setBaseAndExtent(ends[0], ends[1], ends[2], ends[3]);
++  }
++}
+ function useDOMOrder(ref) {
+   const ctx = useStateContext();
+   const debounceRef = React3.useRef(void 0);
++  const frameRef = React3.useRef(void 0);
+   React3.useEffect(() => {
++    const sort = () => {
++      debounceRef.current = void 0;
++      frameRef.current = void 0;
++      const parent = ref.current;
++      if (parent) {
++        const indexByElement = /* @__PURE__ */ new Map();
++        for (const [containerId, viewRef] of ctx.viewRefs) {
++          const element = viewRef.current;
++          const index = peek$(ctx, `containerItemIndex${containerId}`);
++          if (element && index !== void 0) {
++            indexByElement.set(element, index);
++          }
++        }
++        sortDOMElementsKeepingSelection(parent, indexByElement);
++      }
++    };
+     const unsubscribe = listen$(ctx, "lastPositionUpdate", () => {
+       if (debounceRef.current !== void 0) {
+         clearTimeout(debounceRef.current);
++        debounceRef.current = void 0;
+       }
+-      debounceRef.current = setTimeout(() => {
+-        const parent = ref.current;
+-        if (parent) {
+-          const indexByElement = /* @__PURE__ */ new Map();
+-          for (const [containerId, viewRef] of ctx.viewRefs) {
+-            const element = viewRef.current;
+-            const index = peek$(ctx, `containerItemIndex${containerId}`);
+-            if (element && index !== void 0) {
+-              indexByElement.set(element, index);
+-            }
+-          }
+-          sortDOMElements(parent, indexByElement);
++      if (ref.current && selectionReaches(ref.current)) {
++        if (frameRef.current === void 0) {
++          frameRef.current = requestAnimationFrame(sort);
+         }
+-        debounceRef.current = void 0;
+-      }, 500);
++      } else {
++        debounceRef.current = setTimeout(sort, 500);
++      }
+     });
+     return () => {
+       unsubscribe();
+       if (debounceRef.current !== void 0) {
+         clearTimeout(debounceRef.current);
+       }
++      if (frameRef.current !== void 0) {
++        cancelAnimationFrame(frameRef.current);
++      }
+     };
+   }, [ctx]);
+ }
+@@ -6446,8 +6509,8 @@ function ScrollAdjust() {
                window.getComputedStyle(contentNode)[axis.paddingEndProp]
              );
              const temporaryPaddingEnd = `${(currentPaddingEnd || 0) + pad}px`;
@@ -1728,8 +1807,26 @@ index 914d2dafaafa001c9ab6791a0a0581659295e333..199aae77b3620b7c4bb2ecd96b82978c
              void contentNode.offsetHeight;
              scrollBy();
              if (resetPaddingRafRef.current !== void 0) {
+@@ -8221,6 +8284,17 @@ var LegendListInner = typedForwardRef(function LegendListInner2(props, forwarded
+       (_a4 = state.triggerCalculateItemsInView) == null ? void 0 : _a4.call(state, { forceFullItemPositions: true });
+     }
+   }, [extraData, hasOverrideItemLayout, numColumnsProp]);
++  // T3 patch: a row newly pinned by alwaysRender otherwise waits for a scroll
++  // past the cached render range before it gets a container.
++  const alwaysRenderIndicesKey = alwaysRenderIndices.arr.join(",");
++  const previousAlwaysRenderIndicesKey = React3.useRef(alwaysRenderIndicesKey);
++  React3.useLayoutEffect(() => {
++    var _a4;
++    if (previousAlwaysRenderIndicesKey.current === alwaysRenderIndicesKey) return;
++    previousAlwaysRenderIndicesKey.current = alwaysRenderIndicesKey;
++    state.scrollForNextCalculateItemsInView = void 0;
++    (_a4 = state.triggerCalculateItemsInView) == null ? void 0 : _a4.call(state);
++  }, [alwaysRenderIndicesKey]);
+   React3.useEffect(() => {
+     if (!onMetricsChange) {
+       return;
 diff --git a/react.mjs b/react.mjs
-index 95465f2ab89ce41a10553f58af83618f7310e83c..a123bd3e9df510100d44dfae1f59b87e2e456cfc 100644
+index 95465f2ab89ce41a10553f58af83618f7310e83c..0e911df07221885b5084bee97b5bfe973e032a33 100644
 --- a/react.mjs
 +++ b/react.mjs
 @@ -4681,7 +4681,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
@@ -1828,7 +1925,86 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..a123bd3e9df510100d44dfae1f59b87e
        }
      }
    }
-@@ -6425,8 +6459,8 @@ function ScrollAdjust() {
+@@ -5713,35 +5747,64 @@ function findLIS(arr) {
+ }
+ 
+ // src/hooks/useDOMOrder.ts
++// T3 patch: a native selection follows DOM order, so while one reaches into the
++// list, sort containers on the next frame instead of once scrolling settles,
++// and put back any selection end that a move collapsed.
++function selectionReaches(parent) {
++  const selection = typeof document === "undefined" ? null : document.getSelection();
++  return !!selection && !selection.isCollapsed && selection.rangeCount > 0 && selection.getRangeAt(0).intersectsNode(parent);
++}
++function sortDOMElementsKeepingSelection(container, indexByElement) {
++  const selection = document.getSelection();
++  const ends = selection && !selection.isCollapsed ? [selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset] : null;
++  sortDOMElements(container, indexByElement);
++  if (!ends || !ends[0].isConnected || !ends[2].isConnected) return;
++  if (selection.anchorNode !== ends[0] || selection.anchorOffset !== ends[1] || selection.focusNode !== ends[2] || selection.focusOffset !== ends[3]) {
++    selection.setBaseAndExtent(ends[0], ends[1], ends[2], ends[3]);
++  }
++}
+ function useDOMOrder(ref) {
+   const ctx = useStateContext();
+   const debounceRef = useRef(void 0);
++  const frameRef = useRef(void 0);
+   useEffect(() => {
++    const sort = () => {
++      debounceRef.current = void 0;
++      frameRef.current = void 0;
++      const parent = ref.current;
++      if (parent) {
++        const indexByElement = /* @__PURE__ */ new Map();
++        for (const [containerId, viewRef] of ctx.viewRefs) {
++          const element = viewRef.current;
++          const index = peek$(ctx, `containerItemIndex${containerId}`);
++          if (element && index !== void 0) {
++            indexByElement.set(element, index);
++          }
++        }
++        sortDOMElementsKeepingSelection(parent, indexByElement);
++      }
++    };
+     const unsubscribe = listen$(ctx, "lastPositionUpdate", () => {
+       if (debounceRef.current !== void 0) {
+         clearTimeout(debounceRef.current);
++        debounceRef.current = void 0;
+       }
+-      debounceRef.current = setTimeout(() => {
+-        const parent = ref.current;
+-        if (parent) {
+-          const indexByElement = /* @__PURE__ */ new Map();
+-          for (const [containerId, viewRef] of ctx.viewRefs) {
+-            const element = viewRef.current;
+-            const index = peek$(ctx, `containerItemIndex${containerId}`);
+-            if (element && index !== void 0) {
+-              indexByElement.set(element, index);
+-            }
+-          }
+-          sortDOMElements(parent, indexByElement);
++      if (ref.current && selectionReaches(ref.current)) {
++        if (frameRef.current === void 0) {
++          frameRef.current = requestAnimationFrame(sort);
+         }
+-        debounceRef.current = void 0;
+-      }, 500);
++      } else {
++        debounceRef.current = setTimeout(sort, 500);
++      }
+     });
+     return () => {
+       unsubscribe();
+       if (debounceRef.current !== void 0) {
+         clearTimeout(debounceRef.current);
+       }
++      if (frameRef.current !== void 0) {
++        cancelAnimationFrame(frameRef.current);
++      }
+     };
+   }, [ctx]);
+ }
+@@ -6425,8 +6488,8 @@ function ScrollAdjust() {
                window.getComputedStyle(contentNode)[axis.paddingEndProp]
              );
              const temporaryPaddingEnd = `${(currentPaddingEnd || 0) + pad}px`;
@@ -1838,6 +2014,24 @@ index 95465f2ab89ce41a10553f58af83618f7310e83c..a123bd3e9df510100d44dfae1f59b87e
              void contentNode.offsetHeight;
              scrollBy();
              if (resetPaddingRafRef.current !== void 0) {
+@@ -8200,6 +8263,17 @@ var LegendListInner = typedForwardRef(function LegendListInner2(props, forwarded
+       (_a4 = state.triggerCalculateItemsInView) == null ? void 0 : _a4.call(state, { forceFullItemPositions: true });
+     }
+   }, [extraData, hasOverrideItemLayout, numColumnsProp]);
++  // T3 patch: a row newly pinned by alwaysRender otherwise waits for a scroll
++  // past the cached render range before it gets a container.
++  const alwaysRenderIndicesKey = alwaysRenderIndices.arr.join(",");
++  const previousAlwaysRenderIndicesKey = useRef(alwaysRenderIndicesKey);
++  useLayoutEffect(() => {
++    var _a4;
++    if (previousAlwaysRenderIndicesKey.current === alwaysRenderIndicesKey) return;
++    previousAlwaysRenderIndicesKey.current = alwaysRenderIndicesKey;
++    state.scrollForNextCalculateItemsInView = void 0;
++    (_a4 = state.triggerCalculateItemsInView) == null ? void 0 : _a4.call(state);
++  }, [alwaysRenderIndicesKey]);
+   useEffect(() => {
+     if (!onMetricsChange) {
+       return;
 diff --git a/reanimated.d.ts b/reanimated.d.ts
 index e5043320700b12f34f4c0babbc341f85ca8135c1..e8cbd461325a2e2e9ffd61de26a85ae4d108555c 100644
 --- a/reanimated.d.ts
