@@ -74,12 +74,14 @@ function formatHistoryError(error: unknown): string {
   return "Could not load earlier activity.";
 }
 
-// Steers join a running turn; every other user message opens one.
+// Steers join a running turn; every other user message opens one. The timeline shows every
+// notification as a response boundary, whether it opened its run or arrived mid-run.
 function startsTurn(item: OrchestrationV2TurnItem): boolean {
   return (
-    item.type === "user_message" &&
-    item.inputIntent !== "steer" &&
-    item.inputIntent !== "promoted_queued_to_steer"
+    item.type === "notification" ||
+    (item.type === "user_message" &&
+      item.inputIntent !== "steer" &&
+      item.inputIntent !== "promoted_queued_to_steer")
   );
 }
 

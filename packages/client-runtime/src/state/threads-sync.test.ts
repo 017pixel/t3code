@@ -1120,7 +1120,7 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
-  it.effect.each(["complete", "follow-up page failure"] as const)(
+  it.effect.each(["complete", "follow-up page failure", "notification"] as const)(
     "one load-earlier request pages until it reaches the turn that started an agent run (#21821), %s",
     (mode) =>
       Effect.gen(function* () {
@@ -1167,11 +1167,26 @@ describe("EnvironmentThreads", () => {
           text: "Run every check",
           attachments: [],
         };
+        // Arrives mid-run, so it does not open the run, but the timeline still shows it.
+        const notification = {
+          ...common,
+          id: "item:task-notification",
+          ordinal: 151,
+          type: "notification",
+          source: { kind: "delegated_task", taskIds: [] },
+          outcome: "completed",
+          summary: "Checks finished",
+        };
         // Newest page first: a long agent run whose opening message is two pages back.
         const pages: Record<string, { items: ReadonlyArray<unknown>; nextCursor: string | null }> =
           {
             "page-1": { items: commands(152, 75).map(projected), nextCursor: "page-2" },
-            "page-2": { items: commands(77, 75).map(projected), nextCursor: "page-3" },
+            "page-2": {
+              items: [...commands(77, 75), ...(mode === "notification" ? [notification] : [])].map(
+                projected,
+              ),
+              nextCursor: "page-3",
+            },
             "page-3": {
               items: [projected(agentTurnStart), ...commands(2, 75).map(projected)],
               nextCursor: "page-4",
@@ -1226,6 +1241,15 @@ describe("EnvironmentThreads", () => {
         expect(yield* harness.loadEarlier()).toEqual({ _tag: "loaded" });
 
         const state = yield* SubscriptionRef.get(harness.threadState);
+        if (mode === "notification") {
+          expect(requestedCursors).toEqual(["page-1", "page-2"]);
+          expect(state.history).toMatchObject({
+            loading: false,
+            error: null,
+            historyCursor: "page-3",
+          });
+          return;
+        }
         expect(
           Option.getOrThrow(state.data).visibleTurnItems.map((row) => String(row.sourceItemId)),
         ).toContain(agentTurnStart.id);
