@@ -820,3 +820,94 @@ it.effect("admits provider and OAuth client credentials and points only clients 
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
+
+it.effect("offers 2025-11-25 so invalid tool arguments come back as tool errors", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const token = "providerTokenWithoutDots";
+      const scope: McpInvocationContext.McpInvocationScope = {
+        environmentId,
+        requestNamespace: "provider-session",
+        thread: {
+          threadId: ThreadId.make("thread-provider"),
+          providerSessionId: "provider-session",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        client: undefined,
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+      const CountToolkit = Toolkit.make(
+        Tool.make("count", {
+          description: "Counts.",
+          parameters: Schema.Struct({ count: Schema.Number }),
+          success: Schema.Struct({ ok: Schema.Boolean }),
+          failure: OrchestratorMcpFailure,
+          failureMode: "return",
+        }),
+      );
+      const serverLayer = McpHttpServer.toolkitRegistration(
+        CountToolkit,
+        McpToolAccess.toLayer(CountToolkit, {
+          count: McpToolAccess.reads(() => Effect.succeed({ ok: true })),
+        }),
+      ).pipe(
+        Layer.provideMerge(McpHttpServer.layerMcpTransport),
+        Layer.provide(
+          Layer.mock(McpSessionRegistry.McpSessionRegistry)({
+            resolve: (presented) =>
+              Effect.succeed(
+                presented === token
+                  ? (scope as McpInvocationContext.McpThreadInvocationScope)
+                  : undefined,
+              ),
+          }),
+        ),
+      );
+      yield* HttpRouter.serve(serverLayer, { disableListenLog: true, disableLogger: true }).pipe(
+        Layer.build,
+      );
+      const httpClient = (yield* HttpClient.HttpClient).pipe(
+        HttpClient.mapRequest(HttpClientRequest.bearerToken(token)),
+      );
+      const callWithInvalidArguments = (protocolVersion: string) =>
+        Effect.gen(function* () {
+          const accept = "application/json, text/event-stream";
+          const initialize = yield* httpClient.post("/mcp", {
+            headers: { accept },
+            body: HttpBody.text(
+              `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"${protocolVersion}","capabilities":{},"clientInfo":{"name":"probe","version":"1.0.0"}}}`,
+              "application/json",
+            ),
+          });
+          const negotiated = ((yield* initialize.json) as { result: { protocolVersion: string } })
+            .result.protocolVersion;
+          const call = yield* httpClient.post("/mcp", {
+            headers: {
+              accept,
+              "mcp-session-id": initialize.headers["mcp-session-id"]!,
+              "mcp-protocol-version": negotiated,
+            },
+            body: HttpBody.text(
+              `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"count","arguments":{"count":"three"}}}`,
+              "application/json",
+            ),
+          });
+          const body = (yield* call.json) as {
+            readonly result?: { readonly isError: boolean; readonly content: [{ text: string }] };
+            readonly error?: { readonly code: number };
+          };
+          return { negotiated, body };
+        });
+
+      const current = yield* callWithInvalidArguments("2025-11-25");
+      expect(current.negotiated).toBe("2025-11-25");
+      expect(current.body.result?.isError).toBe(true);
+      expect(current.body.result?.content[0].text).toContain("Invalid parameters for tool 'count'");
+
+      const legacy = yield* callWithInvalidArguments("2025-06-18");
+      expect(legacy.negotiated).toBe("2025-06-18");
+      expect(legacy.body.error?.code).toBe(-32602);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
