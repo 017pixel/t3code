@@ -7432,10 +7432,16 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   );
 
   // regression: #17531 a mod that holds a tool behind a focused pane must fail the turn, not hang it
-  it.effect("fails a turn whose mod requests focus for a pane T3 cannot show", () =>
+  it.effect.each([
+    { case: "fails a turn whose mod requests focus for a pane T3 cannot show", focus: true },
+    { case: "keeps a turn running beside a passive mod pane", focus: false },
+  ] as const)("$case", ({ focus }) =>
     Effect.scoped(
       Effect.gen(function* () {
-        const harness = yield* makeWakeHarness;
+        const interrupted = yield* Deferred.make<void>();
+        const harness = yield* makeWakeHarnessWithOptions({
+          interrupt: Deferred.succeed(interrupted, undefined),
+        });
         const now = yield* DateTime.now;
         yield* harness.runtime.startTurn(
           makeClaudeTestTurnInput({
@@ -7460,7 +7466,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ],
             shown_id: "blast-radius",
             focused_id: null,
-            focus_requested_id: "blast-radius",
+            focus_requested_id: focus ? "blast-radius" : null,
             uuid: "00000000-0000-4000-8000-000000000795",
             session_id: WAKE_NATIVE_SESSION,
           }),
@@ -7497,9 +7503,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ),
         );
         const [terminal] = harness.terminalEvents();
+        if (!focus) {
+          assert.equal(terminal, undefined);
+          return;
+        }
         assert.equal(terminal?.status, "failed");
         if (terminal?.status !== "failed") return;
         assert.include(terminal.failure.message, "blast-radius");
+        // The held tool call is abandoned by interrupting the query, never answered.
+        yield* Deferred.await(interrupted);
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
