@@ -476,6 +476,22 @@ it.layer(
         },
       ]);
 
+      const projectModels = [
+        ...provider.models,
+        { slug: "uni/medium-gpt", name: "Medium GPT", isCustom: false, capabilities: null },
+      ];
+      const withProjectModels = ProviderRegistry.upsertProviderWorkspaceSnapshot(
+        provider,
+        "/project",
+        { ...scopedSnapshot, models: projectModels, workspaceModels: projectModels },
+      );
+      assert.strictEqual(withProjectModels.models, provider.models);
+      assert.deepStrictEqual(
+        decodeServerProvider(encodeServerProvider(withProjectModels)).workspaceSnapshots?.[0]
+          ?.models,
+        projectModels,
+      );
+
       const pendingSnapshot = {
         ...scopedSnapshot,
         slashCommands: [COMPACT_SLASH_COMMAND],

@@ -135,6 +135,9 @@ export const ServerProviderWorkspaceSnapshot = Schema.Struct({
   slashCommandsPending: Schema.optional(Schema.Boolean),
   skills: Schema.Array(ServerProviderSkill),
   optionDescriptors: Schema.optional(Schema.Array(ProviderOptionDescriptor)),
+  // Set only when the workspace's catalog differs from the machine's, such as
+  // models from a project's own provider config. Absent means `provider.models`.
+  models: Schema.optional(Schema.Array(ServerProviderModel)),
 });
 export type ServerProviderWorkspaceSnapshot = typeof ServerProviderWorkspaceSnapshot.Type;
 

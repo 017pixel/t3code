@@ -9,6 +9,7 @@ import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime
 import { AsyncResult } from "effect/reactivity";
 import { useAtomValue } from "@effect/atom-react";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
+import { resolveProvidersForCwd } from "@t3tools/client-runtime/providerSkills";
 import { pastedTextDisposition, replaceTextSelection } from "@t3tools/client-runtime/text-paste";
 import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
@@ -720,7 +721,10 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     ? undefined
     : currentModelSelection.instanceId;
   const modelOptions = buildModelOptions(
-    props.serverConfig,
+    props.serverConfig && {
+      ...props.serverConfig,
+      providers: resolveProvidersForCwd(props.serverConfig.providers, props.projectCwd),
+    },
     currentModelSelection,
     lockedProviderInstanceId,
     props.selectedThread.projectId,

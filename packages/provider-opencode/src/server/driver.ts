@@ -1,4 +1,4 @@
-import { ProviderDriverKind } from "@t3tools/contracts";
+import { ProviderDriverKind, type ServerProviderModel } from "@t3tools/contracts";
 import { OpenCodeSettings } from "../settings.ts";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
@@ -29,6 +29,7 @@ import {
   makeOpenCode2ModelLoader,
   makePendingOpenCodeProvider,
   openCode2CommandsToServerProviderSlashCommands,
+  openCode2ProviderModels,
   openCode2SkillsToServerProviderSkills,
   openCodeSkillsToServerProviderSkills,
   openCodeCommandsToServerProviderSlashCommands,
@@ -172,6 +173,19 @@ export type OpenCodeDriverEnv =
   | ProviderLatestVersions.ProviderLatestVersions
   | OpenCodeRuntime.OpenCodeRuntime
   | Path.Path;
+
+/** Lists a workspace's catalog only where it differs, so most projects add nothing to the wire. */
+const scopeWorkspaceModels = (
+  machineModels: ReadonlyArray<ServerProviderModel>,
+  workspaceModels: Option.Option<ReadonlyArray<ServerProviderModel>>,
+) => {
+  if (Option.isNone(workspaceModels) || workspaceModels.value.length === 0) return {};
+  const slugs = (models: ReadonlyArray<ServerProviderModel>) =>
+    models.map((model) => model.slug).join("\n");
+  return slugs(workspaceModels.value) === slugs(machineModels)
+    ? {}
+    : { models: workspaceModels.value, workspaceModels: workspaceModels.value };
+};
 
 export const OpenCodeDriver: ProviderDriver<
   OpenCodeSettings,
@@ -327,6 +341,16 @@ export const OpenCodeDriver: ProviderDriver<
           );
         }).pipe(Effect.scoped),
       );
+    // A project's own opencode.jsonc can add providers, so its catalog can
+    // differ from the machine's. One that cannot be read falls back to it.
+    const loadOpenCode2WorkspaceModels = (cwd: string) =>
+      openCode2Server
+        .withConnection(({ client }) => loadOpenCode2Catalog(client, cwd))
+        .pipe(
+          Effect.timeout("10 seconds"),
+          Effect.map((catalog) => openCode2ProviderModels(effectiveConfig, catalog)),
+          Effect.option,
+        );
     const serverOwner = yield* OpenCodeServerOwner.make({
       binaryPath: effectiveConfig.binaryPath,
       directory: host.paths.cwd,
@@ -488,23 +512,28 @@ export const OpenCodeDriver: ProviderDriver<
         !effectiveConfig.enabled
           ? snapshot.getSnapshot
           : byOpenCodeRuntime(runtimeProbe.get, {
-              v2: Effect.all([
-                snapshot.getSnapshot,
-                listOpenCode2Workspace(cwd).pipe(
-                  Effect.timeout("20 seconds"),
-                  Effect.mapError(
-                    (cause) =>
-                      new ProviderDriverError({
-                        driver: DRIVER_KIND,
-                        instanceId,
-                        detail: `Failed to list OpenCode commands and skills for '${cwd}'`,
-                        cause,
-                      }),
+              v2: Effect.all(
+                [
+                  snapshot.getSnapshot,
+                  loadOpenCode2WorkspaceModels(cwd),
+                  listOpenCode2Workspace(cwd).pipe(
+                    Effect.timeout("20 seconds"),
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderDriverError({
+                          driver: DRIVER_KIND,
+                          instanceId,
+                          detail: `Failed to list OpenCode commands and skills for '${cwd}'`,
+                          cause,
+                        }),
+                    ),
                   ),
-                ),
-              ]).pipe(
-                Effect.map(([machineSnapshot, { skills, commands }]) => ({
+                ],
+                { concurrency: "unbounded" },
+              ).pipe(
+                Effect.map(([machineSnapshot, workspaceModels, { skills, commands }]) => ({
                   ...machineSnapshot,
+                  ...scopeWorkspaceModels(machineSnapshot.models, workspaceModels),
                   skills: openCode2SkillsToServerProviderSkills(skills),
                   slashCommands: openCode2CommandsToServerProviderSlashCommands(commands),
                   // A finished scan lists at least the built-ins. None means it

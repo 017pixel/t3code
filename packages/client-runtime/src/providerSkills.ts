@@ -127,3 +127,23 @@ export function resolveProviderSlashCommandsForCwd(
 ): ServerProvider["slashCommands"] {
   return resolveProviderWorkspaceSnapshot(provider, cwd)?.slashCommands ?? provider.slashCommands;
 }
+
+/**
+ * A project's own provider config can add models, which only its workspace
+ * snapshot lists. Providers without one keep their identity, so memoized
+ * consumers do not rerender.
+ */
+export function resolveProvidersForCwd<P extends ServerProvider>(
+  providers: ReadonlyArray<P>,
+  cwd: string | null | undefined,
+): ReadonlyArray<P> {
+  if (!cwd) return providers;
+  let changed = false;
+  const resolved = providers.map((provider) => {
+    const models = resolveProviderWorkspaceSnapshot(provider, cwd)?.models;
+    if (!models) return provider;
+    changed = true;
+    return { ...provider, models };
+  });
+  return changed ? resolved : providers;
+}

@@ -6,6 +6,7 @@ import {
   hasCompleteProviderWorkspaceSnapshot,
   resolveProviderSkillsForCwd,
   resolveProviderSlashCommandsForCwd,
+  resolveProvidersForCwd,
 } from "./providerSkills.ts";
 
 const provider = {
@@ -121,5 +122,27 @@ describe("workspace provider snapshots", () => {
     expect(hasCompleteProviderWorkspaceSnapshot(provider, "/workspace/project-b")).toBe(false);
     expect(hasCompleteProviderWorkspaceSnapshot(undefined, "/workspace/project-a")).toBe(false);
     expect(hasCompleteProviderWorkspaceSnapshot(provider, null)).toBe(false);
+  });
+
+  it("offers a project's own models only in that project", () => {
+    const projectModel = {
+      slug: "uni/medium-gpt",
+      name: "Medium GPT",
+      isCustom: false,
+      capabilities: null,
+    } satisfies ServerProvider["models"][number];
+    const withProjectModels = {
+      ...provider,
+      workspaceSnapshots: provider.workspaceSnapshots.map((snapshot) => ({
+        ...snapshot,
+        models: [projectModel],
+      })),
+    } satisfies ServerProvider;
+    const providers = [withProjectModels];
+    expect(resolveProvidersForCwd(providers, "/workspace/project-a")[0]?.models).toEqual([
+      projectModel,
+    ]);
+    expect(resolveProvidersForCwd(providers, "/workspace/project-b")).toBe(providers);
+    expect(resolveProvidersForCwd(providers, null)).toBe(providers);
   });
 });
