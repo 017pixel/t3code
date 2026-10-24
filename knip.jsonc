@@ -44,11 +44,6 @@
         "scripts/cli.ts",
         "scripts/evaluate-thread-titles.ts",
         "scripts/fetch-expo-schema.ts",
-        // Evidence capture loads these scripts by path through the browser, tools, and Node.
-        "scripts/issue-20883-proof/browser.js",
-        "scripts/issue-20883-proof/capture.mjs",
-        "scripts/issue-20883-proof/clock.mjs",
-        "scripts/issue-20883-proof/provider.mjs",
         "scripts/measure-pr-preview.ts",
         "scripts/probe-claude-fork-local-rollback-replay.ts",
         "scripts/update-test-shard-weights.ts",
