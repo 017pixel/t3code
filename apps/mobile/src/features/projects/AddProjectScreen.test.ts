@@ -331,6 +331,58 @@ function mountProjectFlow(
 }
 
 describe("add project source environment", () => {
+  it("blocks local add on a requested unavailable host until reconnect or manual choice", async () => {
+    state.realHooks = true;
+    state.scopes = new Set([AuthOrchestrationOperateScope]);
+    state.dispatch.mockReset();
+    state.environments = [
+      { environmentId: "environment", environmentLabel: "Environment" },
+      { environmentId: "another-environment", environmentLabel: "Another environment" },
+    ];
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    const root = createRoot(document.createElement("div"));
+    let screen: ReactNode;
+    function SourceObserver() {
+      screen = AddProjectSourceScreen({ environmentId: "environment" });
+      return null;
+    }
+    try {
+      for (const phase of ["available", "offline", "error"] as const) {
+        state.connectionStates = { environment: phase };
+        await act(() => root.render(createElement(SourceObserver)));
+        expect(findAction(screen, "Local folder")).toBeNull();
+        expect(state.dispatch).not.toHaveBeenCalled();
+      }
+      state.connectionStates = {};
+      await act(() => root.render(createElement(SourceObserver)));
+      const reconnectedLocal = findAction(screen, "Local folder");
+      if (!reconnectedLocal) throw new Error("Reconnected local folder action missing");
+      reconnectedLocal();
+      expect(state.dispatch).toHaveBeenLastCalledWith({
+        type: "PUSH",
+        payload: { name: "AddProjectLocal", params: { environmentId: "environment" } },
+      });
+      state.connectionStates = { environment: "offline" };
+      await act(() => root.render(createElement(SourceObserver)));
+      expect(findAction(screen, "Local folder")).toBeNull();
+      const select = findAction(screen, "Another environment");
+      if (!select) throw new Error("Connected environment selection missing");
+      await act(() => select());
+      const local = findAction(screen, "Local folder");
+      if (!local) throw new Error("Manually selected local folder action missing");
+      local();
+      expect(state.dispatch).toHaveBeenLastCalledWith({
+        type: "PUSH",
+        payload: { name: "AddProjectLocal", params: { environmentId: "another-environment" } },
+      });
+    } finally {
+      await act(() => root.unmount());
+      state.realHooks = false;
+      state.connectionStates = {};
+      state.environments = [{ environmentId: "environment", environmentLabel: "Environment" }];
+    }
+  });
+
   it("keeps a manual host selection when the requested host finishes connecting", async () => {
     state.realHooks = true;
     state.scopes = new Set([AuthOrchestrationOperateScope]);

@@ -374,7 +374,7 @@ function useBrowsePathInput(environment: EnvironmentOption | null, pinnedDirecto
 }
 
 function useEnvironmentOptions(
-  pendingEnvironmentId: EnvironmentId | null = null,
+  selectedEnvironmentId: EnvironmentId | null = null,
 ): ReadonlyArray<EnvironmentOption> {
   const serverConfigByEnvironmentId = useServerConfigs();
   const { savedConnectionsById } = useSavedRemoteConnections();
@@ -404,9 +404,7 @@ function useEnvironmentOptions(
       options.filter(
         (environment) =>
           canCreateProjectInEnvironment(environment.connectionState) ||
-          (environment.environmentId === pendingEnvironmentId &&
-            (environment.connectionState === "connecting" ||
-              environment.connectionState === "reconnecting")),
+          environment.environmentId === selectedEnvironmentId,
       ),
       environmentOptionOrder,
     );
