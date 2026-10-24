@@ -784,6 +784,12 @@ export const make = Effect.gen(function* () {
       ],
       { concurrency: 2 },
     );
+    if (
+      !(yield* active.child.isRunning.pipe(Effect.orElseSucceed(() => false))) ||
+      (yield* Ref.get(activeRef)) !== active
+    ) {
+      return null;
+    }
     return {
       readyConnections: ready?.readyConnections ?? null,
       hostname: config?.config.ingress?.find((rule) => rule.hostname)?.hostname ?? null,

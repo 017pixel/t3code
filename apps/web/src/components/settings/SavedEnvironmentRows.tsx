@@ -49,10 +49,7 @@ import {
   supportsServerUpdateThreadContinuation,
 } from "~/versionSkew";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
-import {
-  primaryCloudLinkMutationAtom,
-  usePrimaryCloudLinkState,
-} from "~/cloud/primaryCloudLinkState";
+import { primaryCloudLinkMutationAtom } from "~/cloud/primaryCloudLinkState";
 import { useCloudLinkController, type CloudLinkDesiredState } from "~/cloud/useCloudLinkController";
 import { environmentCatalog } from "~/connection/catalog";
 import { readEnvironmentScope } from "~/state/session";
@@ -133,10 +130,13 @@ function useCopyMcpUrl() {
 }
 
 export function PrimaryMcpUrlMenuItem() {
-  const { data, isPending } = usePrimaryCloudLinkState();
+  const {
+    linkState: { data, isPending },
+    managedTunnelActive,
+  } = useCloudLinkController();
   const copyMcpUrl = useCopyMcpUrl();
   const reachability =
-    data && !isPending && data.managedTunnelActive !== false && data.linkRevoked !== true
+    data && !isPending && managedTunnelActive && data.linkRevoked !== true
       ? data.reachability
       : undefined;
   const mcpUrl = reachability?.status === "reachable" ? connectReachableMcpUrl(reachability) : null;

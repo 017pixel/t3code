@@ -1070,7 +1070,7 @@ export function ConnectionsSettings() {
                       environmentId={primaryEnvironmentId}
                       serverConfig={primaryServerConfig}
                     />
-                    <PrimaryMcpUrlMenuItem />
+                    {hasCloudPublicConfig() ? <PrimaryMcpUrlMenuItem /> : null}
                   </MenuPopup>
                 </Menu>
               ) : null

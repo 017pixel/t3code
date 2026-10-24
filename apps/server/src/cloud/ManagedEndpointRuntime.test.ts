@@ -12,7 +12,7 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
-import { HttpClient } from "effect/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as RelayClient from "@t3tools/shared/relayClient";
 
@@ -287,6 +287,46 @@ describe("CloudManagedEndpointRuntime", () => {
       ).pipe(Effect.andThen(Stream.runHead(runtime.tunnelConnected)));
     return { spawner, spawned, killed, exits, started, emit, observe };
   });
+
+  it.effect("discards metrics from a connector replaced with the same configuration", () =>
+    Effect.gen(function* () {
+      const readingConfig = yield* Deferred.make<void>();
+      const releaseConfig = yield* Deferred.make<void>();
+      const fixture = yield* makeTransportSpawner();
+      const httpClient = HttpClient.make((request) =>
+        Effect.gen(function* () {
+          const isConfig = request.url.endsWith("/config");
+          if (isConfig) {
+            yield* Deferred.succeed(readingConfig, undefined);
+            yield* Deferred.await(releaseConfig);
+          }
+          return HttpClientResponse.fromWeb(
+            request,
+            new Response(
+              JSON.stringify(
+                isConfig
+                  ? { config: { ingress: [{ hostname: "old.example.test" }] } }
+                  : { readyConnections: 4 },
+              ),
+            ),
+          );
+        }),
+      );
+      const runtime = yield* buildCloudManagedEndpointRuntime(
+        fixture.spawner,
+        layerRelayClientAvailable,
+        httpClient,
+      );
+      yield* runtime.applyConfig(tunnelConfig);
+      yield* fixture.observe(runtime, 0, "Starting metrics server on 127.0.0.1:12345/metrics\n");
+      const inspection = yield* runtime.inspectConnector(tunnelConfig).pipe(Effect.forkChild);
+      yield* Deferred.await(readingConfig);
+      yield* runtime.applyConfig(null);
+      yield* runtime.applyConfig(tunnelConfig);
+      yield* Deferred.succeed(releaseConfig, undefined);
+      expect(yield* Fiber.join(inspection)).toBeNull();
+    }),
+  );
 
   it.effect("preserves an explicit transport choice despite repeated QUIC stalls", () =>
     Effect.gen(function* () {
