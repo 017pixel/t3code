@@ -20,7 +20,11 @@ import { RemoteEnvironmentAuthFetchError, RemoteEnvironmentAuthTimeoutError } fr
 import { createEnvironmentSessionAtoms, currentSessionGrant } from "./session.ts";
 
 // Each session recheck takes the next scripted environment answer.
-const answers: Array<Effect.Effect<AuthSessionState, unknown>> = [];
+type SessionAnswer = Effect.Effect<
+  AuthSessionState,
+  RemoteEnvironmentAuthFetchError | RemoteEnvironmentAuthTimeoutError
+>;
+const answers: Array<SessionAnswer> = [];
 vi.mock("./environmentHttpAuth.ts", () => ({
   executeAuthenticatedEnvironmentHttpRequest: () =>
     Effect.suspend(() => answers.shift() ?? Effect.never),
@@ -67,7 +71,7 @@ const setup = Effect.gen(function* () {
       Layer.succeed(
         EnvironmentRegistry.EnvironmentRegistry,
         EnvironmentRegistry.EnvironmentRegistry.of({
-          followStream: (_id, stream) =>
+          followStream: <A, E, R>(_id: EnvironmentId, stream: Stream.Stream<A, E, R>) =>
             Stream.provideService(stream, EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
         } as unknown as EnvironmentRegistry.EnvironmentRegistry["Service"]),
       ),
@@ -78,7 +82,7 @@ const setup = Effect.gen(function* () {
   const registry = AtomRegistry.make();
   registry.mount(atom);
   yield* Effect.addFinalizer(() => Effect.sync(() => registry.dispose()));
-  const recheck = (answer: Effect.Effect<AuthSessionState, unknown>) =>
+  const recheck = (answer: SessionAnswer) =>
     Effect.gen(function* () {
       answers.push(answer);
       registry.refresh(atom);
