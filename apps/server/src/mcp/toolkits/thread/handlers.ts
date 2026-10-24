@@ -295,6 +295,25 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           .settleThread({ ...common, byOwnAgent: caller?.id === projection.thread.id })
           .pipe(Effect.mapError(dispatchFailure));
       }
+      if (input.action === "reorder") {
+        const targetThreadId = input.beforeThreadId ?? input.afterThreadId;
+        if (
+          targetThreadId === undefined ||
+          (input.beforeThreadId !== undefined && input.afterThreadId !== undefined)
+        ) {
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "reorder requires exactly one of beforeThreadId or afterThreadId.",
+          });
+        }
+        return yield* threads
+          .reorderActiveThread({
+            ...common,
+            placement: input.beforeThreadId === undefined ? "after" : "before",
+            targetThreadId,
+          })
+          .pipe(Effect.mapError(dispatchFailure));
+      }
       let command: OrchestrationV2Command;
       switch (input.action) {
         case "snooze":

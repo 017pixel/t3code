@@ -1,9 +1,11 @@
-import { expect, it } from "@effect/vitest";
+import { describe, expect, it } from "@effect/vitest";
 import {
   CommandId,
   MessageId,
   type OrchestrationV2Run,
+  type OrchestrationV2ServerCommand,
   type OrchestrationV2StoredEvent,
+  type OrchestrationV2ThreadShell,
   type OrchestrationV2ThreadProjection,
   ProjectId,
   ProviderInstanceId,
@@ -17,6 +19,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import { sortActiveThreadsByOrderKey } from "@t3tools/shared/threadOrder";
 
 import * as ServerSettings from "../serverSettings.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -337,3 +340,125 @@ it.effect.each([
     expect(dispatched).toEqual(settles ? ["thread.settle"] : []);
   }),
 );
+
+describe("reorderActiveThread", () => {
+  const shell = (
+    id: string,
+    createdAt: string,
+    overrides: Partial<OrchestrationV2ThreadShell> = {},
+  ) =>
+    ({
+      id: ThreadId.make(id),
+      createdAt: DateTime.makeUnsafe(createdAt),
+      unsettledAt: null,
+      deletedAt: null,
+      archivedAt: null,
+      pinnedAt: null,
+      settledOverride: null,
+      lineage: { relationshipToParent: null },
+      activeOrderKey: null,
+      ...overrides,
+    }) as unknown as OrchestrationV2ThreadShell;
+
+  const reorder = (
+    threads: ReadonlyArray<OrchestrationV2ThreadShell>,
+    input: { threadId: string; placement: "before" | "after"; targetThreadId: string },
+  ) =>
+    Effect.gen(function* () {
+      const dispatched: Array<OrchestrationV2ServerCommand> = [];
+      const layerTest = ThreadManagementService.layer.pipe(
+        Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+        Layer.provide(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getShellSnapshot: () =>
+              Effect.succeed({
+                schemaVersion: 1,
+                snapshotSequence: 0,
+                threads,
+                archivedThreads: [],
+              }),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatched.push(command);
+                return { sequence: dispatched.length, storedEvents: [] } as never;
+              }),
+          }),
+        ),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(layerReceiptsTest),
+      );
+      const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+        Effect.provide(layerTest),
+      );
+      const result = yield* service.reorderActiveThread({
+        threadId: ThreadId.make(input.threadId),
+        commandId: CommandId.make("command:reorder"),
+        placement: input.placement,
+        targetThreadId: ThreadId.make(input.targetThreadId),
+      });
+      const keys = new Map(
+        dispatched.flatMap((command) =>
+          command.type === "thread.active.reorder" ? [[command.threadId, command.orderKey]] : [],
+        ),
+      );
+      const order = sortActiveThreadsByOrderKey(
+        threads
+          .filter((thread) => thread.pinnedAt == null && thread.settledOverride !== "settled")
+          .map((thread) => ({
+            id: thread.id,
+            createdAt: DateTime.formatIso(thread.createdAt),
+            activeOrderKey: keys.get(thread.id) ?? thread.activeOrderKey,
+          })),
+      ).map((thread) => thread.id);
+      return { result, dispatched, order };
+    });
+
+  it.effect("places a thread directly before a keyed neighbor with one write", () =>
+    Effect.gen(function* () {
+      const { dispatched, order } = yield* reorder(
+        [
+          shell("a", "2026-01-01T00:00:00Z", { activeOrderKey: "c" }),
+          shell("b", "2026-01-01T00:00:00Z", { activeOrderKey: "m" }),
+          shell("c", "2026-01-01T00:00:00Z", { activeOrderKey: "t" }),
+        ],
+        { threadId: "c", placement: "before", targetThreadId: "b" },
+      );
+      expect(order).toEqual(["a", "c", "b"]);
+      expect(dispatched).toHaveLength(1);
+    }),
+  );
+
+  it.effect("seeds keyless threads so a thread can move above them", () =>
+    Effect.gen(function* () {
+      const { order } = yield* reorder(
+        [
+          shell("new", "2026-03-01T00:00:00Z"),
+          shell("old", "2026-02-01T00:00:00Z"),
+          shell("a", "2026-01-01T00:00:00Z", { activeOrderKey: "m" }),
+          shell("pinned", "2026-01-01T00:00:00Z", {
+            pinnedAt: DateTime.makeUnsafe("2026-01-01T00:00:00Z"),
+          }),
+        ],
+        { threadId: "a", placement: "after", targetThreadId: "new" },
+      );
+      expect(order).toEqual(["new", "a", "old"]);
+    }),
+  );
+
+  it.effect("refuses threads outside the active section", () =>
+    Effect.gen(function* () {
+      const threads = [
+        shell("a", "2026-01-01T00:00:00Z"),
+        shell("settled", "2026-01-01T00:00:00Z", { settledOverride: "settled" }),
+      ];
+      const moved = yield* Effect.flip(
+        reorder(threads, { threadId: "settled", placement: "before", targetThreadId: "a" }),
+      );
+      const target = yield* Effect.flip(
+        reorder(threads, { threadId: "a", placement: "before", targetThreadId: "settled" }),
+      );
+      expect(moved).toBeInstanceOf(Orchestrator.OrchestratorDispatchError);
+      expect(target).toBeInstanceOf(Orchestrator.OrchestratorDispatchError);
+    }),
+  );
+});

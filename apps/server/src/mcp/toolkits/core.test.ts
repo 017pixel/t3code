@@ -509,7 +509,11 @@ it.effect("reorders an active thread through t3_thread_organize", () =>
     const result = yield* server
       .callTool({
         name: "t3_thread_organize",
-        arguments: { action: "reorder", threadId: "other-project-thread", orderKey: "a1" },
+        arguments: {
+          action: "reorder",
+          threadId: "other-project-thread",
+          beforeThreadId: "neighbor-thread",
+        },
       })
       .pipe(
         Effect.provideService(McpInvocationContext.McpInvocationContext, clientScope("auto")),
@@ -518,9 +522,9 @@ it.effect("reorders an active thread through t3_thread_organize", () =>
     expect(result.isError).toBe(false);
     expect(reorderCommands).toEqual([
       expect.objectContaining({
-        type: "thread.active.reorder",
         threadId: "other-project-thread",
-        orderKey: "a1",
+        placement: "before",
+        targetThreadId: "neighbor-thread",
       }),
     ]);
   }).pipe(
@@ -542,10 +546,10 @@ it.effect("reorders an active thread through t3_thread_organize", () =>
                   deletedAt: null,
                 },
               } as never),
-            dispatch: (command) =>
+            reorderActiveThread: (input) =>
               Effect.sync(() => {
-                reorderCommands.push(command);
-                return { sequence: 7, storedEvents: [] };
+                reorderCommands.push(input);
+                return { sequence: 7 };
               }),
           }),
         ),
