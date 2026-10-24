@@ -107,6 +107,7 @@ export const isRpcClientError = Schema.is(RpcClientError.RpcClientError);
 const isEnvironmentAuthorizationError = Schema.is(EnvironmentAuthorizationError);
 
 const MAX_EXPECTED_FAILURE_RETRY_DELAY_MS = 30_000;
+const STREAM_FAILURE_RETRY_DELAY = Duration.seconds(1);
 
 export type EnvironmentRpcInput<TTag extends EnvironmentRpcTag> = Parameters<RpcMethod<TTag>>[0];
 
@@ -324,6 +325,19 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
                         : Effect.void,
                     ),
                     Stream.catchCause((cause) => {
+                      const retryAfter = (base: Duration.Input) => {
+                        const retryDelay = Duration.millis(
+                          Math.min(
+                            Duration.toMillis(base) * 2 ** expectedFailureRetries,
+                            MAX_EXPECTED_FAILURE_RETRY_DELAY_MS,
+                          ),
+                        );
+                        expectedFailureRetries += 1;
+                        return Stream.fromEffect(Effect.sleep(retryDelay)).pipe(
+                          Stream.drain,
+                          Stream.concat(subscribeToSession()),
+                        );
+                      };
                       const hasOnlyExpectedFailures =
                         cause.reasons.length > 0 &&
                         cause.reasons.every((reason) => reason._tag === "Fail");
@@ -332,17 +346,34 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
                         cause.reasons.every(
                           (reason) => reason._tag === "Fail" && isRpcClientError(reason.error),
                         );
-                      if (isTransportFailure) {
+                      // The RPC client dies with a SchemaError when one stream chunk fails to
+                      // decode, ending only that request while the socket stays open.
+                      const isChunkDecodeDefect =
+                        cause.reasons.length > 0 &&
+                        cause.reasons.every(
+                          (reason) => reason._tag === "Die" && Schema.isSchemaError(reason.defect),
+                        );
+                      // Both end one stream while the session can stay healthy, so nothing else
+                      // would replace it. A dead session is replaced by the supervisor, which
+                      // interrupts this retry through switchMap.
+                      if (isTransportFailure || isChunkDecodeDefect) {
                         return Stream.fromEffect(
                           Effect.logWarning(
-                            "Durable RPC subscription lost its transport; waiting for the next session.",
+                            "Durable RPC subscription stream ended; resubscribing.",
                             {
                               cause: Cause.pretty(cause),
                               method: tag,
                               environmentId: supervisor.target.environmentId,
                             },
                           ),
-                        ).pipe(Stream.drain);
+                        ).pipe(
+                          Stream.drain,
+                          Stream.concat(
+                            retryAfter(
+                              options?.retryExpectedFailureAfter ?? STREAM_FAILURE_RETRY_DELAY,
+                            ),
+                          ),
+                        );
                       }
                       if (hasOnlyExpectedFailures && options?.onExpectedFailure !== undefined) {
                         const handled = Stream.fromEffect(options.onExpectedFailure(cause)).pipe(
@@ -358,19 +389,8 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
                         ) {
                           return handled;
                         }
-                        const retryDelay = Duration.millis(
-                          Math.min(
-                            Duration.toMillis(options.retryExpectedFailureAfter) *
-                              2 ** expectedFailureRetries,
-                            MAX_EXPECTED_FAILURE_RETRY_DELAY_MS,
-                          ),
-                        );
-                        expectedFailureRetries += 1;
                         return handled.pipe(
-                          Stream.concat(
-                            Stream.fromEffect(Effect.sleep(retryDelay)).pipe(Stream.drain),
-                          ),
-                          Stream.concat(subscribeToSession()),
+                          Stream.concat(retryAfter(options.retryExpectedFailureAfter)),
                         );
                       }
                       return Stream.failCause(cause);
