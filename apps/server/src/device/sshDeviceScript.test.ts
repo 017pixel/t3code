@@ -82,6 +82,26 @@ it.effect("does not offer Android when the SDK adb cannot run", () =>
   }),
 );
 
+it.effect("does not offer Android when SDK tools are directories", () =>
+  Effect.gen(function* () {
+    if ((yield* HostProcess.Platform) === "win32") return;
+    const { android } = yield* probeAndroid(async (home) => {
+      const sdk = NodePath.join(home, "sdk");
+      await executable(NodePath.join(sdk, "platform-tools/adb"), "echo Android Debug Bridge");
+      await NodeFSP.mkdir(NodePath.join(sdk, "emulator/emulator"), { recursive: true });
+      await NodeFSP.mkdir(NodePath.join(sdk, "cmdline-tools/latest/bin/avdmanager"), {
+        recursive: true,
+      });
+      return { ANDROID_HOME: sdk };
+    });
+    expect(android).toEqual({
+      platform: "android",
+      available: false,
+      reason: expect.stringContaining("Android Emulator"),
+    });
+  }),
+);
+
 it.effect("uses the SDK the probe accepted for later SSH commands", () =>
   Effect.gen(function* () {
     if ((yield* HostProcess.Platform) === "win32") return;
