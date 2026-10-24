@@ -34,7 +34,8 @@ export function useScratchProject() {
   };
 
   const scratchEnvironmentId = (current: EnvironmentId | null): EnvironmentId | null => {
-    if (current !== null) return scratchWorkspaceRootFor(current) !== null ? current : null;
+    if (current !== null && scratchWorkspaceRootFor(current) !== null) return current;
+    // When the current machine can't take it, fall back only to an unambiguous one.
     const offering = environments.filter(
       (entry) => scratchWorkspaceRootFor(entry.environmentId) !== null,
     );

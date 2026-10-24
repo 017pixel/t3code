@@ -141,8 +141,10 @@ export function DraftHeroHeadline({
     activeProjectRef?.environmentId ?? primaryEnvironmentId,
   );
   const scratchWorkspaceRoot = scratchWorkspaceRootFor(scratchTargetEnvironmentId);
+  // The scratch target can fall back to another machine, so judge the project by its own.
   const isScratchDraft =
-    activeProject !== null && isScratchProject(activeProject, scratchWorkspaceRoot);
+    activeProject !== null &&
+    isScratchProject(activeProject, scratchWorkspaceRootFor(activeProject.environmentId));
 
   const pickerItems: readonly PickerItem[] = [
     ...menuEntries.map(({ group }) => ({ value: group.projectKey, label: group.displayName })),
