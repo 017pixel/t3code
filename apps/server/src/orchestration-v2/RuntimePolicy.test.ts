@@ -1,3 +1,8 @@
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
 import { assert, it } from "@effect/vitest";
 import {
   type ModelSelection,
@@ -74,38 +79,41 @@ const providerInstanceFor = (instanceId: ProviderInstanceId) =>
     },
   }) as ProviderInstance;
 
-const layerTest = RuntimePolicy.layerFromProjectStore.pipe(
-  Layer.provide(
-    Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
-      getInstance: (instanceId) => Effect.succeed(providerInstanceFor(instanceId)),
-      listInstances: Effect.succeed([]),
-      listUnavailable: Effect.succeed([]),
-      streamChanges: Stream.empty,
-      subscribeChanges: Effect.never,
-    }),
-  ),
-  Layer.provide(
-    Layer.mock(ProjectStore.ProjectStoreV2)({
-      get: () =>
-        Effect.succeed(
-          Option.some({
-            projectId,
-            title: "Project",
-            workspaceRoot: "/project-root",
-            defaultModelSelection: null,
-            defaultThreadEnvMode: null,
-            autoPull: false,
-            faviconPath: null,
-            projectIcon: null,
-            scripts: [],
-            createdAt: "2026-06-21T00:00:00.000Z",
-            updatedAt: "2026-06-21T00:00:00.000Z",
-            deletedAt: null,
-          }),
-        ),
-    }),
-  ),
-);
+const layerWithProjectRoot = (workspaceRoot: string) =>
+  RuntimePolicy.layerFromProjectStore.pipe(
+    Layer.provide(
+      Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
+        getInstance: (instanceId) => Effect.succeed(providerInstanceFor(instanceId)),
+        listInstances: Effect.succeed([]),
+        listUnavailable: Effect.succeed([]),
+        streamChanges: Stream.empty,
+        subscribeChanges: Effect.never,
+      }),
+    ),
+    Layer.provide(
+      Layer.mock(ProjectStore.ProjectStoreV2)({
+        get: () =>
+          Effect.succeed(
+            Option.some({
+              projectId,
+              title: "Project",
+              workspaceRoot,
+              defaultModelSelection: null,
+              defaultThreadEnvMode: null,
+              autoPull: false,
+              faviconPath: null,
+              projectIcon: null,
+              scripts: [],
+              createdAt: "2026-06-21T00:00:00.000Z",
+              updatedAt: "2026-06-21T00:00:00.000Z",
+              deletedAt: null,
+            }),
+          ),
+      }),
+    ),
+  );
+
+const layerTest = layerWithProjectRoot("/project-root");
 
 it.layer(layerTest)("RuntimePolicyV2", (it) => {
   it.effect("runs a mode the provider does not offer in Supervised", () =>
@@ -127,3 +135,41 @@ it.layer(layerTest)("RuntimePolicyV2", (it) => {
     }),
   );
 });
+
+// A project rooted in a repository subdirectory, with a thread in a worktree of that repository.
+function makeSubdirectoryProjectRepo() {
+  const base = NodeFS.realpathSync(
+    NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "runtime-policy-subdir-")),
+  );
+  const repoRoot = NodePath.join(base, "repo");
+  const worktreePath = NodePath.join(base, "worktree");
+  NodeFS.mkdirSync(NodePath.join(repoRoot, "ios"), { recursive: true });
+  NodeFS.writeFileSync(NodePath.join(repoRoot, "ios", "README.md"), "ios\n");
+  const git = (...args: string[]) =>
+    NodeChildProcess.execFileSync("git", ["-C", repoRoot, ...args], { stdio: "ignore" });
+  git("init", "-q", "-b", "main");
+  git("add", ".");
+  git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "init");
+  git("worktree", "add", "-q", "-b", "t3-subdir", worktreePath);
+  return { projectRoot: NodePath.join(repoRoot, "ios"), worktreePath };
+}
+
+const subdirectoryRepo = makeSubdirectoryProjectRepo();
+
+it.layer(layerWithProjectRoot(subdirectoryRepo.projectRoot))(
+  "RuntimePolicyV2 for a project in a repository subdirectory",
+  (it) => {
+    it.effect("starts worktree threads in the same subdirectory of the worktree", () =>
+      Effect.gen(function* () {
+        const policy = yield* RuntimePolicy.RuntimePolicyV2;
+        const now = yield* DateTime.now;
+        const resolved = yield* policy.resolve({
+          thread: makeThread({ now, worktreePath: subdirectoryRepo.worktreePath }),
+          modelSelection,
+        });
+
+        assert.equal(resolved.cwd, NodePath.join(subdirectoryRepo.worktreePath, "ios"));
+      }),
+    );
+  },
+);
