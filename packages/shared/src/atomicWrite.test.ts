@@ -268,8 +268,9 @@ it.layer(NodeServices.layer)("writeFileStringAtomically", (it) => {
     }),
   );
 
-  // Write and search but no read: the directory cannot be opened to sync it, which
-  // has to fail the save before the rename rather than after it.
+  // A directory that cannot be opened to sync it has to fail the save before the
+  // rename rather than after it. The failure is injected because root ignores a
+  // chmod that drops read access.
   it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
     "leaves the target intact when its directory cannot be opened for the sync",
     () =>
@@ -279,15 +280,24 @@ it.layer(NodeServices.layer)("writeFileStringAtomically", (it) => {
         const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-atomic-write-" });
         const filePath = path.join(root, "settings.json");
         yield* fs.writeFileString(filePath, "before");
-        yield* Effect.acquireRelease(fs.chmod(root, 0o300), () =>
-          fs.chmod(root, 0o700).pipe(Effect.orDie),
+        const openFailure = PlatformError.systemError({
+          _tag: "PermissionDenied",
+          module: "FileSystem",
+          method: "open",
+          pathOrDescriptor: root,
+        });
+        const unopenableDirectory = FileSystem.make({
+          ...fs,
+          open: (openedPath, options) =>
+            openedPath === root ? Effect.fail(openFailure) : fs.open(openedPath, options),
+        });
+
+        const exit = yield* writeFileStringAtomically({ filePath, contents: "after" }).pipe(
+          Effect.provideService(FileSystem.FileSystem, unopenableDirectory),
+          Effect.exit,
         );
 
-        const failure = yield* writeFileStringAtomically({ filePath, contents: "after" }).pipe(
-          Effect.flip,
-        );
-
-        assert.strictEqual(failure.reason._tag, "PermissionDenied");
+        assert.deepStrictEqual(exit, Exit.fail(openFailure));
         assert.strictEqual(yield* fs.readFileString(filePath), "before");
       }),
   );
