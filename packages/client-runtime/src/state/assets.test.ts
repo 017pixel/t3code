@@ -1,10 +1,32 @@
 import { describe, expect, it } from "@effect/vitest";
-import { type AssetCreateUrlResult, EnvironmentId } from "@t3tools/contracts";
+import {
+  type AssetCreateUrlResult,
+  type AssetResource,
+  AssetWorkspaceAssetNotFoundError,
+  EnvironmentId,
+  ThreadId,
+  WS_METHODS,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
-import { createProjectFaviconUrlAtomFamily } from "./assets.ts";
+import {
+  AVAILABLE_CONNECTION_STATE,
+  type PreparedConnection,
+  PrimaryConnectionTarget,
+  type SupervisorConnectionState,
+} from "../connection/model.ts";
+import { EnvironmentRegistry } from "../connection/registry.ts";
+import { EnvironmentSupervisor } from "../connection/supervisor.ts";
+import { classifyMarkdownImageSource } from "../markdownImages.ts";
+import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
+import type { RpcSession } from "../rpc/session.ts";
+import { createAssetEnvironmentAtoms, createProjectFaviconUrlAtomFamily } from "./assets.ts";
 
 describe("project favicon URL cache", () => {
   it("does not reuse another environment, workspace, or selected icon's cached URL", () => {
@@ -37,4 +59,92 @@ describe("project favicon URL cache", () => {
       registry.dispose();
     }
   });
+});
+
+describe("createAssetEnvironmentAtoms", () => {
+  it.effect("keeps a relative markdown image on the remote host that owns the thread", () =>
+    Effect.gen(function* () {
+      const remoteId = EnvironmentId.make("remote");
+      const localId = EnvironmentId.make("local");
+      const workspaceRoot = "/tmp/t3-17392/repo";
+      const threadId = ThreadId.make("remote-thread");
+      // Mirrors how ChatMarkdown turns an authored image source into an asset resource.
+      const markdownImageResource = (authored: string): AssetResource => {
+        const source = classifyMarkdownImageSource(authored, workspaceRoot);
+        expect(source._tag).toBe("WorkspaceFile");
+        return {
+          _tag: "media-file",
+          threadId,
+          path: source._tag === "WorkspaceFile" ? source.path : authored,
+        };
+      };
+      const calls: EnvironmentId[] = [];
+      const supervisors = new Map<EnvironmentId, EnvironmentSupervisor["Service"]>();
+      for (const environmentId of [remoteId, localId]) {
+        const client = {
+          [WS_METHODS.assetsCreateUrl]: ({ resource }: { readonly resource: AssetResource }) => {
+            calls.push(environmentId);
+            return environmentId === remoteId
+              ? Effect.fail(new AssetWorkspaceAssetNotFoundError({ resource }))
+              : Effect.succeed({ relativeUrl: "/api/assets/local/report.png", expiresAt: 1 });
+          },
+        } as unknown as WsRpcProtocolClient;
+        supervisors.set(
+          environmentId,
+          EnvironmentSupervisor.of({
+            target: new PrimaryConnectionTarget({
+              environmentId,
+              label: environmentId,
+              httpBaseUrl: `https://${environmentId}.test`,
+              wsBaseUrl: `wss://${environmentId}.test`,
+            }),
+            state: yield* SubscriptionRef.make<SupervisorConnectionState>({
+              ...AVAILABLE_CONNECTION_STATE,
+              phase: "connected",
+            }),
+            session: yield* SubscriptionRef.make(Option.some({ client } as RpcSession)),
+            prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
+            connect: Effect.void,
+            disconnect: Effect.void,
+            retryNow: Effect.void,
+          }),
+        );
+      }
+      const environments = EnvironmentRegistry.of({
+        run: (id, effect) =>
+          Effect.provideService(effect, EnvironmentSupervisor, supervisors.get(id)!),
+        followStream: (id, stream) =>
+          Stream.provideService(stream, EnvironmentSupervisor, supervisors.get(id)!),
+      } as EnvironmentRegistry["Service"]);
+      const registry = AtomRegistry.make();
+      yield* Effect.addFinalizer(() => Effect.sync(() => registry.dispose()));
+      const assets = createAssetEnvironmentAtoms(
+        Atom.runtime(Layer.succeed(EnvironmentRegistry, environments)),
+        Atom.make({ environmentId: localId, httpBaseUrl: "https://local.test" }),
+      );
+      const resolve = (authored: string) =>
+        AtomRegistry.getResult(
+          registry,
+          assets.createUrl({
+            environmentId: remoteId,
+            input: { resource: markdownImageResource(authored) },
+          }),
+          { suspendOnWaiting: true },
+        );
+
+      // An explicit host path may still name a file on this desktop.
+      expect((yield* resolve(`${workspaceRoot}/docs/report.png`)).relativeUrl).toBe(
+        "https://local.test/api/assets/local/report.png",
+      );
+      expect(calls).toEqual([remoteId, localId]);
+
+      calls.length = 0;
+      const relative = yield* Effect.result(resolve("docs/report.png"));
+      expect(relative).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "AssetWorkspaceAssetNotFoundError" },
+      });
+      expect(calls).toEqual([remoteId]);
+    }).pipe(Effect.scoped),
+  );
 });
