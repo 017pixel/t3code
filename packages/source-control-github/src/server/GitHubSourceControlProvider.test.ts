@@ -172,6 +172,7 @@ function harness(input: {
   readonly localBranches?: ReadonlyArray<string>;
   readonly resolved?: string;
   readonly gitFailure?: unknown;
+  readonly run?: SourceControlHost.SourceControlHost["Service"]["process"]["run"];
 }) {
   const git: Array<readonly [string, unknown]> = [];
   const graphqlCalls: Array<GraphQlCall> = [];
@@ -207,12 +208,14 @@ function harness(input: {
   const host = TestSourceControlHost.layer({
     git: hostGit,
     process: {
-      run: (args) =>
-        Effect.succeed(
-          args.args[0] === "remote"
-            ? processOutput(input.remotes)
-            : processOutput(input.resolved ?? "", input.resolved ? 0 : 1),
-        ),
+      run:
+        input.run ??
+        ((args) =>
+          Effect.succeed(
+            args.args[0] === "remote"
+              ? processOutput(input.remotes)
+              : processOutput(input.resolved ?? "", input.resolved ? 0 : 1),
+          )),
     },
   });
   const graphql =
@@ -501,6 +504,49 @@ describe("GitHubSourceControlProvider writes", () => {
       assert.strictEqual(requests.length, 2);
     });
   });
+});
+
+describe("GitHubSourceControlProvider.preferredCloneProtocol", () => {
+  const preferredProtocol = (stdout: string) => {
+    const calls: Array<string> = [];
+    return Effect.gen(function* () {
+      const gh = yield* GitHubSourceControlProvider.make;
+      assert.isDefined(gh.preferredCloneProtocol);
+      const protocol = yield* gh.preferredCloneProtocol({
+        cwd: "/repo",
+        url: "https://ghe.test/a/b",
+      });
+      return { protocol, calls };
+    }).pipe(
+      Effect.provide(
+        harness({
+          remotes: "",
+          run: (input) =>
+            Effect.sync(() => {
+              calls.push(`${input.command} ${input.args.join(" ")}`);
+              return processOutput(stdout);
+            }),
+        }).layer,
+      ),
+    );
+  };
+
+  it.effect.each(["ssh", "https"] as const)(
+    "follows gh's git_protocol %s for the repository's host",
+    (configured) =>
+      Effect.gen(function* () {
+        const { protocol, calls } = yield* preferredProtocol(`${configured}\n`);
+        assert.strictEqual(protocol, configured);
+        assert.deepStrictEqual(calls, ["gh config get -h ghe.test git_protocol"]);
+      }),
+  );
+
+  it.effect("uses HTTPS, gh's own default, when git_protocol is unset", () =>
+    Effect.gen(function* () {
+      const { protocol } = yield* preferredProtocol("");
+      assert.strictEqual(protocol, "https");
+    }),
+  );
 });
 
 describe("GitHubSourceControlProvider.checkoutChangeRequest", () => {

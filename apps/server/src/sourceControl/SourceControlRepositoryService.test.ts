@@ -658,3 +658,82 @@ it.effect("publish succeeds with status remote_added when the local repo has no 
     ),
   );
 });
+
+const publishWith = (
+  provider: SourceControlProvider.SourceControlProvider["Service"],
+  protocol?: "auto" | "ssh" | "https",
+) =>
+  Effect.gen(function* () {
+    const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+    return yield* service.publishRepository({
+      cwd: "/workspace",
+      provider: SourceControlProviderKind.make("github"),
+      repository: "octocat/t3code",
+      visibility: "private",
+      ...(protocol === undefined ? {} : { protocol }),
+    });
+  }).pipe(Effect.provide(layer({ provider })));
+
+it.effect.each([
+  ["https", undefined, CLONE_URLS.url],
+  ["ssh", undefined, CLONE_URLS.sshUrl],
+  ["https", "auto", CLONE_URLS.url],
+  ["ssh", "auto", CLONE_URLS.sshUrl],
+] as const)(
+  "publishes over the provider CLI's %s protocol when the protocol is %s",
+  ([preferred, protocol, expected]) =>
+    Effect.gen(function* () {
+      const asked: Array<{ cwd: string; url: string }> = [];
+      const provider = makeProvider({
+        preferredCloneProtocol: (input) =>
+          Effect.sync(() => {
+            asked.push(input);
+            return preferred;
+          }),
+      });
+      const result = yield* publishWith(provider, protocol);
+      assert.strictEqual(result.remoteUrl, expected);
+      assert.deepStrictEqual(asked, [{ cwd: "/workspace", url: CLONE_URLS.url }]);
+    }),
+);
+
+it.effect.each([
+  ["ssh", "https", CLONE_URLS.sshUrl],
+  ["https", "ssh", CLONE_URLS.url],
+] as const)(
+  "publishes over an explicitly chosen %s protocol over the CLI's %s",
+  ([protocol, preferred, expected]) =>
+    Effect.gen(function* () {
+      const provider = makeProvider({ preferredCloneProtocol: () => Effect.succeed(preferred) });
+      const result = yield* publishWith(provider, protocol);
+      assert.strictEqual(result.remoteUrl, expected);
+    }),
+);
+
+it.effect("publishes over SSH for auto when the provider has no CLI protocol setting", () =>
+  Effect.gen(function* () {
+    const result = yield* publishWith(makeProvider(), "auto");
+    assert.strictEqual(result.remoteUrl, CLONE_URLS.sshUrl);
+  }),
+);
+
+it.effect("clones over the protocol the provider's CLI prefers when asked for auto", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const parent = yield* fs.makeTempDirectoryScoped({ prefix: "t3-clone-protocol-" });
+    const provider = makeProvider({ preferredCloneProtocol: () => Effect.succeed("https") });
+
+    const prepared = yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      return yield* service.prepareClone({
+        provider: SourceControlProviderKind.make("github"),
+        repository: "octocat/t3code",
+        destinationPath: path.join(parent, "t3code"),
+        protocol: "auto",
+      });
+    }).pipe(Effect.provide(layer({ provider })));
+
+    assert.strictEqual(prepared.cloneUrl, CLONE_URLS.url);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
