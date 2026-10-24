@@ -2,6 +2,7 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import { type ReactElement } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
+import { commands, page, userEvent } from "vite-plus/test/browser";
 
 import { act, render } from "../../test/render";
 import "../index.css";
@@ -227,6 +228,26 @@ describe("ChatMarkdown workspace file opens", () => {
 
     expect(openFile).toHaveBeenCalledExactlyOnceWith(threadRef, "/elsewhere/b.md", 9);
     expect(workspaceSearch).toHaveBeenCalledOnce();
+  });
+});
+
+describe("ChatMarkdown file path tooltips", () => {
+  it("stays open while the pointer selects the path, then closes when it leaves", async () => {
+    setup();
+    await using screen = await renderText("[notes](/tmp/project/docs/deeply/nested/notes.md)");
+    await userEvent.hover(screen.container.querySelector(".chat-markdown-file-link")!);
+    const path = page.getByText("/tmp/project/docs/deeply/nested/notes.md");
+    await expect.element(path).toBeVisible();
+
+    // Forced so the pointer lands where the user would put it even if the popup ignores it.
+    await userEvent.tripleClick(path, { force: true });
+    expect(window.getSelection()?.toString().trim()).toBe(
+      "/tmp/project/docs/deeply/nested/notes.md",
+    );
+    await expect.element(path).toBeVisible();
+
+    await commands.resetPointer();
+    await expect.element(path).not.toBeInTheDocument();
   });
 });
 
