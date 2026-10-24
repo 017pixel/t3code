@@ -30,8 +30,10 @@ if (mode === "browser") {
       ]),
     ),
   );
-  console.log(
-    `(${browserInstaller})(${JSON.stringify(data)},${JSON.stringify(NodePath.resolve(import.meta.dirname, "../../.."))})`,
+  const installer = `(${browserInstaller})(${JSON.stringify(data)},${JSON.stringify(NodePath.resolve(import.meta.dirname, "../../.."))})\n`;
+  // Pipe writes are asynchronous; exiting before the callback truncates the installer.
+  await new Promise<void>((resolve, reject) =>
+    process.stdout.write(installer, (error) => (error ? reject(error) : resolve())),
   );
   process.exit(0);
 }
@@ -42,12 +44,25 @@ Schema.decodeUnknownSync(OrchestrationV2ThreadProjectionJson)(projection);
 const checksum = NodeCrypto.createHash("sha256").update(JSON.stringify(projection)).digest("hex");
 if (mode !== "validate") {
   if (!destination) throw new Error("An explicit isolated .t3 destination is required");
+  const isWithin = (parent: string, child: string) => {
+    const relative = NodePath.relative(parent, child);
+    return (
+      relative === "" ||
+      (relative !== ".." &&
+        !relative.startsWith(`..${NodePath.sep}`) &&
+        !NodePath.isAbsolute(relative))
+    );
+  };
   const base = NodeFS.realpathSync(destination);
-  const live = NodePath.resolve(NodeOS.homedir(), ".t3");
-  if (!base.endsWith("/.t3") || base === live || base.startsWith(`${live}/`))
+  // Compare canonical paths so a symlinked home or .t3 cannot alias the live profile.
+  const livePath = NodePath.join(NodeOS.homedir(), ".t3");
+  const live = NodeFS.existsSync(livePath)
+    ? NodeFS.realpathSync(livePath)
+    : NodePath.join(NodeFS.realpathSync(NodeOS.homedir()), ".t3");
+  if (NodePath.basename(base) !== ".t3" || isWithin(live, base))
     throw new Error("Refusing non-isolated home");
   const database = NodeFS.realpathSync(NodePath.join(base, "userdata/statev2.sqlite"));
-  if (!database.startsWith(`${base}/`))
+  if (database === base || !isWithin(base, database))
     throw new Error("Refusing database symlink outside isolated home");
   if (mode === "seed") {
     const runtime = NodePath.join(base, "userdata/server-runtime.json");
@@ -146,7 +161,11 @@ if (mode !== "validate") {
         for (const [column, value] of Object.entries(stored)) {
           if (column === "payload_json") continue;
           const expected = indexedValue(column, row, idColumn);
-          if (expected !== undefined && value !== expected && value !== Number(expected))
+          if (
+            expected !== undefined &&
+            value !== expected &&
+            !(typeof expected === "boolean" && value === Number(expected))
+          )
             throw new Error(`Index mismatch: ${suffix}.${column}`);
         }
       }

@@ -7,6 +7,7 @@ import {
   withMessageContext,
   deriveAvailableRevertTurnCounts,
   deriveThreadPendingBackgroundTasks,
+  foregroundRunOwnsStop,
   deriveWorkspaceMutationId,
 } from "./ChatView.logic";
 import { recallCheckoutIsRepo, rememberCheckoutIsRepo } from "./ChatView.logic";
@@ -1363,5 +1364,31 @@ describe("deriveThreadPendingBackgroundTasks", () => {
         }),
       ),
     ).toEqual([{ taskId: "child-1", description: "child 1", kind: "subagent" }]);
+  });
+});
+
+describe("foregroundRunOwnsStop", () => {
+  it.each([
+    // Runless provider-subagent work has no run for the composer to stop first.
+    { status: null, localRunWork: false, expected: false },
+    { status: "idle", localRunWork: false, expected: false },
+    // A send this client just made owns Stop before the server reports a run.
+    { status: null, localRunWork: true, expected: true },
+    { status: "queued", localRunWork: false, expected: true },
+    { status: "running", localRunWork: false, expected: true },
+    // Checkpoint drain: Stop reaches the background work directly.
+    { status: "waiting", localRunWork: true, expected: false },
+  ] as const)("status $status with local work $localRunWork -> $expected", (row) => {
+    const runtime =
+      row.status === null
+        ? null
+        : {
+            status: row.status,
+            activeRunId: null,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            providerName: null,
+            lastError: null,
+          };
+    expect(foregroundRunOwnsStop({ runtime, localRunWork: row.localRunWork })).toBe(row.expected);
   });
 });

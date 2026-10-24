@@ -327,11 +327,13 @@ export const browserInstaller = `async (fixtures, checkout) => {
     const ref = { environmentId: parts[0], threadId: parts[1] };
     const original = registry.get(threads.threadShellAtom(ref));
     if (!original) throw new Error("Open the synthetic thread route before installing fixtures");
-    const RealDate = Date;
-    root.__evidenceClock = Date.parse("2026-10-21T12:00:00.000Z");
+    // A repeated install must not capture the previous install's FixedDate.
+    const RealDate = root.__evidenceRealDate ?? Date;
+    root.__evidenceRealDate = RealDate;
+    root.__evidenceClock = RealDate.parse("2026-10-21T12:00:00.000Z");
     // Patch wall-clock reads only; recordings keep normal browser animation timing.
     const FixedDate = class extends RealDate {
-      constructor(value) { super(value ?? Number(root.__evidenceClock)); }
+      constructor(...args) { super(...(args.length === 0 ? [Number(root.__evidenceClock)] : args)); }
       static now() { return Number(root.__evidenceClock); }
     };
     Object.defineProperty(globalThis, "Date", { value: FixedDate, configurable: true });
