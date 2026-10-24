@@ -63,6 +63,7 @@ export const decodeStoredThreadSnapshot = Effect.fn("ThreadCache.decode")(functi
   let previousPosition = -1;
   const visibleIds = new Set<string>();
   const validRows = projection.visibleTurnItems.every((row) => {
+    const identity = JSON.stringify([row.sourceThreadId, row.sourceItemId]);
     const valid =
       row.sourceItemId === row.item.id &&
       (row.sourceThreadId === row.item.threadId ||
@@ -72,9 +73,9 @@ export const decodeStoredThreadSnapshot = Effect.fn("ThreadCache.decode")(functi
       (row.visibility !== "local" || row.sourceThreadId === threadId) &&
       (row.visibility !== "inherited" || row.sourceThreadId !== threadId) &&
       row.position > previousPosition &&
-      !visibleIds.has(row.sourceItemId);
+      !visibleIds.has(identity);
     previousPosition = row.position;
-    visibleIds.add(row.sourceItemId);
+    visibleIds.add(identity);
     return valid;
   });
   const restored = turnItemsOmitLocalVisible
