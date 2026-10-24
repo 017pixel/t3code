@@ -24,6 +24,12 @@ describe("inline code that names a file", () => {
       "tables",
       "Intro `src/math.ts:2`\n| `./README.md` | Fit |\n|---|---|\n| `./a.ts` | A |\n\nMore\n| a |\n|---|\n| b |",
     ],
+    ["escaped pipe in file header", "Intro text\n| `./a\\|b.ts` | c |\n|---|---|\n| a | b |"],
+    ["escaped pipe in file body", "Intro text\n| a | c |\n|---|---|\n| `./a\\|b.ts` | b |"],
+    [
+      "escaped pipe after a normal file span",
+      "Intro `./normal.ts`\n| `./a\\|b.ts` | c |\n|---|---|\n| a | b |",
+    ],
     ["lazy quote header", "> Intro\n`./README.md` | file\n> | - | - |\n> | ok | yes |"],
     ["lazy list header", "- Intro\n`./README.md` | file\n  | - | - |\n  | ok | yes |"],
     [

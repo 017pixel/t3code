@@ -169,16 +169,21 @@ function transformNativeMarkdown(
   fileLink: RegExp | undefined,
   tableBreaks: boolean,
 ): string {
+  const breakTables = tableBreaks && mayHaveTableUnderText(markdown);
   let linkFiles = false;
   if (fileLink) {
     for (const [, code] of markdown.matchAll(INLINE_CODE_SPAN)) {
       if (fileLink.test(code!.trim())) {
         linkFiles = true;
-        break;
+        // File rewrites expose pipes that can change the next pass's table structure.
+        // Preserve that ordering only for these rare candidates, including after earlier files.
+        if (breakTables && code!.includes("|")) {
+          return markdownWithTableBreaks(markdownWithInlineFileLinks(markdown, fileLink));
+        }
+        if (!breakTables) break;
       }
     }
   }
-  const breakTables = tableBreaks && mayHaveTableUnderText(markdown);
   if (!linkFiles && !breakTables) return markdown;
   const edits: MarkdownEdit[] = [];
   const visit = (node: MarkdownNode) => {
