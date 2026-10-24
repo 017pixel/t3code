@@ -54,6 +54,7 @@ import {
   hasServerAcknowledgedLocalDispatch,
   resolveDraftPromotionNavigationTarget,
   waitForRevertedMessage,
+  composerDraftContentUnchanged,
 } from "./ChatView.logic";
 
 const environmentId = EnvironmentId.make("environment-local");
@@ -1068,6 +1069,55 @@ describe("snapshotComposerSend", () => {
     expect(snapshot.messageText).toBe(
       ensureInlineContextReferences("run", [terminalContextReference(live)]).trim(),
     );
+  });
+});
+
+describe("composerDraftContentUnchanged", () => {
+  const image = {
+    id: "img-1",
+    type: "image" as const,
+    name: "shot.png",
+    mimeType: "image/png",
+    sizeBytes: 1,
+    previewUrl: "blob:one",
+    file: new File([], "shot.png"),
+  };
+  const submitted = {
+    prompt: "and then the tests",
+    images: [image],
+    files: [],
+    nonPersistedImageIds: [],
+    persistedAttachments: [],
+    terminalContexts: [],
+    previewAnnotations: [],
+    reviewComments: [],
+    threadContexts: [],
+    modelSelectionByProvider: {},
+    activeProvider: null,
+    runtimeMode: null,
+    interactionMode: null,
+  };
+
+  it("ignores attachment bookkeeping and model changes the user did not make to the message", () => {
+    expect(
+      composerDraftContentUnchanged(submitted, {
+        ...submitted,
+        images: [{ ...image, previewUrl: "blob:two" }],
+        persistedAttachments: [{ ...image, dataUrl: "data:" }],
+        activeProvider: ProviderInstanceId.make("codex"),
+      }),
+    ).toBe(true);
+  });
+
+  it("treats an edited prompt, attachment set, or cleared draft as a different message", () => {
+    expect(composerDraftContentUnchanged(submitted, { ...submitted, prompt: "and then" })).toBe(
+      false,
+    );
+    expect(composerDraftContentUnchanged(submitted, { ...submitted, images: [] })).toBe(false);
+    expect(composerDraftContentUnchanged(submitted, { ...submitted, terminalContexts: [] })).toBe(
+      false,
+    );
+    expect(composerDraftContentUnchanged(submitted, null)).toBe(false);
   });
 });
 

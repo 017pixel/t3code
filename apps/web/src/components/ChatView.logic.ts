@@ -69,6 +69,7 @@ import {
 import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
+  type ComposerThreadDraftState,
   type DraftId,
   type DraftThreadState,
 } from "../composerDraftStore";
@@ -1489,6 +1490,29 @@ export interface ComposerSendContents {
   readonly previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
   readonly reviewComments: ReadonlyArray<ReviewCommentContext>;
   readonly threadContexts: ReadonlyArray<ThreadContextRecord>;
+}
+
+/**
+ * Whether a draft still holds the message the user submitted. Only its content
+ * counts: the model picker and attachment upload bookkeeping can change without
+ * the user editing the message.
+ */
+export function composerDraftContentUnchanged(
+  submitted: ComposerThreadDraftState | null,
+  current: ComposerThreadDraftState | null,
+): boolean {
+  if (submitted === null || current === null) return submitted === current;
+  const ids = (attachments: ReadonlyArray<{ readonly id: string }>) =>
+    attachments.map((attachment) => attachment.id).join("\n");
+  return (
+    submitted.prompt === current.prompt &&
+    ids(submitted.images) === ids(current.images) &&
+    ids(submitted.files) === ids(current.files) &&
+    submitted.terminalContexts === current.terminalContexts &&
+    submitted.previewAnnotations === current.previewAnnotations &&
+    submitted.reviewComments === current.reviewComments &&
+    submitted.threadContexts === current.threadContexts
+  );
 }
 
 /**
