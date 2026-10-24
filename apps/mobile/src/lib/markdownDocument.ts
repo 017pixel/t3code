@@ -14,9 +14,9 @@ interface MarkdownEdit {
 
 function applyMarkdownEdits(markdown: string, edits: MarkdownEdit[]): string {
   if (edits.length === 0) return markdown;
-  edits.sort((a, b) => a.start - b.start);
   const parts: string[] = [];
   let offset = 0;
+  // AST traversal emits disjoint edits in source order.
   for (const edit of edits) {
     parts.push(markdown.slice(offset, edit.start), edit.content);
     offset = edit.end;
@@ -157,7 +157,8 @@ export function markdownWithHtml(markdown: string): string {
   return applyMarkdownEdits(markdown, edits);
 }
 
-const INLINE_CODE_SPAN = /`+([^`\r\n]+)`+/g;
+// Start only at the beginning of a backtick run to avoid retrying every suffix.
+const INLINE_CODE_SPAN = /(?<!`)`+([^`\r\n]+)`+/g;
 
 export function markdownWithInlineFileLinks(markdown: string, fileLink: RegExp): string {
   return transformNativeMarkdown(markdown, fileLink, false);
@@ -207,11 +208,7 @@ function transformNativeMarkdown(
           start?.offset !== undefined &&
           previous.position?.end.line === start.line - 1
         ) {
-          const lineStart =
-            Math.max(
-              markdown.lastIndexOf("\n", start.offset - 1),
-              markdown.lastIndexOf("\r", start.offset - 1),
-            ) + 1;
+          const lineStart = start.offset - start.column + 1;
           // Replace only the container prefix, leaving cell edits disjoint from the table break.
           const [, header = "", , ending = "\n", markers = ""] =
             /^([ \t>]*)([^\r\n]*)(\r\n|\r|\n)([ \t>]*)/.exec(markdown.slice(lineStart)) ?? [];
