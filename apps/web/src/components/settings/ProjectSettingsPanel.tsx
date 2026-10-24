@@ -95,10 +95,24 @@ function CheckoutGroupingSelect({ member }: { member: SidebarProjectGroupMember 
           ),
         })).catch((error) => {
           console.error("Failed to save checkout grouping rule", error);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not save grouping rule",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
         });
       }}
     >
-      <SelectTrigger size="sm" aria-label={`Grouping rule for ${member.workspaceRoot}`}>
+      <SelectTrigger
+        size="sm"
+        aria-label={`Grouping rule for ${member.workspaceRoot} on ${
+          member.environmentLabel
+            ? `${member.environmentLabel} (${member.environmentId})`
+            : member.environmentId
+        }`}
+      >
         <SelectValue>
           {selection === "inherit"
             ? `Default (${PROJECT_GROUPING_MODE_LABELS[globalMode]})`
