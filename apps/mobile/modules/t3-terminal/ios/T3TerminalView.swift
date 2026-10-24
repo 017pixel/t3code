@@ -549,7 +549,11 @@ public final class T3TerminalView: ExpoView, UITextFieldDelegate {
     ghostty_surface_set_color_scheme(createdSurface, appearance.ghosttyColorScheme)
     setupWriteCallback()
     resizeSurface()
-    feedBuffer(initialBuffer)
+    // A theme or font refresh in the same batch as a new buffer must not feed it early;
+    // applyPendingBuffer feeds it into this fresh surface once the batch's grid is set.
+    if !hasPendingBuffer {
+      feedBuffer(initialBuffer)
+    }
   }
 
   private func resetSurface() {
