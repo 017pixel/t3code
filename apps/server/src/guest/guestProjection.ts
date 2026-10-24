@@ -479,10 +479,17 @@ function guestOutputDelta(previous: string, shown: string, trimmed: boolean): st
  * sends the smallest frame that brings the guest's client to the same text. Text at the end that
  * could still grow into a root waits for the next frame. A settled frame holds nothing back.
  */
+// Erase in display, mode 3: the terminal drops its scrollback, so lines the guest's client kept
+// above the tail must go too. Only a replace does that.
+const CLEAR_SCROLLBACK = /\u001b\[0*3J/u;
+
 export function guestCommandOutputFrames(roots: GuestPathRoots) {
   let terminal = EMPTY_TERMINAL_OUTPUT;
   let sent: { readonly text: string; readonly truncated: boolean } | null = null;
   return (frame: OrchestrationV2CommandOutputFrame): OrchestrationV2CommandOutputFrame | null => {
+    // An escape split across frames waits in `pending`, so the check sees it whole.
+    const clearsScrollback =
+      frame.kind === "append" && CLEAR_SCROLLBACK.test(terminal.pending + frame.text);
     terminal = appendTerminalOutput(
       frame.kind === "replace" ? EMPTY_TERMINAL_OUTPUT : terminal,
       frame.text,
@@ -494,13 +501,21 @@ export function guestCommandOutputFrames(roots: GuestPathRoots) {
     );
     const truncated = terminal.truncated || frame.truncated;
     const previous = sent;
-    sent = { text: shown, truncated: (previous?.truncated ?? false) || truncated };
-    // Only a tail near its limit drops lines from the front.
-    const trimmed = truncated && plain.length >= TERMINAL_OUTPUT_TAIL_CHARS / 2;
-    const delta = previous === null ? null : guestOutputDelta(previous.text, shown, trimmed);
+    // The owner's client starts over on a replace from the server, and so does the guest's.
+    const delta =
+      previous === null || frame.kind === "replace" || clearsScrollback
+        ? null
+        : guestOutputDelta(
+            previous.text,
+            shown,
+            // Only a tail near its limit drops lines from the front.
+            truncated && plain.length >= TERMINAL_OUTPUT_TAIL_CHARS / 2,
+          );
     if (delta === null) {
+      sent = { text: shown, truncated };
       return { kind: "replace", text: shown, truncated, running: frame.running };
     }
+    sent = { text: shown, truncated: previous!.truncated || truncated };
     // Nothing new to show still reports output that scrolled out, or the command settling.
     return delta === "" && frame.running && truncated === previous!.truncated
       ? null

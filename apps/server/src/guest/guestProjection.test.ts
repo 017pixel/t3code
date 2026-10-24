@@ -578,6 +578,20 @@ describe("guestCommandOutputFrames", () => {
     expect(client(empty).text).toBe("");
   });
 
+  it("clears what the terminal cleared from its scrollback, even on a long tail", () => {
+    const rewrite = guestCommandOutputFrames(roots);
+    const suffix = `${"x".repeat(1023)}\n`.repeat(40);
+    const frames = [
+      rewrite(frame("replace", `${"discard\n".repeat(8192)}OLD\n${suffix}`)),
+      // The escape is split across frames.
+      rewrite(frame("append", "\u001b[3")),
+      rewrite(frame("append", `J\u001b[2J${suffix}`)),
+    ];
+    expect(client(frames).text).toBe(suffix);
+    frames.push(rewrite(frame("replace", suffix, false)));
+    expect(client(frames).text).toBe(suffix);
+  });
+
   it("falls back to a replace when repeated lines make the overlap ambiguous", () => {
     const rewrite = guestCommandOutputFrames(roots);
     const frames = [
