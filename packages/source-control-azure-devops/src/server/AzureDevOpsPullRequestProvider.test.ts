@@ -165,6 +165,7 @@ describe("getChangeRequest", () => {
           Effect.provide(
             Layer.mock(AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCli)({
               getPullRequest: () => Effect.succeed(PULL_REQUEST),
+              listBuildChecks: () => Effect.succeed([]),
               listIterations: () =>
                 state === "missing"
                   ? Effect.succeed([])
