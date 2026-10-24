@@ -14,7 +14,7 @@ root = args.worktree.resolve()
 db = root / '.t3/userdata/statev2.sqlite'
 if not (root / '.git').exists() or not db.is_file():
     parser.error('Expected an existing isolated git worktree .t3 database')
-if db.resolve().is_relative_to(Path.home() / '.t3'):
+if db.resolve().is_relative_to(Path.home() / '.t3/userdata'):
     parser.error('Refusing the live T3 home')
 fixture = json.loads(Path(__file__).with_name('fixture.json').read_text())
 settled = copy.deepcopy(fixture)
