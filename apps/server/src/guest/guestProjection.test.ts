@@ -612,6 +612,18 @@ describe("guestCommandOutputFrames", () => {
     expect(client(cleared).text).toBe(suffix);
   });
 
+  it("does not redraw past a live window an erase made shorter", () => {
+    const rewrite = guestCommandOutputFrames(roots);
+    const frames = [
+      rewrite(frame("replace", `${"a\n".repeat(70)}old`)),
+      rewrite(frame("append", "\u001b[2J")),
+      rewrite(frame("append", "\u001b[3Jab\n")),
+    ];
+    expect(client(frames).text).toBe("ab\n");
+    frames.push(rewrite(frame("replace", "ab\n", false)));
+    expect(client(frames).text).toBe("ab\n");
+  });
+
   it("falls back to a replace when repeated lines make the overlap ambiguous", () => {
     const rewrite = guestCommandOutputFrames(roots);
     const frames = [

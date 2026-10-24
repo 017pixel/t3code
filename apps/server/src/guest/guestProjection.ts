@@ -463,8 +463,12 @@ function guestOutputDelta(previous: string, shown: string): string | null {
  */
 export function guestCommandOutputFrames(roots: GuestPathRoots) {
   let terminal = EMPTY_TERMINAL_OUTPUT;
-  // What the guest's client holds: every frame sent keeps it equal to a text the server showed.
-  let sent: { readonly text: string; readonly truncated: boolean } | null = null;
+  // The guest's client, built the way it builds itself from frames. A candidate frame is sent
+  // only if this mirror then shows exactly what the server shows; the terminal model has state
+  // (its live window, fixed lines) that the text alone does not reveal.
+  let client: TerminalOutputState | null = null;
+  const applied = (base: TerminalOutputState, truncated: boolean, text: string) =>
+    appendTerminalOutput({ ...base, truncated: base.truncated || truncated }, text);
   return (frame: OrchestrationV2CommandOutputFrame): OrchestrationV2CommandOutputFrame | null => {
     terminal = appendTerminalOutput(
       frame.kind === "replace" ? EMPTY_TERMINAL_OUTPUT : terminal,
@@ -476,17 +480,18 @@ export function guestCommandOutputFrames(roots: GuestPathRoots) {
       roots,
     );
     const truncated = terminal.truncated || frame.truncated;
-    const delta = sent === null ? null : guestOutputDelta(sent.text, shown);
-    if (delta === null) {
-      sent = { text: shown, truncated };
+    const delta = client === null ? null : guestOutputDelta(client.text, shown);
+    const next = delta === null || client === null ? null : applied(client, truncated, delta);
+    if (next === null || next.text !== shown) {
+      client = applied(EMPTY_TERMINAL_OUTPUT, truncated, shown);
       return { kind: "replace", text: shown, truncated, running: frame.running };
     }
-    const unchanged = delta === "" && truncated === sent!.truncated;
-    sent = { text: shown, truncated: sent!.truncated || truncated };
+    const unchanged = delta === "" && next.truncated === client!.truncated;
+    client = next;
     // Nothing new to show still reports output that scrolled out, or the command settling.
     return unchanged && frame.running
       ? null
-      : { kind: "append", text: delta, truncated, running: frame.running };
+      : { kind: "append", text: delta!, truncated, running: frame.running };
   };
 }
 
