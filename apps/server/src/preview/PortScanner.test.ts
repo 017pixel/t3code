@@ -66,16 +66,16 @@ const ownedScanner = (processIds: ReadonlyArray<number> = [1234]) =>
 const layerLsofScanner = (input: {
   readonly pid: () => number;
   readonly fetch: typeof globalThis.fetch;
-  readonly stdout?: () => string;
+  readonly stdout?: (command: string) => string;
 }) =>
   PortScanner.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         layerNoProc,
         Layer.succeed(ProcessRunner.ProcessRunner, {
-          run: () =>
+          run: ({ command }) =>
             Effect.succeed({
-              stdout: input.stdout?.() ?? `p${input.pid()}\ncnode\nn*:${LSOF_TEST_PORT}\n`,
+              stdout: input.stdout?.(command) ?? `p${input.pid()}\ncnode\nn*:${LSOF_TEST_PORT}\n`,
               stderr: "",
               code: null,
               timedOut: false,
@@ -497,16 +497,8 @@ effectIt.effect("ignores a partial Windows netstat snapshot when one query exits
   }).pipe(Effect.provide(layer));
 });
 
-// #15238: an agent's background server (Claude `run_in_background`, Codex background terminal)
-// runs under the provider CLI, not a T3 terminal, so it needs its own thread registration.
-type AgentProcessRegistration = {
-  readonly registerThreadProcesses?: (input: {
-    readonly threadId: string;
-    readonly processIds: ReadonlyArray<number>;
-  }) => Effect.Effect<void>;
-};
-
 effectIt.effect("attributes an agent-started background server to its thread", () => {
+  const providerPid = 1000;
   const agentServerPid = 4321;
   const fetchFn = (() =>
     Promise.resolve(
@@ -515,26 +507,30 @@ effectIt.effect("attributes an agent-started background server to its thread", (
   const layer = layerLsofScanner({
     pid: () => agentServerPid,
     fetch: fetchFn,
-    stdout: () => `p${agentServerPid}\ncpython3\nn*:${LSOF_TEST_PORT}\n`,
+    // The agent's shell (2000) runs the server under the provider CLI; 3000 is unrelated.
+    stdout: (command) =>
+      command === "ps"
+        ? `    1     0\n ${providerPid}     1\n 2000  ${providerPid}\n ${agentServerPid}  2000\n 3000     1\n`
+        : `p${agentServerPid}\ncpython3\nn*:${LSOF_TEST_PORT}\np3000\ncpostgres\nn127.0.0.1:5432\n`,
   });
 
   return Effect.gen(function* () {
-    const scanner: PortScanner.PortDiscovery["Service"] & AgentProcessRegistration =
-      yield* PortScanner.PortDiscovery;
-    yield* (
-      scanner.registerThreadProcesses?.({
-        threadId: "agent-thread",
-        processIds: [agentServerPid],
-      }) ?? Effect.void
-    );
+    const scanner = yield* PortScanner.PortDiscovery;
+    const owners = () =>
+      scanner
+        .scan()
+        .pipe(
+          Effect.map((servers) =>
+            servers.map(({ port, pid, threadId }) => ({ port, pid, threadId })),
+          ),
+        );
 
-    const servers = yield* scanner.scan();
-    expect(
-      servers.map((server) => ({
-        port: server.port,
-        pid: server.pid,
-        threadId: server.terminal?.threadId ?? null,
-      })),
-    ).toEqual([{ port: LSOF_TEST_PORT, pid: agentServerPid, threadId: "agent-thread" }]);
+    yield* scanner.registerThreadProcess({ threadId: "agent-thread", processId: providerPid });
+    expect(yield* owners()).toEqual([
+      { port: LSOF_TEST_PORT, pid: agentServerPid, threadId: "agent-thread" },
+    ]);
+
+    yield* scanner.unregisterThreadProcess(providerPid);
+    expect(yield* owners()).toEqual([]);
   }).pipe(Effect.provide(layer));
 });

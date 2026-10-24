@@ -54,7 +54,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeUtil from "node:util";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
-import { AgentScope } from "@t3tools/shared/AgentScope";
+import { AgentProcesses, AgentScope } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { applyClaudePromptEffortPrefix } from "@t3tools/shared/model";
 import {
@@ -336,7 +336,7 @@ const CLAUDE_GROUP_WATCH_SCRIPT = [
 export function spawnClaudeProcessGroup(
   options: ClaudeSpawnOptions,
   onExit?: () => void,
-): ClaudeSpawnedProcess {
+): ClaudeSpawnedProcess & { readonly pid?: number | undefined } {
   const child = NodeChildProcess.spawn(
     "/bin/sh",
     ["-c", CLAUDE_GROUP_WATCH_SCRIPT, "t3-claude", options.command, ...options.args],
@@ -355,7 +355,7 @@ export function spawnClaudeProcessGroup(
     onExit?.();
   });
   // Node's typings make stdin and stdout nullable once stdio has a fourth entry; both are pipes.
-  return child as ClaudeSpawnedProcess;
+  return child as ClaudeSpawnedProcess & { readonly pid?: number | undefined };
 }
 
 export const ClaudeProviderCapabilitiesV2 = {
@@ -898,6 +898,7 @@ export const layerQueryRunner: Layer.Layer<
     const path = yield* Path.Path;
     const { native: nativeEventLogger } = yield* ProviderEventLoggers.ProviderEventLoggers;
     const agentScope = yield* AgentScope;
+    const agentProcesses = yield* AgentProcesses;
     const platform = yield* HostProcess.Platform;
     const runFork = Effect.runForkWith(yield* Effect.context<never>());
 
@@ -958,8 +959,18 @@ export const layerQueryRunner: Layer.Layer<
           options.spawnClaudeCodeProcess ??
           (platform === "win32"
             ? undefined
-            : (spawnOptions: ClaudeSpawnOptions) =>
-                spawnClaudeProcessGroup(spawnOptions, stopScope));
+            : (spawnOptions: ClaudeSpawnOptions) => {
+                const child = spawnClaudeProcessGroup(spawnOptions, () => {
+                  if (child.pid !== undefined) runFork(agentProcesses.unregister(child.pid));
+                  stopScope?.();
+                });
+                if (child.pid !== undefined) {
+                  runFork(
+                    agentProcesses.register({ threadId: input.threadId, processId: child.pid }),
+                  );
+                }
+                return child;
+              });
         const queryRuntime = yield* Effect.uninterruptibleMask((restore) =>
           Effect.try({
             try: () =>

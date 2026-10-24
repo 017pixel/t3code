@@ -4,6 +4,7 @@ import {
   ThreadId,
   type DiscoveredLocalServer,
 } from "@t3tools/contracts";
+import { AgentProcesses, type AgentProcessesShape } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { isLoopbackHost, LSOF_LOCAL_HOST_TOKENS } from "@t3tools/shared/preview";
 import * as Cause from "effect/Cause";
@@ -46,11 +47,14 @@ export class PortDiscovery extends Context.Service<
       readonly threadId: string;
       readonly terminalId: string;
     }) => Effect.Effect<void>;
+    readonly registerThreadProcess: AgentProcessesShape["register"];
+    readonly unregisterThreadProcess: AgentProcessesShape["unregister"];
   }
 >()("t3/preview/PortScanner/PortDiscovery") {}
 
 const POLL_INTERVAL = Duration.seconds(3);
 const LSOF_TIMEOUT_MS = 5_000;
+const PS_TIMEOUT_MS = 5_000;
 const PROC_FD_WALK_LIMIT = 50_000;
 const SOCKET_OWNER_ATTEMPTS = 3;
 const WINDOWS_LISTENER_TIMEOUT_MS = 5_000;
@@ -80,6 +84,8 @@ interface ScannerState {
       readonly processIds: ReadonlySet<number>;
     }
   >;
+  /** Provider process IDs, each the root of a tree the thread's agent runs commands in. */
+  readonly threadProcesses: ReadonlyMap<number, ThreadId>;
   readonly retainCount: number;
 }
 
@@ -343,6 +349,15 @@ const parseProcNetTcp = (
   return listeners;
 };
 
+const parsePsParentPids = (raw: string): ReadonlyMap<number, number> => {
+  const parents = new Map<number, number>();
+  for (const line of raw.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+    if (match) parents.set(Number(match[1]), Number(match[2]));
+  }
+  return parents;
+};
+
 const serversEqual = (
   left: ReadonlyArray<DiscoveredLocalServer>,
   right: ReadonlyArray<DiscoveredLocalServer>,
@@ -358,6 +373,7 @@ const serversEqual = (
       a.url !== b.url ||
       a.processName !== b.processName ||
       a.pid !== b.pid ||
+      a.threadId !== b.threadId ||
       a.terminal?.threadId !== b.terminal?.threadId ||
       a.terminal?.terminalId !== b.terminal?.terminalId
     ) {
@@ -379,6 +395,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   const stateRef = yield* Ref.make<ScannerState>({
     listeners: new Map(),
     terminalProcesses: new Map(),
+    threadProcesses: new Map(),
     retainCount: 0,
   });
   const webProbeCacheRef = yield* Ref.make<ReadonlyMap<string, WebProbeCacheEntry>>(new Map());
@@ -478,6 +495,52 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     return [...seen.values()].toSorted((left, right) => left.port - right.port);
   });
 
+  // An agent's background server runs under the provider CLI, not a terminal, so its
+  // listener is matched to the thread by walking up to a registered provider process.
+  const withThreadOwners = Effect.fn("PortDiscovery.withThreadOwners")(function* (
+    servers: ReadonlyArray<DiscoveredLocalServer>,
+    threadProcesses: ReadonlyMap<number, ThreadId>,
+  ) {
+    const needsAncestry = servers.some(
+      (server) =>
+        server.terminal === null && server.pid !== null && !threadProcesses.has(server.pid),
+    );
+    const parents =
+      threadProcesses.size === 0 || !needsAncestry || hostPlatform === "win32"
+        ? new Map<number, number>()
+        : yield* processRunner
+            .run({
+              command: "ps",
+              args: ["-A", "-o", "pid=,ppid="],
+              timeout: Duration.millis(PS_TIMEOUT_MS),
+              maxOutputBytes: 4 * 1024 * 1024,
+            })
+            .pipe(
+              Effect.map((result) =>
+                exitedWithError(result)
+                  ? new Map<number, number>()
+                  : parsePsParentPids(result.stdout),
+              ),
+              Effect.orElseSucceed(() => new Map<number, number>()),
+            );
+    const agentThreadOf = (pid: number): ThreadId | undefined => {
+      const seen = new Set<number>();
+      for (let current: number | undefined = pid; current !== undefined && current > 1;) {
+        const owner = threadProcesses.get(current);
+        if (owner !== undefined) return owner;
+        if (seen.has(current)) return undefined;
+        seen.add(current);
+        current = parents.get(current);
+      }
+      return undefined;
+    };
+    return servers.map((server): DiscoveredLocalServer => {
+      const threadId =
+        server.terminal?.threadId ?? (server.pid === null ? undefined : agentThreadOf(server.pid));
+      return threadId === undefined ? server : { ...server, threadId };
+    });
+  });
+
   const probeWebUrl = Effect.fn("PortDiscovery.probeWebUrl")((url: string) =>
     httpClient.get(url).pipe(
       Effect.map((response) => {
@@ -533,7 +596,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     for (const server of servers) {
       // A listener alone does not identify its protocol. Sending HTTP or TLS to
       // another app's binary RPC listener can crash it before classification.
-      if (server.terminal === null) continue;
+      if (server.threadId === undefined) continue;
       groups.push({
         server,
         urls: [`http://${server.host}:${server.port}`, `https://${server.host}:${server.port}`],
@@ -692,7 +755,13 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
         terminalByProcessId.set(processId, registration.owner);
       }
     }
-    if (terminalByProcessId.size === 0 && configuredUrls.length === 0) {
+    const owned = (servers: ReadonlyArray<DiscoveredLocalServer>) =>
+      withThreadOwners(servers, state.threadProcesses);
+    if (
+      terminalByProcessId.size === 0 &&
+      state.threadProcesses.size === 0 &&
+      configuredUrls.length === 0
+    ) {
       return { discovered: [], configured: new Map() } satisfies WebProbeSnapshot;
     }
     if (hostPlatform === "win32") {
@@ -723,13 +792,13 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
         }),
       );
       return yield* withWindowsProcessNames(
-        yield* probeWebServers(listeners ?? [], configuredUrls),
+        yield* probeWebServers(yield* owned(listeners ?? []), configuredUrls),
       );
     }
     const recoverLsofProbeFailure = recoverProcessProbeFailure("lsof");
     if (yield* Ref.get(lsofMissingRef)) {
       const fromProc = yield* scanProcListeners(terminalByProcessId);
-      return yield* probeWebServers(fromProc ?? [], configuredUrls);
+      return yield* probeWebServers(yield* owned(fromProc ?? []), configuredUrls);
     }
     const lsofResult = yield* processRunner
       .run({
@@ -752,9 +821,10 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
           ProcessTimeoutError: recoverLsofProbeFailure,
         }),
       );
-    if (lsofResult !== null) return yield* probeWebServers(lsofResult, configuredUrls);
+    if (lsofResult !== null)
+      return yield* probeWebServers(yield* owned(lsofResult), configuredUrls);
     const fromProc = yield* scanProcListeners(terminalByProcessId);
-    return yield* probeWebServers(fromProc ?? [], configuredUrls);
+    return yield* probeWebServers(yield* owned(fromProc ?? []), configuredUrls);
   });
 
   const scanSnapshot = Effect.fn("PortDiscovery.scanSnapshot")(
@@ -872,13 +942,44 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     });
   });
 
+  const registerThreadProcess: PortDiscovery["Service"]["registerThreadProcess"] = (input) =>
+    !Number.isInteger(input.processId) || input.processId <= 1
+      ? Effect.void
+      : Ref.update(stateRef, (state) => ({
+          ...state,
+          threadProcesses: new Map(state.threadProcesses).set(
+            input.processId,
+            ThreadId.make(input.threadId),
+          ),
+        }));
+
+  const unregisterThreadProcess: PortDiscovery["Service"]["unregisterThreadProcess"] = (
+    processId,
+  ) =>
+    Ref.update(stateRef, (state) => {
+      if (!state.threadProcesses.has(processId)) return state;
+      const threadProcesses = new Map(state.threadProcesses);
+      threadProcesses.delete(processId);
+      return { ...state, threadProcesses };
+    });
+
   return PortDiscovery.of({
     scan: scanOnce,
     subscribe,
     retain,
     registerTerminalProcesses,
     unregisterTerminal,
+    registerThreadProcess,
+    unregisterThreadProcess,
   });
 }).pipe(Effect.withSpan("PortDiscovery.make"));
 
 export const layer = Layer.effect(PortDiscovery, make);
+
+export const layerAgentProcesses = Layer.effect(
+  AgentProcesses,
+  PortDiscovery.useSync((discovery) => ({
+    register: discovery.registerThreadProcess,
+    unregister: discovery.unregisterThreadProcess,
+  })),
+);

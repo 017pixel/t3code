@@ -341,6 +341,8 @@ export const DiscoveredLocalServer = Schema.Struct({
       terminalId: TrimmedNonEmptyString,
     }),
   ),
+  /** The thread whose terminal or agent process owns the listener. Older servers omit it. */
+  threadId: Schema.optional(ThreadId),
 });
 export type DiscoveredLocalServer = typeof DiscoveredLocalServer.Type;
 

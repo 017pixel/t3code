@@ -27,7 +27,12 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
-import { AgentScope, AgentScopeThreadId, RAISE_OOM_SCORE_LINE } from "@t3tools/shared/AgentScope";
+import {
+  AgentProcesses,
+  AgentScope,
+  AgentScopeThreadId,
+  RAISE_OOM_SCORE_LINE,
+} from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
@@ -1436,6 +1441,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
           });
         });
   const agentScope = yield* AgentScope;
+  const agentThreadId = yield* AgentScopeThreadId;
   const scopedLaunch =
     linuxCgroupLease !== undefined || spawnCommand.shell
       ? undefined
@@ -1443,7 +1449,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
           command: spawnCommand.command,
           args: spawnCommand.args,
           name: "acp",
-          threadId: yield* AgentScopeThreadId,
+          threadId: agentThreadId,
           env: { ...process.env, ...options.spawn.env },
         });
   const scopedSpawnCommand =
@@ -1490,6 +1496,12 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
           }),
       ),
     );
+
+  if (agentThreadId !== undefined) {
+    const agentProcesses = yield* AgentProcesses;
+    yield* agentProcesses.register({ threadId: agentThreadId, processId: child.pid });
+    yield* Scope.addFinalizer(runtimeScope, agentProcesses.unregister(child.pid));
+  }
 
   // Detached children can keep stdout open, delaying protocol termination.
   if (scopeUnit !== undefined) {

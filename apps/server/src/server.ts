@@ -625,6 +625,8 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       CodexInstallation.CodexInstallation.layer,
     ),
   ),
+  // Provider adapters register their processes so agent-started servers reach their thread.
+  Layer.provideMerge(PortScanner.layerAgentProcesses.pipe(Layer.provide(layerPortScanner))),
 );
 
 const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(

@@ -55,6 +55,23 @@ export const AgentScopeThreadId = Context.Reference<string | undefined>(
   { defaultValue: () => undefined },
 );
 
+/**
+ * Records a provider process as its thread's, so a server one of its descendants
+ * opens (an agent's background dev server) is attributed to that thread.
+ */
+export interface AgentProcessesShape {
+  readonly register: (input: {
+    readonly threadId: string;
+    readonly processId: number;
+  }) => Effect.Effect<void>;
+  readonly unregister: (processId: number) => Effect.Effect<void>;
+}
+
+export const AgentProcesses = Context.Reference<AgentProcessesShape>(
+  "@t3tools/shared/AgentScope/AgentProcesses",
+  { defaultValue: () => ({ register: () => Effect.void, unregister: () => Effect.void }) },
+);
+
 export const AGENT_OOM_SCORE_ADJ = 800;
 
 export const RAISE_OOM_SCORE_LINE = `{ echo ${AGENT_OOM_SCORE_ADJ} >/proc/self/oom_score_adj; } 2>/dev/null`;

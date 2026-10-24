@@ -6,7 +6,6 @@ import {
   ArrowUpDownIcon,
   ChevronRightIcon,
   FolderPlusIcon,
-  Globe2Icon,
   SearchIcon,
   SquarePenIcon,
   TriangleAlertIcon,
@@ -44,7 +43,6 @@ import { restrictToFirstScrollableAncestor, restrictToVerticalAxis } from "@dnd-
 import { CSS } from "@dnd-kit/utilities";
 import {
   AuthOrchestrationOperateScope,
-  AuthPreviewOperateScope,
   type ContextMenuItem,
   type EnvironmentId,
   ProjectId,
@@ -96,14 +94,11 @@ import {
 } from "../state/entities";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
-import { useThreadDiscoveredPorts } from "../portDiscoveryState";
-import { openDiscoveredPort } from "./preview/openDiscoveredPort";
-import { useAtomCommand } from "../state/use-atom-command";
+import { ThreadDiscoveredPortButton } from "./ThreadDiscoveredPortButton";
 import {
   ORCHESTRATION_OPERATE_DENIED_MESSAGE,
   useOrchestrationCommand,
 } from "../state/use-orchestration-command";
-import { previewEnvironment } from "../state/preview";
 import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
 import {
   legacyProjectCwdPreferenceKey,
@@ -408,7 +403,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     thread,
   } = props;
   const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
-  const canOperatePreview = useEnvironmentScope(thread.environmentId, AuthPreviewOperateScope);
   const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
   const [isFileDragOver, setIsFileDragOver] = useState(false);
   useEffect(() => {
@@ -426,13 +420,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     threadId: thread.id,
   });
   const isMobile = useIsMobile();
-  const discoveredPorts = useThreadDiscoveredPorts({
-    environmentId: thread.environmentId,
-    threadId: thread.id,
-  });
-  const openPreview = useAtomCommand(previewEnvironment.open, {
-    reportFailure: false,
-  });
   const environment = useEnvironment(thread.environmentId);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const isRemoteThread = thread.environmentId !== primaryEnvironmentId;
@@ -470,27 +457,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     addFolders: () => {},
   });
   const isHighlighted = isActive || isSelected;
-  const handleOpenDiscoveredPort = (event: React.MouseEvent<HTMLButtonElement>) => {
-    const port = discoveredPorts[0];
-    if (!port || !canOperatePreview) return;
-    event.preventDefault();
-    event.stopPropagation();
-    navigateToThread(threadRef);
-    void (async () => {
-      const result = await openDiscoveredPort({ threadRef, port, openPreview });
-      if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
-        return;
-      }
-      const error = squashAtomCommandFailure(result);
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Unable to open preview",
-          description: error instanceof Error ? error.message : "The preview could not be opened.",
-        }),
-      );
-    })();
-  };
   const currentLinkedPr = supportsMultiplePullRequests
     ? resolveThreadCurrentPullRequestLink(thread.pullRequests)
     : null;
@@ -758,26 +724,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           )}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          {canOperatePreview && discoveredPorts.length > 0 && (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <button
-                    type="button"
-                    aria-label={`Open localhost:${discoveredPorts[0]?.port ?? ""}`}
-                    className="inline-flex cursor-pointer items-center justify-center text-success-foreground outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
-                    onClick={handleOpenDiscoveredPort}
-                  />
-                }
-              >
-                <Globe2Icon className="size-3" />
-              </TooltipTrigger>
-              <TooltipPopup side="top">
-                Open localhost:{discoveredPorts[0]?.port}
-                {discoveredPorts.length > 1 ? ` (+${discoveredPorts.length - 1})` : ""}
-              </TooltipPopup>
-            </Tooltip>
-          )}
+          <ThreadDiscoveredPortButton threadRef={threadRef} onThreadActivate={navigateToThread} />
           <ThreadWorktreeIndicator thread={thread} />
           <ThreadTerminalStatusButton
             threadRef={threadRef}
