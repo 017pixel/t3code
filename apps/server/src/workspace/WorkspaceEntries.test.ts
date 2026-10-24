@@ -372,6 +372,31 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         expect(paths.some((entryPath) => entryPath.startsWith(".convex/"))).toBe(false);
       }),
     );
+
+    it.effect("indexes symlinked files and directories inside the workspace", () =>
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) === "win32") return;
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-symlinks-" });
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* writeTextFile(cwd, "src/index.ts", "export {};");
+        yield* fileSystem.symlink("src", path.join(cwd, "src-link"));
+        yield* fileSystem.symlink("src/index.ts", path.join(cwd, "index-link.ts"));
+        const symlinkEntries = [
+          { kind: "directory", path: "src-link" },
+          { kind: "file", path: "index-link.ts" },
+        ];
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const searched = yield* searchWorkspaceEntries({ cwd, query: "link", limit: 100 });
+        const listed = yield* workspaceEntries.list({ cwd });
+
+        for (const entry of symlinkEntries) {
+          expect(searched.entries).toContainEqual(expect.objectContaining(entry));
+          expect(listed.entries).toContainEqual(expect.objectContaining(entry));
+        }
+      }),
+    );
   });
 
   describe("searchContents", () => {
