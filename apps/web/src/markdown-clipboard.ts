@@ -70,8 +70,12 @@ export function serializeCodeBlockToMarkdown(source: string, language: string | 
 // copied as shown, without fences; DOM text from rendered markdown carries no NUL.
 const CODE_BOUNDARY = "\u0000";
 
+function verbatimBlock(code: string): string {
+  return `${CODE_BOUNDARY}${code}${CODE_BOUNDARY}\n\n`;
+}
+
 function serializeCodeBlock(pre: Element): string {
-  return `${CODE_BOUNDARY}${(pre.textContent ?? "").replace(/\n$/, "")}${CODE_BOUNDARY}\n\n`;
+  return verbatimBlock((pre.textContent ?? "").replace(/\n$/, ""));
 }
 
 function serializeTableCell(cell: Element): string {
@@ -191,7 +195,12 @@ function serializeNode(node: Node): string {
     return serializeDetails(element);
   }
   const markdownCopy = element.getAttribute("data-markdown-copy");
-  if (markdownCopy !== null) return markdownCopy;
+  if (markdownCopy !== null) {
+    // A diagram copies as its fenced source, which is code too.
+    return element.hasAttribute("data-markdown-mermaid")
+      ? verbatimBlock(markdownCopy.replace(/\n+$/, ""))
+      : markdownCopy;
+  }
   if (isSkippedElement(element)) return "";
 
   const headingLevel = /^H([1-6])$/.exec(element.tagName)?.[1];

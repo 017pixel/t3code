@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { serializeRenderedMarkdownFragment } from "./markdown-clipboard";
+import {
+  serializeCodeBlockToMarkdown,
+  serializeRenderedMarkdownFragment,
+} from "./markdown-clipboard";
 import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import {
   collectAssistantCitations,
@@ -193,6 +196,21 @@ describe("serializeRenderedMarkdownFragment", () => {
     );
 
     expect(serializeRenderedMarkdownFragment(asNode(container))).toBe("printf 'hello\\n'\n\nT");
+  });
+
+  it("keeps a diagram's source exactly as written when copied with prose", () => {
+    const source = 'flowchart TD\n  A["first   \n\n\nlast"]';
+    const container = new FakeElement("DIV").append(
+      new FakeElement("DIV", [], {
+        "data-markdown-mermaid": "",
+        "data-markdown-copy": serializeCodeBlockToMarkdown(source, "mermaid"),
+      }),
+      new FakeElement("P").append(new FakeText("After")),
+    );
+
+    expect(serializeRenderedMarkdownFragment(asNode(container))).toBe(
+      `\`\`\`mermaid\n${source}\n\`\`\`\n\nAfter`,
+    );
   });
 
   it("omits fences when a selection past the last line drags in the whole code block", () => {
