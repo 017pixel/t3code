@@ -610,6 +610,34 @@ describe("mergeUsage", () => {
       ]);
     });
 
+    it("counts it once when one server reaches it through two mounts", () => {
+      const secondMount = { ...wsl, homePath: "/mnt/win/Users/user/.claude/projects" };
+      const merged = mergeUsage(
+        [
+          environment(
+            "wsl",
+            summary(
+              [
+                bucket({ sourcePath: wsl.homePath }),
+                bucket({
+                  day: "2026-08-08" as UsageDay,
+                  sourcePath: secondMount.homePath,
+                  costUsd: 3,
+                }),
+              ],
+              [wsl, secondMount],
+            ),
+          ),
+        ],
+        USAGE_CONTRACT_VERSION,
+      );
+
+      expect(merged.costUsd).toBe(10);
+      expect(merged.sessions).toBe(142);
+      expect(merged.daily.map(({ day }) => day)).toEqual(["2026-08-07"]);
+      expect(merged.duplicateSources).toEqual([`wsl: ${secondMount.homePath}`]);
+    });
+
     it("keeps a native WSL directory apart from the Windows one", () => {
       const native = {
         ...wsl,

@@ -178,12 +178,11 @@ function claimSources(
   environments: readonly EnvironmentUsage[],
   sourceKey: (fingerprint: UsageSourceFingerprint) => string,
 ): {
-  readonly ownerByFingerprint: ReadonlyMap<string, EnvironmentId>;
+  readonly ownerScanByFingerprint: ReadonlyMap<string, { readonly source: UsageSource }>;
   readonly supplementalBucketsByEnvironment: ReadonlyMap<EnvironmentId, ReadonlySet<UsageBucket>>;
   readonly sessionsByFingerprint: ReadonlyMap<string, number>;
   readonly duplicates: readonly string[];
 } {
-  const ownerByFingerprint = new Map<string, EnvironmentId>();
   const ownerScanByFingerprint = new Map<
     string,
     { environment: EnvironmentUsage; source: UsageSource }
@@ -204,11 +203,10 @@ function claimSources(
       for (const source of environment.summary.sources) {
         if (source.status !== status) continue;
         const key = sourceKey(source.fingerprint);
-        if (ownerByFingerprint.has(key)) {
+        if (ownerScanByFingerprint.has(key)) {
           duplicates.push(`${environment.label}: ${source.fingerprint.resolvedHomePath}`);
           continue;
         }
-        ownerByFingerprint.set(key, environment.environmentId);
         ownerScanByFingerprint.set(key, { environment, source });
         sessionsByFingerprint.set(key, source.distinctSessions);
       }
@@ -254,7 +252,7 @@ function claimSources(
   }
 
   return {
-    ownerByFingerprint,
+    ownerScanByFingerprint,
     supplementalBucketsByEnvironment,
     sessionsByFingerprint,
     duplicates,
@@ -263,7 +261,7 @@ function claimSources(
 
 function ownedContribution(
   environment: EnvironmentUsage,
-  ownerByFingerprint: ReadonlyMap<string, EnvironmentId>,
+  ownerScanByFingerprint: ReadonlyMap<string, { readonly source: UsageSource }>,
   supplementalBuckets: ReadonlySet<UsageBucket>,
   sessionsByFingerprint: ReadonlyMap<string, number>,
   sourceKey: (fingerprint: UsageSourceFingerprint) => string,
@@ -277,7 +275,9 @@ function ownedContribution(
   for (const source of environment.summary.sources) {
     if (source.status === "missing") continue;
     const key = sourceKey(source.fingerprint);
-    if (ownerByFingerprint.get(key) === environment.environmentId) {
+    // By source, not environment: one server can reach a directory through two
+    // mounts, and only the winning reading may count.
+    if (ownerScanByFingerprint.get(key)?.source === source) {
       const provider = source.fingerprint.provider;
       ownedProviders.add(provider);
       ownedSources.add(`${provider}\u0000${source.fingerprint.resolvedHomePath}`);
@@ -370,7 +370,7 @@ export function mergeUsage(
 
   const sourceKey = sourceIdentity(current);
   const {
-    ownerByFingerprint,
+    ownerScanByFingerprint,
     supplementalBucketsByEnvironment,
     sessionsByFingerprint,
     duplicates,
@@ -429,7 +429,7 @@ export function mergeUsage(
   for (const environment of current) {
     const { buckets, sessionsByProvider } = ownedContribution(
       environment,
-      ownerByFingerprint,
+      ownerScanByFingerprint,
       supplementalBucketsByEnvironment.get(environment.environmentId) ?? new Set(),
       sessionsByFingerprint,
       sourceKey,
