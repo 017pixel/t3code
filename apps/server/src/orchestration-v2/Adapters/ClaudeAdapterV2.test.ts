@@ -2942,6 +2942,54 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         ),
     );
 
+    // regression: #23918 the CLI keeps asking in Plan despite the session rule it was given
+    it.effect("keeps a session approval for later calls of the same tool in Plan", () =>
+      Effect.gen(function* () {
+        const turn = yield* openPlanTurn("full-access");
+        const toolName = "mcp__t3-code__t3_thread_read";
+        const approval = yield* requestWrite(
+          turn,
+          toolName,
+          { threadId: "thread-dummy" },
+          { toolUseID: "read-first-page" },
+        );
+        assert.equal(approval.first.type, "request");
+        if (approval.first.type !== "request") return;
+        yield* turn.runtime.respondToRuntimeRequest({
+          requestId: approval.first.event.runtimeRequest.id,
+          decision: "acceptForSession",
+        });
+        assert.equal((yield* Fiber.join(approval.decision))?.behavior, "allow");
+
+        for (const [toolUseID, toolInput] of [
+          ["read-next-page", { threadId: "thread-dummy", afterPosition: 40 }],
+          ["read-item-text", { threadId: "thread-dummy", itemId: "item-1", textOffset: 50000 }],
+        ] as const) {
+          const later = yield* requestWrite(turn, toolName, toolInput, { toolUseID });
+          assert.equal(
+            later.first.type,
+            "decision",
+            `${toolUseID} asked again after Always allow this session`,
+          );
+          if (later.first.type !== "decision") return;
+          assert.equal(later.first.result?.behavior, "allow");
+        }
+
+        const otherTool = yield* requestWrite(
+          turn,
+          "Bash",
+          { command: "echo after > target.txt" },
+          { toolUseID: "other-tool" },
+        );
+        assert.equal(otherTool.first.type, "request", "the session grant covered another tool");
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    );
+
     it.effect("denies Plan writes without asking when approvals are never allowed", () =>
       Effect.gen(function* () {
         const turn = yield* openPlanTurn("full-access", "never");
