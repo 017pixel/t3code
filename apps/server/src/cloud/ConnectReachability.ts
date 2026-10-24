@@ -18,7 +18,7 @@ import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
-import { CLOUD_ENDPOINT_RUNTIME_CONFIG } from "./config.ts";
+import { CLOUD_ENDPOINT_RUNTIME_CONFIG, decodeRuntimeConfig } from "./config.ts";
 import * as ManagedEndpointRuntime from "./ManagedEndpointRuntime.ts";
 
 // cloudflared finds the edge through the SRV record `_v2-origintunneld._tcp.argotunnel.com`,
@@ -241,7 +241,8 @@ const make = Effect.gen(function* () {
   // Runs only inside the `ConnectReachability.check` span.
   const gatherFacts = Effect.fnUntraced(function* (tunnelConfig: string | null) {
     const managedTunnelConfigured = tunnelConfig !== null;
-    const connector = managedTunnelConfigured ? yield* runtime.inspectConnector : null;
+    const config = tunnelConfig ? Option.getOrNull(decodeRuntimeConfig(tunnelConfig)) : null;
+    const connector = config ? yield* runtime.inspectConnector(config) : null;
     const endpoint =
       connector?.hostname && connector.readyConnections !== 0
         ? yield* probeEndpoint(connector.hostname)

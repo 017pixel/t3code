@@ -470,24 +470,20 @@ describe("CloudManagedEndpointRuntime", () => {
       );
       const runtime = yield* buildCloudManagedEndpointRuntime(spawner);
 
-      yield* runtime.applyConfig({
+      const config = {
         providerKind: "cloudflare_tunnel",
         connectorToken: "token-1",
         tunnelId: "tunnel-1",
         tunnelName: "t3-code-env-1",
-      });
-      yield* runtime.applyConfig({
-        providerKind: "cloudflare_tunnel",
-        connectorToken: "token-1",
-        tunnelId: "tunnel-1",
-        tunnelName: "t3-code-env-1",
-      });
-      yield* runtime.applyConfig({
-        providerKind: "cloudflare_tunnel",
-        connectorToken: "token-2",
-        tunnelId: "tunnel-1",
-        tunnelName: "t3-code-env-1",
-      });
+      } as const;
+      const replacement = { ...config, connectorToken: "token-2" };
+      yield* runtime.applyConfig(config);
+      expect(yield* runtime.inspectConnector(config)).not.toBeNull();
+      expect(yield* runtime.inspectConnector(replacement)).toBeNull();
+      yield* runtime.applyConfig(config);
+      yield* runtime.applyConfig(replacement);
+      expect(yield* runtime.inspectConnector(replacement)).not.toBeNull();
+      expect(yield* runtime.inspectConnector(config)).toBeNull();
       const stopped = yield* runtime.applyConfig(null);
 
       expect(spawned.map((command) => command.command)).toEqual(["cloudflared", "cloudflared"]);

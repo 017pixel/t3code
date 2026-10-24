@@ -82,13 +82,14 @@ describe("classifyReachability", () => {
 
 describe("ConnectReachability", () => {
   it.effect("exposes the checked tunnel's MCP URL until its config changes", () => {
-    let config = new TextEncoder().encode("first");
+    const tunnelConfig = { providerKind: "cloudflare_tunnel", connectorToken: "first" };
+    let config = new TextEncoder().encode(JSON.stringify(tunnelConfig));
     const dependencies = Layer.mergeAll(
       Layer.mock(ServerSecretStore.ServerSecretStore)({
         get: () => Effect.sync(() => Option.some(config)),
       }),
       Layer.mock(ManagedEndpointRuntime.CloudManagedEndpointRuntime)({
-        inspectConnector: Effect.succeed(connected),
+        inspectConnector: () => Effect.succeed(connected),
         readinessChanged: Stream.empty,
       }),
       Layer.succeed(
@@ -109,7 +110,9 @@ describe("ConnectReachability", () => {
       );
 
       // A relink stores a new tunnel before its connector reports in.
-      config = new TextEncoder().encode("second");
+      config = new TextEncoder().encode(
+        JSON.stringify({ ...tunnelConfig, connectorToken: "second" }),
+      );
       expect(yield* reachability.latest).toEqual(Option.none());
     }).pipe(Effect.provide(ConnectReachability.layer.pipe(Layer.provide(dependencies))));
   });
