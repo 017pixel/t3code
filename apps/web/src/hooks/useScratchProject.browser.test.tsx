@@ -23,6 +23,7 @@ vi.mock(import("./useHandleNewThread"), async (original) => ({
   useNewThreadHandler: (() => vi.fn()) as never,
 }));
 
+import { toastManager } from "~/components/ui/toast";
 import { useScratchProject } from "./useScratchProject";
 
 const LOCAL = EnvironmentId.make("local");
@@ -63,4 +64,32 @@ it("does not guess between several connected machines", async () => {
     environment(OTHER, "connected"),
   ];
   expect(await scratchTargetFrom(REMOTE)).toBe("none");
+});
+
+function StartProbe({ current }: { current: EnvironmentId }) {
+  const { scratchEnvironmentId, startScratchThread } = useScratchProject();
+  return (
+    <button type="button" onClick={() => void startScratchThread(scratchEnvironmentId(current))}>
+      start
+    </button>
+  );
+}
+
+it("explains instead of doing nothing when several connected machines could take it", async () => {
+  state.environments = [
+    environment(REMOTE, "reconnecting"),
+    environment(LOCAL, "connected"),
+    environment(OTHER, "connected"),
+  ];
+  const toast = vi.spyOn(toastManager, "add");
+  await using screen = await render(<StartProbe current={REMOTE} />, { router: false });
+  screen.container.querySelector("button")?.click();
+  await vi.waitFor(() =>
+    expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Could not start without a project",
+        description: expect.stringContaining("Several of your machines"),
+      }),
+    ),
+  );
 });

@@ -33,14 +33,21 @@ export function useScratchProject() {
     return availableScratchWorkspaceRoot(environment?.connection.phase, environment?.serverConfig);
   };
 
+  const offeringEnvironments = () =>
+    environments.filter((entry) => scratchWorkspaceRootFor(entry.environmentId) !== null);
+
   const scratchEnvironmentId = (current: EnvironmentId | null): EnvironmentId | null => {
     if (current !== null && scratchWorkspaceRootFor(current) !== null) return current;
     // When the current machine can't take it, fall back only to an unambiguous one.
-    const offering = environments.filter(
-      (entry) => scratchWorkspaceRootFor(entry.environmentId) !== null,
-    );
+    const offering = offeringEnvironments();
     return offering.length === 1 ? (offering[0]?.environmentId ?? null) : null;
   };
+
+  // Explains a null scratchEnvironmentId: no machine can take it, or several can and we won't guess.
+  const scratchUnavailableReason = () =>
+    offeringEnvironments().length > 1
+      ? "Several of your machines can start a thread without a project. Open a thread on the one you want first."
+      : "None of your machines can start a thread without a project right now.";
 
   const openScratchProject = async (
     environmentId: EnvironmentId,
@@ -54,7 +61,14 @@ export function useScratchProject() {
     return null;
   };
 
-  const startScratchThread = async (environmentId: EnvironmentId) => {
+  const startScratchThread = async (environmentId: EnvironmentId | null) => {
+    if (environmentId === null) {
+      reportScratchFailure(
+        "Could not start without a project",
+        new Error(scratchUnavailableReason()),
+      );
+      return;
+    }
     const project = await openScratchProject(environmentId);
     if (project) {
       await handleNewThread(scopeProjectRef(project.environmentId, project.id)).catch(
@@ -63,5 +77,11 @@ export function useScratchProject() {
     }
   };
 
-  return { scratchWorkspaceRootFor, scratchEnvironmentId, openScratchProject, startScratchThread };
+  return {
+    scratchWorkspaceRootFor,
+    scratchEnvironmentId,
+    scratchUnavailableReason,
+    openScratchProject,
+    startScratchThread,
+  };
 }

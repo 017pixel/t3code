@@ -68,7 +68,8 @@ export function NewThreadLinkView({ link }: { readonly link: NewThreadLink }) {
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const handleNewThread = useNewThreadHandler();
-  const { scratchEnvironmentId, openScratchProject } = useScratchProject();
+  const { scratchEnvironmentId, scratchUnavailableReason, openScratchProject } =
+    useScratchProject();
   const startProjectClone = useAtomCommand(sourceControlEnvironment.startProjectClone, {
     reportFailure: false,
   });
@@ -138,11 +139,15 @@ export function NewThreadLinkView({ link }: { readonly link: NewThreadLink }) {
 
   const openScratchDraft = async () => {
     const environmentId = scratchEnvironmentId(lastActiveEnvironmentId());
-    const project = environmentId === null ? null : await openScratchProject(environmentId);
+    if (environmentId === null) {
+      setState({ status: "failed", message: scratchUnavailableReason() });
+      return;
+    }
+    const project = await openScratchProject(environmentId);
     if (project === null) {
       setState({
         status: "failed",
-        message: "None of your machines can start a thread without a project right now.",
+        message: "This machine could not start a thread without a project.",
       });
       return;
     }
