@@ -22,9 +22,12 @@ import {
 import { describe, expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   AVAILABLE_CONNECTION_STATE,
@@ -66,13 +69,18 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
   readonly projectionRequests?: ThreadId[];
   readonly advertiseServerResolvedCommandContext?: boolean;
   readonly advertiseThreadStop?: boolean;
+  readonly dispatchNeverAnswers?: boolean;
 }) {
   const client = {
     [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
       Effect.sync(() => {
         input.commands.push(command);
         return { sequence: input.commands.length };
-      }),
+      }).pipe(
+        Effect.andThen((result) =>
+          input.dispatchNeverAnswers ? Effect.never : Effect.succeed(result),
+        ),
+      ),
     [ORCHESTRATION_V2_WS_METHODS.getThreadProjection]: (requestInput: {
       readonly threadId: ThreadId;
     }) =>
@@ -297,6 +305,41 @@ describe("V2 environment commands", () => {
       }
       expect(projectionRequests).toEqual([]);
     }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
+  it.effect(
+    "fails a message send the server never answers while the connection stays healthy",
+    () =>
+      Effect.gen(function* () {
+        const commands: OrchestrationV2Command[] = [];
+        const supervisor = yield* makeSupervisor({
+          commands,
+          projects: [],
+          dispatchNeverAnswers: true,
+        });
+
+        const send = yield* startThreadTurn({
+          commandId: CommandId.make("command-unanswered"),
+          threadId: v2ThreadId,
+          message: {
+            messageId: MessageId.make("message-unanswered"),
+            role: "user",
+            text: "Are you there?",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+        }).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust("5 minutes");
+
+        expect(commands).toHaveLength(1);
+        const exit = send.pollUnsafe();
+        expect(exit !== undefined && Exit.isFailure(exit)).toBe(true);
+        yield* Fiber.interrupt(send);
+      }).pipe(Effect.provide(layerTestCrypto)),
   );
 
   it.effect("retains projection-shaped delivery for servers without command context support", () =>
