@@ -165,7 +165,7 @@ const normalizeWindowsPath = (path: string) =>
  * `/proc/self/mountinfo` so a custom automount root resolves and an ext4
  * mount under `/mnt` never passes for a drive.
  */
-export function windowsMountFor(
+function windowsMountFor(
   mountInfo: string,
   dir: string,
 ): { readonly mountPoint: string; readonly windowsRoot: string } | undefined {
