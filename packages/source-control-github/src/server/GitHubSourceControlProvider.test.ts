@@ -541,7 +541,9 @@ describe("GitHubSourceControlProvider.preferredCloneProtocol", () => {
       }),
   );
 
-  it.effect("uses HTTPS, gh's own default, when git_protocol is unset", () =>
+  // An unset git_protocol already prints gh's default, https; an explicitly empty one prints
+  // nothing, and gh itself clones over HTTPS for any value but ssh.
+  it.effect("uses HTTPS, as gh does, when git_protocol is empty", () =>
     Effect.gen(function* () {
       const { protocol } = yield* preferredProtocol("");
       assert.strictEqual(protocol, "https");
