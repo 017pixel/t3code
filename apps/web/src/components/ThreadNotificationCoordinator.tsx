@@ -128,7 +128,7 @@ function EnvironmentNotifications({
   );
   const navigate = useNavigate();
   const previous = useRef(new Map<ThreadId, NotificationState>());
-  const toasts = useRef(new Map<ThreadId, ReturnType<typeof toastManager.add>[]>());
+  const toasts = useRef(new Map<ThreadId, Set<ReturnType<typeof toastManager.add>>>());
 
   useEffect(() => {
     if (openThreadId === null) return;
@@ -215,6 +215,11 @@ function EnvironmentNotifications({
                 <MessageCircleQuestionIcon aria-hidden className="size-4 text-info-foreground" />
               ),
           },
+          onClose: () => {
+            const threadToasts = toasts.current.get(thread.id);
+            threadToasts?.delete(toastId);
+            if (threadToasts?.size === 0) toasts.current.delete(thread.id);
+          },
           actionProps: {
             children: "Open thread",
             onClick: () => {
@@ -226,7 +231,8 @@ function EnvironmentNotifications({
             },
           },
         });
-        toasts.current.set(thread.id, [...(toasts.current.get(thread.id) ?? []), toastId]);
+        const threadToasts = toasts.current.get(thread.id) ?? new Set();
+        toasts.current.set(thread.id, threadToasts.add(toastId));
         continue;
       }
       if (

@@ -298,6 +298,27 @@ it("keeps toasts open for threads that were not opened", async () => {
   expect(state.closeToast.mock.calls).toEqual([["Thread completed:Test thread"]]);
 });
 
+it("closes only the toasts still open when their thread opens", async () => {
+  await using app = setup();
+  state.inApp = true;
+  focused = true;
+  const onClose: Record<string, () => void> = {};
+  state.toast.mockImplementation((options: { title: string; onClose: () => void }) => {
+    onClose[options.title] = options.onClose;
+    return options.title;
+  });
+  await app.render();
+  state.shells.set("one", shell({ hasPendingApprovals: true }));
+  await app.render();
+  state.shells.set("one", shell(completed));
+  await app.render();
+  expect(Object.keys(onClose)).toEqual(["Approval needed", "Thread completed"]);
+  onClose["Approval needed"]!();
+  state.open({ environmentId: "one", threadId: "thread" });
+  await app.render();
+  expect(state.closeToast.mock.calls).toEqual([["Thread completed"]]);
+});
+
 it("closes the toast when a promoted draft route shows its thread", async () => {
   await using app = setup();
   const environmentId = EnvironmentId.make("one");
