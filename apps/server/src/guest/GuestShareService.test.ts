@@ -17,6 +17,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -516,6 +517,26 @@ it.effect("sends a guest's files as the guest's message and keeps them the guest
     // The guest loads the thread's copy from their own row.
     const fromRow = yield* guestShares.attachment(session, copied.id);
     assert.equal(fromRow.attachment.id, copied.id);
+
+    // A new link for someone else shows that message from history, but not its files.
+    const { url } = yield* guestShares.create({ threadId });
+    const next = yield* guestShares.redeem({
+      credential: url.slice(url.indexOf("#") + 1),
+      name: "Eve",
+    });
+    assert.equal(
+      (yield* Effect.flip(guestShares.attachment(next.token, copied.id))).reason,
+      "unavailable",
+    );
+    const snapshot = yield* guestShares
+      .stream(next.token)
+      .pipe(Effect.flatMap(Stream.runHead), Effect.map(Option.getOrThrow));
+    assert.equal(snapshot.type, "snapshot");
+    if (snapshot.type !== "snapshot") return;
+    const earlier = snapshot.items.find(
+      (item) => item.type === "user_message" && item.context?.guest?.guestMessageId === message!.id,
+    );
+    assert.deepInclude(earlier, { attachments: [] });
   }).pipe(Effect.scoped, Effect.provide(layerTest)),
 );
 

@@ -15,6 +15,8 @@ import {
   type RunId,
   ThreadId,
   type OrchestrationV2Run,
+  type GuestTurnItem,
+  type ThreadGuestShare,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
@@ -189,6 +191,23 @@ export class GuestShareService extends Context.Service<
     >;
   }
 >()("t3/guest/GuestShareService") {}
+
+/**
+ * A guest's files show only on messages from their own share. A replacement link can still show
+ * an earlier guest's messages from the history window, but never their files.
+ */
+const isOwnGuestMessage = (
+  share: Pick<ThreadGuestShare, "messages">,
+  guestMessageId: GuestMessageId,
+) => share.messages.some((message) => message.id === guestMessageId);
+
+const withOwnGuestFiles = (item: GuestTurnItem, share: Pick<ThreadGuestShare, "messages">) =>
+  item.type === "user_message" &&
+  item.attachments.length > 0 &&
+  (item.context?.guest === undefined ||
+    !isOwnGuestMessage(share, item.context.guest.guestMessageId))
+    ? { ...item, attachments: [] }
+    : item;
 
 const make = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -501,7 +520,9 @@ const make = Effect.gen(function* () {
               const runId = event.payload.runId;
               if (runId === null || !visibleRunIds.has(runId)) return [];
               const item = projectTurnItemForGuest(event.payload, roots);
-              return item === null ? [] : [{ type: "item", item }];
+              return item === null || !thread.guestShare
+                ? []
+                : [{ type: "item", item: withOwnGuestFiles(item, thread.guestShare) }];
             }
             case "thread.archived":
             case "thread.deleted":
@@ -540,7 +561,7 @@ const make = Effect.gen(function* () {
       type: "snapshot",
       view: initialView,
       runs: guestSnapshot.runs,
-      items: guestSnapshot.items,
+      items: guestSnapshot.items.map((item) => withOwnGuestFiles(item, share)),
     };
     return Stream.concat(
       Stream.make(snapshotEvent),
@@ -635,7 +656,11 @@ const make = Effect.gen(function* () {
       fromMessage ??
       (yield* guestSnapshot(session)).visibleItems
         .flatMap((item) =>
-          item.type === "user_message" && item.context?.guest !== undefined ? item.attachments : [],
+          item.type === "user_message" &&
+          item.context?.guest !== undefined &&
+          isOwnGuestMessage(share, item.context.guest.guestMessageId)
+            ? item.attachments
+            : [],
         )
         .find((candidate) => candidate.id === attachmentId);
     const path =
