@@ -1515,6 +1515,63 @@ export function composerDraftContentUnchanged(
   );
 }
 
+/** A draft the user pressed Enter on while their previous message was still sending. */
+export interface QueuedComposerSubmit<Mode, Intent> {
+  readonly routeThreadKey: string;
+  readonly draft: ComposerThreadDraftState | null;
+  readonly dispatchMode: Mode;
+  readonly submissionIntent: Intent;
+  /** The send generation it waits behind. */
+  readonly afterSend: number;
+  readonly ready: boolean;
+}
+
+/**
+ * What a finished send does to the submit waiting behind it. Only the send it waits behind,
+ * on the same thread, settles it: another thread's send finishing says nothing about this one.
+ */
+export function settleQueuedComposerSubmit(input: {
+  readonly waiting: {
+    readonly routeThreadKey: string;
+    readonly afterSend: number;
+    readonly ready: boolean;
+  } | null;
+  readonly sendRouteThreadKey: string;
+  /** The generation the finished send claimed, or null if it stopped before claiming one. */
+  readonly sendGeneration: number | null;
+  readonly started: boolean;
+}): "unrelated" | "ready" | "cancel" {
+  const { waiting, sendGeneration } = input;
+  if (
+    sendGeneration === null ||
+    waiting === null ||
+    waiting.ready ||
+    waiting.routeThreadKey !== input.sendRouteThreadKey ||
+    waiting.afterSend !== sendGeneration
+  ) {
+    return "unrelated";
+  }
+  return input.started ? "ready" : "cancel";
+}
+
+/**
+ * Whether a ready queued submit sends now. It is the user's earlier Enter, so it only sends
+ * as the plain message they wrote: an approval or question that arrived meanwhile would turn
+ * it into an answer they never saw, so it is cancelled instead.
+ */
+export function resolveQueuedComposerSubmit(input: {
+  readonly ready: boolean;
+  readonly leftThread: boolean;
+  readonly sendBlocked: boolean;
+  readonly pendingRequest: boolean;
+  readonly draftUnchanged: boolean;
+}): "wait" | "send" | "drop" | "cancel" {
+  if (input.leftThread) return "drop";
+  if (!input.ready || input.sendBlocked) return "wait";
+  if (!input.draftUnchanged) return "drop";
+  return input.pendingRequest ? "cancel" : "send";
+}
+
 /**
  * Copies the composer contents a send dispatches, so a failed send can put the
  * same draft back. Terminal contexts that lost their text are dropped from both
