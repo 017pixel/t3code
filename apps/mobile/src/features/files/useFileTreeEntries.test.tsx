@@ -310,20 +310,37 @@ describe("file tree workspace state", () => {
       ]);
       screen.updateView([...retained, path, `${path}/child`], "src/first.ts");
       await screen.succeed(screen.requests.length - 1);
-      screen.updateView([...retained, `${path}/child`], "src/first.ts");
     }
     expect(screen.requests).toHaveLength(133);
     expect(screen.current.isPending).toBe(false);
-    expect(screen.current.loadedDirectories.size).toBe(65);
-    expect(screen.current.loadedDirectories.has("src")).toBe(true);
-    expect(screen.current.loadedDirectories.has(nested[0]!)).toBe(false);
-    expect(screen.current.expandedPaths.size).toBe(33);
-    expect(screen.current.expandedPaths.has(`${nested[0]!}/child`)).toBe(false);
-    expect(screen.current.expandedPaths.has(`${nested.at(-1)!}/child`)).toBe(true);
-    expect(screen.current.selectedPath).toBe("src/first.ts");
-    const settledRequests = screen.requests.length;
+    expect(screen.current.loadedDirectories.size).toBe(133);
+    expect(screen.current.expandedPaths.size).toBe(133);
+    const activeView = screen.current;
+    screen.render({ cwd: "/other" });
     screen.render();
-    expect(screen.requests).toHaveLength(settledRequests);
+    expect(screen.current.loadedDirectories.size).toBeLessThanOrEqual(64);
+    expect(screen.current.expandedPaths.size).toBeLessThanOrEqual(64);
+    const retainedPaths = new Set([
+      ...screen.current.loadedDirectories,
+      ...screen.current.expandedPaths,
+    ]);
+    expect(retainedPaths.size).toBeLessThanOrEqual(64);
+    for (const path of nested) {
+      if (!screen.current.expandedPaths.has(path)) {
+        expect(screen.current.expandedPaths.has(`${path}/child`)).toBe(false);
+        expect(screen.current.loadedDirectories.has(`${path}/child`)).toBe(false);
+      }
+    }
+    expect(activeView.loadedDirectories.size).toBe(133);
+    expect(activeView.expandedPaths.size).toBe(133);
+    expect(screen.current.selectedPath).toBe("src/first.ts");
+    const returnRequests = screen.requests.length;
+    for (let index = 133; index < returnRequests; index++) {
+      await screen.succeed(index);
+    }
+    expect(screen.current.isPending).toBe(false);
+    screen.render();
+    expect(screen.requests).toHaveLength(returnRequests);
     for (let index = 1; index <= 8; index++) screen.render({ cwd: `/workspace-${index}` });
     screen.render();
     expect([...screen.current.loadedDirectories]).toEqual([]);

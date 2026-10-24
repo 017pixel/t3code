@@ -23,7 +23,7 @@ function createDirectories() {
   };
 }
 
-function boundDirectories(current: ReturnType<typeof createDirectories>) {
+function boundDirectories(current: ReturnType<typeof createDirectories>, preserveVisible = true) {
   const visible = (path: string) => {
     const parts = path.split("/");
     return parts.every((_, index) =>
@@ -32,7 +32,7 @@ function boundDirectories(current: ReturnType<typeof createDirectories>) {
   };
   const inactive = [
     ...new Set([...current.entries.keys(), ...current.errors.keys(), ...current.expandedPaths]),
-  ].filter((path) => !visible(path));
+  ].filter((path) => !preserveVisible || !visible(path));
   if (inactive.length <= 64) return current;
   const evicted = new Set(inactive.slice(0, -64));
   const isEvicted = (path: string) => {
@@ -121,12 +121,15 @@ export function useFileTreeEntries(input: {
     if (previous) {
       workspaces.set(
         cache.key,
-        boundDirectories({
-          ...previous,
-          errors: new Map(),
-          loading: new Set(),
-          isRefreshing: false,
-        }),
+        boundDirectories(
+          {
+            ...previous,
+            errors: new Map(),
+            loading: new Set(),
+            isRefreshing: false,
+          },
+          false,
+        ),
       );
     }
     workspaces.delete(workspaceKey);
