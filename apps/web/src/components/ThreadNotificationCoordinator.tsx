@@ -131,6 +131,14 @@ function EnvironmentNotifications({
   }, [activeEnvironmentId, activeThreadId, environmentId]);
 
   useEffect(() => {
+    const owned = toasts.current;
+    return () => {
+      for (const toastId of owned.keys()) toastManager.close(toastId);
+      owned.clear();
+    };
+  }, []);
+
+  useEffect(() => {
     if (threads === null) {
       previous.current.clear();
       return;

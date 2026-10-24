@@ -98,9 +98,11 @@ Configure the actual keyboard command with supported `server.upsertKeybinding`
 `{key:"ctrl+alt+shift+9",command:"thread.jump.N"}`, where N is the visible sidebar
 row index plus one. Sidebar is a DIV role=button; narrow layout requires opening
 the drawer. The native click uses the row's exposed left edge when the toast
-covers its center. Hover expands the stack; it does **not** pause the separate
-thread visible-time timeout. Tool stalls can invalidate a post checkpoint. Do not
-count an expired Before as proof of route-driven closure.
+covers its center. These notifications call `toastManager.add` directly and use
+Base UI's default 5-second timeout; hovering the toast stack pauses that timeout
+and expands the stack. They do not use the thread visible-time timeout. Keep the
+pointer position and elapsed time matched on both SHAs. Tool stalls can invalidate
+a post checkpoint. Do not count an expired Before as proof of route-driven closure.
 
 Measured capture environment: Chrome 154.0.0.0 headless shell on Linux X11, T3
 preview freeform (no device emulation), DPR 2, visualViewport.scale 1, root 16px,
