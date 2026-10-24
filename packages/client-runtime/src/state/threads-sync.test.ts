@@ -1120,9 +1120,9 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
-  it.effect(
-    "one load-earlier request pages until it reaches the turn that started an agent run (#21821)",
-    () =>
+  it.effect.each(["complete", "follow-up page failure"] as const)(
+    "one load-earlier request pages until it reaches the turn that started an agent run (#21821), %s",
+    (mode) =>
       Effect.gen(function* () {
         const common = {
           threadId: THREAD_ID,
@@ -1178,12 +1178,19 @@ describe("EnvironmentThreads", () => {
             },
           };
         const requestedCursors: Array<string | null> = [];
+        let failFollowUp = mode === "follow-up page failure";
         const harness = yield* makeHarness({
           historyHttpClient: HttpClient.make((request, url) => {
             const cursor = url.searchParams.get("cursor");
             requestedCursors.push(cursor);
             const page = cursor === null ? undefined : pages[cursor];
             if (page === undefined) return Effect.die(`Unexpected history cursor ${cursor}`);
+            if (cursor === "page-2" && failFollowUp) {
+              failFollowUp = false;
+              return Effect.succeed(
+                HttpClientResponse.fromWeb(request, new Response("Unavailable", { status: 503 })),
+              );
+            }
             return Effect.succeed(
               HttpClientResponse.fromWeb(
                 request,
@@ -1209,13 +1216,24 @@ describe("EnvironmentThreads", () => {
           (state) => state.status === "live" && state.history.historyCursor === "page-1",
         );
 
+        if (mode === "follow-up page failure") {
+          // The failure lands on the follow-up cursor and leaves the first page merged.
+          expect((yield* harness.loadEarlier())._tag).toBe("error");
+          const failed = yield* SubscriptionRef.get(harness.threadState);
+          expect(failed.history).toMatchObject({ loading: false, historyCursor: "page-2" });
+          expect(failed.history.error).not.toBeNull();
+        }
         expect(yield* harness.loadEarlier()).toEqual({ _tag: "loaded" });
 
         const state = yield* SubscriptionRef.get(harness.threadState);
         expect(
           Option.getOrThrow(state.data).visibleTurnItems.map((row) => String(row.sourceItemId)),
         ).toContain(agentTurnStart.id);
-        expect(requestedCursors).toEqual(["page-1", "page-2", "page-3"]);
+        expect(requestedCursors).toEqual(
+          mode === "complete"
+            ? ["page-1", "page-2", "page-3"]
+            : ["page-1", "page-2", "page-2", "page-3"],
+        );
         expect(state.history).toMatchObject({
           loading: false,
           error: null,
@@ -1341,7 +1359,7 @@ describe("EnvironmentThreads", () => {
         }
         if (mode === "retry") {
           expect(result._tag).toBe("error");
-          expect(yield* harness.loadEarlier()).toEqual({ _tag: "loaded" });
+          expect(yield* harness.loadEarlier(message.messageId)).toEqual({ _tag: "loaded" });
         } else expect(result).toEqual({ _tag: "loaded" });
         const complete = yield* SubscriptionRef.get(harness.threadState);
         expect(complete.history).toMatchObject({
