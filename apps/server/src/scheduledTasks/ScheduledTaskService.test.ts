@@ -405,3 +405,69 @@ it.effect("thread cleanup notifies subscribers and a finishing run cannot recrea
     }).pipe(Effect.provide(layer));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
+
+it.effect.each([
+  {
+    name: "archived",
+    error: () =>
+      new ThreadManagementService.ThreadManagementThreadArchivedError({
+        threadId: ThreadId.make("thread:gone"),
+      }),
+  },
+  {
+    name: "deleted",
+    error: () =>
+      new ThreadManagementService.ThreadManagementThreadNotFoundError({
+        projectId: ProjectId.make("project:test"),
+        threadId: ThreadId.make("thread:gone"),
+      }),
+  },
+])("pauses a bound task whose thread was $name before it fired", ({ error }) =>
+  Effect.gen(function* () {
+    const sends = yield* Ref.make(0);
+    const layer = ScheduledTaskService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+            launch: () => Effect.die("bound tasks must not launch a replacement thread"),
+          }),
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            sendToThread: () => Ref.update(sends, (n) => n + 1).pipe(Effect.andThen(error())),
+          }),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+            namedProjectsRoot: "/projects",
+            isScratchProject: () => Effect.succeed(false),
+          }),
+          NodeCrypto.layer,
+          Scheduler.layer,
+        ),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      const { task } = yield* service.upsert({
+        id: ScheduledTaskId.make("task:bound-to-gone-thread"),
+        title: "Check orchestration",
+        prompt: "Check progress",
+        enabled: true,
+        schedule: { type: "interval", everyMs: 60_000 },
+        projectId: ProjectId.make("project:test"),
+        threadId: ThreadId.make("thread:gone"),
+        workspaceStrategy: { type: "root" },
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      });
+      // The poll loop delays before its first pass; then let several intervals elapse.
+      for (let tick = 0; tick < 4; tick++) yield* TestClock.adjust("61 seconds");
+
+      const [current] = (yield* service.list()).tasks;
+      assert.equal(current?.id, task.id);
+      assert.equal(current?.lastRunStatus, "failed");
+      assert.equal(yield* Ref.get(sends), 1, "a gone destination must not be retried every tick");
+      assert.isFalse(current?.enabled, "the bound task stays enabled after a permanent failure");
+      assert.isNull(current?.nextRunAt);
+    }).pipe(Effect.provide(layer));
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
