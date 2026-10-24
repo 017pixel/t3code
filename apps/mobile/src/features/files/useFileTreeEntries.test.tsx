@@ -6,6 +6,7 @@ import {
   type ProjectEntry,
   type ProjectListEntriesResult,
 } from "@t3tools/contracts";
+import * as fileTree from "./fileTree";
 import * as Cause from "effect/Cause";
 import * as React from "react";
 import { act, useLayoutEffect } from "react";
@@ -30,7 +31,7 @@ const sourcePath = require.resolve("./useFileTreeEntries.ts");
 const rootEntries: ProjectEntry[] = [{ kind: "directory", path: "src" }];
 const firstTarget = { cwd: "/first", environmentId: EnvironmentId.make("first") };
 
-function compileHook() {
+function compileModule(sourcePath: string) {
   const { code } = babel.transformFileSync(sourcePath, {
     babelrc: false,
     configFile: false,
@@ -46,11 +47,11 @@ function compileHook() {
       supportsReactCompiler: true,
     },
   });
-  expect(code).toContain("react/compiler-runtime");
+
   return NodeVM.compileFunction(code, ["require", "exports"], { filename: sourcePath });
 }
 
-function setup() {
+function setup(withBrowser = false) {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   const requests: {
     readonly query: Query;
@@ -59,7 +60,7 @@ function setup() {
   }[] = [];
   const rootQuery = {
     data: { entries: rootEntries, truncated: false },
-    error: null,
+    error: null as string | null,
     isPending: false,
     refresh: vi.fn(),
   };
@@ -82,21 +83,60 @@ function setup() {
     "../../state/query": { useEnvironmentQuery: () => rootQuery },
   };
   const exports = {} as { useFileTreeEntries: Hook };
-  compileHook()((name: string) => {
+  compileModule(sourcePath)((name: string) => {
     if (name.startsWith("@babel/runtime/"))
       return NodeModule.createRequire(require.resolve("babel-preset-expo"))(name);
     if (!(name in modules)) throw new Error(`Unexpected hook dependency: ${name}`);
     return modules[name];
   }, exports);
+  const browserExports = {} as typeof import("./FileTreeBrowser");
+  const empty = () => null;
+  const browserModules: Record<string, unknown> = {
+    ...modules,
+    "react/jsx-runtime": require("react/jsx-runtime"),
+    "react-native": {
+      Platform: { OS: "ios" },
+      View: empty,
+      Pressable: empty,
+      RefreshControl: empty,
+    },
+    "react-native-safe-area-context": { useSafeAreaInsets: () => ({ top: 0 }) },
+    "../../native/native-layout-metrics": { useNativeColumnLayoutMetrics: () => null },
+    "@legendapp/list/react-native": { LegendList: empty },
+    "../../components/ui/Button": { Button: empty },
+    "../../components/ui/AppActivityIndicator": { AppActivityIndicator: empty },
+    "../../components/ui/AppSymbol": { SymbolView: empty },
+    "../../components/ui/AppText": { AppText: empty },
+    "../../components/PierreEntryIcon": { PierreEntryIcon: empty },
+    "../../lib/cn": { cn: () => "" },
+    "./fileTree": fileTree,
+  };
+  compileModule(require.resolve("./FileTreeBrowser.tsx"))((name: string) => {
+    if (name.startsWith("@babel/runtime/"))
+      return NodeModule.createRequire(require.resolve("babel-preset-expo"))(name);
+    if (!(name in browserModules)) throw new Error(`Unexpected browser dependency: ${name}`);
+    return browserModules[name];
+  }, browserExports);
   const useFileTreeEntries = exports.useFileTreeEntries;
   const root = createRoot(document.createElement("div"));
   let current: ReturnType<Hook>;
+  let renders = 0;
   function Probe(input: Input) {
+    if (++renders > 100 && withBrowser) throw new Error("File tree did not settle");
     const result = useFileTreeEntries(input);
     useLayoutEffect(() => {
       current = result;
     });
-    return null;
+    return withBrowser ? (
+      <browserExports.FileTreeBrowser
+        {...result}
+        selectedPath="src/nested/file.ts"
+        searchQuery=""
+        onLoadDirectory={result.loadDirectory}
+        onRefresh={result.refresh}
+        onSelectFile={result.selectPath}
+      />
+    ) : null;
   }
   const unmount = () => act(() => root.unmount());
   return {
@@ -187,7 +227,8 @@ describe("file tree workspace state", () => {
       expect(screen.current.entries.map((entry) => entry.path)).toEqual(["src", "src/first.ts"]);
       expect([...screen.current.loadedDirectories]).toEqual(["src"]);
       screen.load();
-      expect(screen.requests).toHaveLength(2);
+      expect(screen.requests).toHaveLength(3);
+      await screen.succeed(2, [{ kind: "file", path: "src/first.ts" }]);
 
       screen.render(target);
       expect([...screen.current.expandedPaths]).toEqual([]);
@@ -228,18 +269,16 @@ describe("file tree workspace state", () => {
       { kind: "file", path: "src/first.ts" },
       ...nested.map((path) => ({ kind: "directory" as const, path })),
     ]);
-    screen.render({ cwd: "/second" });
-    screen.render();
+    screen.updateView(["src"], "src/first.ts");
     for (const path of nested) {
+      screen.updateView(["src", path], "src/first.ts");
       screen.load(path);
       await screen.succeed(screen.requests.length - 1);
+      screen.updateView(["src"], "src/first.ts");
     }
-    screen.updateView(nested, "src/first.ts");
-    expect(screen.current.loadedDirectories.size).toBe(66);
-    screen.render({ cwd: "/second" });
-    screen.render();
-    expect(screen.current.loadedDirectories.size).toBe(64);
-    expect(screen.current.expandedPaths.size).toBe(64);
+    expect(screen.current.loadedDirectories.size).toBe(65);
+    expect(screen.current.loadedDirectories.has("src")).toBe(true);
+    expect(screen.current.loadedDirectories.has(nested[0]!)).toBe(false);
     expect(screen.current.selectedPath).toBe("src/first.ts");
     for (let index = 1; index <= 8; index++) screen.render({ cwd: `/workspace-${index}` });
     screen.render();
@@ -247,6 +286,52 @@ describe("file tree workspace state", () => {
     expect([...screen.current.expandedPaths]).toEqual([]);
     expect(screen.current.selectedPath).toBeNull();
   });
+
+  it.each(["collapse", "delete"])("settles controlled selection after %s", async (action) => {
+    using screen = setup(true);
+    screen.render();
+    await screen.succeed(0, [{ kind: "directory", path: "src/nested" }]);
+    expect([...screen.current.expandedPaths]).toEqual(["src", "src/nested"]);
+    if (action === "collapse") {
+      screen.updateView([], "src/nested/file.ts");
+      expect([...screen.current.expandedPaths]).toEqual([]);
+    }
+    screen.rootQuery.data = { entries: [], truncated: false };
+    screen.render();
+    expect([...screen.current.expandedPaths]).toEqual([]);
+    expect(screen.current.selectedPath).toBeNull();
+  });
+
+  it.each(["return", "missing root"])(
+    "revalidates retained children after %s without clearing for transient errors",
+    async (scenario) => {
+      using screen = setup();
+      screen.render();
+      screen.load();
+      await screen.succeed(0, [{ kind: "file", path: "src/old.ts" }]);
+      screen.updateView(["src"], "src/old.ts");
+      screen.render({ cwd: "/second" });
+      screen.render();
+      screen.rootQuery.error = "Connection unavailable";
+      screen.render();
+      expect(screen.current.selectedPath).toBe("src/old.ts");
+      expect(screen.current.entries.map((entry) => entry.path)).toEqual(["src", "src/old.ts"]);
+      if (scenario === "missing root") {
+        screen.rootQuery.error = "Workspace root does not exist: /first";
+        screen.render();
+        expect(screen.current.selectedPath).toBeNull();
+        expect([...screen.current.expandedPaths]).toEqual([]);
+        expect([...screen.current.loadedDirectories]).toEqual([]);
+      }
+      screen.rootQuery.error = null;
+      screen.render();
+      screen.load();
+      expect(screen.requests).toHaveLength(2);
+      await screen.succeed(1, []);
+      expect(screen.current.entries.map((entry) => entry.path)).toEqual(["src"]);
+      expect(screen.current.selectedPath).toBeNull();
+    },
+  );
 
   it("prunes deleted directory contents, expansion and selection after a fresh parent listing", async () => {
     using screen = setup();

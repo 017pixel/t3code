@@ -14,10 +14,36 @@ function createDirectories() {
     entries: new Map<string, ReadonlyArray<ProjectEntry>>(),
     errors: new Map<string, string>(),
     completeDirectories: new Set<string>(),
+    validatedDirectories: new Set<string>(),
     loading: new Set<string>(),
     expandedPaths: new Set<string>(),
     selectedPath: null as string | null,
     isRefreshing: false,
+  };
+}
+
+function boundDirectories(current: ReturnType<typeof createDirectories>) {
+  const visible = (path: string) => {
+    const parts = path.split("/");
+    return parts.every((_, index) =>
+      current.expandedPaths.has(parts.slice(0, index + 1).join("/")),
+    );
+  };
+  const inactive = [...new Set([...current.entries.keys(), ...current.errors.keys()])].filter(
+    (path) => !visible(path),
+  );
+  if (inactive.length <= 64) return current;
+  const evicted = new Set(inactive.slice(0, -64));
+  return {
+    ...current,
+    entries: new Map([...current.entries].filter(([path]) => !evicted.has(path))),
+    errors: new Map([...current.errors].filter(([path]) => !evicted.has(path))),
+    completeDirectories: new Set(
+      [...current.completeDirectories].filter((path) => !evicted.has(path)),
+    ),
+    validatedDirectories: new Set(
+      [...current.validatedDirectories].filter((path) => !evicted.has(path)),
+    ),
   };
 }
 
@@ -55,6 +81,7 @@ export function useFileTreeEntries(input: {
       ? projectEnvironment.listEntries({ environmentId, input: { cwd, directoryPath: "" } })
       : null,
   );
+  const { refresh: refreshRoot } = root;
   const search = useEnvironmentQuery(
     searching && debouncedQuery.length > 0 && cwd !== null && environmentId !== null
       ? projectEnvironment.searchEntries({
@@ -76,6 +103,9 @@ export function useFileTreeEntries(input: {
       : {
           ...savedDirectories,
           target: {},
+          validatedDirectories: new Set<string>(),
+          completeDirectories: new Set<string>(),
+          errors: new Map<string, string>(),
           loading: new Set<string>(),
           isRefreshing: false,
         };
@@ -83,19 +113,15 @@ export function useFileTreeEntries(input: {
     const workspaces = new Map(cache.workspaces);
     const previous = workspaces.get(cache.key);
     if (previous) {
-      // Bound retained history without evicting directories from the visible tree.
-      const entries = new Map([...previous.entries].slice(-64));
-      workspaces.set(cache.key, {
-        ...previous,
-        entries,
-        completeDirectories: new Set(
-          [...previous.completeDirectories].filter((path) => entries.has(path)),
-        ),
-        errors: new Map(),
-        loading: new Set(),
-        expandedPaths: new Set([...previous.expandedPaths].slice(-64)),
-        isRefreshing: false,
-      });
+      workspaces.set(
+        cache.key,
+        boundDirectories({
+          ...previous,
+          errors: new Map(),
+          loading: new Set(),
+          isRefreshing: false,
+        }),
+      );
     }
     workspaces.delete(workspaceKey);
     workspaces.set(workspaceKey, directories);
@@ -111,7 +137,7 @@ export function useFileTreeEntries(input: {
       setCache((current) => {
         const previous = current.workspaces.get(workspaceKey);
         if (!previous) return current;
-        const next = update(previous);
+        const next = boundDirectories(update(previous));
         if (next === previous) return current;
         return { ...current, workspaces: new Map(current.workspaces).set(workspaceKey, next) };
       }),
@@ -123,6 +149,7 @@ export function useFileTreeEntries(input: {
   useLayoutEffect(() => {
     const requests = getRequests(requestsByTarget.current, target);
     requests.active = true;
+    refreshRoot();
     return () => {
       requests.active = false;
       requests.refreshVersion++;
@@ -134,7 +161,7 @@ export function useFileTreeEntries(input: {
           : current,
       );
     };
-  }, [target, setDirectories, requestsByTarget]);
+  }, [target, setDirectories, requestsByTarget, refreshRoot]);
   const updateDirectories = (
     update: (current: ReturnType<typeof createDirectories>) => ReturnType<typeof createDirectories>,
   ) => setDirectories((current) => (current.target === target ? update(current) : current));
@@ -144,8 +171,7 @@ export function useFileTreeEntries(input: {
       !requests.active ||
       cwd === null ||
       environmentId === null ||
-      (!refresh &&
-        (directories.entries.has(directoryPath) || directories.errors.has(directoryPath))) ||
+      (!refresh && directories.validatedDirectories.has(directoryPath)) ||
       requests.pending.has(directoryPath)
     ) {
       return;
@@ -167,6 +193,7 @@ export function useFileTreeEntries(input: {
       if (controller.signal.aborted) return;
       requests.pending.delete(directoryPath);
       updateDirectories((current) => {
+        const validatedDirectories = new Set(current.validatedDirectories).add(directoryPath);
         const loading = new Set(current.loading);
         loading.delete(directoryPath);
         if (result._tag === "Success") {
@@ -182,12 +209,13 @@ export function useFileTreeEntries(input: {
           const completeDirectories = new Set(current.completeDirectories);
           if (result.value.truncated) completeDirectories.delete(directoryPath);
           else completeDirectories.add(directoryPath);
-          return { ...current, entries, loading, completeDirectories };
+          return { ...current, entries, loading, completeDirectories, validatedDirectories };
         }
         const error = Cause.squash(result.cause);
         return {
           ...current,
           loading,
+          validatedDirectories,
           errors: new Map(current.errors).set(
             directoryPath,
             error instanceof Error ? error.message : "Files unavailable",
@@ -196,7 +224,19 @@ export function useFileTreeEntries(input: {
       });
     });
   };
-  const { refresh: refreshRoot, data: rootData } = root;
+  // This is the server's specific missing-root error; connection failures retain the view.
+  const missingRoot = root.error?.startsWith("Workspace root does not exist: ") ?? false;
+  const rootData = missingRoot ? null : root.data;
+  if (
+    missingRoot &&
+    (directories.entries.size > 0 ||
+      directories.errors.size > 0 ||
+      directories.loading.size > 0 ||
+      directories.expandedPaths.size > 0 ||
+      directories.selectedPath !== null)
+  ) {
+    setDirectories(() => createDirectories());
+  }
   const { refresh: refreshSearch, data: searchData } = search;
   const snapshot = (() => {
     const merged = new Map<string, ProjectEntry>();
@@ -260,7 +300,17 @@ export function useFileTreeEntries(input: {
       const completeDirectories = new Set(
         [...current.completeDirectories].filter((path) => entries.has(path)),
       );
-      return { ...current, entries, errors, expandedPaths, selectedPath, completeDirectories };
+      return {
+        ...current,
+        entries,
+        errors,
+        expandedPaths,
+        selectedPath,
+        completeDirectories,
+        validatedDirectories: new Set(
+          [...current.validatedDirectories].filter((path) => !deleted(path, true)),
+        ),
+      };
     })();
     if (reconciled !== directories) setDirectories(() => reconciled);
   }
@@ -319,13 +369,16 @@ export function useFileTreeEntries(input: {
     });
   };
 
-  const setExpandedPaths = (update: (current: ReadonlySet<string>) => ReadonlySet<string>) =>
-    updateDirectories((current) => {
-      const expandedPaths = update(current.expandedPaths);
-      return expandedPaths === current.expandedPaths
-        ? current
-        : { ...current, expandedPaths: new Set(expandedPaths) };
-    });
+  const setExpandedPaths = useCallback(
+    (update: (current: ReadonlySet<string>) => ReadonlySet<string>) =>
+      setDirectories((current) => {
+        const expandedPaths = update(current.expandedPaths);
+        return expandedPaths === current.expandedPaths
+          ? current
+          : { ...current, expandedPaths: new Set(expandedPaths) };
+      }),
+    [setDirectories],
+  );
 
   return {
     expandedPaths: directories.expandedPaths,

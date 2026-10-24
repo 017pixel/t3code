@@ -152,12 +152,25 @@ export function FileTreeBrowser(props: {
     searchResultPaths: props.searchResultPaths,
   });
 
+  const revealedSelection = useRef<{ path: string | null; ancestors: Set<string> }>({
+    path: null,
+    ancestors: new Set(),
+  });
   useEffect(() => {
+    if (revealedSelection.current.path !== controlledSelectedPath) {
+      revealedSelection.current = { path: controlledSelectedPath, ancestors: new Set() };
+    }
     if (!controlledSelectedPath) {
       return;
     }
+    const ancestors = ancestorPaths(controlledSelectedPath).filter(
+      (path) =>
+        props.entries.some((entry) => entry.kind === "directory" && entry.path === path) &&
+        !revealedSelection.current.ancestors.has(path),
+    );
+    for (const ancestor of ancestors) revealedSelection.current.ancestors.add(ancestor);
+    if (ancestors.length === 0) return;
     setExpandedPaths((current) => {
-      const ancestors = ancestorPaths(controlledSelectedPath);
       if (ancestors.every((ancestor) => current.has(ancestor))) {
         return current;
       }
@@ -167,7 +180,7 @@ export function FileTreeBrowser(props: {
       }
       return next;
     });
-  }, [controlledSelectedPath, setExpandedPaths]);
+  }, [controlledSelectedPath, setExpandedPaths, props.entries]);
 
   useEffect(() => {
     for (const path of expandedPaths) onLoadDirectory(path);
