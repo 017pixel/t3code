@@ -178,7 +178,7 @@ const parseLsofOutput = (
   raw: string,
   terminalByProcessId: ReadonlyMap<number, TerminalProcessOwner> = new Map(),
 ): ReadonlyArray<DiscoveredLocalServer> => {
-  const seen = new Map<string, DiscoveredLocalServer>();
+  const listeners: DiscoveredLocalServer[] = [];
   let pid: number | null = null;
   let processName: string | null = null;
 
@@ -199,26 +199,18 @@ const parseLsofOutput = (
     if (tag === "n") {
       const portMatch = parsePortFromLsofName(value);
       if (portMatch == null) continue;
-      const url = `http://localhost:${portMatch}`;
-      const key = `localhost:${portMatch}`;
-      const terminal = pid === null ? null : (terminalByProcessId.get(pid) ?? null);
-      const existing = seen.get(key);
-      if (existing) {
-        if (terminal === null) seen.set(key, { ...existing, terminal: null });
-        continue;
-      }
-      seen.set(key, {
+      listeners.push({
         host: "localhost",
         port: portMatch,
-        url,
+        url: `http://localhost:${portMatch}`,
         processName,
         pid,
-        terminal,
+        terminal: pid === null ? null : (terminalByProcessId.get(pid) ?? null),
       });
     }
   }
 
-  return Array.from(seen.values()).toSorted((a, b) => a.port - b.port);
+  return listeners;
 };
 
 const parsePortFromLsofName = (name: string): number | null => {
@@ -296,28 +288,51 @@ const parseWindowsListenerOutput = (
   raw: string,
   terminalByProcessId: ReadonlyMap<number, TerminalProcessOwner> = new Map(),
 ): ReadonlyArray<DiscoveredLocalServer> => {
-  const seen = new Map<number, DiscoveredLocalServer>();
+  const listeners: DiscoveredLocalServer[] = [];
   for (const line of raw.split(/\r?\n/g)) {
     const parsed = parseWindowsListenerLine(line);
     if (!parsed) continue;
-    const { port, pid: normalizedPid, processName } = parsed;
-    const terminal =
-      normalizedPid === null ? null : (terminalByProcessId.get(normalizedPid) ?? null);
-    const existing = seen.get(port);
-    if (existing) {
-      if (terminal === null) seen.set(port, { ...existing, terminal: null });
-      continue;
-    }
-    seen.set(port, {
+    const { port, pid, processName } = parsed;
+    listeners.push({
       host: "localhost",
       port,
       url: `http://localhost:${port}`,
       processName,
-      pid: normalizedPid,
-      terminal,
+      pid,
+      terminal: pid === null ? null : (terminalByProcessId.get(pid) ?? null),
     });
   }
-  return [...seen.values()].toSorted((left, right) => left.port - right.port);
+  return listeners;
+};
+
+// A port can have several listeners (IPv4 and IPv6, SO_REUSEPORT). It is owned only
+// while every listener on it is, so an unrelated process sharing it is never probed.
+const collapseListenersByPort = (
+  listeners: ReadonlyArray<DiscoveredLocalServer>,
+): ReadonlyArray<DiscoveredLocalServer> => {
+  const byPort = new Map<number, DiscoveredLocalServer>();
+  for (const listener of listeners) {
+    const existing = byPort.get(listener.port);
+    if (existing === undefined) {
+      byPort.set(listener.port, listener);
+      continue;
+    }
+    const kept = existing.pid === null && listener.pid !== null ? listener : existing;
+    byPort.set(
+      listener.port,
+      existing.threadId === undefined || listener.threadId === undefined
+        ? {
+            host: kept.host,
+            port: kept.port,
+            url: kept.url,
+            processName: kept.processName,
+            pid: kept.pid,
+            terminal: null,
+          }
+        : kept,
+    );
+  }
+  return [...byPort.values()].toSorted((left, right) => left.port - right.port);
 };
 
 const PROC_TCP_LISTEN = "0A";
@@ -474,25 +489,17 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     }
     yield* Ref.set(socketOwnersRef, owners);
     yield* Ref.set(socketOwnerMissesRef, misses);
-    const seen = new Map<number, DiscoveredLocalServer>();
-    for (const { port, inode } of listeners) {
+    return listeners.map(({ port, inode }): DiscoveredLocalServer => {
       const owner = owners.get(inode) ?? null;
-      const terminal = owner === null ? null : (terminalByProcessId.get(owner.pid) ?? null);
-      const existing = seen.get(port);
-      if (existing && (existing.pid !== null || owner === null)) {
-        if (terminal === null) seen.set(port, { ...existing, terminal: null });
-        continue;
-      }
-      seen.set(port, {
+      return {
         host: "localhost",
         port,
         url: `http://localhost:${port}`,
         processName: owner?.processName ?? null,
         pid: owner?.pid ?? null,
-        terminal: existing ? null : terminal,
-      });
-    }
-    return [...seen.values()].toSorted((left, right) => left.port - right.port);
+        terminal: owner === null ? null : (terminalByProcessId.get(owner.pid) ?? null),
+      };
+    });
   });
 
   // An agent's background server runs under the provider CLI, not a terminal, so its
@@ -755,8 +762,8 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
         terminalByProcessId.set(processId, registration.owner);
       }
     }
-    const owned = (servers: ReadonlyArray<DiscoveredLocalServer>) =>
-      withThreadOwners(servers, state.threadProcesses);
+    const owned = (listeners: ReadonlyArray<DiscoveredLocalServer>) =>
+      withThreadOwners(listeners, state.threadProcesses).pipe(Effect.map(collapseListenersByPort));
     if (
       terminalByProcessId.size === 0 &&
       state.threadProcesses.size === 0 &&

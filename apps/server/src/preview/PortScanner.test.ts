@@ -534,3 +534,87 @@ effectIt.effect("attributes an agent-started background server to its thread", (
     expect(yield* owners()).toEqual([]);
   }).pipe(Effect.provide(layer));
 });
+
+effectIt.effect("never probes a port an agent server shares with an unrelated listener", () => {
+  const providerPid = 1000;
+  const agent = `p${providerPid}\ncpython3\nn[::1]:${LSOF_TEST_PORT}\n`;
+  const unrelated = `p5678\ncrpc\nn127.0.0.1:${LSOF_TEST_PORT}\n`;
+  let stdout = `${agent}${unrelated}`;
+  const requests: string[] = [];
+  const fetchFn = ((input: Parameters<typeof globalThis.fetch>[0]) => {
+    requests.push(String(input));
+    return Promise.resolve(new Response("app", { headers: { "content-type": "text/html" } }));
+  }) as typeof globalThis.fetch;
+  const layer = layerLsofScanner({
+    pid: () => providerPid,
+    fetch: fetchFn,
+    stdout: (command) => (command === "ps" ? ` ${providerPid}     1\n 5678     1\n` : stdout),
+  });
+
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    yield* scanner.registerThreadProcess({ threadId: "agent-thread", processId: providerPid });
+    expect(yield* scanner.scan()).toEqual([]);
+    stdout = `${unrelated}${agent}`;
+    expect(yield* scanner.scan()).toEqual([]);
+    expect(requests).toEqual([]);
+
+    stdout = agent;
+    expect((yield* scanner.scan()).map(({ threadId }) => threadId)).toEqual(["agent-thread"]);
+    expect(requests).toEqual([`http://localhost:${LSOF_TEST_PORT}/`]);
+  }).pipe(Effect.provide(layer));
+});
+
+effectIt.effect("never probes a /proc listener port an agent shares with another process", () => {
+  const providerPid = 4242;
+  const header =
+    "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+  const ipv4 = (inode: number) =>
+    `   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 ${inode} 1 0000000000000000 100 0 0 10 0\n`;
+  const ipv6 = (inode: number) =>
+    `   0: 00000000000000000000000001000000:1F90 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 ${inode} 1 0000000000000000 100 0 0 10 0\n`;
+  // /proc/net/tcp is read before tcp6, so each phase puts the agent's socket first, then second.
+  let tables = { tcp: header + ipv4(6001), tcp6: header + ipv6(6002) };
+  const procFds: Record<string, Record<string, string>> = {
+    [providerPid]: { "3": "socket:[6001]", "5": "socket:[6004]", "7": "socket:[6005]" },
+    "5678": { "4": "socket:[6002]", "6": "socket:[6003]" },
+  };
+  const missing = FileSystem.makeNoop({});
+  const fileSystem = FileSystem.layerNoop({
+    readFileString: (path) =>
+      path === "/proc/net/tcp"
+        ? Effect.succeed(tables.tcp)
+        : path === "/proc/net/tcp6"
+          ? Effect.succeed(tables.tcp6)
+          : missing.readFileString(path),
+    readDirectory: (path) => {
+      if (path === "/proc") return Effect.succeed(Object.keys(procFds));
+      const fds = procFds[/^\/proc\/(\d+)\/fd$/.exec(path)?.[1] ?? ""];
+      return fds === undefined ? missing.readDirectory(path) : Effect.succeed(Object.keys(fds));
+    },
+    readLink: (path) => {
+      const [, pid, fd] = /^\/proc\/(\d+)\/fd\/(\d+)$/.exec(path) ?? [];
+      const target = pid && fd ? procFds[pid]?.[fd] : undefined;
+      return target === undefined ? missing.readLink(path) : Effect.succeed(target);
+    },
+  });
+  const requests: string[] = [];
+  const fetchFn = ((input: Parameters<typeof globalThis.fetch>[0]) => {
+    requests.push(String(input));
+    return Promise.resolve(new Response("app", { headers: { "content-type": "text/html" } }));
+  }) as typeof globalThis.fetch;
+  const layer = layerProbeFailure(processProbeFailure, fetchFn, fileSystem);
+
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    yield* scanner.registerThreadProcess({ threadId: "agent-thread", processId: providerPid });
+    expect(yield* scanner.scan()).toEqual([]);
+    tables = { tcp: header + ipv4(6003), tcp6: header + ipv6(6004) };
+    expect(yield* scanner.scan()).toEqual([]);
+    expect(requests).toEqual([]);
+
+    tables = { tcp: header + ipv4(6005), tcp6: header };
+    expect((yield* scanner.scan()).map(({ threadId }) => threadId)).toEqual(["agent-thread"]);
+    expect(requests).toEqual(["http://localhost:8080/"]);
+  }).pipe(Effect.provide(layer));
+});
