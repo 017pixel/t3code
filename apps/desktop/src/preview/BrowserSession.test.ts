@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import { beforeEach, vi } from "vite-plus/test";
 
@@ -12,6 +13,8 @@ const { fromPartition, sessions } = vi.hoisted(() => ({
     {
       readonly clearCache: ReturnType<typeof vi.fn>;
       readonly clearStorageData: ReturnType<typeof vi.fn>;
+      readonly closeAllConnections: ReturnType<typeof vi.fn>;
+      readonly storagePath: string | null;
       readonly getUserAgent: ReturnType<typeof vi.fn<() => string>>;
       readonly setPermissionRequestHandler: ReturnType<typeof vi.fn>;
       readonly setPermissionCheckHandler: ReturnType<typeof vi.fn>;
@@ -19,6 +22,8 @@ const { fromPartition, sessions } = vi.hoisted(() => ({
     }
   >(),
 }));
+
+const storage = vi.hoisted(() => ({ root: "" }));
 
 const { fromWebContents } = vi.hoisted(() => ({
   fromWebContents: vi.fn<(webContents: unknown) => unknown>(() => null),
@@ -107,11 +112,18 @@ describe("BrowserSession", () => {
   beforeEach(() => {
     sessions.clear();
     appListeners.clear();
+    storage.root = "";
     fromPartition.mockReset();
     fromPartition.mockImplementation((partition: string) => {
       const browserSession = {
         clearCache: vi.fn(() => Promise.resolve()),
         clearStorageData: vi.fn(() => Promise.resolve()),
+        closeAllConnections: vi.fn(() => Promise.resolve()),
+        // Like Electron, only a `persist:` partition has storage on disk.
+        storagePath:
+          storage.root !== "" && partition.startsWith("persist:")
+            ? `${storage.root}/Partitions/${partition}`
+            : null,
         getUserAgent: vi.fn(() => "Mozilla/5.0 Electron/41.5.0 t3code/0.0.27"),
         setPermissionRequestHandler: vi.fn(),
         setPermissionCheckHandler: vi.fn(),
@@ -186,6 +198,8 @@ describe("BrowserSession", () => {
         const browserSession = {
           clearCache: vi.fn(() => Promise.resolve()),
           clearStorageData: vi.fn(() => Promise.resolve()),
+          closeAllConnections: vi.fn(() => Promise.resolve()),
+          storagePath: null,
           getUserAgent: vi.fn(() => userAgent),
           setPermissionRequestHandler: vi.fn(),
           setPermissionCheckHandler: vi.fn(),
@@ -365,5 +379,40 @@ describe("BrowserSession", () => {
       assert.isFalse(yield* certificateError(browserSession, { url }).trusted);
       assert.strictEqual(showMessageBox.mock.calls.length, 1);
     }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("remembers approvals across restarts, but not incognito ones", () =>
+    Effect.gen(function* () {
+      storage.root = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped();
+      const url = "https://localhost:18443/";
+      const approve = Effect.gen(function* () {
+        const browserSessions = yield* BrowserSession.BrowserSession;
+        const persistent = yield* browserSessions.getPartition("scope-a");
+        const incognito = yield* browserSessions.getPartition("scope-a", false);
+        yield* browserSessions.getSession("scope-a");
+        yield* browserSessions.getSession("scope-a", false);
+        showMessageBox.mockReset();
+        showMessageBox.mockImplementation(trustCertificateButton);
+        assert.isTrue(yield* certificateError(sessions.get(persistent), { url }).trusted);
+        assert.isTrue(yield* certificateError(sessions.get(incognito), { url }).trusted);
+        return { persistent, incognito };
+      });
+      const { persistent, incognito } = yield* approve.pipe(Effect.provide(layer));
+
+      // A restarted app gets fresh Session objects and reads approvals from disk.
+      sessions.clear();
+      appListeners.clear();
+      yield* Effect.gen(function* () {
+        const browserSessions = yield* BrowserSession.BrowserSession;
+        yield* browserSessions.getSession("scope-a");
+        yield* browserSessions.getSession("scope-a", false);
+        showMessageBox.mockReset();
+        showMessageBox.mockReturnValue(1);
+        assert.isTrue(yield* certificateError(sessions.get(persistent), { url }).trusted);
+        assert.strictEqual(showMessageBox.mock.calls.length, 0);
+        assert.isFalse(yield* certificateError(sessions.get(incognito), { url }).trusted);
+        assert.strictEqual(showMessageBox.mock.calls.length, 1);
+      }).pipe(Effect.provide(layer));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });
