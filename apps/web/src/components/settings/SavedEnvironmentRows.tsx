@@ -5,7 +5,7 @@ import {
   EllipsisIcon,
   RouteIcon,
 } from "lucide-react";
-import { useAtomValue } from "@effect/atom-react";
+import { useAtom, useAtomValue } from "@effect/atom-react";
 import { useEffect, useEffectEvent, useState } from "react";
 import {
   AuthRelayWriteScope,
@@ -49,8 +49,11 @@ import {
   supportsServerUpdateThreadContinuation,
 } from "~/versionSkew";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
-import { usePrimaryCloudLinkState } from "~/cloud/primaryCloudLinkState";
-import { useCloudLinkController } from "~/cloud/useCloudLinkController";
+import {
+  primaryCloudLinkMutationAtom,
+  usePrimaryCloudLinkState,
+} from "~/cloud/primaryCloudLinkState";
+import { useCloudLinkController, type CloudLinkDesiredState } from "~/cloud/useCloudLinkController";
 import { environmentCatalog } from "~/connection/catalog";
 import { readEnvironmentScope } from "~/state/session";
 import {
@@ -493,17 +496,23 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
     publishAgentActivity,
     holdWebhooksWhileOffline,
     operationError,
-    reconcileCloudState,
+    reconcileCloudState: reconcileLink,
   } = useCloudLinkController();
-  const [isUpdating, setIsUpdating] = useState(false);
-  const [isUpdatingPreference, setIsUpdatingPreference] = useState(false);
+  const [isBusy, setIsBusy] = useAtom(primaryCloudLinkMutationAtom(primaryEnvironmentId));
+  const reconcileCloudState = async (desired: CloudLinkDesiredState) => {
+    setIsBusy(true);
+    try {
+      return await reconcileLink(desired);
+    } finally {
+      setIsBusy(false);
+    }
+  };
 
   const disabledReason = !isSignedIn
     ? "Sign in to T3 Connect to manage this environment."
     : !canManageRelay
       ? "Your session does not have permission to manage T3 Connect access."
       : null;
-  const isBusy = isUpdating || isUpdatingPreference;
   const refreshLinkState = useEffectEvent(primaryCloudLinkState.refresh);
   // The server rechecks reachability when the tunnel's 30 s readiness poll changes.
   // Poll while mounted, so a failed read does not stop later ones.
@@ -537,7 +546,6 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
       !readEnvironmentScope(primaryEnvironmentId, AuthRelayWriteScope)
     )
       return;
-    setIsUpdating(true);
     const ok = await reconcileCloudState({ managedTunnel: enabled, publish: publishAgentActivity });
     if (ok) {
       toastManager.add({
@@ -554,7 +562,6 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
             : "This environment is no longer available through T3 Connect.",
       });
     }
-    setIsUpdating(false);
   };
 
   const updatePublishAgentActivity = async (enabled: boolean) => {
@@ -563,7 +570,6 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
       !readEnvironmentScope(primaryEnvironmentId, AuthRelayWriteScope)
     )
       return;
-    setIsUpdatingPreference(true);
     const ok = await reconcileCloudState({ managedTunnel: managedTunnelActive, publish: enabled });
     if (ok) {
       toastManager.add({
@@ -574,11 +580,9 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
           : "This environment will stop publishing agent activity.",
       });
     }
-    setIsUpdatingPreference(false);
   };
 
   const updateHoldWebhooks = async (enabled: boolean) => {
-    setIsUpdatingPreference(true);
     const ok = await reconcileCloudState({
       managedTunnel: managedTunnelActive,
       publish: publishAgentActivity,
@@ -593,7 +597,6 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
           : "Requests to an offline environment now fail. Anything already held is still delivered.",
       });
     }
-    setIsUpdatingPreference(false);
   };
 
   return (
