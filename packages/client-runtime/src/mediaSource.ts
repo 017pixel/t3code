@@ -3,7 +3,6 @@ import { mediaMimeType, mediaMimeTypeFromExtension } from "@t3tools/shared/fileP
 
 import {
   classifyMarkdownImageSource,
-  markdownImageMediaPath,
   markdownImageSourceFragment,
   type MarkdownImageSource,
 } from "./markdownImages.ts";
@@ -100,10 +99,8 @@ export function resolveMediaSource(
     resource: {
       _tag: "media-file",
       threadId: input.threadId,
-      path:
-        input.resolvedFilePath === undefined
-          ? markdownImageMediaPath(source, path, input.workspaceRoot)
-          : path,
+      path,
+      ...(classified.relative ? { hostOnly: true as const } : {}),
     },
   };
 }

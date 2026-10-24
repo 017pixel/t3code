@@ -23,7 +23,7 @@ import {
 } from "../connection/model.ts";
 import { EnvironmentRegistry } from "../connection/registry.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
-import { classifyMarkdownImageSource, markdownImageMediaPath } from "../markdownImages.ts";
+import { resolveMediaSource } from "../mediaSource.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { createAssetEnvironmentAtoms, createProjectFaviconUrlAtomFamily } from "./assets.ts";
@@ -68,21 +68,10 @@ describe("createAssetEnvironmentAtoms", () => {
       const localId = EnvironmentId.make("local");
       const workspaceRoot = "/tmp/t3-17392/repo";
       const threadId = ThreadId.make("remote-thread");
-      // Mirrors how ChatMarkdown turns an authored image source into an asset resource.
-      const markdownImageResource = (
-        authored: string,
-        documentDir = workspaceRoot,
-      ): AssetResource => {
-        const source = classifyMarkdownImageSource(authored, documentDir);
-        expect(source._tag).toBe("WorkspaceFile");
-        return {
-          _tag: "media-file",
-          threadId,
-          path:
-            source._tag === "WorkspaceFile"
-              ? markdownImageMediaPath(authored, source.path, workspaceRoot)
-              : authored,
-        };
+      const markdownImageResource = (authored: string, documentDir = workspaceRoot) => {
+        const media = resolveMediaSource(authored, { threadId, workspaceRoot: documentDir });
+        expect(media?.access).toBe("environment");
+        return (media as Extract<typeof media, { access: "environment" }>).resource;
       };
       const calls: EnvironmentId[] = [];
       const supervisors = new Map<EnvironmentId, EnvironmentSupervisor["Service"]>();
@@ -139,33 +128,32 @@ describe("createAssetEnvironmentAtoms", () => {
         );
 
       // An explicit host path may still name a file on this desktop.
-      expect((yield* resolve(`${workspaceRoot}/docs/report.png`)).relativeUrl).toBe(
-        "https://local.test/api/assets/local/report.png",
-      );
-      expect(calls).toEqual([remoteId, localId]);
+      for (const authored of [
+        `${workspaceRoot}/docs/report.png`,
+        "/tmp/t3-17392/docs/report.png",
+        "D:\\docs\\report.png",
+      ]) {
+        calls.length = 0;
+        expect((yield* resolve(authored)).relativeUrl).toBe(
+          "https://local.test/api/assets/local/report.png",
+        );
+        expect(calls).toEqual([remoteId, localId]);
+      }
 
-      calls.length = 0;
-      const relative = yield* Effect.result(resolve("docs/report.png"));
-      expect(relative).toMatchObject({
-        _tag: "Failure",
-        failure: { _tag: "AssetWorkspaceAssetNotFoundError" },
-      });
-      expect(calls).toEqual([remoteId]);
-
-      // A host-path document outside the workspace keeps its relative image on the host too,
-      // and does not share the cached local result for the same absolute path.
-      calls.length = 0;
-      expect((yield* resolve("/tmp/t3-17392/docs/report.png")).relativeUrl).toBe(
-        "https://local.test/api/assets/local/report.png",
-      );
-      expect(calls).toEqual([remoteId, localId]);
-      calls.length = 0;
-      const outside = yield* Effect.result(resolve("report.png", "/tmp/t3-17392/docs"));
-      expect(outside).toMatchObject({
-        _tag: "Failure",
-        failure: { _tag: "AssetWorkspaceAssetNotFoundError" },
-      });
-      expect(calls).toEqual([remoteId]);
+      // The same files authored relative to their document, inside the workspace, outside
+      // it, or on another drive, stay on the host and miss the cached local results.
+      for (const [authored, documentDir] of [
+        ["docs/report.png", workspaceRoot],
+        ["report.png", "/tmp/t3-17392/docs"],
+        ["report.png", "D:\\docs"],
+      ] as const) {
+        calls.length = 0;
+        expect(yield* Effect.result(resolve(authored, documentDir))).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "AssetWorkspaceAssetNotFoundError" },
+        });
+        expect(calls).toEqual([remoteId]);
+      }
     }).pipe(Effect.scoped),
   );
 });

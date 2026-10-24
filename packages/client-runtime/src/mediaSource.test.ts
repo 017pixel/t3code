@@ -47,7 +47,7 @@ describe("resolveMediaSource", () => {
       });
     });
 
-    it("keeps relative paths on the thread host and records the relative reference", () => {
+    it("joins relative paths to the workspace and records the relative reference", () => {
       expect(
         resolveMediaSource("screens/logo.svg?v=2#mark", { threadId, workspaceRoot: "/repo" }),
       ).toEqual({
@@ -61,7 +61,7 @@ describe("resolveMediaSource", () => {
         },
         srcFragment: "#mark",
         access: "environment",
-        resource: { _tag: "media-file", threadId, path: "screens/logo.svg" },
+        resource: { _tag: "media-file", threadId, path: "/repo/screens/logo.svg", hostOnly: true },
       });
     });
 

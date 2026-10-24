@@ -1,7 +1,6 @@
 import { MISSING_FILE_ACCESS_MESSAGE } from "@t3tools/client-runtime/state/assets";
 import { mediaFileReference, mediaUrlReference } from "@t3tools/client-runtime/media-reference";
 import type { AssetResource, EnvironmentId, SOURCE_CONTROL_MEDIA_ASSET } from "@t3tools/contracts";
-import { isAbsolutePath } from "@t3tools/shared/path";
 import { TriangleAlertIcon } from "lucide-react";
 import {
   createContext,
@@ -374,10 +373,9 @@ export const ChatMarkdownAssetImage = memo(function ChatMarkdownAssetImage(props
     resource._tag,
   ]);
   const path =
-    resource._tag === "media-file" && isAbsolutePath(resource.path)
+    resource._tag === "media-file"
       ? resource.path
-      : (resource._tag === "media-file" || resource._tag === "workspace-file") &&
-          props.workspaceRoot
+      : resource._tag === "workspace-file" && props.workspaceRoot
         ? `${props.workspaceRoot.replace(/[\\/]+$/, "")}/${resource.path}`
         : undefined;
   const reference = path

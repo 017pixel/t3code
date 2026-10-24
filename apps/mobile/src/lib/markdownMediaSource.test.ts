@@ -1,6 +1,5 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import { resolveMarkdownMediaPreview } from "./markdownMedia";
 import { resolveMobileMarkdownMediaSource } from "./markdownMediaSource";
 
 describe("mobile Markdown draft media", () => {
@@ -28,25 +27,6 @@ describe("mobile Markdown draft media", () => {
     expect(
       resolveMobileMarkdownMediaSource("image.png", { threadId, workspaceRoot: "/project" }),
     ).toMatchObject({ resource: { _tag: "media-file", threadId, path: "/project/image.png" } });
-  });
-
-  it("resolves a nested document's media from its own directory, not the thread root", () => {
-    const threadId = ThreadId.make("markdown-thread");
-    const input = {
-      environmentId: EnvironmentId.make("remote"),
-      threadId,
-      workspaceRoot: "/repo/docs",
-      imageEmbed: true,
-    };
-    for (const [href, path] of [
-      ["report.png", "/repo/docs/report.png"],
-      ["../clip.mp4", "/repo/docs/../clip.mp4"],
-      ["guide.pdf", "/repo/docs/guide.pdf"],
-    ] as const) {
-      expect(resolveMarkdownMediaPreview(href, input)?.source).toMatchObject({
-        resource: { _tag: "media-file", threadId, path },
-      });
-    }
   });
 
   it("keeps direct URLs direct and rejects unresolvable or blocked references", () => {

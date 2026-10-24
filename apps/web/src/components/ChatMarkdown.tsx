@@ -60,7 +60,6 @@ import {
 } from "@t3tools/shared/codexArtifactTemplates";
 import {
   classifyMarkdownImageSource,
-  markdownImageMediaPath,
   markdownImageSourceFragment,
 } from "@t3tools/client-runtime/markdown-images";
 import { mediaUrlReference } from "@t3tools/client-runtime/media-reference";
@@ -1465,7 +1464,8 @@ const CHAT_MARKDOWN_COMPONENTS = {
           resource={{
             _tag: "media-file",
             threadId: threadRef.threadId,
-            path: markdownImageMediaPath(classifiedSrc, imageSource.path, cwd),
+            path: imageSource.path,
+            ...(imageSource.relative ? { hostOnly: true as const } : {}),
           }}
           alt={altText}
           kind={kind}

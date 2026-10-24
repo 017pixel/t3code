@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { classifyMarkdownImageSource, markdownImageMediaPath } from "./markdownImages.js";
+import { classifyMarkdownImageSource } from "./markdownImages.js";
 
 describe("classifyMarkdownImageSource", () => {
   it.each([
@@ -13,7 +13,7 @@ describe("classifyMarkdownImageSource", () => {
     ["file:///workspace/project/image%20one.png", null, "/workspace/project/image one.png"],
     ["file://server/share/image.png", "\\\\server\\share", "\\\\server\\share\\image.png"],
   ])("maps %s to a workspace file", (source, workspaceRoot, path) => {
-    expect(classifyMarkdownImageSource(source, workspaceRoot)).toEqual({
+    expect(classifyMarkdownImageSource(source, workspaceRoot)).toMatchObject({
       _tag: "WorkspaceFile",
       path,
     });
@@ -37,33 +37,5 @@ describe("classifyMarkdownImageSource", () => {
     expect(classifyMarkdownImageSource(source, "\\\\server\\share\\project")).toEqual({
       _tag: "Blocked",
     });
-  });
-});
-
-describe("markdownImageMediaPath", () => {
-  it.each([
-    ["../shot.png", "/repo/docs", "docs/../shot.png"],
-    ["/repo/docs/shot.png", "/repo/docs", "/repo/docs/shot.png"],
-    ["file:///repo/docs/shot.png", "/repo/docs", "/repo/docs/shot.png"],
-    ["report.png", "/tmp/docs", "../tmp/docs/report.png"],
-    ["report.png", "/repo-other/docs", "../repo-other/docs/report.png"],
-  ])("resolves %s from %s against the thread's own host", (source, baseDir, path) => {
-    const classified = classifyMarkdownImageSource(source, baseDir);
-    expect(classified._tag).toBe("WorkspaceFile");
-    if (classified._tag !== "WorkspaceFile") return;
-    expect(markdownImageMediaPath(source, classified.path, "/repo/")).toBe(path);
-  });
-
-  it.each([
-    ["report.png", "C:\\repo\\docs", "C:\\repo", "docs\\report.png"],
-    ["report.png", "C:\\tmp\\docs", "C:\\repo", "..\\tmp\\docs\\report.png"],
-    // No relative path reaches another drive or share, so the path stays absolute.
-    ["report.png", "D:\\docs", "C:\\repo", "D:\\docs\\report.png"],
-    ["report.png", "\\\\host\\other", "\\\\host\\share", "\\\\host\\other\\report.png"],
-  ])("keeps %s from %s relative to %s only when reachable", (source, baseDir, root, path) => {
-    const classified = classifyMarkdownImageSource(source, baseDir);
-    expect(classified._tag).toBe("WorkspaceFile");
-    if (classified._tag !== "WorkspaceFile") return;
-    expect(markdownImageMediaPath(source, classified.path, root)).toBe(path);
   });
 });
