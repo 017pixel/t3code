@@ -139,6 +139,12 @@ function sourceIdentity(
   const find = (key: string): string => {
     let root = key;
     for (let next = parent.get(root); next !== undefined; next = parent.get(root)) root = next;
+    // Path compression keeps long alias chains from making lookups quadratic.
+    for (let node = key; node !== root;) {
+      const next = parent.get(node)!;
+      parent.set(node, root);
+      node = next;
+    }
     return root;
   };
   for (const environment of environments) {

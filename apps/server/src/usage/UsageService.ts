@@ -198,14 +198,19 @@ export const make = Effect.gen(function* () {
   const hostPlatform = yield* HostProcess.Platform;
   const hostScope = hostEnvironment[DESKTOP_HOST_SCOPE_ENV]?.trim();
   // A mount or a directory's on-disk name does not change under a running server.
+  // A miss is not cached: the directory may not exist yet.
   const physicalSourceIds = new Map<string, Promise<string | undefined>>();
   const physicalSourceId = (dir: string) =>
     Effect.promise(() => {
-      let id = physicalSourceIds.get(dir);
-      if (id === undefined) {
-        id = readPhysicalSourceId(dir, hostScope, hostPlatform);
-        physicalSourceIds.set(dir, id);
-      }
+      const cached = physicalSourceIds.get(dir);
+      if (cached !== undefined) return cached;
+      const id = readPhysicalSourceId(dir, hostScope, hostPlatform);
+      physicalSourceIds.set(dir, id);
+      void id.then((resolved) => {
+        if (resolved === undefined && physicalSourceIds.get(dir) === id) {
+          physicalSourceIds.delete(dir);
+        }
+      });
       return id;
     });
   const readerContext = yield* Effect.context<BuiltInUsageReadersEnv>();
@@ -678,7 +683,7 @@ export const make = Effect.gen(function* () {
                         Effect.promise(() => readDirectoryVolumeId(source.dir)),
                         physicalSourceId(source.dir),
                       ])
-                    : Effect.succeed([volumeId, undefined] as const),
+                    : Effect.succeed<[string, string | undefined]>([volumeId, undefined]),
                   ([resolved, sourceId]): ScannedDir => ({
                     ...source,
                     files: source.files?.map((file) => ({ ...file, malformedRecords: 0 })) ?? null,

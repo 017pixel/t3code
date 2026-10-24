@@ -19,6 +19,8 @@ import {
   transcriptLineGate,
 } from "./usageTranscriptReader.ts";
 
+const decodeUsageSummary = Schema.decodeUnknownSync(UsageSummary);
+
 let dir: string;
 
 beforeEach(async () => {
@@ -331,7 +333,7 @@ describe("readPhysicalSourceId", () => {
 
   // One NTFS directory the Windows server reads natively and the WSL server
   // through drvfs. The temp dir stands in for the drive's mount point.
-  async function drvfsFixture(extraMounts = "") {
+  async function drvfsFixture(extraMounts: (escapedMountPoint: string) => string = () => "") {
     const mountPoint = NodePath.join(dir, "drive c");
     await NodeFSP.mkdir(NodePath.join(mountPoint, "Users", "User", ".claude", "projects"), {
       recursive: true,
@@ -343,14 +345,14 @@ describe("readPhysicalSourceId", () => {
       [
         "24 1 8:32 / / rw,relatime shared:1 - ext4 /dev/sdc rw,discard",
         `81 24 0:61 / ${escaped} rw,noatime shared:2 - 9p C:\\134 rw,dirsync,aname=drvfs;path=C:\\;uid=1000;gid=1000;symlinkroot=/mnt/,mmap,access=client,msize=65536,trans=fd`,
-        extraMounts,
+        extraMounts(escaped),
       ].join("\n"),
     );
     return { mountPoint, mountInfoPath };
   }
 
   function summaryFor(resolvedHomePath: string, volumeId: string, physicalSourceId?: string) {
-    return Schema.decodeUnknownSync(UsageSummary)({
+    return decodeUsageSummary({
       contractVersion: USAGE_CONTRACT_VERSION,
       readAt: "2026-10-22T02:00:00.000Z",
       timeZone: "UTC",
@@ -417,7 +419,7 @@ describe("readPhysicalSourceId", () => {
 
   it("gives no identity to native or shadowing Linux mounts, or without a desktop scope", async () => {
     const { mountPoint, mountInfoPath } = await drvfsFixture(
-      `90 81 8:48 / ${mountPoint.replaceAll(" ", "\\040")}/Users rw,relatime - ext4 /dev/sdd rw`,
+      (escaped) => `90 81 8:48 / ${escaped}/Users rw,relatime - ext4 /dev/sdd rw`,
     );
     const projects = `${mountPoint}/Users/User/.claude/projects`;
     assert.isUndefined(await readPhysicalSourceId(projects, scope, "linux", mountInfoPath));

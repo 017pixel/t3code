@@ -267,13 +267,12 @@ const readOrCreateHostScope = Effect.gen(function* () {
     .pipe(Effect.orElseSucceed(() => ""))).trim();
   if (HOST_SCOPE_PATTERN.test(existing)) return existing;
   const scope = (yield* crypto.randomUUIDv4().pipe(Effect.orDie)).replaceAll("-", "");
-  yield* fileSystem
-    .writeFileString(scopePath, scope)
-    .pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning("Could not persist the desktop host scope.", { cause }),
-      ),
-    );
+  yield* fileSystem.makeDirectory(environment.stateDir, { recursive: true }).pipe(
+    Effect.andThen(fileSystem.writeFileString(scopePath, scope)),
+    Effect.catch((cause) =>
+      Effect.logWarning("Could not persist the desktop host scope.", { cause }),
+    ),
+  );
   return scope;
 });
 
