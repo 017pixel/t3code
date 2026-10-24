@@ -179,15 +179,15 @@ describe("TailscaleServe", () => {
     }),
   );
 
-  it.effect("shuts down without waiting for an attempt that never answers", () =>
+  it.effect("waits on shutdown no longer than the Serve command's timeout", () =>
     Effect.gen(function* () {
       const { state, scope } = yield* startTailscaleServe(1, true);
       yield* TestClock.adjust("1 second");
       assert.equal(state.serveAttempts, 2);
 
-      // The clock stays put, so this would hang if shutdown waited for the
-      // CLI timeout.
-      yield* Scope.close(scope, Exit.void);
+      const shutdown = yield* Scope.close(scope, Exit.void).pipe(Effect.forkChild);
+      yield* TestClock.adjust("10 seconds");
+      yield* Fiber.join(shutdown);
 
       // No attempt succeeded, so any existing mapping on this port is not ours
       // to turn off.

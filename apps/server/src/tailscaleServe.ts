@@ -75,8 +75,12 @@ export const layer = (options: {
       );
 
       let lastFailure: string | undefined;
+      // The daemon applies the mapping before the CLI exits, so an interrupt
+      // between the two would leave it behind with nothing to disable it.
+      // Shutdown waits for the command's own timeout instead.
       const attempt = ensureTailscaleServe({ localPort, servePort, localHost }).pipe(
         Effect.tap(() => Ref.set(configured, true)),
+        Effect.uninterruptible,
         Effect.tap(() => Effect.logInfo("Tailscale Serve configured", { localPort, servePort })),
         Effect.tapError((cause) => {
           const key = failureKey(cause);
