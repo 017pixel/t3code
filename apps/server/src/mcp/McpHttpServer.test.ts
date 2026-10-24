@@ -19,6 +19,7 @@ import { McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
 import { HttpBody, HttpClient, HttpClientRequest, HttpRouter } from "effect/http";
 
 import * as DeviceService from "../device/DeviceService.ts";
+import * as PreviewManager from "../preview/Manager.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as PullRequestReviewGuideService from "../pullRequest/PullRequestReviewGuideService.ts";
 import * as ServerConfig from "../config.ts";
@@ -862,6 +863,7 @@ it.effect.each([
           ),
           Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
           Layer.provide(PreviewAutomationBroker.layer),
+          Layer.provide(Layer.mock(PreviewManager.PreviewManager)({})),
           Layer.provide(Layer.mock(DeviceService.DeviceService)({})),
           Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
           Layer.provide(
