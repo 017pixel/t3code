@@ -60,7 +60,7 @@ export function evaluatePullRequestWatch(
   let awaitingApproval = headMoved ? [] : (watch.awaitingApproval ?? []);
   // "action-required" waits on someone, such as a maintainer approving a fork's workflows, so the
   // agent is told once and nothing passes meanwhile. A placeholder is a host that could not tell,
-  // so that pass leaves the gate as it was.
+  // so it never confirms a pass, though a failed, pending, or awaited check beside it ends one.
   const failed = detail.checks.filter(isFailedCheck);
   const awaiting = detail.checks.filter(
     (check) => check.status === "action-required" && check.placeholder !== true,
@@ -94,12 +94,12 @@ export function evaluatePullRequestWatch(
       ),
     ];
   }
-  if (detail.checks.length > 0 && !unread) {
-    const required = detail.checks.filter((check) => check.required === true);
-    const gate = required.length > 0 ? required : detail.checks;
-    const passedNow =
-      awaitingApproval.length === 0 &&
-      gate.every((check) => check.status !== "pending" && !isFailedCheck(check));
+  const required = detail.checks.filter((check) => check.required === true);
+  const gate = required.length > 0 ? required : detail.checks;
+  const passedNow =
+    awaitingApproval.length === 0 &&
+    gate.every((check) => check.status !== "pending" && !isFailedCheck(check));
+  if (detail.checks.length > 0 && !(unread && passedNow)) {
     const gateNames = gate.map((check) => check.name);
     const told = passed && passedChecks.length === 0 ? gateNames : passedChecks;
     // A required job created and finished between two passes is never seen pending. Without

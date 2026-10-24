@@ -226,6 +226,67 @@ describe("evaluatePullRequestWatch", () => {
     );
   });
 
+  it("ends a pass on a known failure, pending check, or approval beside an unread one", () => {
+    const unknown = {
+      ...check("Workflow approval status", "action-required"),
+      url: null,
+      placeholder: true,
+    };
+    const required = (status: PullRequestCheck["status"]) => ({
+      ...check("test", status),
+      required: true,
+    });
+    const green = detail({ checks: [required("success"), check("e2e", "pending")] });
+    const first = evaluatePullRequestWatch(watch(), green, noRemarks);
+    assert.deepEqual(first.next.owedChecks, ["e2e"]);
+    // Only good news beside the unread approvals keeps the state, owed checks included.
+    const blind = evaluatePullRequestWatch(
+      first.next,
+      detail({ checks: [...green.checks, unknown] }),
+      noRemarks,
+    );
+    assert.deepEqual(blind.changes, []);
+    assert.deepEqual(blind.next.owedChecks, ["e2e"]);
+
+    const broken = required("failure");
+    const failed = evaluatePullRequestWatch(
+      blind.next,
+      detail({ checks: [broken, unknown] }),
+      noRemarks,
+    );
+    assert.deepEqual(failed.changes, [{ kind: "checks-failed", failed: [broken] }]);
+    assert.isFalse(failed.next.passed);
+    const fixed = evaluatePullRequestWatch(
+      failed.next,
+      detail({ checks: [required("success")] }),
+      noRemarks,
+    );
+    assert.deepEqual(fixed.changes, [{ kind: "checks-passed", count: 1, required: true }]);
+
+    // Where nothing is required, a rerun pending beside the unread approvals ends the pass too.
+    const bot = check("bot", "success");
+    const passed = evaluatePullRequestWatch(watch(), detail({ checks: [bot] }), noRemarks);
+    const rerun = evaluatePullRequestWatch(
+      passed.next,
+      detail({ checks: [check("bot", "pending"), unknown] }),
+      noRemarks,
+    );
+    assert.deepEqual(rerun.changes, []);
+    assert.isFalse(rerun.next.passed);
+    const done = evaluatePullRequestWatch(rerun.next, detail({ checks: [bot] }), noRemarks);
+    assert.deepEqual(done.changes, [{ kind: "checks-passed", count: 1, required: false }]);
+
+    // So does a run listed as awaiting approval while others could not be read.
+    const approval = { ...check("CI", "action-required"), url: run(1) };
+    const gated = evaluatePullRequestWatch(
+      passed.next,
+      detail({ checks: [bot, approval, unknown] }),
+      noRemarks,
+    );
+    assert.deepEqual(gated.changes, [{ kind: "checks-awaiting-approval", checks: [approval] }]);
+    assert.isFalse(gated.next.passed);
+  });
+
   it("waits for an approval with no URL while the host lists it", () => {
     const bot = check("bot", "success");
     const green = evaluatePullRequestWatch(watch(), detail({ checks: [bot] }), noRemarks);
