@@ -485,4 +485,29 @@ it.layer(layerDriver)("AcpRegistryDriver workspace discovery", (it) => {
       ]);
     }).pipe(Effect.scoped),
   );
+
+  it.effect("leaves other agents to the skills they advertise", () =>
+    Effect.gen(function* () {
+      const instance = yield* AcpRegistryDriver.create({
+        instanceId: identity.instanceId,
+        displayName: identity.displayName,
+        accentColor: undefined,
+        environment: [],
+        enabled: true,
+        config: decodeSettings({ agentId: "example-agent" }),
+      }).pipe(
+        Effect.provideService(
+          AcpRegistrySupport.AcpRegistryCatalog,
+          catalogWithInspection({
+            status: "ready",
+            agentId: "example-agent",
+            version: "1.0.0",
+            distribution: "binary",
+          }),
+        ),
+      );
+
+      expect(instance.snapshotForCwd).toBeUndefined();
+    }).pipe(Effect.scoped),
+  );
 });
