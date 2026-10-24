@@ -7650,6 +7650,79 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  // #24297: an empty roster lets the orchestrator finalize a delegated child on its pre-wake
+  // result, and a finalized task never reopens for the wake run that follows.
+  it.effect("keeps an exited background command on the roster until its wake run starts", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const wakeAttemptId = RunAttemptId.make("attempt-claude-wake-roster-2");
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-wake-roster-1"),
+            text: "Run the build in the background.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        yield* harness.awaitTerminal(1);
+        yield* harness.offerAndWait(wakeNotification);
+        yield* harness.offerAndWait(wakeTurnInit);
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: wakeAttemptId,
+            text: "Background task completed.",
+            attachments: [],
+            providerTurnOrdinal: 2,
+            messageCreatedBy: "agent",
+            messageCreationSource: "provider",
+          }),
+        );
+        yield* harness.offerAndWait(wakeAssistant);
+        yield* harness.offerAndWait(wakeResult);
+        yield* harness.awaitTerminal(2);
+
+        const wakeStart = harness.events.findIndex(
+          (event) =>
+            event.type === "provider_turn.updated" &&
+            event.providerTurn.runAttemptId === wakeAttemptId,
+        );
+        assert.isAbove(wakeStart, -1);
+        const rosters = harness.events.flatMap((event, index) =>
+          event.type === "provider_thread.updated" &&
+          event.providerThread.id === harness.providerThread.id
+            ? [
+                {
+                  beforeWake: index < wakeStart,
+                  taskIds: (event.providerThread.pendingBackgroundTasks ?? []).map(
+                    (task) => task.taskId,
+                  ),
+                },
+              ]
+            : [],
+        );
+        assert.deepEqual(
+          rosters.filter((roster) => roster.beforeWake).map((roster) => roster.taskIds),
+          rosters.filter((roster) => roster.beforeWake).map(() => [WAKE_TASK_ID]),
+        );
+        assert.deepEqual(rosters.at(-1)?.taskIds, []);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect.each([true, false])(
     "carries a rejected wake rate limit into the continuation failure (event=%s)",
     (standaloneEvent) =>
