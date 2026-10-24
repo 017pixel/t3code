@@ -1549,6 +1549,39 @@ it.layer(
             "opencode/big-pickle",
             "uni/medium-gpt",
           ]);
+
+          // Settings rebuild OpenCode under the same ID while the old instance
+          // is still reading a catalog; its late answer is neither published nor returned.
+          const retiredReadStarted = yield* Deferred.make<void>();
+          const releaseRetiredRead = yield* Deferred.make<void>();
+          const retiredModels = [
+            machineModel,
+            { slug: "retired/model", name: "Retired", isCustom: false, capabilities: null },
+          ];
+          instances[1] = makeInstance(
+            "opencode",
+            () => Effect.succeed({}),
+            () =>
+              Deferred.succeed(retiredReadStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseRetiredRead)),
+                Effect.as(retiredModels),
+              ),
+          );
+          const retiredRead = yield* registry.getProvidersForCwd("/rebuilt").pipe(Effect.forkChild);
+          yield* Deferred.await(retiredReadStarted);
+          instances[1] = makeInstance(
+            "opencode",
+            () => Effect.succeed({}),
+            () => Effect.succeed(undefined),
+          );
+          yield* Deferred.succeed(releaseRetiredRead, undefined);
+          assert.deepStrictEqual(openCodeModels(yield* Fiber.join(retiredRead)), [
+            "opencode/big-pickle",
+          ]);
+          assert.deepStrictEqual(
+            openCodeModels(resolveProvidersForCwd(yield* registry.getProviders, "/rebuilt")),
+            ["opencode/big-pickle"],
+          );
         }).pipe(Effect.provide(runtimeServices));
       }),
     );

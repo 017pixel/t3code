@@ -1080,24 +1080,30 @@ export const layer = Layer.effect(
             ),
             (instance) =>
               instance.modelsForCwd!(cwd).pipe(
-                Effect.tap((models) =>
-                  updateProviders((providers) =>
-                    // A full scan in flight publishes the same cached catalog.
-                    Ref.getUnsafe(workspaceRefreshesRef).get(instance)?.has(cwd)
-                      ? providers
-                      : providers.map((provider) =>
-                          provider.instanceId === instance.instanceId
-                            ? withWorkspaceModels(provider, cwd, models)
-                            : provider,
-                        ),
+                Effect.flatMap((models) =>
+                  instanceRegistry.getInstance(instance.instanceId).pipe(
+                    Effect.flatMap((currentInstance) =>
+                      // A settings rebuild retired this instance mid-read.
+                      currentInstance !== instance
+                        ? Effect.succeed([])
+                        : updateProviders((providers) =>
+                            // A full scan in flight publishes the same cached catalog.
+                            Ref.getUnsafe(workspaceRefreshesRef).get(instance)?.has(cwd)
+                              ? providers
+                              : providers.map((provider) =>
+                                  provider.instanceId === instance.instanceId
+                                    ? withWorkspaceModels(provider, cwd, models)
+                                    : provider,
+                                ),
+                          ).pipe(Effect.as([[instance.instanceId, models] as const])),
+                    ),
                   ),
                 ),
-                Effect.map((models) => [instance.instanceId, models] as const),
               ),
             { concurrency: "unbounded" },
           ),
         ),
-        Effect.map((entries) => new Map(entries)),
+        Effect.map((entries) => new Map(entries.flat())),
       );
 
     return {
