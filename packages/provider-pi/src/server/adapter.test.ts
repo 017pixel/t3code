@@ -707,7 +707,7 @@ describe("PiAdapterV2", () => {
   );
 
   it.effect.each([false, true])(
-    "retains native wake ownership after a rejected joining prompt, compaction aborted=%s",
+    "retains native wake ownership and delivers a joining prompt held through compaction, aborted=%s",
     (aborted) =>
       Effect.gen(function* () {
         const fake = yield* makeFakePi;
@@ -734,9 +734,6 @@ describe("PiAdapterV2", () => {
         yield* fake.emit({ type: "agent_settled" });
         yield* fake.emit({ type: "compaction_start", reason: "manual" });
         yield* startTurn(runtime, providerThread);
-        yield* fake.takeRequest("prompt");
-        const rejection = "Cannot submit a prompt while compaction is in progress.";
-        yield* fake.emit({ type: "response", command: "prompt", success: false, error: rejection });
         yield* fake.emit({
           type: "extension_ui_request",
           id: "native-compaction-dialog",
@@ -752,22 +749,21 @@ describe("PiAdapterV2", () => {
           decision: "accept",
         });
         yield* fake.takeRequest("extension_ui_response");
-        if (aborted) {
-          yield* fake.emit({ type: "compaction_end", result: null, aborted: true });
-          const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
-          assert.isTrue(
-            terminal.type === "turn.terminal" &&
-              terminal.status === "failed" &&
-              terminal.failure.message === rejection,
-          );
-          return;
-        }
+        assert.isFalse(fake.allRequests().some((request) => request["type"] === "prompt"));
+        yield* fake.emit(
+          aborted
+            ? { type: "compaction_end", result: null, aborted: true }
+            : {
+                type: "compaction_end",
+                result: { summary: "Native compaction finished" },
+                willRetry: true,
+              },
+        );
+        const prompt = yield* fake.takeRequest("prompt");
+        assert.equal(prompt["message"], "Hello pi");
         fake.queueState({ isStreaming: true });
-        yield* fake.emit({
-          type: "compaction_end",
-          result: { summary: "Native compaction finished" },
-          willRetry: true,
-        });
+        yield* fake.emit({ type: "response", command: "prompt", success: true });
+        yield* fake.takeRequest("get_state");
         yield* fake.emit({ type: "agent_start" });
         yield* fake.emit({ type: "message_start", message: { role: "assistant" } });
         yield* fake.emit({
@@ -780,13 +776,12 @@ describe("PiAdapterV2", () => {
         });
         const message = yield* takeEvent((event) => event.type === "message.updated");
         assert.isTrue(message.type === "message.updated" && message.message.runId !== null);
-        yield* fake.takeRequest("get_state");
         yield* fake.emit({ type: "agent_settled" });
         const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
-        assert.isTrue(
-          terminal.type === "turn.terminal" &&
-            terminal.status === "failed" &&
-            terminal.failure.message === rejection,
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        assert.equal(
+          fake.allRequests().filter((request) => request["type"] === "prompt").length,
+          1,
         );
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
@@ -3932,10 +3927,8 @@ describe("PiAdapterV2", () => {
         undefined,
         2,
       );
-      yield* fake.takeRequest("prompt");
       fake.setCompacting(false);
       const compactionEnded = fake.allRequests().length;
-      fake.queueState({ isStreaming: true, isCompacting: false, pendingMessageCount: 0 });
       yield* fake.emit({
         type: "compaction_end",
         reason: "manual",
@@ -3943,6 +3936,8 @@ describe("PiAdapterV2", () => {
         aborted: false,
         willRetry: false,
       });
+      const delivered = yield* fake.takeRequest("prompt");
+      assert.equal(delivered["message"], "Sent during compaction");
       yield* fake.emit({ type: "agent_start" });
       fake.queueState({ isStreaming: false, isCompacting: false, pendingMessageCount: 0 });
       yield* fake.emit({ type: "agent_settled" });
@@ -3960,6 +3955,119 @@ describe("PiAdapterV2", () => {
       assert.isTrue(
         terminal.type === "turn.terminal" && terminal.status === "completed",
         `turn ended ${terminal.type === "turn.terminal" ? terminal.status : terminal.type}`,
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([
+    { error: PI_COMPACTING_PROMPT_ERROR, retried: true },
+    { error: "Model unavailable", retried: false },
+  ])(
+    "retries a prompt Pi rejected because compaction started first, retried=$retried",
+    ({ error, retried }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "response", command: "prompt", success: true });
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "agent_settled" });
+        yield* fake.takeRequest("get_state");
+        yield* takeEvent((event) => event.type === "turn.terminal");
+
+        yield* startTurn(runtime, providerThread, "default", [], "Raced compaction", undefined, 2);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "compaction_start", reason: "manual" });
+        yield* fake.emit({
+          type: "response",
+          command: "prompt",
+          success: false,
+          error,
+        });
+        if (!retried) {
+          const failed = yield* takeEvent((event) => event.type === "turn.terminal");
+          assert.isTrue(
+            failed.type === "turn.terminal" &&
+              failed.status === "failed" &&
+              failed.failure.message === error,
+          );
+          return;
+        }
+        const compactionEnded = fake.allRequests().length;
+        yield* fake.emit({ type: "compaction_end", result: null, aborted: true });
+        const retriedPrompt = yield* fake.takeRequest("prompt");
+        assert.equal(retriedPrompt["message"], "Raced compaction");
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "agent_settled" });
+        const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+        assert.isTrue(
+          terminal.type === "turn.terminal" && terminal.status === "completed",
+          `turn ended ${terminal.type === "turn.terminal" ? terminal.status : terminal.type}`,
+        );
+        assert.equal(
+          fake
+            .allRequests()
+            .slice(compactionEnded)
+            .filter((request) => request["type"] === "prompt").length,
+          1,
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("restarts Pi when Stop interrupts a prompt held for detached compaction", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.takeRequest("get_state");
+      yield* takeEvent((event) => event.type === "turn.terminal");
+
+      fake.setCompacting(true);
+      yield* fake.emit({ type: "compaction_start", reason: "manual" });
+      yield* startTurn(runtime, providerThread, "default", [], "Held prompt", undefined, 2);
+      const running = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" &&
+          event.providerTurn.status === "running" &&
+          event.providerTurn.ordinal === 2,
+      );
+      const providerTurnId =
+        running.type === "provider_turn.updated" ? running.providerTurn.id : undefined;
+      assert.isDefined(providerTurnId);
+
+      // A dialog the new turn owns proves the pump has observed compaction.
+      yield* fake.emit({
+        type: "extension_ui_request",
+        id: "held-prompt-dialog",
+        method: "confirm",
+        title: "Continue?",
+      });
+      yield* takeEvent((event) => event.type === "runtime_request.updated");
+      const interruptedAt = fake.allRequests().length;
+      yield* runtime.interruptTurn({ providerThread, providerTurnId: providerTurnId! });
+      assert.isFalse(fake.allRequests().some((request) => request["type"] === "abort"));
+      yield* fake.closeStdout;
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
+      assert.isFalse(
+        fake
+          .allRequests()
+          .slice(interruptedAt)
+          .some((request) => request["type"] === "prompt"),
       );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
@@ -4005,10 +4113,8 @@ describe("PiAdapterV2", () => {
           creationSource: "web",
         },
       });
-      yield* fake.takeRequest("prompt");
       fake.setCompacting(false);
       const compactionEnded = fake.allRequests().length;
-      fake.queueState({ isStreaming: true, isCompacting: false, pendingMessageCount: 0 });
       yield* fake.emit({
         type: "compaction_end",
         reason: "manual",
@@ -4016,6 +4122,8 @@ describe("PiAdapterV2", () => {
         aborted: false,
         willRetry: false,
       });
+      const delivered = yield* fake.takeRequest("prompt");
+      assert.equal(delivered["message"], "Steer during compaction");
       yield* fake.emit({ type: "agent_start" });
       fake.queueState({ isStreaming: false, isCompacting: false, pendingMessageCount: 0 });
       yield* fake.emit({ type: "agent_settled" });
