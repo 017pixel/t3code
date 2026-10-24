@@ -1,4 +1,4 @@
-import { RegistryContext } from "@effect/atom-react";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { EnvironmentId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
@@ -11,6 +11,8 @@ const state = vi.hoisted(() => ({
   mode: "notifications",
   inApp: false,
   toast: vi.fn(),
+  closeToast: vi.fn(),
+  open: (_params: { environmentId: string; threadId: string }) => {},
   shells: null as unknown as { set: (id: string, value: unknown) => void },
   navigate: vi.fn(),
   sound: vi.fn(),
@@ -20,11 +22,18 @@ const state = vi.hoisted(() => ({
 vi.mock(import("@tanstack/react-router"), async (original) => ({
   ...(await original()),
   useNavigate: (() => state.navigate) as never,
-  useParams: (() => ({})) as never,
+  useParams: (() => useAtomValue(paramsAtom)) as never,
 }));
 vi.mock(import("./ui/toast"), async (original) => {
   const actual = await original();
-  return { ...actual, toastManager: { ...actual.toastManager, add: state.toast as never } };
+  return {
+    ...actual,
+    toastManager: {
+      ...actual.toastManager,
+      add: state.toast as never,
+      close: state.closeToast as never,
+    },
+  };
 });
 vi.mock(import("../state/shell"), async (original) => {
   const actual = await original();
@@ -58,7 +67,10 @@ import { ThreadNotificationCoordinator } from "./ThreadNotificationCoordinator";
 
 let registry: AtomRegistry.AtomRegistry;
 const shellAtom = Atom.family((_id: string) => Atom.make<unknown>(null));
+// Route params come from an atom because the compiler memoizes the per-environment children.
+const paramsAtom = Atom.make({});
 state.shells = { set: (id, value) => registry.set(shellAtom(id), value) };
+state.open = (params) => registry.set(paramsAtom, params);
 
 class TestNotification extends EventTarget {
   static permission = "granted";
@@ -237,4 +249,41 @@ it.each([
   );
   await screen.rerender(app.ui());
   expect(TestNotification.sent.map((notification) => notification.title)).toEqual(titles);
+});
+
+const completed = {
+  latestTurn: { turnId: "turn", state: "completed", completedAt: "2026-09-13T07:01:00.000Z" },
+};
+
+it.each([
+  ["completion", completed],
+  ["attention", { hasPendingApprovals: true }],
+] as const)("closes the %s toast when its thread opens by any route", async (_, update) => {
+  await using app = setup();
+  state.inApp = true;
+  focused = true;
+  state.toast.mockReturnValue("toast");
+  await app.render();
+  state.shells.set("one", shell(update));
+  await app.render();
+  expect(state.toast).toHaveBeenCalledTimes(1);
+  state.open({ environmentId: "one", threadId: "thread" });
+  await app.render();
+  expect(state.closeToast).toHaveBeenCalledWith("toast");
+});
+
+it("keeps toasts open for threads that were not opened", async () => {
+  await using app = setup();
+  state.inApp = true;
+  focused = true;
+  state.toast.mockImplementation(({ title, description }) => `${title}:${description}`);
+  state.shells.set("one", shell({}, { id: "other", title: "Other" }));
+  await app.render();
+  state.shells.set("one", shell(completed, { ...completed, id: "other", title: "Other" }));
+  state.shells.set("two", shell({ ...completed, title: "Same id, other environment" }));
+  await app.render();
+  expect(state.toast).toHaveBeenCalledTimes(3);
+  state.open({ environmentId: "one", threadId: "thread" });
+  await app.render();
+  expect(state.closeToast.mock.calls).toEqual([["Thread completed:Test thread"]]);
 });
