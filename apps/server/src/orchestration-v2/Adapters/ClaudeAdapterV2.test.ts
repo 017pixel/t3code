@@ -3501,19 +3501,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       );
 
       yield* harness.offerAndWait(stream({ type: "content_block_stop", index: 0 }));
-      yield* harness.offerAndWait(
-        claudeSdkFrame({
-          ...makeAssistantTextFrame({
-            uuid: "answer-snapshot",
-            text: "Movable type changed Europe.",
-          }),
-          message: {
-            ...makeAssistantTextFrame({ uuid: "answer-snapshot", text: "" }).message,
-            id: "answer-message",
-            content: [{ type: "text", text: "Movable type changed Europe." }],
-          },
-        } as SDKMessage),
-      );
+      const snapshot = makeAssistantTextFrame({
+        uuid: "answer-snapshot",
+        text: "Movable type changed Europe.",
+      });
+      assert(snapshot.type === "assistant");
+      yield* harness.offerAndWait({
+        ...snapshot,
+        message: { ...snapshot.message, id: "answer-message" },
+      });
       yield* Queue.offer(
         harness.sdkMessages,
         makeResultFrame({ uuid: "text-stream-result", result: "Movable type changed Europe." }),
