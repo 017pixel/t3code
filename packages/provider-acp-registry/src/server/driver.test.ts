@@ -442,8 +442,12 @@ it.layer(layerDriver)("AcpRegistryDriver workspace discovery", (it) => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-acp-home-" });
-      const project = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-acp-project-" });
+      const home = yield* fileSystem.realPath(
+        yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-acp-home-" }),
+      );
+      const project = yield* fileSystem.realPath(
+        yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-acp-project-" }),
+      );
       const writeSkill = (root: string, name: string) =>
         fileSystem
           .makeDirectory(path.join(root, ".agents", "skills", name), { recursive: true })
@@ -462,7 +466,11 @@ it.layer(layerDriver)("AcpRegistryDriver workspace discovery", (it) => {
         instanceId: identity.instanceId,
         displayName: identity.displayName,
         accentColor: undefined,
-        environment: [{ name: "HOME", value: home, sensitive: false }],
+        environment: [
+          { name: "HOME", value: home, sensitive: false },
+          { name: "XDG_CONFIG_HOME", value: path.join(home, ".config"), sensitive: false },
+          { name: "OPENCODE_CONFIG_DIR", value: path.join(home, "opencode"), sensitive: false },
+        ],
         enabled: true,
         config: decodeSettings({ agentId: "opencode-v2" }),
       }).pipe(
@@ -479,7 +487,11 @@ it.layer(layerDriver)("AcpRegistryDriver workspace discovery", (it) => {
 
       expect(instance.snapshotForCwd).toBeDefined();
       const workspace = yield* instance.snapshotForCwd!(project);
-      expect(workspace.skills.map((skill) => skill.name).toSorted()).toEqual([
+      // Ancestors of the temp directories are real OpenCode roots too.
+      const fixtureSkills = workspace.skills.filter(
+        (skill) => skill.path.startsWith(home) || skill.path.startsWith(project),
+      );
+      expect(fixtureSkills.map((skill) => skill.name).toSorted()).toEqual([
         "global-skill",
         "project-skill",
       ]);
