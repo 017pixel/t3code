@@ -204,7 +204,7 @@ export function decideGuestMessageSend(input: {
   return Result.map(resolveMessage(share, input.guestMessageId, "sent"), (next) => ({
     thread: { ...input.thread, guestShare: next, updatedAt: input.now },
     text: `Message from guest ${name}, sent by the owner:\n\n${guestText}`,
-    guest: { guestMessageId: input.guestMessageId, name, text: guestText },
+    guest: { guestMessageId: input.guestMessageId, name, text: guestText, shareId: share.id },
   }));
 }
 

@@ -513,10 +513,25 @@ it.effect("sends a guest's files as the guest's message and keeps them the guest
       guestMessageId: message!.id,
       name: "Sam",
       text: "See this",
+      shareId,
     });
     // The guest loads the thread's copy from their own row.
     const fromRow = yield* guestShares.attachment(session, copied.id);
     assert.equal(fromRow.attachment.id, copied.id);
+
+    // Still theirs after their share's message list has trimmed it away.
+    for (let index = 0; index < 21; index += 1) {
+      yield* guestShares.submit(session, { shareId, text: `note ${index}` }, []);
+      const [waiting] = (yield* waitingMessages).filter((next) => next.status === "pending");
+      yield* orchestrator.dispatch({
+        type: "thread.guest-message.dismiss",
+        commandId: CommandId.make(`dismiss-note-${index}`),
+        threadId,
+        guestMessageId: waiting!.id,
+      });
+    }
+    assert.isFalse((yield* waitingMessages).some((next) => next.id === message!.id));
+    assert.equal((yield* guestShares.attachment(session, copied.id)).attachment.id, copied.id);
 
     // A new link for someone else shows that message from history, but not its files.
     const { url } = yield* guestShares.create({ threadId });
