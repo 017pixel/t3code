@@ -3374,57 +3374,46 @@ export const make = Effect.gen(function* () {
     if (reference !== undefined) {
       yield* canonicalRef(reference).pipe(
         Effect.flatMap((ref) =>
-          readCache
-            .invalidate(refScope(ref))
-            .pipe(
-              Effect.andThen(Effect.sync(() => bumpRefEpoch(ref))),
-              Effect.andThen(
-                forgetProviderReads({ repository: ref.repository, number: ref.number }),
-              ),
-            ),
+          forgetProviderReads({ repository: ref.repository, number: ref.number }).pipe(
+            Effect.andThen(readCache.invalidate(refScope(ref))),
+            Effect.andThen(Effect.sync(() => bumpRefEpoch(ref))),
+          ),
         ),
         Effect.ignore,
       );
     } else {
+      yield* forgetProviderReads();
       listingsEpoch = ++epochCounter;
       everyFileRevisionEpoch = ++epochCounter;
       viewersByHost.clear();
       yield* Cache.invalidateAll(viewerFlights);
-      yield* forgetProviderReads();
     }
     if (options?.notifyReaders) {
       yield* SubscriptionRef.set(pullRequestRefreshes, ++epochCounter);
     }
   });
 
-  const refreshAfterTurn: PullRequestService["Service"]["refreshAfterTurn"] = (projectId) =>
-    Effect.suspend(() => {
-      listingsEpoch = ++epochCounter;
-      projectEpochs.delete(projectId);
-      if (projectEpochs.size >= REF_EPOCH_CAPACITY) {
-        const oldest = projectEpochs.keys().next().value;
-        if (oldest !== undefined) {
-          projectEpochFloor = projectEpochs.get(oldest)!;
-          projectEpochs.delete(oldest);
-        }
+  const refreshAfterTurn: PullRequestService["Service"]["refreshAfterTurn"] = Effect.fn(
+    "PullRequestService.refreshAfterTurn",
+  )(function* (projectId) {
+    // Everything the provider holds, not just the project's repository: a turn can touch a
+    // change request reached through another repository, and no epoch may move until those
+    // reads are gone, or a reader in between keeps the old one under the new epoch.
+    yield* forgetProviderReads();
+    listingsEpoch = ++epochCounter;
+    projectEpochs.delete(projectId);
+    if (projectEpochs.size >= REF_EPOCH_CAPACITY) {
+      const oldest = projectEpochs.keys().next().value;
+      if (oldest !== undefined) {
+        projectEpochFloor = projectEpochs.get(oldest)!;
+        projectEpochs.delete(oldest);
       }
-      projectEpochs.set(projectId, listingsEpoch);
-      const epoch = listingsEpoch;
-      return readCache.invalidate(`project:${projectId}`).pipe(
-        Effect.andThen(
-          projects.getShell(projectId).pipe(
-            Effect.flatMap((shell) => {
-              const repository = Option.isSome(shell)
-                ? sourceControlRepositorySelector(shell.value.repositoryIdentity)
-                : null;
-              return repository === null ? Effect.void : forgetProviderReads({ repository });
-            }),
-            Effect.ignore,
-          ),
-        ),
-        Effect.andThen(SubscriptionRef.set(pullRequestRefreshes, epoch)),
-      );
-    });
+    }
+    projectEpochs.set(projectId, listingsEpoch);
+    const epoch = listingsEpoch;
+    yield* readCache.invalidate(`project:${projectId}`);
+    yield* SubscriptionRef.set(pullRequestRefreshes, epoch);
+  });
 
   const invalidatedByMutation =
     <I extends PullRequestRef>(
