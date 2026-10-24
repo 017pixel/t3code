@@ -308,17 +308,21 @@ it.layer(NodeServices.layer)("writeFileStringAtomically", (it) => {
       const path = yield* Path.Path;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-atomic-write-" });
       const filePath = path.join(root, "settings.json");
+      const removeAttempts: Array<string> = [];
       const unremovable = FileSystem.make({
         ...fs,
         remove: (removedPath) =>
-          Effect.fail(
-            PlatformError.systemError({
-              _tag: "PermissionDenied",
-              module: "FileSystem",
-              method: "remove",
-              pathOrDescriptor: removedPath,
-            }),
-          ),
+          Effect.suspend(() => {
+            removeAttempts.push(removedPath);
+            return Effect.fail(
+              PlatformError.systemError({
+                _tag: "PermissionDenied",
+                module: "FileSystem",
+                method: "remove",
+                pathOrDescriptor: removedPath,
+              }),
+            );
+          }),
       });
 
       yield* writeFileStringAtomically({ filePath, contents: "after" }).pipe(
@@ -326,7 +330,11 @@ it.layer(NodeServices.layer)("writeFileStringAtomically", (it) => {
       );
 
       assert.strictEqual(yield* fs.readFileString(filePath), "after");
-      assert.strictEqual((yield* fs.readDirectory(root)).length, 2);
+      assert.strictEqual(removeAttempts.length, 1);
+      assert.deepStrictEqual(
+        (yield* fs.readDirectory(root)).toSorted(),
+        [path.basename(removeAttempts[0]!), "settings.json"].toSorted(),
+      );
     }),
   );
 });
