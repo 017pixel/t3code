@@ -581,6 +581,13 @@ public final class T3TerminalView: ExpoView, UITextFieldDelegate {
     }
     surface = nil
     app = nil
+    // Ghostty adds its IOSurface layer to the viewport on iOS but never removes it on
+    // free, leaving the last frame on screen under the next surface's layer. The
+    // viewport has no subviews, so every sublayer belongs to a freed surface.
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    terminalViewport.layer.sublayers?.forEach { $0.removeFromSuperlayer() }
+    CATransaction.commit()
   }
 
   func applyPendingBuffer() {
