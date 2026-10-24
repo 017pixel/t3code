@@ -8,6 +8,7 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   PULL_REQUEST_WATCH_WAKE_LIMIT,
   evaluatePullRequestWatch as evaluate,
+  pullRequestWatchMessage,
 } from "./pullRequestWatch.ts";
 
 // These cases read the head once or at one moment, so the no-checks notice never comes due.
@@ -29,6 +30,8 @@ const watch = (overrides: Partial<ThreadPullRequestWatch> = {}): ThreadPullReque
   wakes: 0,
   ...overrides,
 });
+
+const run = (id: number) => `https://github.com/o/r/actions/runs/${id}`;
 
 const check = (name: string, status: PullRequestCheck["status"]): PullRequestCheck => ({
   name,
@@ -78,6 +81,155 @@ const remark = (
 const noRemarks: ReadonlyArray<PullRequestComment> = [];
 
 describe("evaluatePullRequestWatch", () => {
+  // regression: #24575 fork workflows awaiting approval flapped between failed and passed
+  it("waits for workflow approval once, through reads that miss it, until the run finishes", () => {
+    const bot = check("bot", "success");
+    const approval = { ...check("CI", "action-required"), url: run(1) };
+    const gated = detail({ checks: [bot, approval] });
+    const first = evaluatePullRequestWatch(watch(), gated, noRemarks);
+    assert.deepEqual(first.changes, [{ kind: "checks-awaiting-approval", checks: [approval] }]);
+    assert.deepEqual(first.next.failedChecks, []);
+    assert.isFalse(first.next.passed);
+    const message = pullRequestWatchMessage({
+      number: 1,
+      url: "https://github.com/o/r/pull/1",
+      baseBranch: "main",
+      headSha: "aaaaaaaaaa",
+      report: first,
+    });
+    assert.equal(message.notification.outcome, "updated");
+    assert.match(message.text, /approval/i);
+
+    // GitHub's approval read can answer empty while the rest of the checks read fine.
+    const missing = evaluatePullRequestWatch(first.next, detail({ checks: [bot] }), noRemarks);
+    assert.deepEqual(missing.changes, []);
+    assert.isFalse(missing.next.passed);
+    const returned = evaluatePullRequestWatch(missing.next, gated, noRemarks);
+    assert.deepEqual(returned.changes, []);
+
+    // Approved, the run's jobs carry their own names under the run's URL.
+    const job = (status: PullRequestCheck["status"]) => ({
+      ...check("lint", status),
+      url: `${run(1)}/job/7`,
+    });
+    const running = evaluatePullRequestWatch(
+      returned.next,
+      detail({ checks: [bot, job("pending")] }),
+      noRemarks,
+    );
+    assert.deepEqual(running.changes, []);
+    // A read that misses the running job is not a pass either.
+    const lost = evaluatePullRequestWatch(running.next, detail({ checks: [bot] }), noRemarks);
+    assert.deepEqual(lost.changes, []);
+    assert.isFalse(lost.next.passed);
+    const completed = evaluatePullRequestWatch(
+      lost.next,
+      detail({ checks: [bot, job("success")] }),
+      noRemarks,
+    );
+    assert.deepEqual(completed.changes, [{ kind: "checks-passed", count: 2, required: false }]);
+    assert.deepEqual(completed.next.awaitingApproval, []);
+    assert.deepEqual(
+      evaluatePullRequestWatch(completed.next, detail({ checks: [bot] }), noRemarks).changes,
+      [],
+    );
+  });
+
+  it("does not report required checks passed while workflows await approval", () => {
+    const label = { ...check("Label", "success"), required: true };
+    const approval = { ...check("CI", "action-required"), url: run(1) };
+    const first = evaluatePullRequestWatch(
+      watch(),
+      detail({ checks: [label, approval] }),
+      noRemarks,
+    );
+    assert.deepEqual(first.changes, [{ kind: "checks-awaiting-approval", checks: [approval] }]);
+    const missing = evaluatePullRequestWatch(first.next, detail({ checks: [label] }), noRemarks);
+    assert.deepEqual(missing.changes, []);
+    const test = { ...check("test", "success"), url: `${run(1)}/job/8`, required: true };
+    const done = evaluatePullRequestWatch(
+      missing.next,
+      detail({ checks: [label, test] }),
+      noRemarks,
+    );
+    assert.deepEqual(done.changes, [{ kind: "checks-passed", count: 2, required: true }]);
+  });
+
+  it("still reports failures beside workflows awaiting approval", () => {
+    const approval = { ...check("CI", "action-required"), url: run(1) };
+    const broken = [check("lint", "failure"), check("e2e", "cancelled")];
+    const first = evaluatePullRequestWatch(
+      watch(),
+      detail({ checks: [approval, ...broken] }),
+      noRemarks,
+    );
+    assert.deepEqual(first.changes, [
+      { kind: "checks-failed", failed: broken },
+      { kind: "checks-awaiting-approval", checks: [approval] },
+    ]);
+    const message = pullRequestWatchMessage({
+      number: 1,
+      url: "https://github.com/o/r/pull/1",
+      baseBranch: "main",
+      headSha: "aaaaaaaaaa",
+      report: first,
+    });
+    assert.equal(message.notification.outcome, "failed");
+    assert.deepEqual(
+      evaluatePullRequestWatch(first.next, detail({ checks: broken }), noRemarks).changes,
+      [],
+    );
+  });
+
+  it("waits for workflow approval again only on a new head", () => {
+    const bot = check("bot", "success");
+    const approval = { ...check("CI", "action-required"), url: run(1) };
+    const first = evaluatePullRequestWatch(watch(), detail({ checks: [bot, approval] }), noRemarks);
+    const pushed = evaluatePullRequestWatch(
+      first.next,
+      detail({ headSha: "bbbbbbbbbb", checks: [bot] }),
+      noRemarks,
+    );
+    assert.deepEqual(pushed.changes, [{ kind: "checks-passed", count: 1, required: false }]);
+    assert.deepEqual(pushed.next.awaitingApproval, []);
+    const gatedAgain = { ...approval, url: run(2) };
+    const second = evaluatePullRequestWatch(
+      pushed.next,
+      detail({ headSha: "bbbbbbbbbb", checks: [bot, gatedAgain] }),
+      noRemarks,
+    );
+    assert.deepEqual(second.changes, [{ kind: "checks-awaiting-approval", checks: [gatedAgain] }]);
+  });
+
+  it("keeps the last state when a host cannot tell whether workflows await approval", () => {
+    const bot = check("bot", "success");
+    const unknown = { ...check("Workflow approval status", "action-required"), url: null };
+    const unread = evaluatePullRequestWatch(watch(), detail({ checks: [bot, unknown] }), noRemarks);
+    assert.deepEqual(unread.changes, []);
+    assert.isFalse(unread.next.passed);
+    const read = evaluatePullRequestWatch(unread.next, detail({ checks: [bot] }), noRemarks);
+    assert.deepEqual(read.changes, [{ kind: "checks-passed", count: 1, required: false }]);
+    const again = evaluatePullRequestWatch(
+      read.next,
+      detail({ checks: [bot, unknown] }),
+      noRemarks,
+    );
+    assert.deepEqual(again.changes, []);
+    assert.isTrue(again.next.passed);
+    assert.deepEqual(
+      evaluatePullRequestWatch(again.next, detail({ checks: [bot] }), noRemarks).changes,
+      [],
+    );
+  });
+
+  it("does not tell a watch saved before approvals were recorded about one it reported", () => {
+    const approval = { ...check("CI", "action-required"), url: run(1) };
+    const saved = watch({ headSha: "aaaaaaaaaa", failedChecks: ["CI"] });
+    const report = evaluatePullRequestWatch(saved, detail({ checks: [approval] }), noRemarks);
+    assert.deepEqual(report.changes, []);
+    assert.deepEqual(report.next.awaitingApproval, [run(1)]);
+  });
+
   it("reports each failure at once, even while another check never finishes", () => {
     const bot = check("CodeRabbit", "pending");
     const first = detail({ checks: [check("lint", "failure"), check("test", "pending"), bot] });

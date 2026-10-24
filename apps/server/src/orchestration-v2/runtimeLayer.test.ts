@@ -19,6 +19,7 @@ import {
   type ModelSelection,
   type OrchestrationV2Run,
   ProjectId,
+  type PullRequestCheck,
   type PullRequestDetail,
   type PullRequestComment,
   PullRequestOperationError,
@@ -2740,6 +2741,125 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch?.owedChecks,
         [],
       );
+      yield* watch(false, "end");
+    }),
+  );
+
+  // regression: #24575 fork workflows awaiting approval flapped between failed and passed
+  it.effect("keeps awaited workflow approvals across empty reads, a restart, and a re-watch", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const threadId = ThreadId.make("runtime-pull-request-watch-approval");
+      const projectId = ProjectId.make("pr-watch-approval-project");
+      yield* seedProject({
+        projectId,
+        title: "Watch approval",
+        workspaceRoot: "/workspace/watch-approval",
+        defaultModelSelection: null,
+        createdAt: "2026-10-01T00:00:00.000Z",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("pr-watch-approval-create"),
+        threadId,
+        projectId,
+        title: "Watch approval",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+      });
+      const watch = (on: boolean, id: string) =>
+        orchestrator.dispatch({
+          type: "thread.pull-request.watch",
+          commandId: CommandId.make(`pr-watch-approval-${id}`),
+          threadId,
+          host: "github.com",
+          repository: "pingdotgg/t3code",
+          number: 12,
+          watching: on,
+          link: { url: "https://github.com/pingdotgg/t3code/pull/12", source: "agent" },
+        });
+      yield* watch(true, "start");
+
+      const run = (id: number) => `https://github.com/pingdotgg/t3code/actions/runs/${id}`;
+      const bot = { name: "bot", status: "success" as const, description: null, url: null };
+      const approval = (id: number) => ({
+        name: `Workflow ${id}`,
+        status: "action-required" as const,
+        description: null,
+        url: run(id),
+      });
+      const job = (id: number) => ({
+        name: `job ${id}`,
+        status: "success" as const,
+        description: null,
+        url: `${run(id)}/job/${id}0`,
+      });
+      let checks: ReadonlyArray<PullRequestCheck> = [bot, approval(1), approval(2)];
+      const host = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(PullRequestService.PullRequestService)({
+          detail: () =>
+            Effect.sync(() => ({
+              ...watchedPullRequestDetail({
+                projectId,
+                number: 12,
+                at: "2026-10-02T12:00:00.000Z",
+              }),
+              headSha: "ad70160aaa",
+              checks,
+            })),
+          activity: () =>
+            Effect.succeed({
+              comments: [],
+              commentCount: 0,
+              commentsTruncated: false,
+              reviewThreads: [],
+              commits: [],
+            }),
+        }),
+      );
+      const summaries = Effect.map(
+        orchestrator.getThreadRecords(threadId, ["messages"]),
+        ({ messages }) => messages.flatMap((message) => message.notification?.summary ?? []),
+      );
+      const awaited = Effect.map(
+        orchestrator.getThreadShell(threadId),
+        (thread) => thread?.pullRequests?.[0]?.watch?.awaitingApproval,
+      );
+      const reactor = yield* PullRequestWatchReactor.make.pipe(Effect.provide(host));
+      const pass = (target: typeof reactor) =>
+        Effect.gen(function* () {
+          yield* TestClock.adjust("10 minutes");
+          yield* target.sweep;
+          yield* worker.drain();
+        });
+      yield* pass(reactor);
+      assert.deepEqual(yield* summaries, ["#12: checks await approval"]);
+
+      // One run finishing changes only what is awaited, which is still saved without a wake.
+      checks = [bot, approval(1), job(2)];
+      yield* pass(reactor);
+      assert.deepEqual(yield* awaited, [run(1)]);
+
+      // The approval read answering empty, after a restart and a re-watch, is still not a pass.
+      checks = [bot, job(2)];
+      const restarted = yield* PullRequestWatchReactor.make.pipe(Effect.provide(host));
+      yield* pass(restarted);
+      yield* watch(false, "stop");
+      yield* watch(true, "again");
+      yield* pass(restarted);
+      assert.deepEqual(yield* summaries, ["#12: checks await approval"]);
+      assert.deepEqual(yield* awaited, [run(1)]);
+
+      checks = [bot, job(1), job(2)];
+      yield* pass(restarted);
+      assert.deepEqual(yield* summaries, ["#12: checks await approval", "#12: checks passed"]);
       yield* watch(false, "end");
     }),
   );
