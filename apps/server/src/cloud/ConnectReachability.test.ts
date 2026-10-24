@@ -11,7 +11,6 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
-import { CLOUD_ENDPOINT_RUNTIME_CONFIG } from "./config.ts";
 import * as ConnectReachability from "./ConnectReachability.ts";
 import * as ManagedEndpointRuntime from "./ManagedEndpointRuntime.ts";
 
@@ -71,17 +70,6 @@ describe("classifyReachability", () => {
     ).toMatchObject({ cause: "dns_failed" });
   });
 
-  it("gives the MCP URL on the host the running tunnel answered on", () => {
-    const result = ConnectReachability.classifyReachability(
-      facts({ endpoint: { kind: "status", status: 200 } }),
-      checkedAt,
-    );
-    expect(result).toMatchObject({ status: "reachable", hostname: "env.example.test" });
-    expect(result.status === "reachable" && connectReachableMcpUrl(result)).toBe(
-      "https://env.example.test/mcp",
-    );
-  });
-
   it("waits on a connector that has not connected while the edge answers", () => {
     expect(
       ConnectReachability.classifyReachability(
@@ -93,53 +81,35 @@ describe("classifyReachability", () => {
 });
 
 describe("ConnectReachability", () => {
-  it.effect("drops a result once the tunnel config it checked is replaced", () => {
-    const secrets = new Map([[CLOUD_ENDPOINT_RUNTIME_CONFIG, new TextEncoder().encode("first")]]);
-    const unused = Effect.die("unused");
+  it.effect("exposes the checked tunnel's MCP URL until its config changes", () => {
+    let config = new TextEncoder().encode("first");
     const dependencies = Layer.mergeAll(
-      Layer.succeed(
-        ServerSecretStore.ServerSecretStore,
-        ServerSecretStore.ServerSecretStore.of({
-          get: (name) => Effect.sync(() => Option.fromNullishOr(secrets.get(name))),
-          set: () => unused,
-          create: () => unused,
-          getOrCreateRandom: () => unused,
-          remove: () => unused,
-        }),
-      ),
-      Layer.succeed(
-        ManagedEndpointRuntime.CloudManagedEndpointRuntime,
-        ManagedEndpointRuntime.CloudManagedEndpointRuntime.of({
-          applyConfig: () => unused,
-          inspectConnector: Effect.succeed(connected),
-          readinessChanged: Stream.empty,
-          recoveryRequests: Stream.empty,
-          requestRecovery: () => unused,
-          tunnelConnected: Stream.empty,
-          withLinkStateLock: (effect) => effect,
-        }),
-      ),
+      Layer.mock(ServerSecretStore.ServerSecretStore)({
+        get: () => Effect.sync(() => Option.some(config)),
+      }),
+      Layer.mock(ManagedEndpointRuntime.CloudManagedEndpointRuntime)({
+        inspectConnector: Effect.succeed(connected),
+        readinessChanged: Stream.empty,
+      }),
       Layer.succeed(
         HttpClient.HttpClient,
         HttpClient.make((request) =>
           Effect.succeed(HttpClientResponse.fromWeb(request, new Response("{}"))),
         ),
       ),
-      Layer.succeed(
-        ChildProcessSpawner.ChildProcessSpawner,
-        ChildProcessSpawner.make(() => unused),
-      ),
+      Layer.mock(ChildProcessSpawner.ChildProcessSpawner)({}),
     );
 
     return Effect.gen(function* () {
       const reachability = yield* ConnectReachability.ConnectReachability;
       yield* reachability.check;
-      expect(Option.getOrNull(yield* reachability.latest)).toMatchObject({
-        hostname: "env.example.test",
-      });
+      const result = Option.getOrThrow(yield* reachability.latest);
+      expect(result.status === "reachable" && connectReachableMcpUrl(result)).toBe(
+        "https://env.example.test/mcp",
+      );
 
       // A relink stores a new tunnel before its connector reports in.
-      secrets.set(CLOUD_ENDPOINT_RUNTIME_CONFIG, new TextEncoder().encode("second"));
+      config = new TextEncoder().encode("second");
       expect(yield* reachability.latest).toEqual(Option.none());
     }).pipe(Effect.provide(ConnectReachability.layer.pipe(Layer.provide(dependencies))));
   });

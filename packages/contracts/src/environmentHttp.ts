@@ -455,11 +455,6 @@ export function formatConnectReachable(
   ].join(" · ");
 }
 
-/**
- * The MCP URL outside agents use to reach this environment through T3 Connect. It comes from
- * the host the running tunnel answered on, since a saved T3 Connect entry with the same name
- * can belong to an older environment whose tunnel is gone.
- */
 export function connectReachableMcpUrl(
   result: Extract<EnvironmentConnectReachability, { status: "reachable" }>,
 ): string | null {

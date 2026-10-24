@@ -129,15 +129,11 @@ function useCopyMcpUrl() {
   }).copyToClipboard;
 }
 
-/**
- * This machine's T3 Connect MCP URL, from the host its running tunnel answered on. Shown only
- * after a passing check, so it never hands out an address nothing serves.
- */
 export function PrimaryMcpUrlMenuItem() {
-  const { data } = usePrimaryCloudLinkState();
+  const { data, isPending } = usePrimaryCloudLinkState();
   const copyMcpUrl = useCopyMcpUrl();
   const reachability =
-    data && data.managedTunnelActive !== false && data.linkRevoked !== true
+    data && !isPending && data.managedTunnelActive !== false && data.linkRevoked !== true
       ? data.reachability
       : undefined;
   const mcpUrl = reachability?.status === "reachable" ? connectReachableMcpUrl(reachability) : null;
