@@ -33,16 +33,21 @@ export function ManagedRelayAuthProvider({ children }: { readonly children: Reac
     treatPendingAsSignedOut: false,
   });
   const clerk = useClerk();
-  const clerkStatus = useSyncExternalStore(
+  // "degraded" loads from local state when Clerk's API fails. "ready" alone is not proof either:
+  // while the browser reports offline, Clerk turns failed fetches into empty resources, leaving
+  // the client without the id every /v1/client response carries.
+  const clerkApiAnswered = useSyncExternalStore(
     (onChange) => {
       clerk.on("status", onChange);
-      return () => clerk.off("status", onChange);
+      const removeListener = clerk.addListener(onChange);
+      return () => {
+        clerk.off("status", onChange);
+        removeListener();
+      };
     },
-    () => clerk.status,
+    () => clerk.status === "ready" && Boolean(clerk.client?.id),
   );
-  // Clerk loads "degraded" from local state when its API is unreachable, often signed out,
-  // so only a "ready" load is Clerk's answer that no session exists.
-  const signedOutByClerkApi = !(isSignedIn && userId) && clerkStatus === "ready";
+  const signedOutByClerkApi = !(isSignedIn && userId) && clerkApiAnswered;
   const removeRelayEnvironments = useAtomCommand(environmentCatalog.removeRelayEnvironments, {
     reportFailure: false,
     reportDefect: false,

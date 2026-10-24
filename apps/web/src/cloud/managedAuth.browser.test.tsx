@@ -12,19 +12,27 @@ type ClerkAuth = {
   isLoaded: boolean;
   isSignedIn: boolean;
   userId: string | null;
+  clientId?: string | undefined;
 };
 
 const testState = vi.hoisted(() => {
-  const statusListeners = new Set<() => void>();
+  const clerkListeners = new Set<() => void>();
   return {
     auth: { status: "loading", isLoaded: false, isSignedIn: false, userId: null } as ClerkAuth,
-    statusListeners,
+    clerkListeners,
     clerk: {
       get status() {
         return testState.auth.status;
       },
-      on: (_event: "status", listener: () => void) => void statusListeners.add(listener),
-      off: (_event: "status", listener: () => void) => void statusListeners.delete(listener),
+      get client() {
+        return { id: testState.auth.clientId };
+      },
+      addListener: (listener: () => void) => {
+        clerkListeners.add(listener);
+        return () => void clerkListeners.delete(listener);
+      },
+      on: (_event: "status", listener: () => void) => void clerkListeners.add(listener),
+      off: (_event: "status", listener: () => void) => void clerkListeners.delete(listener),
     },
     getToken: async () => "clerk-token",
     removeRelayEnvironments: vi.fn(),
@@ -53,17 +61,19 @@ vi.mock(import("./publicConfig"), async (original) => ({
 import { ManagedRelayAuthProvider } from "./managedAuth";
 
 const loading: ClerkAuth = { status: "loading", isLoaded: false, isSignedIn: false, userId: null };
-const signedOut = (status: "ready" | "degraded"): ClerkAuth => ({
+const signedOut = (status: "ready" | "degraded", clientId?: string): ClerkAuth => ({
   status,
   isLoaded: true,
   isSignedIn: false,
   userId: null,
+  clientId,
 });
 const signedInAs = (userId: string): ClerkAuth => ({
   status: "ready",
   isLoaded: true,
   isSignedIn: true,
   userId,
+  clientId: "client-1",
 });
 
 async function mountAuth(
@@ -81,9 +91,9 @@ async function mountAuth(
   try {
     for (const state of rest) {
       testState.auth = state;
-      // Clerk announces status through its status event and auth state through a render.
+      // Clerk announces status and client changes through listeners and auth state through a render.
       await act(() => {
-        for (const listener of testState.statusListeners) listener();
+        for (const listener of testState.clerkListeners) listener();
       });
       await screen.rerender(<ManagedRelayAuthProvider>{null}</ManagedRelayAuthProvider>);
     }
@@ -106,15 +116,29 @@ describe("ManagedRelayAuthProvider", () => {
     expect(activeAccount()).toBeNull();
   });
 
+  it("keeps saved relay environments when Clerk reports ready after offline fetches", async () => {
+    await using _screen = await mountAuth([loading, signedOut("ready")]);
+
+    expect(testState.removeRelayEnvironments).not.toHaveBeenCalled();
+    expect(activeAccount()).toBeNull();
+  });
+
   it("removes relay environments once Clerk's API confirms there is no session", async () => {
-    await using _screen = await mountAuth([loading, signedOut("degraded"), signedOut("ready")]);
+    await using _screen = await mountAuth([
+      loading,
+      signedOut("degraded"),
+      signedOut("ready", "client-1"),
+    ]);
 
     await vi.waitFor(() => expect(testState.removeRelayEnvironments).toHaveBeenCalledTimes(1));
     expect(activeAccount()).toBeNull();
   });
 
   it("removes relay environments when the signed-in account signs out", async () => {
-    await using _screen = await mountAuth([signedInAs("account-1"), signedOut("ready")]);
+    await using _screen = await mountAuth([
+      signedInAs("account-1"),
+      signedOut("ready", "client-1"),
+    ]);
 
     await vi.waitFor(() => expect(testState.removeRelayEnvironments).toHaveBeenCalledTimes(1));
     expect(activeAccount()).toBeNull();

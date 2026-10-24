@@ -305,6 +305,7 @@ export default defineConfig({
       },
       {
         files: [
+          "apps/web/src/cloud/managedAuth.tsx",
           "apps/web/src/components/settings/AuthorizedClientsSettings.tsx",
           "apps/web/src/components/settings/ConnectionsSettings.tsx",
           "apps/mobile/src/features/updates/app-updates.ts",
