@@ -177,10 +177,11 @@ function wrapCommandForCompletion(
     case "fish":
       return `begin\r${body}\rend; printf '\\n${sentinel}%s\\n' $status`;
     case "nu":
-      // Nushell raises a failed external as an error, and piping the body would hide that exit
-      // code, so the body runs unpiped inside `try`. As in any Nushell block, a final internal
-      // value is not printed; externals stream as usual.
-      return `$env.LAST_EXIT_CODE = 0; let __t3c = try {\r${body}\r$env.LAST_EXIT_CODE } catch {|e| print -e $e.rendered; $e.exit_code? | default 1 }; print $"\\n${sentinel}($__t3c)"`;
+      // Nushell raises an unhandled failed external as an error, so a body that completes
+      // succeeded. It runs unpiped and non-final inside `try`: piping would hide that error and a
+      // final external would be captured instead of streamed, so a final internal value is not
+      // printed.
+      return `let __t3c = try {\r${body}\r0 } catch {|e| print -e $e.rendered; $e.exit_code? | default 1 }; print $"\\n${sentinel}($__t3c)"`;
     case "posix":
       return `( ${body}\r); printf '\\n${sentinel}%s\\n' "$?"`;
   }

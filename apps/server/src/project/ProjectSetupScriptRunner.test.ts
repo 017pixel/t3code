@@ -130,3 +130,14 @@ it.effect.skipIf(!hasNushell)("reports a Nushell setup script's failure exit cod
     assert.equal(completion.exitCode, 3);
   }),
 );
+
+it.effect.skipIf(!hasNushell)(
+  "reports success when a Nushell setup script recovers a failure",
+  () =>
+    Effect.gen(function* () {
+      const completion = yield* runSetupInNushell(
+        "try { bash -c 'exit 3' } catch { print recovered }",
+      );
+      assert.equal(completion.exitCode, 0);
+    }),
+);
