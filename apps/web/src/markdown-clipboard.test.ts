@@ -186,6 +186,15 @@ describe("serializeRenderedMarkdownFragment", () => {
     expect(serializeRenderedMarkdownFragment(asNode(container))).toBe("-\n\n```\npnpm test\n```");
   });
 
+  it("copies a command and the prose after it as shown, without code fences", () => {
+    const container = new FakeElement("DIV").append(
+      renderedCodeBlock(["printf 'hello\\n'"]),
+      new FakeElement("P").append(new FakeText("T")),
+    );
+
+    expect(serializeRenderedMarkdownFragment(asNode(container))).toBe("printf 'hello\\n'\n\nT");
+  });
+
   it("omits fences when a selection past the last line drags in the whole code block", () => {
     const container = new FakeElement("DIV").append(
       renderedCodeBlock(["printf '%s' 'TOKEN' | gh secret set CLOUDFLARE_API_TOKEN"]),
