@@ -23,6 +23,7 @@ export class ResourceCleanupError extends Schema.TaggedError<ResourceCleanupErro
 
 export class ResourceCleanupService extends Context.Reference<{
   readonly cleanupScheduledTasks: (threadId: ThreadId) => Effect.Effect<void, ResourceCleanupError>;
+  readonly pauseScheduledTasks: (threadId: ThreadId) => Effect.Effect<void, ResourceCleanupError>;
   readonly cleanupTerminals: (threadId: string) => Effect.Effect<void, ResourceCleanupError>;
   readonly cleanupPreviews: (threadId: string) => Effect.Effect<void, ResourceCleanupError>;
   readonly cleanupAttachments: (
@@ -31,6 +32,7 @@ export class ResourceCleanupService extends Context.Reference<{
 }>("t3/orchestration-v2/ResourceCleanupService", {
   defaultValue: () => ({
     cleanupScheduledTasks: () => Effect.void,
+    pauseScheduledTasks: () => Effect.void,
     cleanupTerminals: () => Effect.void,
     cleanupPreviews: () => Effect.void,
     cleanupAttachments: () => Effect.void,
@@ -49,6 +51,15 @@ export const layer = Layer.effect(
       cleanupScheduledTasks: (threadId: ThreadId) =>
         scheduledTasks
           .deleteForThread(threadId)
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new ResourceCleanupError({ operation: "scheduled-tasks", threadId, cause }),
+            ),
+          ),
+      pauseScheduledTasks: (threadId: ThreadId) =>
+        scheduledTasks
+          .pauseForThread(threadId)
           .pipe(
             Effect.mapError(
               (cause) =>

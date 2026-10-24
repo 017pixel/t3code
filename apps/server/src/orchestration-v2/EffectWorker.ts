@@ -473,6 +473,17 @@ export const layerExecutor: Layer.Layer<
                   }),
               ),
             );
+          case "scheduled-tasks.pause":
+            return resourceCleanup.pauseScheduledTasks(effect.threadId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause,
+                  }),
+              ),
+            );
           case "terminal.cleanup":
             return resourceCleanup.cleanupTerminals(effect.threadId).pipe(
               Effect.mapError(
