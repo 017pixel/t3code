@@ -63,6 +63,10 @@ public class T3TerminalModule: Module {
         view.sharedGrid = sharedGrid
       }
       Events("onInput", "onResize", "onCapture")
+
+      OnViewDidUpdateProps { (view: T3TerminalView) in
+        view.applyPendingBuffer()
+      }
     }
   }
 }

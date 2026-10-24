@@ -251,11 +251,15 @@ public final class T3TerminalView: ExpoView, UITextFieldDelegate {
     }
   }
 
+  // Expo sets a batch's props in no fixed order, so the buffer waits for the whole batch:
+  // output fed before the same batch's sharedGrid lands would be drawn, and clipped, at the
+  // previous grid.
   var initialBuffer: String = "" {
     didSet {
-      applyRemoteBuffer(initialBuffer)
+      hasPendingBuffer = true
     }
   }
+  private var hasPendingBuffer = false
 
   // The PTY grid shared by every attached client, or empty before the server reports one.
   // The surface draws this grid so its wrapping and cursor match the PTY; the view's own
@@ -573,6 +577,12 @@ public final class T3TerminalView: ExpoView, UITextFieldDelegate {
     }
     surface = nil
     app = nil
+  }
+
+  func applyPendingBuffer() {
+    guard hasPendingBuffer else { return }
+    hasPendingBuffer = false
+    applyRemoteBuffer(initialBuffer)
   }
 
   private func applyRemoteBuffer(_ buffer: String) {
