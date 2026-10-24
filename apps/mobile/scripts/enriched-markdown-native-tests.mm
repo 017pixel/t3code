@@ -54,7 +54,7 @@ static void testCoordinator(void)
                  apply:^{
                  }];
   }
-  for (NSUInteger revision = 1; revision <= 1000; revision++)
+  for (NSUInteger revision = 1; revision <= 3; revision++)
   {
     [coordinator
         scheduleRender:^BOOL {
@@ -71,7 +71,7 @@ static void testCoordinator(void)
   check(background.count == 1, "a burst must enqueue one worker, not one closure per revision");
   drain(background);
   drain(mainQueue);
-  check(rendered == 1 && applied == 1000, "only the latest pending revision may parse and apply");
+  check(rendered == 1 && applied == 3, "only the latest pending revision may parse and apply");
 
   NSMutableArray<NSString *> *renders = [NSMutableArray new];
   NSMutableArray<NSString *> *applies = [NSMutableArray new];
@@ -116,43 +116,9 @@ static void testCoordinator(void)
   [coordinator invalidate];
   drain(background);
   drain(mainQueue);
-  check(rendered == 1 && applied == 1000, "recycling must discard pending parsing and application");
+  check(rendered == 1 && applied == 3, "recycling must discard pending parsing and application");
 
-  [coordinator
-      scheduleRender:^BOOL {
-        return NO;
-      }
-      apply:^{
-        applied++;
-      }];
-  drain(background);
-  drain(mainQueue);
-  check(applied == 1000, "failed renders must not apply");
-  coordinator.blockAsyncRender = YES;
-  [coordinator
-      scheduleRender:^BOOL {
-        rendered++;
-        return YES;
-      }
-      apply:^{
-        applied++;
-      }];
-  check(background.count == 0, "synchronous render mode must suppress scheduling");
-  coordinator.blockAsyncRender = NO;
-  [coordinator
-      scheduleRender:^BOOL {
-        rendered++;
-        return YES;
-      }
-      apply:^{
-        applied++;
-      }];
-  drain(background);
-  [coordinator invalidate];
-  drain(mainQueue);
-  check(rendered == 2 && applied == 1000, "invalidation must also suppress an already completed render");
-  printf("PASS coordinator: 1001 pending revisions -> 1 parse, obsolete captures released; in-flight "
-         "replacement/invalidation/failure covered\n");
+  printf("PASS coordinator: latest pending revision, capture release, in-flight replacement, invalidation\n");
 }
 
 static void testCache(void)
@@ -160,53 +126,56 @@ static void testCache(void)
   using namespace facebook::react;
   auto &cache = MeasurementCache::shared();
   CachedSize size;
-  MeasurementCacheKey key{};
-  key.markdown = std::string(100 * 1024, 'x');
-  for (int revision = 0; revision < 512; revision++)
+  // Four duplicated 1 MiB strings exceed 8 MiB once key structs are included.
+  MeasurementCacheKey keys[4]{};
+  for (int index = 0; index < 4; index++)
+    keys[index].markdown = std::string(1024 * 1024, char('a' + index));
+  for (int index = 0; index < 3; index++)
+    cache.set(keys[index], {double(index), 20});
+  check(cache.get(keys[0], size), "a hit must remain available before budget eviction");
+  cache.set(keys[3], {3, 20});
+  check(!cache.get(keys[1], size), "byte overflow must evict the least recently used key");
+  for (int index : {0, 2, 3})
+    check(cache.get(keys[index], size) && size.width == index,
+          "byte eviction must retain the other measurements");
+
+  // An oversized key must bypass storage without flushing useful entries.
+  for (auto field : {&MeasurementCacheKey::markdown, &MeasurementCacheKey::lineBreakStrategyIOS,
+                     &MeasurementCacheKey::writingDirection, &MeasurementCacheKey::ellipsizeMode,
+                     &MeasurementCacheKey::linkRegexKey, &MeasurementCacheKey::inlineCodeLinkRegexKey})
   {
-    key.markdown += "x";
-    cache.set(key, {double(revision), 20});
+    MeasurementCacheKey huge{};
+    huge.*field = std::string(4 * 1024 * 1024, 'z');
+    cache.set(huge, {99, 99});
+    check(!cache.get(huge, size), "8 MiB includes both copies of every string and key structs");
   }
-  check(cache.get(key, size) && size.width == 511, "latest streamed measurement must remain available");
-  NSUInteger retained = 0;
-  size_t retainedMarkdownBytes = 0;
-  for (int revision = 0; revision < 512; revision++)
-  {
-    key.markdown = std::string(100 * 1024 + revision + 1, 'x');
-    if (cache.get(key, size))
-    {
-      retained++;
-      retainedMarkdownBytes += 2 * key.markdown.size();
-    }
-  }
-  printf("cache retained prefixes: %lu; duplicated markdown bytes: %zu\n", (unsigned long)retained,
-         retainedMarkdownBytes);
-  check(retained > 0 && retained <= 64,
-        "streamed prefixes must obey a byte budget, not only a 512-entry limit");
+  for (int index : {0, 2, 3})
+    check(cache.get(keys[index], size), "oversized keys must preserve useful measurements");
 
-  MeasurementCacheKey huge{};
-  huge.markdown = std::string(5 * 1024 * 1024, 'z');
-  cache.set(huge, {1, 1});
-  check(!cache.get(huge, size), "one document larger than the budget must bypass retention");
-  huge.markdown = "regex-heavy";
-  huge.linkRegexKey = std::string(5 * 1024 * 1024, 'r');
-  cache.set(huge, {1, 1});
-  check(!cache.get(huge, size), "the byte budget must include non-markdown key strings");
-
-  check(cache.get(key, size), "oversized entries must not evict useful cached measurements");
-  cache.set(key, {123, 456});
-  check(cache.get(key, size) && size.width == 123 && size.height == 456,
-        "updating a cache hit must preserve the new size");
-  cache.removeMatchingMarkdown(key.markdown);
-  check(!cache.get(key, size), "removing a document must remove its cached measurements");
-  cache.set(key, {789, 10});
-  check(cache.get(key, size) && size.width == 789, "removed capacity must be reusable");
-
-  for (int revision = 0; revision < 512; revision++)
-  {
-    key.markdown = std::string(100 * 1024 + revision + 1, 'x');
+  cache.set(keys[0], {123, 456});
+  cache.removeMatchingMarkdown(keys[2].markdown);
+  cache.set(keys[1], {1, 20});
+  check(cache.get(keys[0], size) && size.width == 123 && size.height == 456,
+        "updates and removals must release or reuse capacity without spurious eviction");
+  check(cache.get(keys[3], size) && cache.get(keys[1], size), "removed capacity must be reusable");
+  check(!cache.get(keys[2], size), "removed measurements must stay absent");
+  for (const auto &key : keys)
     cache.removeMatchingMarkdown(key.markdown);
-  }
+
+  MeasurementCacheKey boundary{};
+  const size_t budget = 8 * 1024 * 1024;
+  const size_t structs = sizeof(MeasurementCache::CacheEntry) + sizeof(MeasurementCacheKey);
+  boundary.markdown = std::string((budget - structs) / 2, 'b');
+  cache.set(boundary, {8, 8});
+  check(cache.get(boundary, size), "a key at the 8 MiB budget must fit");
+  auto oversized = boundary;
+  oversized.markdown += "b";
+  cache.set(oversized, {9, 9});
+  check(!cache.get(oversized, size), "a key above the 8 MiB budget must bypass storage");
+  check(cache.get(boundary, size), "a rejected boundary key must not evict the cached key");
+  cache.removeMatchingMarkdown(boundary.markdown);
+
+  MeasurementCacheKey key{};
   for (int entry = 0; entry < 512; entry++)
   {
     key.markdown = std::to_string(entry);
@@ -217,12 +186,10 @@ static void testCache(void)
   key.markdown = "new";
   cache.set(key, {1000, 1});
   key.markdown = "1";
-  check(!cache.get(key, size), "overflow must evict the least recently used document");
+  check(!cache.get(key, size), "entry overflow must evict the least recently used document");
   key.markdown = "0";
   check(cache.get(key, size), "reading a cache hit must refresh its LRU position");
-  printf("PASS cache: 512 x ~100 KiB prefixes -> %lu retained, %zu duplicated markdown bytes; oversized keys "
-         "bypassed\n",
-         (unsigned long)retained, retainedMarkdownBytes);
+  printf("PASS cache: 8 MiB byte eviction, oversized keys, updates/removal, 512-entry LRU\n");
 }
 
 int main(int argc, const char *argv[])

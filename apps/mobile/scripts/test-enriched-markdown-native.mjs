@@ -1,8 +1,23 @@
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
+
+if (HostProcess.Platform.defaultValue() !== "darwin") {
+  throw new Error(
+    "Native markdown source tests require macOS Foundation and the Apple clang toolchain.",
+  );
+}
+if (
+  process.argv.slice(3).some((argument) => !["cache", "coordinator"].includes(argument)) ||
+  process.argv.length > 4
+) {
+  throw new Error(
+    "Usage: node scripts/test-enriched-markdown-native.mjs [dependency-path] [cache|coordinator]",
+  );
+}
 
 // Foundation-only source harness: no simulator, app build, UIKit, or React Native runtime.
 const here = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
