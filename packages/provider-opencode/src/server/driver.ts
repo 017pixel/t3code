@@ -32,6 +32,7 @@ import { loadOpenCode2Catalog } from "./openCode2Catalog.ts";
 import {
   checkOpenCodeProviderStatus,
   loadOpenCode2Workspace,
+  loadSettledOpenCode2Catalog,
   makeOpenCode2ModelLoader,
   makePendingOpenCodeProvider,
   openCode2CommandsToServerProviderSlashCommands,
@@ -503,8 +504,8 @@ export const OpenCodeDriver: ProviderDriver<
     );
 
     // A project's own opencode.jsonc can add providers, so its catalog can
-    // differ from the machine's. It settles like the machine catalog does; one
-    // that cannot be read falls back to the machine's. Only a healthy OpenCode 2
+    // differ from the machine's. Only a settled read counts; one that cannot be
+    // read or never settles falls back to the machine's. Only a healthy OpenCode 2
     // reads per-directory catalogs.
     const workspaceModelsCache = yield* Cache.makeWith(
       (cwd: string) =>
@@ -514,18 +515,13 @@ export const OpenCodeDriver: ProviderDriver<
             Effect.flatMap((machine) =>
               !machine.installed || machine.status === "error" || machine.status === "disabled"
                 ? Effect.succeed(Option.none<ReadonlyArray<ServerProviderModel>>())
-                : makeOpenCode2ModelLoader(
+                : loadSettledOpenCode2Catalog(
                     openCode2Server.withConnection(({ client }) =>
                       loadOpenCode2Catalog(client, cwd),
                     ),
                   ).pipe(
-                    Effect.flatten,
-                    // The loader times out to an empty catalog; that is unreadable,
-                    // not empty, even once custom models are added to it.
-                    Effect.map((catalog) =>
-                      catalog.length === 0
-                        ? Option.none()
-                        : Option.some(openCode2ProviderModels(effectiveConfig, catalog)),
+                    Effect.map(
+                      Option.map((catalog) => openCode2ProviderModels(effectiveConfig, catalog)),
                     ),
                   ),
             ),

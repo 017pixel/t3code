@@ -484,6 +484,17 @@ const catalogFingerprint = (models: ReadonlyArray<OpenCode2Model>) =>
     .toSorted()
     .join("\n");
 
+/** True once a non-empty catalog read matches the read before it. */
+const makeCatalogSettled = () => {
+  let previous: string | undefined;
+  return (models: ReadonlyArray<OpenCode2Model>) => {
+    const fingerprint = models.length > 0 ? catalogFingerprint(models) : undefined;
+    const settled = fingerprint !== undefined && fingerprint === previous;
+    previous = fingerprint;
+    return settled;
+  };
+};
+
 /** A cold server can list a partial catalog; two agreeing reads reduce that startup race. */
 export const makeOpenCode2ModelLoader = <E>(
   list: Effect.Effect<ReadonlyArray<OpenCode2Model>, E>,
@@ -491,16 +502,13 @@ export const makeOpenCode2ModelLoader = <E>(
   Effect.sync(() => {
     let lastLoaded: ReadonlyArray<OpenCode2Model> = [];
     return Effect.suspend(() => {
-      let previous: string | undefined;
+      const isSettled = makeCatalogSettled();
       let latest: ReadonlyArray<OpenCode2Model> = [];
       return list.pipe(
         Effect.repeat({
           until: (models) => {
             if (models.length > 0) latest = models;
-            const fingerprint = models.length > 0 ? catalogFingerprint(models) : undefined;
-            const settled = fingerprint !== undefined && fingerprint === previous;
-            previous = fingerprint;
-            return settled;
+            return isSettled(models);
           },
           schedule: Schedule.spaced("250 millis"),
         }),
@@ -514,6 +522,22 @@ export const makeOpenCode2ModelLoader = <E>(
         }),
       );
     });
+  });
+
+/**
+ * The settled catalog only, or none when reads never agreed within the timeout.
+ * A project catalog has the machine's to fall back on, so a partial read must
+ * not stand in for it.
+ */
+export const loadSettledOpenCode2Catalog = <E>(
+  list: Effect.Effect<ReadonlyArray<OpenCode2Model>, E>,
+) =>
+  Effect.suspend(() => {
+    const isSettled = makeCatalogSettled();
+    return list.pipe(
+      Effect.repeat({ until: isSettled, schedule: Schedule.spaced("250 millis") }),
+      Effect.timeoutOption("5 seconds"),
+    );
   });
 
 export interface OpenCode2Workspace {

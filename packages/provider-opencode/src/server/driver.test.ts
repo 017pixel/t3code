@@ -243,6 +243,7 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
     readonly project: string;
     readonly failProject?: boolean;
     readonly hangProject?: { current: boolean };
+    readonly unsettledProject?: { current: boolean };
   }) =>
     Effect.sync(() => {
       const model = (providerID: string, id: string, name: string) => ({
@@ -289,6 +290,10 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
             return json({ error: "unreadable opencode.jsonc" }, 500);
           }
           if (directory === input.project && input.hangProject?.current) return Effect.never;
+          if (directory === input.project && input.unsettledProject?.current) {
+            const partial = model("uni", `partial-${projectRequests.length}`, "Partial");
+            return json({ location: { directory }, data: [globalModel, partial] });
+          }
           return json({
             location: { directory },
             data: directory === input.project ? [globalModel, projectModel] : [globalModel],
@@ -384,6 +389,38 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
       assert.strictEqual(yield* Fiber.join(timedOut), undefined);
 
       hangProject.current = false;
+      yield* TestClock.adjust("30 seconds");
+      assert.deepStrictEqual(
+        (yield* settled(instance.modelsForCwd!(project)))?.map((entry) => entry.slug),
+        ["opencode/big-pickle", "uni/medium-gpt"],
+      );
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("falls back to the machine catalog when project reads never agree", () =>
+    Effect.gen(function* () {
+      const project = "/work/unsettled-config";
+      const unsettledProject = { current: true };
+      const server = yield* workspaceModelServer({ project, unsettledProject });
+      const instance = yield* readyInstance(server.client);
+
+      const timedOut = yield* Effect.forkChild(instance.modelsForCwd!(project));
+      yield* TestClock.adjust("5 seconds");
+      assert.strictEqual(yield* Fiber.join(timedOut), undefined);
+      const attempts = server.projectRequests.length;
+      assert.ok(attempts > 1);
+
+      // Neither the cache nor the project snapshot holds any of the partial reads.
+      assert.strictEqual(yield* instance.modelsForCwd!(project), undefined);
+      const projectSnapshot = yield* settled(instance.snapshotForCwd!(project));
+      assert.strictEqual(projectSnapshot.workspaceModels, undefined);
+      assert.deepStrictEqual(
+        projectSnapshot.models.map((entry) => entry.slug),
+        ["opencode/big-pickle"],
+      );
+      assert.ok(server.projectRequests.slice(attempts).every((path) => path !== "/api/model"));
+
+      unsettledProject.current = false;
       yield* TestClock.adjust("30 seconds");
       assert.deepStrictEqual(
         (yield* settled(instance.modelsForCwd!(project)))?.map((entry) => entry.slug),
