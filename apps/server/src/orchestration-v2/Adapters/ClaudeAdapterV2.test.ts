@@ -3446,6 +3446,90 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
+  // regression: #17270 assistant text streams before the completed snapshot
+  it.effect("streams Claude assistant text deltas before the final snapshot", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("text-stream-attempt"),
+          text: "Explain the printing press.",
+          attachments: [],
+        }),
+      );
+      const stream = (event: unknown) =>
+        claudeSdkFrame({
+          type: "stream_event",
+          event,
+          parent_tool_use_id: null,
+          session_id: WAKE_NATIVE_SESSION,
+          uuid: "text-stream-frame",
+        });
+      const assistantMessages = () =>
+        harness.events.flatMap((event) =>
+          event.type === "message.updated" && event.message.role === "assistant"
+            ? [event.message]
+            : [],
+        );
+      for (const frame of [
+        stream({ type: "message_start", message: { id: "answer-message" } }),
+        stream({
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        }),
+        stream({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "Movable type " },
+        }),
+        stream({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "changed Europe." },
+        }),
+      ]) {
+        yield* harness.offerAndWait(frame);
+      }
+      yield* TestClock.adjust("1 second");
+      assert.include(
+        assistantMessages().map((message) => message.text),
+        "Movable type changed Europe.",
+      );
+
+      yield* harness.offerAndWait(stream({ type: "content_block_stop", index: 0 }));
+      yield* harness.offerAndWait(
+        claudeSdkFrame({
+          ...makeAssistantTextFrame({
+            uuid: "answer-snapshot",
+            text: "Movable type changed Europe.",
+          }),
+          message: {
+            ...makeAssistantTextFrame({ uuid: "answer-snapshot", text: "" }).message,
+            id: "answer-message",
+            content: [{ type: "text", text: "Movable type changed Europe." }],
+          },
+        } as SDKMessage),
+      );
+      yield* Queue.offer(
+        harness.sdkMessages,
+        makeResultFrame({ uuid: "text-stream-result", result: "Movable type changed Europe." }),
+      );
+      yield* Queue.take(harness.terminalReceipts);
+      const messages = assistantMessages();
+      assert.equal(new Set(messages.map((message) => message.id)).size, 1);
+      assert.equal(messages.at(-1)?.text, "Movable type changed Europe.");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
   // regression: #15892 non-execution metadata is carried through, not guessed from result text
   it.effect.each(["cancelled", "denied", "permission_denied", undefined])(
     "preserves native tool non-execution metadata %s without inferring a denial from text",
