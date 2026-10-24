@@ -10,9 +10,14 @@ if (HostProcess.Platform.defaultValue() !== "darwin") {
     "Native markdown source tests require macOS Foundation and the Apple clang toolchain.",
   );
 }
+const [dependencyPathOrMode, explicitMode, ...extraArguments] = process.argv.slice(2);
+const isMode = (argument) => ["cache", "coordinator"].includes(argument);
+const modeOnly = isMode(dependencyPathOrMode);
+const mode = modeOnly ? dependencyPathOrMode : explicitMode;
 if (
-  process.argv.slice(3).some((argument) => !["cache", "coordinator"].includes(argument)) ||
-  process.argv.length > 4
+  extraArguments.length > 0 ||
+  (modeOnly && explicitMode !== undefined) ||
+  (mode !== undefined && !isMode(mode))
 ) {
   throw new Error(
     "Usage: node scripts/test-enriched-markdown-native.mjs [dependency-path] [cache|coordinator]",
@@ -22,8 +27,8 @@ if (
 // Foundation-only source harness: no simulator, app build, UIKit, or React Native runtime.
 const here = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const dependency = NodeFS.realpathSync(
-  process.argv[2]
-    ? NodePath.resolve(process.argv[2])
+  dependencyPathOrMode && !modeOnly
+    ? NodePath.resolve(dependencyPathOrMode)
     : NodePath.join(here, "../node_modules/react-native-enriched-markdown"),
 );
 const temporary = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-markdown-native-"));
@@ -62,7 +67,7 @@ try {
     ],
     { stdio: "inherit" },
   );
-  NodeChildProcess.execFileSync(executable, process.argv.slice(3), { stdio: "inherit" });
+  NodeChildProcess.execFileSync(executable, mode ? [mode] : [], { stdio: "inherit" });
 } finally {
   NodeFS.rmSync(temporary, { recursive: true, force: true });
 }
