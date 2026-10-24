@@ -75,6 +75,9 @@ const SLOW_SERVER = [
   "",
 ].join("\n");
 
+// The launcher mounts only under setsid, which stock macOS and Windows lack; there it extracts instead.
+const hasSetsid = NodeChildProcess.spawnSync("setsid", ["true"]).status === 0;
+
 const lines = (stream: NodeJS.ReadableStream) => {
   const seen: Array<string> = [];
   const waiters: Array<() => void> = [];
@@ -98,7 +101,7 @@ const lines = (stream: NodeJS.ReadableStream) => {
 };
 
 describe("renderCliShim", () => {
-  it.each(["SIGTERM", "SIGHUP"] as const)(
+  it.skipIf(!hasSetsid).each(["SIGTERM", "SIGHUP"] as const)(
     "keeps the AppImage mounted until the server exits after %s to the process group",
     async (signal) => {
       const { root, shim } = fakeAppImage(true, SLOW_SERVER);
@@ -117,8 +120,8 @@ describe("renderCliShim", () => {
 
         // Ctrl-C in a terminal, a closed SSH session, or a service manager signals the whole group.
         process.kill(-child.pid!, signal);
-        // The shell runs pending traps in signal order, so a mounter that also got the group
-        // signal unmounts before it can answer this probe.
+        // The shell runs pending traps in ascending signal number, and WINCH outnumbers TERM and
+        // HUP, so a mounter that also got the group signal unmounts before it answers this probe.
         process.kill(mounter, "SIGWINCH");
         const mount = await events.until((line) => line === "mounted" || line === "unmounted");
         expect(mount).toBe("mounted");
