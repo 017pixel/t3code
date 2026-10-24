@@ -72,7 +72,6 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import {
   classifyMarkdownImageSource,
-  markdownImageMediaPath,
   markdownImageSourceFragment,
 } from "@t3tools/client-runtime/markdown-images";
 import { resolveViewedImageAsset } from "@t3tools/client-runtime/work-log/presentation";
@@ -2452,7 +2451,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         resource={{
           _tag: "media-file",
           threadId: props.threadId,
-          path: markdownImageMediaPath(image.href, imageSource.path, props.workspaceRoot),
+          path: imageSource.path,
         }}
         alt={image.alt}
         srcFragment={markdownImageSourceFragment(image.href)}

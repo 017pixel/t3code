@@ -1,6 +1,5 @@
 import {
   classifyMarkdownImageSource,
-  markdownImageMediaPath,
   markdownImageSourceFragment,
 } from "@t3tools/client-runtime/markdown-images";
 import { splitFilePathPosition } from "@t3tools/shared/fileLinks";
@@ -60,11 +59,7 @@ export function resolveMarkdownMediaPreview(
       }
       if (input.captured) return null;
       const resource = input.threadId
-        ? {
-            _tag: "media-file" as const,
-            threadId: input.threadId,
-            path: markdownImageMediaPath(href, path, input.workspaceRoot),
-          }
+        ? { _tag: "media-file" as const, threadId: input.threadId, path }
         : input.workspaceRoot
           ? { _tag: "draft-workspace-file" as const, cwd: input.workspaceRoot, path }
           : null;
