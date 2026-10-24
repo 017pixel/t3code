@@ -9,6 +9,7 @@ import {
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
+  RunId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2ShellSnapshot,
@@ -298,12 +299,66 @@ describe("mobile SQLite environment cache store", () => {
       delete partial.snapshot.projection.visibleTurnItems;
       const invalidItem = JSON.parse(raw);
       delete invalidItem.snapshot.projection.visibleTurnItems[1].item.message;
-      for (const invalid of ["{broken", JSON.stringify(partial), JSON.stringify(invalidItem)]) {
+      const corruptions = [
+        partial,
+        invalidItem,
+        ...[
+          (value: typeof partial) => {
+            delete value.snapshot.turnItemCount;
+          },
+          (value: typeof partial) => {
+            delete value.snapshot.turnItemsOmitLocalVisible;
+          },
+          (value: typeof partial) => {
+            value.snapshot.turnItemsOmitLocalVisible = false;
+          },
+          (value: typeof partial) => {
+            value.snapshot.projection.visibleTurnItems.pop();
+          },
+          (value: typeof partial) => {
+            value.snapshot.projection.visibleTurnItems.shift();
+          },
+          (value: typeof partial) => {
+            value.snapshot.projection.turnItems.pop();
+          },
+          (value: typeof partial) => {
+            value.snapshot.turnItemCount = 0;
+          },
+          (value: typeof partial) => {
+            value.snapshot.projection.visibleTurnItems[1].sourceItemId = "wrong-item";
+          },
+          (value: typeof partial) => {
+            value.snapshot.projection.visibleTurnItems[1].visibility = "inherited";
+          },
+          (value: typeof partial) => {
+            value.snapshot.projection.visibleTurnItems[1].item.threadId = "wrong-thread";
+          },
+          (value: typeof partial) => {
+            value.snapshot.projection.thread.id = "wrong-thread";
+          },
+          (value: typeof partial) => {
+            value.snapshot.projection.turnItems.push(
+              value.snapshot.projection.visibleTurnItems[1].item,
+            );
+          },
+          (value: typeof partial) => {
+            value.snapshot.projection.visibleTurnItems.push(
+              value.snapshot.projection.visibleTurnItems[1],
+            );
+          },
+        ].map((corrupt) => {
+          const value = JSON.parse(raw);
+          corrupt(value);
+          return value;
+        }),
+      ];
+      const invalidRecords = ["{broken", ...corruptions.map((value) => JSON.stringify(value))];
+      for (const invalid of invalidRecords) {
         memory.values.set(id, invalid);
         expect(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID)).toEqual(Option.none());
         expect(memory.values.has(id)).toBe(false);
       }
-      expect(memory.removed).toEqual([id, id, id]);
+      expect(memory.removed).toEqual(invalidRecords.map(() => id));
       yield* store.saveThread(ENVIRONMENT_ID, threadSnapshotWithItems());
       expect(Option.getOrThrow(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID))).toEqual(
         threadSnapshotWithItems(),
@@ -320,6 +375,28 @@ describe("mobile SQLite environment cache store", () => {
       const original = threadSnapshotWithItems();
       const local = original.projection.visibleTurnItems[1]!;
       const synthetic = { ...local.item, id: TurnItemId.make("synthetic-notice"), ordinal: 12 };
+      const fork = {
+        id: TurnItemId.make("fork-marker"),
+        threadId: THREAD_ID,
+        runId: null,
+        nodeId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 0,
+        status: "completed" as const,
+        title: null,
+        startedAt: null,
+        completedAt: NOW,
+        updatedAt: NOW,
+        type: "fork" as const,
+        source: {
+          type: "run" as const,
+          threadId: ThreadId.make("parent-thread"),
+          runId: RunId.make("parent-run"),
+        },
+        targetThreadId: THREAD_ID,
+      };
       const snapshot = {
         ...original,
         projection: {
@@ -335,6 +412,13 @@ describe("mobile SQLite environment cache store", () => {
               sourceItemId: synthetic.id,
               item: synthetic,
             },
+            {
+              position: 3,
+              visibility: "synthetic" as const,
+              sourceThreadId: fork.source.threadId,
+              sourceItemId: fork.id,
+              item: fork,
+            },
           ],
         },
       };
@@ -344,6 +428,8 @@ describe("mobile SQLite environment cache store", () => {
       expect(encoded.schemaVersion).toBe(5);
       expect(memory.schemaVersions.get(id)).toBe(5);
       expect(encoded.snapshot.turnItemsOmitLocalVisible).toBe(true);
+      expect(encoded.snapshot.turnItemCount).toBe(3);
+      expect(encoded.snapshot.visibleTurnItemCount).toBe(4);
       expect(encoded.snapshot.projection.turnItems.map((item: { id: string }) => item.id)).toEqual([
         "hidden-notice",
       ]);
@@ -351,6 +437,8 @@ describe("mobile SQLite environment cache store", () => {
       const loaded = Option.getOrThrow(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID));
       expect(loaded).toEqual(snapshot);
       expect(loaded).not.toHaveProperty("turnItemsOmitLocalVisible");
+      expect(loaded).not.toHaveProperty("turnItemCount");
+      expect(loaded).not.toHaveProperty("visibleTurnItemCount");
       expect(loaded.projection.turnItems[0]).toBe(loaded.projection.visibleTurnItems[0]!.item);
       expect(loaded.projection.turnItems[1]).toBe(loaded.projection.visibleTurnItems[2]!.item);
       expect(snapshot.projection.turnItems).toHaveLength(3);
@@ -375,7 +463,8 @@ describe("mobile SQLite environment cache store", () => {
         const raw = memory.values.get(cacheId(ENVIRONMENT_ID, "thread", THREAD_ID))!;
         const encoded = JSON.parse(raw);
         expect(encoded.schemaVersion).toBe(5);
-        expect(encoded.snapshot).not.toHaveProperty("turnItemsOmitLocalVisible");
+        expect(encoded.snapshot.turnItemsOmitLocalVisible).toBe(false);
+        expect(encoded.snapshot.turnItemCount).toBe(2);
         expect(encoded.snapshot.projection.turnItems).toHaveLength(2);
         expect(Option.getOrThrow(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID))).toEqual(
           snapshot,
