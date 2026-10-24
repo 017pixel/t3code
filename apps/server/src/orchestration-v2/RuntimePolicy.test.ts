@@ -3,6 +3,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   type ModelSelection,
@@ -81,6 +82,7 @@ const providerInstanceFor = (instanceId: ProviderInstanceId) =>
 
 const layerWithProjectRoot = (workspaceRoot: string) =>
   RuntimePolicy.layerFromProjectStore.pipe(
+    Layer.provide(NodeServices.layer),
     Layer.provide(
       Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
         getInstance: (instanceId) => Effect.succeed(providerInstanceFor(instanceId)),
