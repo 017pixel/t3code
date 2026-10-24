@@ -21,9 +21,10 @@ unlinking the machine from T3 Connect also ends it. You can send or dismiss gues
 
 ## What the guest sees
 
-The guest sees the last three turns before you shared the thread and everything after. They see
-messages, plans, and the agent's questions to you. Tool calls appear as one line, such as "Ran a
-command", without commands, file contents, or output.
+The guest sees the last three turns before you shared the thread and everything after, in the same
+timeline you see, as it streams. They see messages, plans, the agent's questions, and its work:
+commands, file names, searches, and tool names. They do not see command output, diffs, file
+contents, the agent's reasoning, or what you answer in approval prompts.
 
 The agent's replies can still repeat something it read, such as a value from a file. Share only
 threads you are comfortable showing.

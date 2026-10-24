@@ -1,0 +1,404 @@
+import {
+  type GuestRun,
+  type GuestShareView,
+  type GuestStreamEvent,
+  type GuestTurnItem,
+  type OrchestrationV2AppThread,
+  type OrchestrationV2Run,
+  type OrchestrationV2ThreadProjection,
+  type OrchestrationV2TurnItem,
+  orchestrationV2RunWorkStartedAt,
+} from "@t3tools/contracts";
+import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
+import * as DateTime from "effect/DateTime";
+
+import { projectTurnItemForWire } from "../orchestration-v2/WireProjection.ts";
+
+/**
+ * The guest sees the thread as the owner sees it with every row collapsed: what ran and how it
+ * ended, never output, diffs, or anything that points at another thread. Every guest object is
+ * built by picking fields, so a field added to a domain type stays on the server until someone
+ * adds it here. The guest stream schema backs this up when it encodes.
+ */
+
+/** Absolute directories whose paths a guest sees relative to them, longest first. */
+export type GuestPathRoots = ReadonlyArray<string>;
+
+export function guestPathRoots(roots: ReadonlyArray<string | null | undefined>): GuestPathRoots {
+  return roots
+    .flatMap((root) => {
+      const trimmed = root?.replace(/[\\/]+$/u, "");
+      // A filesystem root would turn every path relative, so it is not a workspace.
+      return trimmed && /[^\\/:]/u.test(trimmed.replace(/^[A-Za-z]:/u, "")) ? [trimmed] : [];
+    })
+    .toSorted((left, right) => right.length - left.length);
+}
+
+const isAbsolutePath = (path: string) => /^(?:[\\/]|[A-Za-z]:[\\/])/u.test(path);
+
+/** A path inside a root becomes relative to it; any other absolute path keeps its base name. */
+function guestPath(path: string, roots: GuestPathRoots): string {
+  for (const root of roots) {
+    if (path === root) return ".";
+    if (path.startsWith(`${root}/`) || path.startsWith(`${root}\\`)) {
+      return path.slice(root.length + 1) || ".";
+    }
+  }
+  return isAbsolutePath(path) ? (path.split(/[\\/]/u).findLast(Boolean) ?? ".") : path;
+}
+
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+/** Rewrites the workspace roots inside free text, such as a command, to relative paths. */
+function guestText(text: string, roots: GuestPathRoots): string {
+  let result = text;
+  for (const root of roots) {
+    if (!result.includes(root)) continue;
+    // The root itself, or the root plus a separator, but not a sibling such as `<root>-old`.
+    result = result.replace(
+      new RegExp(`${escapeRegExp(root)}(?:[\\\\/]|(?![\\w.-]))`, "gu"),
+      (match) => (match.length > root.length ? "" : "."),
+    );
+  }
+  return result;
+}
+
+function guestBase(
+  item: OrchestrationV2TurnItem,
+  runId: NonNullable<OrchestrationV2TurnItem["runId"]>,
+) {
+  return {
+    id: item.id,
+    threadId: item.threadId,
+    runId,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: item.parentItemId,
+    ordinal: item.ordinal,
+    status: item.status,
+    title: null,
+    startedAt: item.startedAt,
+    completedAt: item.completedAt,
+    updatedAt: item.updatedAt,
+  } as const;
+}
+
+type Projector<T extends OrchestrationV2TurnItem["type"]> = (
+  item: Extract<OrchestrationV2TurnItem, { readonly type: T }>,
+  base: ReturnType<typeof guestBase>,
+  roots: GuestPathRoots,
+) => GuestTurnItem | null;
+
+const drop = () => null;
+
+/**
+ * One policy per item type. A new type fails to compile here until someone decides what a guest
+ * sees of it.
+ */
+const GUEST_PROJECTORS: { readonly [T in OrchestrationV2TurnItem["type"]]: Projector<T> } = {
+  user_message: (item, base) => {
+    // Scheduled, cross-thread, agent-sent, and workflow messages can carry webhook bodies, other
+    // threads' results, or scripts, so only messages a person typed into this thread pass.
+    if (
+      item.createdBy !== "user" ||
+      item.scheduledTaskId !== undefined ||
+      item.senderThreadId !== undefined ||
+      item.workflowScript === true
+    ) {
+      return null;
+    }
+    const guest = item.context?.guest;
+    return {
+      ...base,
+      type: "user_message",
+      createdBy: item.createdBy,
+      creationSource: item.creationSource,
+      messageId: item.messageId,
+      inputIntent: item.inputIntent,
+      text: item.text,
+      ...(guest === undefined
+        ? {}
+        : {
+            context: {
+              version: 1,
+              guest: { guestMessageId: guest.guestMessageId, name: guest.name, text: guest.text },
+              records: [],
+            },
+          }),
+      attachments: [],
+    };
+  },
+  assistant_message: (item, base) => ({
+    ...base,
+    type: "assistant_message",
+    messageId: item.messageId,
+    text: item.text,
+    streaming: item.streaming,
+  }),
+  reasoning: (item, base) => ({ ...base, type: "reasoning", text: "", streaming: item.streaming }),
+  proposed_plan: (item, base) => ({
+    ...base,
+    type: "proposed_plan",
+    planId: item.planId,
+    markdown: item.markdown,
+    streaming: item.streaming,
+  }),
+  user_input_request: (item, base) => ({
+    ...base,
+    type: "user_input_request",
+    requestId: item.requestId,
+    questions: item.questions.map((question) => ({
+      id: question.id,
+      header: question.header,
+      question: question.question,
+      options: question.options.map((option) => ({
+        label: option.label,
+        description: option.description,
+      })),
+      ...(question.multiSelect === undefined ? {} : { multiSelect: question.multiSelect }),
+    })),
+  }),
+  file_change: (item, base, roots) => ({
+    ...base,
+    type: "file_change",
+    fileName: guestPath(item.fileName, roots),
+    ...(item.additions === undefined ? {} : { additions: item.additions }),
+    ...(item.deletions === undefined ? {} : { deletions: item.deletions }),
+    ...(item.changes === undefined
+      ? {}
+      : {
+          changes: item.changes.map((change) => ({
+            operation: change.operation,
+            path: guestPath(change.path, roots),
+            ...(change.oldPath === undefined ? {} : { oldPath: guestPath(change.oldPath, roots) }),
+          })),
+        }),
+  }),
+  command_execution: (item, base, roots) => ({
+    ...base,
+    type: "command_execution",
+    input: guestText(item.input, roots),
+    ...(item.outputIndicatesFailure === undefined
+      ? {}
+      : { outputIndicatesFailure: item.outputIndicatesFailure }),
+    ...(item.exitCode === undefined ? {} : { exitCode: item.exitCode }),
+  }),
+  file_search: (item, base, roots) => ({
+    ...base,
+    type: "file_search",
+    ...(item.pattern === undefined ? {} : { pattern: guestText(item.pattern, roots) }),
+    ...(item.results === undefined
+      ? {}
+      : {
+          results: item.results.map((result) => ({
+            fileName: guestPath(result.fileName, roots),
+            ...(result.line === undefined ? {} : { line: result.line }),
+            ...(result.column === undefined ? {} : { column: result.column }),
+          })),
+        }),
+  }),
+  web_search: (item, base) => ({
+    ...base,
+    type: "web_search",
+    ...(item.patterns === undefined ? {} : { patterns: item.patterns }),
+    ...(item.results === undefined
+      ? {}
+      : {
+          results: item.results.map((result) => ({
+            ...(result.title === undefined ? {} : { title: result.title }),
+            ...(result.url === undefined ? {} : { url: result.url }),
+          })),
+        }),
+  }),
+  approval_request: (item, base) => ({
+    ...base,
+    type: "approval_request",
+    requestId: item.requestId,
+    requestKind: item.requestKind,
+  }),
+  run_interrupt_request: (item, base, roots) => ({
+    ...base,
+    type: item.type,
+    message: guestText(item.message, roots),
+  }),
+  run_interrupt_result: (item, base, roots) => ({
+    ...base,
+    type: item.type,
+    message: guestText(item.message, roots),
+  }),
+  system_notice: (item, base, roots) => ({
+    ...base,
+    type: item.type,
+    message: guestText(item.message, roots),
+  }),
+  error: (item, base, roots) => ({
+    ...base,
+    type: "error",
+    failure: {
+      class: item.failure.class,
+      message: guestText(item.failure.message, roots),
+      code: item.failure.code,
+      retryable: item.failure.retryable,
+      ...(item.failure.resetAt === undefined ? {} : { resetAt: item.failure.resetAt }),
+    },
+    ...(item.retry === undefined
+      ? {}
+      : {
+          retry: {
+            attempt: item.retry.attempt,
+            maxAttempts: item.retry.maxAttempts,
+            retryDelayMs: item.retry.retryDelayMs,
+          },
+        }),
+  }),
+  compaction: (item, base) => ({
+    ...base,
+    type: "compaction",
+    driver: item.driver,
+    ...(item.beforeTokenCount === undefined ? {} : { beforeTokenCount: item.beforeTokenCount }),
+    ...(item.afterTokenCount === undefined ? {} : { afterTokenCount: item.afterTokenCount }),
+  }),
+  subagent: (item, base) => ({
+    ...base,
+    type: "subagent",
+    subagentId: item.subagentId,
+    origin: item.origin,
+    driver: item.driver,
+    providerInstanceId: item.providerInstanceId,
+    childThreadId: null,
+    prompt: "",
+    result: null,
+  }),
+  // Input and output can hold anything. A published visual keeps its reference, which the guest
+  // loads through the render route; an MCP app keeps nothing, so its frame never mounts.
+  dynamic_tool: (item, base) => {
+    const htmlRender = item.status === "completed" ? htmlRenderFromToolItem(item) : undefined;
+    return {
+      ...base,
+      type: "dynamic_tool",
+      toolName: item.toolName,
+      input: null,
+      ...(htmlRender === undefined
+        ? {}
+        : {
+            output: {
+              htmlRender: {
+                attachmentId: htmlRender.attachmentId,
+                title: htmlRender.title,
+                height: htmlRender.height,
+                ...(htmlRender.heights === undefined ? {} : { heights: htmlRender.heights }),
+              },
+            },
+          }),
+    };
+  },
+  // Not timeline rows.
+  todo_list: drop,
+  checkpoint: drop,
+  // These point at other threads, other providers' sessions, or the owner's secret prompt.
+  notification: drop,
+  handoff: drop,
+  fork: drop,
+  thread_created: drop,
+  secret_request: drop,
+};
+
+/**
+ * What a guest sees of one item, or null when it sees nothing. Items outside a run are dropped:
+ * they cannot be placed against the share's history window.
+ */
+export function projectTurnItemForGuest(
+  item: OrchestrationV2TurnItem,
+  roots: GuestPathRoots,
+): GuestTurnItem | null {
+  const runId = item.runId;
+  // Older clients and servers can store types this build does not know.
+  const project = Object.hasOwn(GUEST_PROJECTORS, item.type)
+    ? (GUEST_PROJECTORS[item.type] as Projector<typeof item.type>)
+    : undefined;
+  if (runId === null || project === undefined) return null;
+  const wire = projectTurnItemForWire(item);
+  return project(wire, guestBase(wire, runId), roots);
+}
+
+export function projectRunForGuest(run: OrchestrationV2Run): GuestRun {
+  return {
+    id: run.id,
+    ordinal: run.ordinal,
+    status: run.status,
+    requestedAt: DateTime.formatIso(run.requestedAt),
+    startedAt: run.startedAt === null ? null : DateTime.formatIso(run.startedAt),
+    completedAt: run.completedAt === null ? null : DateTime.formatIso(run.completedAt),
+    workStartedAt: DateTime.formatIso(orchestrationV2RunWorkStartedAt(run)),
+  };
+}
+
+export const isGuestVisibleRun = (
+  run: Pick<OrchestrationV2Run, "ordinal">,
+  historyStartRunOrdinal: number,
+) => run.ordinal >= historyStartRunOrdinal;
+
+/**
+ * The runs and items a guest's snapshot starts from: runs from the share's history window on,
+ * and this thread's own items in them. Rows inherited from a fork source belong to another
+ * thread.
+ */
+export function projectSnapshotForGuest(
+  projection: Pick<OrchestrationV2ThreadProjection, "runs" | "visibleTurnItems">,
+  historyStartRunOrdinal: number,
+  roots: GuestPathRoots,
+): { readonly runs: ReadonlyArray<GuestRun>; readonly items: ReadonlyArray<GuestTurnItem> } {
+  const runs = projection.runs.filter((run) => isGuestVisibleRun(run, historyStartRunOrdinal));
+  const runIds = new Set(runs.map((run) => run.id));
+  const items = projection.visibleTurnItems.flatMap((entry) => {
+    if (entry.visibility !== "local" || entry.item.runId === null) return [];
+    if (!runIds.has(entry.item.runId)) return [];
+    const item = projectTurnItemForGuest(entry.item, roots);
+    return item === null ? [] : [item];
+  });
+  return { runs: runs.map(projectRunForGuest), items };
+}
+
+export function guestShareView(thread: OrchestrationV2AppThread): GuestShareView | null {
+  const share = thread.guestShare;
+  if (!share || share.guestName === null) return null;
+  return {
+    shareId: share.id,
+    title: thread.title,
+    guestName: share.guestName,
+    expiresAt: share.expiresAt,
+    messages: share.messages,
+  };
+}
+
+/**
+ * Keeps the last `item`, `run`, and `view` per id in a batch, at the place the first one held,
+ * so a streaming reply sends one update per window and new items still arrive in order.
+ */
+export function coalesceGuestEvents(
+  events: ReadonlyArray<GuestStreamEvent>,
+): ReadonlyArray<GuestStreamEvent> {
+  const slots = new Map<string, number>();
+  const result: GuestStreamEvent[] = [];
+  for (const event of events) {
+    const key =
+      event.type === "item"
+        ? `item:${event.item.id}`
+        : event.type === "run"
+          ? `run:${event.run.id}`
+          : event.type === "view"
+            ? "view"
+            : null;
+    const slot = key === null ? undefined : slots.get(key);
+    if (slot !== undefined) {
+      result[slot] = event;
+      continue;
+    }
+    if (key !== null) slots.set(key, result.length);
+    result.push(event);
+    if (event.type === "ended") break;
+  }
+  return result;
+}

@@ -1,4 +1,5 @@
 import {
+  EnvironmentId,
   GUEST_MESSAGE_MAX_LENGTH,
   GUEST_NAME_MAX_LENGTH,
   GUEST_ROUTE_PREFIX,
@@ -7,26 +8,41 @@ import {
   type GuestRedeemRequest,
   type GuestShareView,
   type GuestSubmitRequest,
-  type GuestTranscriptItem,
   type ThreadGuestMessage,
   type ThreadGuestMessageStatus,
 } from "@t3tools/contracts";
+import type { LegendListRef } from "@legendapp/list/react";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { ArrowUpIcon, CircleDashedIcon } from "lucide-react";
-import { useEffect, useReducer, useState, type FormEvent, type KeyboardEvent } from "react";
+import { ArrowUpIcon } from "lucide-react";
+import {
+  createRef,
+  useEffect,
+  useReducer,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
 
+import { useIncrementalTimelineEntries } from "~/hooks/useIncrementalTimelineEntries";
 import { useNowMinute } from "~/hooks/useNowMinute";
+import { useStableCallback } from "~/hooks/useStableCallback";
+import { useTheme } from "~/hooks/useTheme";
 import { cn } from "~/lib/utils";
-import ChatMarkdown from "../ChatMarkdown";
+import type { ChatComposerHandle } from "../chat/ChatComposer";
 import { GuestMessageName, guestBubbleClassName } from "../chat/guestMessageStyle";
+import { MessagesTimeline } from "../chat/MessagesTimeline";
+import { ScrollToEndButton } from "../chat/TimelineOverlays";
+import type { TimelineRow } from "../chat/timelineRowContext";
+import { useTimelineFollow } from "../chat/useTimelineFollow";
 import { GuestHtmlRender } from "./GuestHtmlRender";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import {
   applyGuestStreamEvent,
+  deriveGuestActivity,
   formatGuestExpiry,
-  groupGuestTranscript,
   initialGuestStreamState,
   inviteShareId,
   type GuestStreamState,
@@ -222,7 +238,12 @@ function GuestSession({ shareId }: { readonly shareId: string }) {
   }
   if (stream.view !== null) {
     return (
-      <GuestThread view={stream.view} items={stream.items} awaitingRowIds={stream.awaitingRowIds} />
+      <GuestThread
+        view={stream.view}
+        runs={stream.runs}
+        items={stream.items}
+        awaitingRowIds={stream.awaitingRowIds}
+      />
     );
   }
   if (!rejected) return <Notice title="Connecting..." />;
@@ -292,49 +313,120 @@ function NameForm({
   );
 }
 
+// The timeline needs an environment id to key its rows. Nothing behind it loads on this page;
+// see isGuestPage.
+const GUEST_ENVIRONMENT_ID = EnvironmentId.make("guest");
+const NO_COMPOSER = createRef<ChatComposerHandle>();
+const NO_TURN_DIFFS: ReadonlyArray<never> = [];
+const NO_HANDOFF_RUNS: ReadonlyArray<never> = [];
+const NO_OPTIMISTIC_MESSAGES: ReadonlyArray<never> = [];
+const ignore = () => {};
+const ignoreAsync = async () => {};
+
+/**
+ * The owner's timeline, read-only: every action that would reach the owner's machine (fork,
+ * revert, diffs, files, other threads, shell) is left out, so its control does not render.
+ */
 function GuestThread({
-  view: { shareId, title, working, expiresAt, messages },
+  view: { shareId, title, expiresAt, messages },
+  runs,
   items,
   awaitingRowIds,
 }: {
   readonly view: GuestShareView;
-  readonly items: ReadonlyArray<GuestTranscriptItem>;
+  readonly runs: GuestStreamState["runs"];
+  readonly items: GuestStreamState["items"];
   readonly awaitingRowIds: GuestStreamState["awaitingRowIds"];
 }) {
+  // No ":" so the timeline finds no environment thread behind the key.
+  const threadKey = `guest-${shareId}`;
+  const listRef = useRef<LegendListRef | null>(null);
+  const { resolvedTheme } = useTheme();
+  const entries = useIncrementalTimelineEntries(threadKey, {
+    visibleTurnItems: items,
+    optimisticMessages: NO_OPTIMISTIC_MESSAGES,
+  });
+  const activity = deriveGuestActivity(runs);
+  const runningRunId = activity.isWorking ? (activity.run?.runId ?? null) : null;
+  const follow = useTimelineFollow({
+    legendListRef: listRef,
+    composerRef: NO_COMPOSER,
+    composerOverlayElement: null,
+    composerTimelineInset: 0,
+    routeThreadKey: threadKey,
+    activeThreadKey: threadKey,
+    activeThreadId: undefined,
+    // Not a server thread: new turns follow the end instead of anchoring near the top.
+    isServerThread: false,
+    serverProjection: null,
+    threadStatus: "live",
+    activeActivityRun: activity.run,
+    activeRunningTurnId: runningRunId,
+    timelineEntries: entries,
+    timelineAnchorMessageId: null,
+    setTimelineAnchor: ignore,
+  });
+  const renderHtmlRender = useStableCallback(
+    (row: Extract<TimelineRow, { kind: "html-render" }>) => (
+      <GuestHtmlRender itemId={row.id} reference={row.htmlRender} shareId={shareId} />
+    ),
+  );
   const unplaced = unplacedGuestMessages(messages, items, awaitingRowIds);
-  const ownMessageIds = new Set(messages.map((message) => message.id));
   return (
     <>
       <header className="flex shrink-0 items-center gap-3 border-b border-border px-4 py-2.5">
         <h1 className="min-w-0 flex-1 truncate text-sm font-medium">{title}</h1>
-        {working ? (
-          <span className="flex items-center gap-1 text-xs text-info">
-            <CircleDashedIcon aria-hidden className="size-3.5" />
-            Working
-          </span>
-        ) : null}
         <ExpiryLabel expiresAt={expiresAt} />
       </header>
-      {/* column-reverse keeps the view pinned to the newest reply while the reader is at the bottom. */}
-      <div className="scrollbar-gutter-both flex min-h-0 flex-1 flex-col-reverse overflow-y-auto">
-        <ol className={cn(LANE, "flex flex-col gap-4 py-6")}>
-          {groupGuestTranscript(items).map((row) =>
-            row.kind === "work" ? (
-              <li key={row.id}>
-                <p className="truncate text-xs text-muted-foreground">{row.line}</p>
-              </li>
-            ) : (
-              <li key={row.item.id}>
-                <TranscriptItem item={row.item} ownMessageIds={ownMessageIds} shareId={shareId} />
-              </li>
-            ),
-          )}
-          {unplaced.map((message) => (
-            <li key={message.id}>
-              <UnplacedGuestMessage message={message} />
-            </li>
-          ))}
-        </ol>
+      <div className="relative min-h-0 flex-1">
+        <MessagesTimeline
+          listRef={listRef}
+          timelineEntries={entries}
+          isWorking={activity.isWorking}
+          activeTurnInProgress={activity.isWorking}
+          activeTurnStartedAt={activity.workStartedAt}
+          latestRun={activity.run}
+          runningRunId={runningRunId}
+          turnDiffSummaries={NO_TURN_DIFFS}
+          runs={NO_HANDOFF_RUNS}
+          routeThreadKey={threadKey}
+          onOpenThread={ignore}
+          onForkFromRun={ignoreAsync}
+          onRollbackCheckpoint={ignore}
+          supportsConversationRollback={false}
+          onRevertToTurnCount={ignore}
+          isRevertingCheckpoint={false}
+          onImageExpand={ignore}
+          renderHtmlRender={renderHtmlRender}
+          activeThreadEnvironmentId={GUEST_ENVIRONMENT_ID}
+          markdownCwd={undefined}
+          resolvedTheme={resolvedTheme}
+          timestampFormat="locale"
+          workspaceRoot={undefined}
+          anchorMessageId={null}
+          onAnchorReady={ignore}
+          onAnchorSizeChanged={ignore}
+          contentInsetEndAdjustment={0}
+          emptyPlaceholderInset={0}
+          liveFollowEnabled={follow.timelineLiveFollowEnabled}
+          onIsAtEndChange={follow.onIsAtEndChangeStable}
+          onManualNavigation={follow.cancelTimelineLiveFollowForUserNavigationStable}
+          cancelPositionRestoreRef={follow.cancelPositionRestoreRef}
+          footer={
+            unplaced.length === 0 ? null : (
+              <ol className="chat-content-lane flex flex-col gap-4 pb-4">
+                {unplaced.map((message) => (
+                  <li key={message.id}>
+                    <UnplacedGuestMessage message={message} />
+                  </li>
+                ))}
+              </ol>
+            )
+          }
+        />
+        {follow.showScrollToBottom ? (
+          <ScrollToEndButton bottom={4} onScrollToEnd={() => follow.scrollToEnd(true)} />
+        ) : null}
       </div>
       <div className={cn(LANE, "shrink-0 pb-4")}>
         <GuestComposer shareId={shareId} />
@@ -371,91 +463,6 @@ function UnplacedGuestMessage({ message }: { readonly message: ThreadGuestMessag
       </div>
       <p className="me-1 text-2xs text-muted-foreground">{STATUS_LABEL[message.status]}</p>
     </div>
-  );
-}
-
-function TranscriptItem({
-  item,
-  ownMessageIds,
-  shareId,
-}: {
-  readonly item: GuestTranscriptItem;
-  readonly ownMessageIds: ReadonlySet<string>;
-  readonly shareId: string;
-}) {
-  switch (item.kind) {
-    case "user":
-      return (
-        <div className="flex flex-col items-end gap-1">
-          {item.guestMessageId ? (
-            <GuestMessageName
-              name={ownMessageIds.has(item.guestMessageId) ? "You" : (item.guestName ?? "Guest")}
-            />
-          ) : null}
-          <div
-            className={cn(
-              BUBBLE,
-              "text-message-foreground",
-              item.guestMessageId ? guestBubbleClassName(false) : "bg-message",
-            )}
-          >
-            {item.text}
-          </div>
-        </div>
-      );
-    case "assistant":
-      return <GuestMarkdown text={item.text} streaming={item.streaming} />;
-    case "plan":
-      return (
-        <div className="flex flex-col gap-1">
-          <span className="text-xs text-muted-foreground">Plan</span>
-          <GuestMarkdown text={item.text} streaming={item.streaming} />
-        </div>
-      );
-    case "question":
-      return (
-        <div className="flex flex-col gap-3 text-sm">
-          {item.questions.map((question) => (
-            <div key={question.question} className="flex flex-col gap-1">
-              <span className="text-xs text-muted-foreground">{question.header || "Question"}</span>
-              <p>{question.question}</p>
-              {question.options.length > 0 ? (
-                <ul className="list-disc ps-5 text-muted-foreground">
-                  {question.options.map((option) => (
-                    <li key={option}>{option}</li>
-                  ))}
-                </ul>
-              ) : null}
-            </div>
-          ))}
-        </div>
-      );
-    case "tool":
-      return null;
-    case "html-render":
-      return <GuestHtmlRender item={item} shareId={shareId} />;
-  }
-}
-
-/**
- * The app's renderer, so code, diagrams, and math look as they do for the owner. With no `cwd`,
- * thread, or environment, nothing in it can open files or reach the owner's machine.
- */
-function GuestMarkdown({
-  text,
-  streaming,
-}: {
-  readonly text: string;
-  readonly streaming: boolean;
-}) {
-  return (
-    <ChatMarkdown
-      text={text}
-      cwd={undefined}
-      isStreaming={streaming}
-      parseRawHtml={false}
-      className="text-foreground"
-    />
   );
 }
 

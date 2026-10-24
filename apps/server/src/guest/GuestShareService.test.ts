@@ -3,6 +3,7 @@ import { assert, it } from "@effect/vitest";
 import {
   CommandId,
   GuestShareId,
+  MessageId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -25,6 +26,7 @@ import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexA
 import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as GuestShareService from "./GuestShareService.ts";
@@ -60,6 +62,7 @@ const layerConnect = Layer.mock(CloudManagedEndpointRuntime)({
 });
 const layerTest = GuestShareService.layer.pipe(
   Layer.provideMerge(layerOrchestration),
+  Layer.provide(ProjectStore.layer.pipe(Layer.provide(layerDatabase))),
   Layer.provide(layerConnect),
   Layer.provide(ServerSecretStore.layer),
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-guest-share-" })),
@@ -116,6 +119,70 @@ it.effect("spends an invite once and ends the guest stream when the owner stops 
     );
     assert.isTrue(Exit.isFailure(yield* Effect.exit(guestShares.stream(session))));
     assert.isTrue(Exit.isFailure(yield* Effect.exit(guestShares.check(session))));
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("streams the runs and items the guest can see, then the same state on reconnect", () =>
+  Effect.gen(function* () {
+    const { orchestrator, guestShares, credential } = yield* shareThread;
+    const { token: session } = yield* guestShares.redeem({ credential, name: "Sam" });
+    const events = yield* guestShares.stream(session);
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("owner-message"),
+      threadId,
+      messageId: MessageId.make("message:owner"),
+      text: "Fix the login bug",
+      attachments: [],
+      dispatchMode: { type: "defer_start" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.guest-share.close",
+      commandId: CommandId.make("close-after-message"),
+      threadId,
+    });
+    const received = Array.from(yield* Stream.runCollect(events));
+    assert.equal(received[0]?.type, "snapshot");
+    assert.equal(received.at(-1)?.type, "ended");
+    // The run's updates in one batch arrive as one event.
+    assert.equal(received.filter((event) => event.type === "run").length, 1);
+    const message = received.flatMap((event) =>
+      event.type === "item" && event.item.type === "user_message" ? [event.item] : [],
+    );
+    assert.deepEqual(
+      message.map((item) => [item.text, item.title, item.attachments]),
+      [["Fix the login bug", null, []]],
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("starts a stream with the runs and items already in the thread", () =>
+  Effect.gen(function* () {
+    const { orchestrator, guestShares, credential } = yield* shareThread;
+    const { token: session } = yield* guestShares.redeem({ credential, name: "Sam" });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("owner-message-before"),
+      threadId,
+      messageId: MessageId.make("message:before"),
+      text: "Fix the login bug",
+      attachments: [],
+      dispatchMode: { type: "defer_start" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const [snapshot] = Array.from(
+      yield* Stream.runCollect(Stream.take(yield* guestShares.stream(session), 1)),
+    );
+    assert.equal(snapshot?.type, "snapshot");
+    if (snapshot?.type !== "snapshot") return;
+    assert.equal(snapshot.runs.length, 1);
+    assert.include(
+      snapshot.items.map((item) => item.type),
+      "user_message",
+    );
   }).pipe(Effect.provide(layerTest)),
 );
 

@@ -4,6 +4,7 @@ import {
   GUEST_SHARE_PARAM,
   GUEST_SHARE_TTL_MS,
   GuestRedeemRequest,
+  GuestStreamEvent,
   GuestSubmitRequest,
   guestSessionCookieName,
 } from "@t3tools/contracts";
@@ -25,6 +26,9 @@ const NO_STORE = { "cache-control": "no-store" };
 
 const decodeRedeem = Schema.decodeUnknownEffect(GuestRedeemRequest);
 const decodeSubmit = Schema.decodeUnknownEffect(GuestSubmitRequest);
+// Encoding drops every key the guest schema does not declare, so a projector that forgets to strip
+// a field still cannot send it.
+const encodeStreamEvent = Schema.encodeEffect(Schema.fromJsonString(GuestStreamEvent));
 
 const errorResponse = (error: GuestShareAccessError) =>
   HttpServerResponse.json(
@@ -101,7 +105,21 @@ const streamRoute = HttpRouter.add(
     const guestShares = yield* GuestShareService;
     return yield* guestShares.stream(yield* sessionToken).pipe(
       Effect.map((events) => {
-        const data = events.pipe(Stream.map((event) => `data: ${JSON.stringify(event)}\n\n`));
+        const data = events.pipe(
+          Stream.mapEffect((event) =>
+            encodeStreamEvent(event).pipe(
+              Effect.map((json) => [`data: ${json}\n\n`]),
+              // A bug in the guest projector; the guest misses one update instead of the stream.
+              // The error would quote the value, which is exactly what must not spread.
+              Effect.catch(() =>
+                Effect.logWarning("Dropped a guest stream event that failed to encode.", {
+                  type: event.type === "item" ? event.item.type : event.type,
+                }).pipe(Effect.as([])),
+              ),
+            ),
+          ),
+          Stream.flattenIterable,
+        );
         const heartbeat = Stream.tick(HEARTBEAT_INTERVAL).pipe(Stream.map(() => ": ping\n\n"));
         return HttpServerResponse.stream(
           data.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }), Stream.encodeText),

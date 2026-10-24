@@ -212,8 +212,9 @@ interface MessagesTimelineProps {
   paintOnly?: boolean;
   /** Off where another region already speaks the thread's status, like a subagent's bar. */
   announceTurnStatus?: boolean;
-  onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
+  onOpenTurnDiff?: (runId: RunId, filePath?: string) => void;
   onOpenThread: (threadId: OrchestrationV2TurnItem["threadId"]) => void;
+  renderHtmlRender?: TimelineRowSharedState["renderHtmlRender"];
   parentThreadLink?: {
     readonly threadId: ThreadId;
     readonly title: string;
@@ -328,6 +329,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   announceTurnStatus = true,
   onOpenTurnDiff,
   onOpenThread,
+  renderHtmlRender,
   parentThreadLink = null,
   workflowOpening = null,
   onForkFromRun,
@@ -931,6 +933,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     openPullRequest,
     onOpenTurnDiff,
     onOpenThread,
+    renderHtmlRender,
     workflowOpening,
     onForkFromRun,
     onRollbackCheckpoint,

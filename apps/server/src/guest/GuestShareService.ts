@@ -10,7 +10,6 @@ import {
   type GuestStreamEvent,
   type GuestSubmitRequest,
   type OrchestrationV2AppThread,
-  type OrchestrationV2Run,
   type RunId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -38,13 +37,16 @@ import * as ServerConfig from "../config.ts";
 import { CloudManagedEndpointRuntime } from "../cloud/ManagedEndpointRuntime.ts";
 import { GUEST_FAILURE } from "../orchestration-v2/GuestShareDecider.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import {
-  guestItemEvent,
-  guestItemText,
+  coalesceGuestEvents,
+  guestPathRoots,
   guestShareView,
-  guestTranscriptItem,
   isGuestVisibleRun,
-} from "./guestTranscript.ts";
+  projectRunForGuest,
+  projectSnapshotForGuest,
+  projectTurnItemForGuest,
+} from "./guestProjection.ts";
 
 const SIGNING_SECRET_NAME = "guest-share-signing-key";
 const SHARE_ID_BYTES = 16;
@@ -52,12 +54,10 @@ const INVITE_SIGNATURE_BYTES = 16;
 const SNAPSHOT_ROW_LIMIT = 600;
 const HOST_RECHECK_INTERVAL = Duration.seconds(30);
 const SNAPSHOT_USER_TURN_LIMIT = 20;
-const WORKING_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
-  "preparing",
-  "starting",
-  "running",
-  "waiting",
-]);
+// Streaming text and running tools update many times a second; the owner's stream batches the
+// same way (see ThreadLiveEventCoalescer).
+const LIVE_COALESCE_WINDOW = Duration.millis(50);
+const LIVE_COALESCE_MAX_EVENTS = 512;
 
 const GUEST_ACCESS_MESSAGES = {
   ...GUEST_FAILURE,
@@ -147,6 +147,7 @@ export class GuestShareService extends Context.Service<
 
 const make = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const projects = yield* ProjectStore.ProjectStoreV2;
   const managedEndpoint = yield* CloudManagedEndpointRuntime;
   const { attachmentsDir } = yield* ServerConfig.ServerConfig;
   const crypto = yield* Crypto.Crypto;
@@ -328,25 +329,16 @@ const make = Effect.gen(function* () {
       return yield* inactive;
     }
 
-    const runStatuses = new Map<RunId, OrchestrationV2Run["status"]>();
-    for (const run of projection.runs) {
-      if (isGuestVisibleRun(run, share.historyStartRunOrdinal)) runStatuses.set(run.id, run.status);
-    }
-    const texts = new Map<string, string>();
-    const items = projection.visibleTurnItems.flatMap((entry) => {
-      if (entry.visibility !== "local" || entry.item.runId === null) return [];
-      if (!runStatuses.has(entry.item.runId)) return [];
-      const item = guestTranscriptItem(entry.item);
-      if (item === null) return [];
-      const text = guestItemText(item);
-      if (text !== undefined) texts.set(item.id, text);
-      return [item];
-    });
-    const working = () =>
-      [...runStatuses.values()].some((status) => WORKING_RUN_STATUSES.has(status));
+    // Guests get paths relative to the workspace; absolute ones name the owner's home folder.
+    const projectRoot = yield* projects.get(projection.thread.projectId).pipe(
+      Effect.map((project) => Option.getOrNull(project)?.workspaceRoot ?? null),
+      Effect.orElseSucceed(() => null),
+    );
     let thread: OrchestrationV2AppThread = projection.thread;
-    const view = () => guestShareView(thread, working());
-    const initialView = view();
+    let roots = guestPathRoots([thread.worktreePath, projectRoot]);
+    const guestSnapshot = projectSnapshotForGuest(projection, share.historyStartRunOrdinal, roots);
+    const visibleRunIds = new Set<RunId>(guestSnapshot.runs.map((run) => run.id));
+    const initialView = guestShareView(thread);
     if (initialView === null) return yield* inactive;
 
     const ended: GuestStreamEvent = { type: "ended" };
@@ -359,22 +351,14 @@ const make = Effect.gen(function* () {
             case "run.created":
             case "run.updated": {
               if (!isGuestVisibleRun(event.payload, share.historyStartRunOrdinal)) return [];
-              const wasWorking = working();
-              runStatuses.set(event.payload.id, event.payload.status);
-              const next = view();
-              return wasWorking === working() || next === null
-                ? []
-                : [{ type: "view", view: next }];
+              visibleRunIds.add(event.payload.id);
+              return [{ type: "run", run: projectRunForGuest(event.payload) }];
             }
             case "turn-item.updated": {
               const runId = event.payload.runId;
-              if (runId === null || !runStatuses.has(runId)) return [];
-              const item = guestTranscriptItem(event.payload);
-              if (item === null) return [];
-              const update = guestItemEvent(texts.get(item.id), item);
-              const text = guestItemText(item);
-              if (text !== undefined) texts.set(item.id, text);
-              return [update];
+              if (runId === null || !visibleRunIds.has(runId)) return [];
+              const item = projectTurnItemForGuest(event.payload, roots);
+              return item === null ? [] : [{ type: "item", item }];
             }
             case "thread.archived":
             case "thread.deleted":
@@ -383,7 +367,8 @@ const make = Effect.gen(function* () {
             case "thread.metadata-updated": {
               thread = event.payload;
               if (thread.guestShare?.id !== share.id) return [ended];
-              const next = view();
+              roots = guestPathRoots([thread.worktreePath, projectRoot]);
+              const next = guestShareView(thread);
               return next === null ? [ended] : [{ type: "view", view: next }];
             }
             default:
@@ -391,7 +376,11 @@ const make = Effect.gen(function* () {
           }
         }),
         Stream.flattenIterable,
+        // Ending first means a batch holding `ended` flushes at once instead of after the window.
         Stream.takeUntil((event) => event.type === "ended"),
+        Stream.groupedWithin(LIVE_COALESCE_MAX_EVENTS, LIVE_COALESCE_WINDOW),
+        Stream.map(coalesceGuestEvents),
+        Stream.flattenIterable,
         Stream.catchCause(() => Stream.make(ended)),
       );
     const untilExpiry = Effect.sleep(
@@ -404,7 +393,12 @@ const make = Effect.gen(function* () {
         until: (current) => current !== share.host,
       }),
     );
-    const snapshotEvent: GuestStreamEvent = { type: "snapshot", view: initialView, items };
+    const snapshotEvent: GuestStreamEvent = {
+      type: "snapshot",
+      view: initialView,
+      runs: guestSnapshot.runs,
+      items: guestSnapshot.items,
+    };
     return Stream.concat(
       Stream.make(snapshotEvent),
       Stream.concat(
@@ -441,9 +435,13 @@ const make = Effect.gen(function* () {
       item === undefined ||
       item.type !== "dynamic_tool" ||
       run === undefined ||
-      !isGuestVisibleRun(run, share.historyStartRunOrdinal) ||
-      guestTranscriptItem(item)?.kind !== "html-render"
+      !isGuestVisibleRun(run, share.historyStartRunOrdinal)
     ) {
+      return yield* renderUnavailable;
+    }
+    // The same policy as the stream decides whether the guest sees this visual.
+    const guestItem = projectTurnItemForGuest(item, []);
+    if (guestItem?.type !== "dynamic_tool" || guestItem.output === undefined) {
       return yield* renderUnavailable;
     }
     const [attachmentId] = threadHtmlRenderAttachmentIds(thread.id, [item]);
