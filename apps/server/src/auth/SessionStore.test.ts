@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { AuthStandardClientScopes, EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -56,7 +56,7 @@ const relaySessionInput = {
   client: { label: "Relay desktop", deviceType: "desktop" },
 } as const;
 
-const preSplitStandardScopes = [
+const narrowedScopes = [
   "orchestration:read",
   "orchestration:operate",
   "terminal:operate",
@@ -295,24 +295,21 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
     ),
   );
 
-  // Issue 17310: T3 Connect sessions minted before the scope split recorded the
-  // standard grant of that time, so they must reach today's standard grant.
-  it.effect.each([
-    { subject: "cloud-connect", expected: AuthStandardClientScopes },
-    { subject: "one-time-token", expected: preSplitStandardScopes },
-  ])("verifies a pre-split $subject DPoP session with its current grant", ({ subject, expected }) =>
+  // Issue 17310: migration 069 revokes historical grants; a deliberately narrowed
+  // grant issued today keeps exactly what it asked for.
+  it.effect("verifies a newly narrowed cloud-connect DPoP session with exactly its grant", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionStore.SessionStore;
       const issued = yield* sessions.issue({
-        subject,
+        subject: "cloud-connect",
         method: "dpop-access-token",
         proofKeyThumbprint: "proof-key",
         ttl: Duration.hours(1),
-        scopes: preSplitStandardScopes,
+        scopes: narrowedScopes,
       });
 
       expect([...(yield* sessions.verify(issued.token)).scopes].toSorted()).toEqual(
-        [...expected].toSorted(),
+        [...narrowedScopes].toSorted(),
       );
     }).pipe(Effect.provide(layerSessionStore())),
   );
