@@ -13,7 +13,8 @@ if root == Path(__file__).resolve().parents[3]:
     raise SystemExit('Use a separate disposable checkout, not fixture source checkout')
 sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()
 fixture=Path(__file__).with_name('native-fixture.tsx.template').read_text()
-(root/'apps/mobile/index.ts').write_text(fixture.replace('__PRODUCT_SHA__',sha[:12]))
+(root/'apps/mobile/issue14463-static.tsx').write_text(fixture.replace('__PRODUCT_SHA__',sha[:12]))
+(root/'apps/mobile/index.ts').write_text("import './issue14463-static';\n")
 profile=root/'apps/mobile/eas.json'
 data=json.loads(profile.read_text())
 data['build']['issue14463-static']={'corepack':True,'distribution':'internal','environment':'preview','env':{'APP_VARIANT':'preview','NODE_OPTIONS':'--max-old-space-size=8192'},'ios':{'simulator':True,'image':'macos-tahoe-26.6-xcode-27.1'},'developmentClient':False}
