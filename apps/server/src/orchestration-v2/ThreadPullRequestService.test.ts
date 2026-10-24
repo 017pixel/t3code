@@ -424,8 +424,7 @@ describe("ThreadPullRequestServiceV2 reads", () => {
           {
             level: "Info",
             parts: [
-              "thread branch pull request lookup failed",
-              { threadIds: [thread.id], retryAt: RETRY_AT },
+              `thread branch pull request lookup failed: rate limited until ${DateTime.formatIso(DateTime.makeUnsafe(RETRY_AT))} (threads: ${thread.id})`,
             ],
           },
         ]);
@@ -489,8 +488,7 @@ describe("ThreadPullRequestServiceV2 reads", () => {
           {
             level: "Info",
             parts: [
-              "thread pull request discovery failed",
-              { threadId: thread.id, retryAt: RETRY_AT },
+              `thread pull request discovery failed: rate limited until ${DateTime.formatIso(DateTime.makeUnsafe(RETRY_AT))} (threads: ${thread.id})`,
             ],
           },
         ]);

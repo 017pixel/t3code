@@ -701,7 +701,7 @@ describe("ThreadSettlementServiceV2 worker", () => {
       expect(logs).toEqual([
         {
           level: "Info",
-          parts: ["automatic thread settlement skipped", { threadIds: [thread.id] }],
+          parts: [`automatic thread settlement skipped: rate limited (threads: ${thread.id})`],
         },
       ]);
     }).pipe(
