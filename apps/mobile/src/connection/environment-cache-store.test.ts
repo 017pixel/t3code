@@ -285,50 +285,103 @@ describe("mobile SQLite environment cache store", () => {
     }),
   );
 
-  it.effect(
-    "discards obsolete and corrupt thread records and rejects another environment's cache",
-    () =>
-      Effect.gen(function* () {
-        const memory = makeDatabase();
-        const store = yield* make().pipe(
-          Effect.provideService(MobileDatabase.MobileDatabase, memory.database),
-        );
-        const id = cacheId(ENVIRONMENT_ID, "thread", THREAD_ID);
-        yield* store.saveThread(ENVIRONMENT_ID, threadSnapshotWithItems());
-        const raw = memory.values.get(id)!;
-        for (const invalid of ["{broken", raw.replace('"schemaVersion":5', '"schemaVersion":3')]) {
-          memory.values.set(id, invalid);
-          expect(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID)).toEqual(Option.none());
-        }
-        expect(memory.removed).toEqual([id, id]);
-        memory.values.set(
-          id,
-          raw.replace('"environmentId":"environment-1"', '"environmentId":"other"'),
-        );
+  it.effect("discards corrupt or partial thread records so they can be refetched", () =>
+    Effect.gen(function* () {
+      const memory = makeDatabase();
+      const store = yield* make().pipe(
+        Effect.provideService(MobileDatabase.MobileDatabase, memory.database),
+      );
+      const id = cacheId(ENVIRONMENT_ID, "thread", THREAD_ID);
+      yield* store.saveThread(ENVIRONMENT_ID, threadSnapshotWithItems());
+      const raw = memory.values.get(id)!;
+      const partial = JSON.parse(raw);
+      delete partial.snapshot.projection.visibleTurnItems;
+      const invalidItem = JSON.parse(raw);
+      delete invalidItem.snapshot.projection.visibleTurnItems[1].item.message;
+      for (const invalid of ["{broken", JSON.stringify(partial), JSON.stringify(invalidItem)]) {
+        memory.values.set(id, invalid);
         expect(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID)).toEqual(Option.none());
-        memory.values.set(id, raw.replace('"threadId":"thread-1"', '"threadId":"other"'));
-        expect(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID)).toEqual(Option.none());
-      }),
+        expect(memory.values.has(id)).toBe(false);
+      }
+      expect(memory.removed).toEqual([id, id, id]);
+      yield* store.saveThread(ENVIRONMENT_ID, threadSnapshotWithItems());
+      expect(Option.getOrThrow(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID))).toEqual(
+        threadSnapshotWithItems(),
+      );
+    }),
   );
 
-  it.effect(
-    "persists each local timeline payload once and restores shared items before returning",
-    () =>
-      Effect.gen(function* () {
-        const memory = makeDatabase();
-        const store = yield* make().pipe(
-          Effect.provideService(MobileDatabase.MobileDatabase, memory.database),
-        );
-        const snapshot = threadSnapshotWithItems();
+  it.effect("round-trips V5 exactly and restores shared items before returning to a consumer", () =>
+    Effect.gen(function* () {
+      const memory = makeDatabase();
+      const store = yield* make().pipe(
+        Effect.provideService(MobileDatabase.MobileDatabase, memory.database),
+      );
+      const original = threadSnapshotWithItems();
+      const local = original.projection.visibleTurnItems[1]!;
+      const synthetic = { ...local.item, id: TurnItemId.make("synthetic-notice"), ordinal: 12 };
+      const snapshot = {
+        ...original,
+        projection: {
+          ...original.projection,
+          turnItems: [local.item, synthetic, original.projection.turnItems[1]!],
+          visibleTurnItems: [
+            { ...local, position: 0 },
+            { ...original.projection.visibleTurnItems[0]!, position: 1 },
+            {
+              ...local,
+              position: 2,
+              visibility: "synthetic" as const,
+              sourceItemId: synthetic.id,
+              item: synthetic,
+            },
+          ],
+        },
+      };
+      yield* store.saveThread(ENVIRONMENT_ID, snapshot);
+      const id = cacheId(ENVIRONMENT_ID, "thread", THREAD_ID);
+      const encoded = JSON.parse(memory.values.get(id)!);
+      expect(encoded.schemaVersion).toBe(5);
+      expect(memory.schemaVersions.get(id)).toBe(5);
+      expect(encoded.snapshot.turnItemsOmitLocalVisible).toBe(true);
+      expect(encoded.snapshot.projection.turnItems.map((item: { id: string }) => item.id)).toEqual([
+        "hidden-notice",
+      ]);
+
+      const loaded = Option.getOrThrow(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID));
+      expect(loaded).toEqual(snapshot);
+      expect(loaded).not.toHaveProperty("turnItemsOmitLocalVisible");
+      expect(loaded.projection.turnItems[0]).toBe(loaded.projection.visibleTurnItems[0]!.item);
+      expect(loaded.projection.turnItems[1]).toBe(loaded.projection.visibleTurnItems[2]!.item);
+      expect(snapshot.projection.turnItems).toHaveLength(3);
+    }),
+  );
+
+  it.effect("keeps a full projection when visible rows cannot reproduce the original items", () =>
+    Effect.gen(function* () {
+      const memory = makeDatabase();
+      const store = yield* make().pipe(
+        Effect.provideService(MobileDatabase.MobileDatabase, memory.database),
+      );
+      const original = threadSnapshotWithItems();
+      const local = original.projection.turnItems[0]!;
+      for (const turnItems of [
+        [{ ...local }, original.projection.turnItems[1]!],
+        [{ ...local, message: "Newer than the visible row." }, original.projection.turnItems[1]!],
+        original.projection.turnItems.toReversed(),
+      ]) {
+        const snapshot = { ...original, projection: { ...original.projection, turnItems } };
         yield* store.saveThread(ENVIRONMENT_ID, snapshot);
         const raw = memory.values.get(cacheId(ENVIRONMENT_ID, "thread", THREAD_ID))!;
-        expect(raw.match(/"id":"local-notice"/g)).toHaveLength(1);
-
-        const loaded = Option.getOrThrow(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID));
-        expect(loaded).toEqual(snapshot);
-        expect(loaded.projection.turnItems[0]).toBe(loaded.projection.visibleTurnItems[1]!.item);
-        expect(snapshot.projection.turnItems).toHaveLength(2);
-      }),
+        const encoded = JSON.parse(raw);
+        expect(encoded.schemaVersion).toBe(5);
+        expect(encoded.snapshot).not.toHaveProperty("turnItemsOmitLocalVisible");
+        expect(encoded.snapshot.projection.turnItems).toHaveLength(2);
+        expect(Option.getOrThrow(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID))).toEqual(
+          snapshot,
+        );
+      }
+    }),
   );
 
   it.effect("round-trips V2 shell and thread DateTime fields with the shared cache schema", () =>
