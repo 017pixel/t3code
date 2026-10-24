@@ -574,6 +574,7 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly shouldFinalizeRun?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
   readonly loadRunInterruptReason?: () => Effect.Effect<string | undefined, never>;
+  readonly hasWorkspaceMoved?: () => Effect.Effect<boolean, never>;
   readonly message: ProviderAdapter.ProviderAdapterV2TurnMessage;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
@@ -1048,6 +1049,16 @@ export const layer: Layer.Layer<
           if (yield* Ref.get(rootRunFinalized)) {
             return;
           }
+          // Moving the thread to another workspace detaches its provider
+          // session, which stops the turn that asked for the move. That ends
+          // the turn as the handoff intended; only a Stop makes it an interrupt.
+          const settledTerminal: ProviderTerminalEvent =
+            terminal.status === "interrupted" &&
+            input.hasWorkspaceMoved !== undefined &&
+            !(yield* input.hasUnpairedRunInterruptRequest?.() ?? Effect.succeed(false)) &&
+            (yield* input.hasWorkspaceMoved())
+              ? { ...terminal, status: "completed" }
+              : terminal;
           const providerThread = yield* Ref.get(latestProviderThread);
           const openSubagents = yield* Ref.get(openRunOwnedSubagents);
           yield* writeFinalRunEvents({
@@ -1076,13 +1087,16 @@ export const layer: Layer.Layer<
               ? {}
               : { loadRunInterruptReason: input.loadRunInterruptReason }),
             openRunOwnedSubagents: openSubagents,
-            terminal,
-            failureItemPersisted: terminal.status === "failed",
+            terminal: settledTerminal,
+            failureItemPersisted: settledTerminal.status === "failed",
             refreshAfterTurn,
           }).pipe(
             Effect.mapError((cause) => new RunExecutionIngestError({ runId: input.run.id, cause })),
           );
-          if (isRunOwnedSubagentTerminalStatus(terminal.status) && !childTurnsContinue(terminal)) {
+          if (
+            isRunOwnedSubagentTerminalStatus(settledTerminal.status) &&
+            !childTurnsContinue(settledTerminal)
+          ) {
             yield* Ref.set(openRunOwnedSubagents, emptyOpenRunOwnedSubagentProjection());
           }
           yield* Ref.set(rootRunFinalized, true);
