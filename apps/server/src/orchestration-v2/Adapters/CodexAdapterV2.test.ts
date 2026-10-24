@@ -2942,6 +2942,90 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect("answers a held approval when the woken run settles before adopting", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-external-queue-cancelled";
+        const nativeThreadId = `native-${scenario}-thread`;
+        const transcript = externalQueueTranscript(
+          scenario,
+          "Reply with the word QUEUED.",
+          (turnId) => [
+            {
+              type: "emit_inbound",
+              label: "approval",
+              frame: {
+                id: 200,
+                method: "item/commandExecution/requestApproval",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId,
+                  itemId: "external-command",
+                  startedAtMs: 1782622459500,
+                  command: "cat external",
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              label: "approval failed without a run",
+              frame: {
+                id: 200,
+                error: { code: -32603, message: `No T3 run adopted Codex turn ${turnId}.` },
+              },
+            },
+          ],
+          [
+            {
+              type: "emit_inbound",
+              label: "goal update after the answer",
+              frame: {
+                method: "thread/goal/updated",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: null,
+                  goal: {
+                    threadId: nativeThreadId,
+                    objective: "Finish",
+                    status: "active",
+                    tokenBudget: null,
+                    tokensUsed: 0,
+                    timeUsedSeconds: 0,
+                    createdAt: 1782622440,
+                    updatedAt: 1782622450,
+                  },
+                },
+              },
+            },
+          ],
+        );
+        const harness = yield* makeCodexReplayHarness(transcript);
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-ready"),
+            text: "Reply with the requested recovery marker.",
+          }),
+        );
+        yield* harness.awaitTerminal(1);
+        yield* harness.until(() => harness.continuationRequests.length > 0);
+        // The woken run was cancelled, stopped, or failed preparing, so no
+        // startTurn adopts the native turn. Its approval must not wait for the
+        // session to close; the replay sends the goal update only after it.
+        yield* harness.continuationRequests[0]!.onRunSettled!();
+        yield* harness.until(() =>
+          harness.events.some((event) => event.type === "provider_thread.updated"),
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   const BG_SCENARIO = "codex-bg-exec-wake";
   const BG_NATIVE_THREAD = "native-codex-bg-thread";
   const BG_NATIVE_TURN = "native-codex-bg-turn";

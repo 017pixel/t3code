@@ -4319,6 +4319,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             /** `adopted` is false when the wake was rejected or the session closed. */
             readonly frames: Array<(adopted: boolean) => Effect.Effect<void>>;
             messageId: MessageId | undefined;
+            releasing: boolean;
           }
         >();
         const heldExternalTurnIdOf = (payload: unknown) => {
@@ -4333,26 +4334,34 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         };
         /**
          * Delivers the held frames in order and stops holding. Without adoption,
-         * notifications are dropped as for any unknown turn and requests reach
-         * their handlers, which fail fast without an active turn.
+         * notifications are dropped as for any unknown turn and requests fail.
          */
         const releaseHeldExternalTurn = Effect.fnUntraced(function* (
           nativeTurnId: string,
           adopted: boolean,
         ) {
           const held = heldExternalTurns.get(nativeTurnId);
-          if (held === undefined) return;
-          heldExternalTurns.delete(nativeTurnId);
+          if (held === undefined || held.releasing) return;
+          held.releasing = true;
+          // The turn stays held while draining: frames the reader delivers
+          // meanwhile append here, so none overtakes an earlier buffered one.
           // Requests are forked, so a frame never waits on a user decision.
           // Uninterruptible so no held request is left without a response.
           yield* Effect.uninterruptible(
-            Effect.forEach(held.frames, (frame) => frame(adopted), { discard: true }),
+            Effect.gen(function* () {
+              for (let index = 0; index < held.frames.length; index++) {
+                yield* held.frames[index]!(adopted);
+              }
+              heldExternalTurns.delete(nativeTurnId);
+            }),
           );
         });
         yield* Scope.addFinalizer(
           scope,
-          Effect.forEach([...heldExternalTurns.keys()], (nativeTurnId) =>
-            releaseHeldExternalTurn(nativeTurnId, false),
+          Effect.suspend(() =>
+            Effect.forEach([...heldExternalTurns.keys()], (nativeTurnId) =>
+              releaseHeldExternalTurn(nativeTurnId, false),
+            ),
           ).pipe(Effect.asVoid),
         );
         const offerExternalTurnWake = Effect.fnUntraced(function* (
@@ -4369,7 +4378,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ).item;
           const isPrompt = item?.type === "userMessage";
           const isEnd = (payload as { readonly turn?: unknown }).turn !== undefined;
-          if (held === undefined || held.messageId !== undefined || !(isPrompt || isEnd)) return;
+          if (
+            held === undefined ||
+            held.releasing ||
+            held.messageId !== undefined ||
+            !(isPrompt || isEnd)
+          )
+            return;
           const providerThread = rootProviderThreads.get(held.nativeThreadId);
           if (providerThread?.appThreadId == null || continuationRequests === undefined) {
             return yield* releaseHeldExternalTurn(nativeTurnId, false);
@@ -4400,6 +4415,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             dispatchIfCurrent: (dispatch) =>
               dispatch.pipe(Effect.asSome, Effect.onError(rejectIfCurrent)),
             clearIfCurrent: rejectIfCurrent,
+            // A woken run cancelled or failed before startTurn never adopts.
+            onRunSettled: rejectIfCurrent,
           });
         });
         const handleCodexNotification: CodexClient.CodexAppServerClient["Service"]["handleServerNotification"] =
@@ -4429,12 +4446,21 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 // Forked like the protocol reader forks live requests: an
                 // approval waits on the user, who answers through the effect
                 // outbox that this adoption's startTurn would otherwise block.
-                held.frames.push(() =>
-                  Effect.suspend(() => handler(payload)).pipe(
-                    Deferred.into(response),
-                    Effect.forkIn(scope, { startImmediately: true }),
-                    Effect.asVoid,
-                  ),
+                // Without adoption the request is answered here: handlers die
+                // without an active turn, which sends Codex no response at all.
+                held.frames.push((adopted) =>
+                  adopted
+                    ? Effect.suspend(() => handler(payload)).pipe(
+                        Deferred.into(response),
+                        Effect.forkIn(scope, { startImmediately: true }),
+                        Effect.asVoid,
+                      )
+                    : Deferred.fail(
+                        response,
+                        CodexErrors.CodexAppServerRequestError.internalError(
+                          `No T3 run adopted Codex turn ${nativeTurnId}.`,
+                        ),
+                      ).pipe(Effect.asVoid),
                 );
                 return yield* Deferred.await(response);
               });
@@ -4445,7 +4471,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         ) {
           let nativeTurnId: string | undefined;
           for (const [id, held] of heldExternalTurns) {
-            if (held.messageId === turnInput.message.messageId) nativeTurnId = id;
+            if (!held.releasing && held.messageId === turnInput.message.messageId)
+              nativeTurnId = id;
           }
           if (nativeTurnId === undefined) return false;
           const held = heldExternalTurns.get(nativeTurnId)!;
@@ -4716,6 +4743,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 startedAt: codexTimestamp(payload.turn.startedAt),
                 frames: [],
                 messageId: undefined,
+                releasing: false,
               });
               return;
             }
