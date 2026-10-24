@@ -499,13 +499,9 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
     reconcileCloudState: reconcileLink,
   } = useCloudLinkController();
   const [isBusy, setIsBusy] = useAtom(primaryCloudLinkMutationAtom(primaryEnvironmentId));
-  const reconcileCloudState = async (desired: CloudLinkDesiredState) => {
+  const reconcileCloudState = (desired: CloudLinkDesiredState) => {
     setIsBusy(true);
-    try {
-      return await reconcileLink(desired);
-    } finally {
-      setIsBusy(false);
-    }
+    return reconcileLink(desired).finally(() => setIsBusy(false));
   };
 
   const disabledReason = !isSignedIn
