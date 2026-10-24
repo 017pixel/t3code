@@ -566,6 +566,7 @@ export function ThreadFilesTreeScreen(props: ThreadFilesRouteScreenProps) {
       <ScreenContent insetHorizontal={layout.usesSplitView}>
         <FileTreeBrowser
           key={JSON.stringify([environmentId, cwd])}
+          revealSelection={entriesQuery.revealSelection}
           expandedPaths={entriesQuery.expandedPaths}
           setExpandedPaths={entriesQuery.setExpandedPaths}
           entries={entriesQuery.entries}
@@ -949,6 +950,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
         <ScreenContent>
           <FileTreeBrowser
             key={JSON.stringify([environmentId, directoryPath])}
+            revealSelection={entriesQuery.revealSelection}
             expandedPaths={entriesQuery.expandedPaths}
             setExpandedPaths={entriesQuery.setExpandedPaths}
             entries={entriesQuery.entries}

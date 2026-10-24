@@ -87,6 +87,7 @@ export function ThreadFileNavigatorPane(props: {
   const fileTree = (
     <FileTreeBrowser
       key={JSON.stringify([props.environmentId, props.cwd])}
+      revealSelection={entriesQuery.revealSelection}
       expandedPaths={entriesQuery.expandedPaths}
       setExpandedPaths={entriesQuery.setExpandedPaths}
       entries={entriesQuery.entries}

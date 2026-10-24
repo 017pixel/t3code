@@ -3,12 +3,15 @@ import * as NodeModule from "node:module";
 import * as NodeVM from "node:vm";
 import {
   EnvironmentId,
+  ProjectListEntriesError,
   type ProjectEntry,
   type ProjectListEntriesResult,
 } from "@t3tools/contracts";
 import * as fileTree from "./fileTree";
 import * as Cause from "effect/Cause";
 import * as React from "react";
+import * as Option from "effect/Option";
+import { AsyncResult, Atom } from "effect/reactivity";
 import { act, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -61,10 +64,12 @@ function setup(withBrowser = false) {
   const rootQuery = {
     data: { entries: rootEntries, truncated: false },
     error: null as string | null,
+    failure: null as ProjectListEntriesError | null,
     isPending: false,
     refresh: vi.fn(),
   };
   const modules: Record<string, unknown> = {
+    "@t3tools/contracts": { ProjectListEntriesError },
     react: React,
     "react/compiler-runtime": require("react/compiler-runtime"),
     "effect/Cause": Cause,
@@ -80,8 +85,30 @@ function setup(withBrowser = false) {
       },
     },
     "../../state/queries": { useDebouncedValue: (value: string) => value },
-    "../../state/query": { useEnvironmentQuery: () => rootQuery },
   };
+  const queryExports = {} as typeof import("../../state/query");
+  const queryModules: Record<string, unknown> = {
+    "react/compiler-runtime": require("react/compiler-runtime"),
+    "@effect/atom-react": {
+      useAtomValue: () =>
+        rootQuery.error
+          ? AsyncResult.fail(rootQuery.failure ?? new Error(rootQuery.error), {
+              previousSuccess: Option.some(AsyncResult.success(rootQuery.data)),
+            })
+          : AsyncResult.success(rootQuery.data),
+      useAtomRefresh: () => rootQuery.refresh,
+    },
+    "effect/Cause": Cause,
+    "effect/Option": Option,
+    "effect/reactivity": { AsyncResult, Atom },
+  };
+  compileModule(require.resolve("../../state/query.ts"))((name: string) => {
+    if (name.startsWith("@babel/runtime/"))
+      return NodeModule.createRequire(require.resolve("babel-preset-expo"))(name);
+    if (!(name in queryModules)) throw new Error(`Unexpected query dependency: ${name}`);
+    return queryModules[name];
+  }, queryExports);
+  modules["../../state/query"] = queryExports;
   const exports = {} as { useFileTreeEntries: Hook };
   compileModule(sourcePath)((name: string) => {
     if (name.startsWith("@babel/runtime/"))
@@ -129,8 +156,9 @@ function setup(withBrowser = false) {
     });
     return withBrowser ? (
       <browserExports.FileTreeBrowser
+        key={JSON.stringify([input.environmentId, input.cwd])}
         {...result}
-        selectedPath="src/nested/file.ts"
+        selectedPath={result.selectedPath}
         searchQuery=""
         onLoadDirectory={result.loadDirectory}
         onRefresh={result.refresh}
@@ -143,6 +171,7 @@ function setup(withBrowser = false) {
     requests,
     rootQuery,
     updateView(expanded: string[], selected: string) {
+      renders = 0;
       act(() => {
         current.setExpandedPaths(() => new Set(expanded));
         current.selectPath(selected);
@@ -153,20 +182,24 @@ function setup(withBrowser = false) {
       return current;
     },
     render(target: Partial<Input> = {}) {
+      renders = 0;
       const probe = <Probe {...firstTarget} searchQuery="" {...target} />;
       act(() => root.render(probe));
     },
     load(path = "src") {
+      renders = 0;
       act(() => {
         void current.loadDirectory(path);
       });
     },
     async succeed(index: number, entries: ProjectEntry[] = []) {
+      renders = 0;
       await act(async () => {
         requests[index]!.resolve({ _tag: "Success", value: { entries, truncated: false } });
       });
     },
     async fail(index: number, message = "Directory unavailable") {
+      renders = 0;
       await act(async () => {
         requests[index]!.resolve({ _tag: "Failure", cause: Cause.fail(new Error(message)) });
       });
@@ -261,25 +294,36 @@ describe("file tree workspace state", () => {
     expect([...screen.current.loadingDirectories]).toEqual([]);
   });
   it("evicts the least recently visited workspace instead of retaining unbounded history", async () => {
-    using screen = setup();
+    using screen = setup(true);
     screen.render();
-    screen.load();
-    const nested = Array.from({ length: 65 }, (_, index) => `src/directory-${index}`);
+    screen.updateView(["src"], "src/first.ts");
+    const nested = Array.from({ length: 66 }, (_, index) => `src/directory-${index}`);
     await screen.succeed(0, [
       { kind: "file", path: "src/first.ts" },
       ...nested.map((path) => ({ kind: "directory" as const, path })),
     ]);
-    screen.updateView(["src"], "src/first.ts");
     for (const path of nested) {
-      screen.updateView(["src", path], "src/first.ts");
-      screen.load(path);
+      const retained = [...screen.current.expandedPaths];
+      screen.updateView([...retained, path], "src/first.ts");
+      await screen.succeed(screen.requests.length - 1, [
+        { kind: "directory", path: `${path}/child` },
+      ]);
+      screen.updateView([...retained, path, `${path}/child`], "src/first.ts");
       await screen.succeed(screen.requests.length - 1);
-      screen.updateView(["src"], "src/first.ts");
+      screen.updateView([...retained, `${path}/child`], "src/first.ts");
     }
+    expect(screen.requests).toHaveLength(133);
+    expect(screen.current.isPending).toBe(false);
     expect(screen.current.loadedDirectories.size).toBe(65);
     expect(screen.current.loadedDirectories.has("src")).toBe(true);
     expect(screen.current.loadedDirectories.has(nested[0]!)).toBe(false);
+    expect(screen.current.expandedPaths.size).toBe(33);
+    expect(screen.current.expandedPaths.has(`${nested[0]!}/child`)).toBe(false);
+    expect(screen.current.expandedPaths.has(`${nested.at(-1)!}/child`)).toBe(true);
     expect(screen.current.selectedPath).toBe("src/first.ts");
+    const settledRequests = screen.requests.length;
+    screen.render();
+    expect(screen.requests).toHaveLength(settledRequests);
     for (let index = 1; index <= 8; index++) screen.render({ cwd: `/workspace-${index}` });
     screen.render();
     expect([...screen.current.loadedDirectories]).toEqual([]);
@@ -290,10 +334,14 @@ describe("file tree workspace state", () => {
   it.each(["collapse", "delete"])("settles controlled selection after %s", async (action) => {
     using screen = setup(true);
     screen.render();
+    screen.updateView([], "src/nested/file.ts");
     await screen.succeed(0, [{ kind: "directory", path: "src/nested" }]);
     expect([...screen.current.expandedPaths]).toEqual(["src", "src/nested"]);
     if (action === "collapse") {
       screen.updateView([], "src/nested/file.ts");
+      expect([...screen.current.expandedPaths]).toEqual([]);
+      screen.render({ cwd: "/second" });
+      screen.render();
       expect([...screen.current.expandedPaths]).toEqual([]);
     }
     screen.rootQuery.data = { entries: [], truncated: false };
@@ -317,14 +365,24 @@ describe("file tree workspace state", () => {
       expect(screen.current.selectedPath).toBe("src/old.ts");
       expect(screen.current.entries.map((entry) => entry.path)).toEqual(["src", "src/old.ts"]);
       if (scenario === "missing root") {
-        screen.rootQuery.error = "Workspace root does not exist: /first";
+        screen.rootQuery.failure = new ProjectListEntriesError({
+          cwd: "/first",
+          failure: "workspace_root_not_found",
+        });
+        screen.rootQuery.error = screen.rootQuery.failure.message;
+        expect(screen.rootQuery.error).toBe("Failed to list workspace entries in '/first'.");
         screen.render();
         expect(screen.current.selectedPath).toBeNull();
         expect([...screen.current.expandedPaths]).toEqual([]);
         expect([...screen.current.loadedDirectories]).toEqual([]);
       }
       screen.rootQuery.error = null;
+      screen.rootQuery.failure = null;
       screen.render();
+      if (scenario === "missing root") {
+        expect(screen.current.entries.map((entry) => entry.path)).toEqual(["src"]);
+        expect(screen.current.selectedPath).toBeNull();
+      }
       screen.load();
       expect(screen.requests).toHaveLength(2);
       await screen.succeed(1, []);

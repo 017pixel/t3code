@@ -1,5 +1,5 @@
 import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
+import { ProjectListEntriesError, type EnvironmentId, type ProjectEntry } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 
@@ -18,6 +18,7 @@ function createDirectories() {
     loading: new Set<string>(),
     expandedPaths: new Set<string>(),
     selectedPath: null as string | null,
+    revealedSelection: { path: null as string | null, ancestors: new Set<string>() },
     isRefreshing: false,
   };
 }
@@ -29,20 +30,25 @@ function boundDirectories(current: ReturnType<typeof createDirectories>) {
       current.expandedPaths.has(parts.slice(0, index + 1).join("/")),
     );
   };
-  const inactive = [...new Set([...current.entries.keys(), ...current.errors.keys()])].filter(
-    (path) => !visible(path),
-  );
+  const inactive = [
+    ...new Set([...current.entries.keys(), ...current.errors.keys(), ...current.expandedPaths]),
+  ].filter((path) => !visible(path));
   if (inactive.length <= 64) return current;
   const evicted = new Set(inactive.slice(0, -64));
+  const isEvicted = (path: string) => {
+    const parts = path.split("/");
+    return parts.some((_, index) => evicted.has(parts.slice(0, index + 1).join("/")));
+  };
   return {
     ...current,
-    entries: new Map([...current.entries].filter(([path]) => !evicted.has(path))),
-    errors: new Map([...current.errors].filter(([path]) => !evicted.has(path))),
+    expandedPaths: new Set([...current.expandedPaths].filter((path) => !isEvicted(path))),
+    entries: new Map([...current.entries].filter(([path]) => !isEvicted(path))),
+    errors: new Map([...current.errors].filter(([path]) => !isEvicted(path))),
     completeDirectories: new Set(
-      [...current.completeDirectories].filter((path) => !evicted.has(path)),
+      [...current.completeDirectories].filter((path) => !isEvicted(path)),
     ),
     validatedDirectories: new Set(
-      [...current.validatedDirectories].filter((path) => !evicted.has(path)),
+      [...current.validatedDirectories].filter((path) => !isEvicted(path)),
     ),
   };
 }
@@ -224,8 +230,9 @@ export function useFileTreeEntries(input: {
       });
     });
   };
-  // This is the server's specific missing-root error; connection failures retain the view.
-  const missingRoot = root.error?.startsWith("Workspace root does not exist: ") ?? false;
+  const missingRoot =
+    root.failure instanceof ProjectListEntriesError &&
+    root.failure.failure === "workspace_root_not_found";
   const rootData = missingRoot ? null : root.data;
   if (
     missingRoot &&
@@ -369,6 +376,28 @@ export function useFileTreeEntries(input: {
     });
   };
 
+  const revealSelection = (path: string | null) => {
+    updateDirectories((current) => {
+      const previous = current.revealedSelection;
+      const handled = previous.path === path ? previous.ancestors : new Set<string>();
+      const parts = path?.split("/").filter(Boolean) ?? [];
+      const ancestors = parts
+        .slice(1)
+        .map((_, index) => parts.slice(0, index + 1).join("/"))
+        .filter(
+          (ancestor) =>
+            !handled.has(ancestor) &&
+            snapshot.entries.some((entry) => entry.kind === "directory" && entry.path === ancestor),
+        );
+      if (previous.path === path && ancestors.length === 0) return current;
+      return {
+        ...current,
+        revealedSelection: { path, ancestors: new Set([...handled, ...ancestors]) },
+        expandedPaths: new Set([...current.expandedPaths, ...ancestors]),
+      };
+    });
+  };
+
   const setExpandedPaths = useCallback(
     (update: (current: ReadonlySet<string>) => ReadonlySet<string>) =>
       setDirectories((current) => {
@@ -381,6 +410,7 @@ export function useFileTreeEntries(input: {
   );
 
   return {
+    revealSelection,
     expandedPaths: directories.expandedPaths,
     setExpandedPaths,
     selectedPath: directories.selectedPath,
