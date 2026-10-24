@@ -692,6 +692,45 @@ describe("mergeUsage", () => {
       expect(merged.duplicateSources).toHaveLength(1);
     });
 
+    it("keeps two directories apart when their Windows fingerprints collide but physical sources differ", () => {
+      const pairs = ["a", "b"].map((name) => ({
+        windows: { ...windows, physicalSourceId: `physical-${name}` },
+        wsl: { ...wsl, physicalSourceId: `physical-${name}` },
+      }));
+      const environments = pairs.flatMap(({ windows: win, wsl: linux }, index) => [
+        environment(`windows-${index}`, summary([bucket({ sourcePath: win.homePath })], [win])),
+        environment(`wsl-${index}`, summary([bucket({ sourcePath: linux.homePath })], [linux])),
+      ]);
+
+      for (const ordered of [environments, environments.toReversed()]) {
+        const merged = mergeUsage(ordered, USAGE_CONTRACT_VERSION);
+        expect(merged.costUsd).toBe(20);
+        expect(merged.sessions).toBe(284);
+        expect(merged.duplicateSources).toHaveLength(2);
+      }
+    });
+
+    it("keeps a legacy-only reading apart when its fingerprint matches two physical sources", () => {
+      const { physicalSourceId: _omitted, ...legacy } = windows;
+      const merged = mergeUsage(
+        [
+          environment("pc-a", summary([bucket({ sourcePath: windows.homePath })], [windows])),
+          environment(
+            "pc-b",
+            summary(
+              [bucket({ sourcePath: windows.homePath })],
+              [{ ...windows, physicalSourceId: "physical-other-pc" }],
+            ),
+          ),
+          environment("standalone", summary([bucket({ sourcePath: legacy.homePath })], [legacy])),
+        ],
+        USAGE_CONTRACT_VERSION,
+      );
+
+      expect(merged.costUsd).toBe(30);
+      expect(merged.duplicateSources).toHaveLength(0);
+    });
+
     it("joins a legacy-only reading to the WSL one through the Windows reading", () => {
       const { physicalSourceId: _omitted, ...legacy } = windows;
       const environments = [
