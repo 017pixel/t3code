@@ -2208,6 +2208,73 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         1,
         `getTimelinePage read the whole thread on each of ${timelinePages} pages`,
       );
+
+      // A write to the thread a fork inherits from must reach the fork's next page.
+      const forkThreadId = ThreadId.make("thread:paged-scrollback:fork");
+      yield* projectionStore.apply({
+        id: EventId.make("event:paged-scrollback:fork"),
+        type: "thread.created",
+        threadId: forkThreadId,
+        occurredAt: now,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: forkThreadId,
+          projectId: ProjectId.make("project:paged-scrollback"),
+          title: "Paged scrollback fork",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: {
+            parentThreadId: threadId,
+            relationshipToParent: "fork",
+            rootThreadId: threadId,
+          },
+          forkedFrom: { type: "run", threadId, runId },
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      const forkPage = () =>
+        projectionStore.getTimelinePage(forkThreadId, { view: "activity", limit: 1 });
+      const forkTotal = (yield* forkPage()).totalItems;
+      assert.strictEqual((yield* forkPage()).totalItems, forkTotal);
+      yield* projectionStore.apply({
+        id: EventId.make("event:paged-scrollback:late-item"),
+        type: "turn-item.updated",
+        threadId,
+        runId,
+        driver,
+        occurredAt: now,
+        payload: {
+          id: TurnItemId.make("turn-item:paged-scrollback:late"),
+          threadId,
+          runId,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: itemCount,
+          status: "completed",
+          title: "late",
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          type: "command_execution",
+          input: "echo",
+        },
+      });
+      assert.strictEqual((yield* forkPage()).totalItems, forkTotal + 1);
     }),
   );
 
