@@ -1169,6 +1169,8 @@ function sanitizeTerminalHistoryChunk(
   }
 
   const input = `${pendingControlSequence}${data}`;
+  // Only the pending prefix's final ESC can begin a terminator split across chunks.
+  const pendingScanStart = Math.max(0, pendingControlSequence.length - 1);
   let visibleText = "";
   let index = 0;
 
@@ -1211,7 +1213,10 @@ function sanitizeTerminalHistoryChunk(
         nextCodePoint === 0x5e ||
         nextCodePoint === 0x5f
       ) {
-        const terminatorIndex = findStringTerminatorIndex(input, index + 2);
+        const terminatorIndex = findStringTerminatorIndex(
+          input,
+          Math.max(index + 2, pendingScanStart),
+        );
         if (terminatorIndex === null) {
           return { visibleText, pendingControlSequence: input.slice(index) };
         }
@@ -1257,7 +1262,10 @@ function sanitizeTerminalHistoryChunk(
     }
 
     if (codePoint === 0x9d || codePoint === 0x90 || codePoint === 0x9e || codePoint === 0x9f) {
-      const terminatorIndex = findStringTerminatorIndex(input, index + 1);
+      const terminatorIndex = findStringTerminatorIndex(
+        input,
+        Math.max(index + 1, pendingScanStart),
+      );
       if (terminatorIndex === null) {
         return { visibleText, pendingControlSequence: input.slice(index) };
       }
