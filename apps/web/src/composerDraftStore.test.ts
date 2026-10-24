@@ -1327,6 +1327,7 @@ describe("composerDraftStore modelSelection", () => {
     const remoteModel = DEFAULT_MODEL_BY_PROVIDER[CLAUDE_AGENT_DRIVER]!;
     h.update({ modelSelection: modelSelection(CLAUDE_AGENT_DRIVER, remoteModel) });
     const effective = deriveEffectiveComposerModelState({
+      threadStarted: false,
       draft: draftFor(threadId, TEST_ENVIRONMENT_ID),
       providers: [
         {
@@ -1367,6 +1368,7 @@ describe("composerDraftStore modelSelection", () => {
     const h = modelReconciliationHarness(TEST_ENVIRONMENT_ID, threadId);
     h.update({ modelSelection: primary });
     const fallback = deriveEffectiveComposerModelState({
+      threadStarted: false,
       draft: before,
       providers: [],
       selectedProvider: CODEX_DRIVER,
