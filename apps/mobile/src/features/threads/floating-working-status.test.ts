@@ -7,11 +7,12 @@ describe("thread sync status", () => {
     expect(resolveThreadSyncPhase({ status: "cached", hasError: true, contentKind: "ready" })).toBe(
       "failed",
     );
-    expect(threadSyncFloatingStatus("failed", () => {})).toMatchObject({
+    expect(threadSyncFloatingStatus("failed")).toMatchObject({
       kind: "connection",
       tone: "unavailable",
       label: "Could not sync messages",
     });
+    expect(threadSyncFloatingStatus("failed")).not.toHaveProperty("onPress");
     expect(
       resolveThreadSyncPhase({ status: "cached", hasError: false, contentKind: "ready" }),
     ).toBe("syncing");

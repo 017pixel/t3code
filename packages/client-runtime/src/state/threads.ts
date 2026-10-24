@@ -262,6 +262,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   const resumeDied = yield* Ref.make(false);
   const forceSnapshot = yield* Ref.make(false);
   const attemptSession = yield* Ref.make<RpcSession | undefined>(undefined);
+  const defectSession = yield* Ref.make<RpcSession | undefined>(undefined);
   const applyLock = yield* Semaphore.make(1);
   // Save only completed data/cursor updates. A canceled scope must not cache
   // a cursor whose event has not reached the data yet.
@@ -986,6 +987,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
           if (Cause.hasDies(cause) && (yield* Ref.get(resuming))) {
             yield* Ref.set(resumeDied, true);
           } else {
+            yield* Ref.set(defectSession, yield* Ref.get(attemptSession));
             yield* setStreamError("Could not synchronize the thread.");
           }
         }),
@@ -1005,8 +1007,12 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
           }
           // Any other defect keeps its error on screen and waits for a new
           // session or a foreground wakeup, so recovery cannot loop. A session
-          // that changed before this wait counts as the next one.
-          const failedSession = yield* Ref.get(attemptSession);
+          // that changed before this wait counts as the next one, so a buffered
+          // defect from a replaced session retries at once. A defect applying
+          // items never reaches onDefect, so the error is set here too.
+          const failedSession =
+            (yield* Ref.getAndSet(defectSession, undefined)) ?? (yield* Ref.get(attemptSession));
+          yield* setStreamError("Could not synchronize the thread.");
           yield* Stream.merge(
             SubscriptionRef.changes(supervisor.session).pipe(
               Stream.filter((session) => Option.getOrUndefined(session) !== failedSession),

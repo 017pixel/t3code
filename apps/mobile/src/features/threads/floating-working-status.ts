@@ -40,7 +40,7 @@ export type FloatingWorkingStatus =
       readonly kind: "connection";
       readonly tone: "reconnecting" | "unavailable";
       readonly label: string;
-      readonly onPress: () => void;
+      readonly onPress?: () => void;
     };
 
 export function connectionFloatingStatus(input: {
@@ -104,10 +104,7 @@ export function resolveThreadSyncPhase(input: {
   }
 }
 
-export function threadSyncFloatingStatus(
-  phase: ThreadSyncPhase,
-  onRetry: () => void,
-): FloatingWorkingStatus {
+export function threadSyncFloatingStatus(phase: ThreadSyncPhase): FloatingWorkingStatus {
   switch (phase) {
     case "loading":
       return { kind: "syncing", label: "Loading messages..." };
@@ -117,8 +114,10 @@ export function threadSyncFloatingStatus(
       return {
         kind: "connection",
         tone: "unavailable",
+        // Not tappable: reconnecting a connected environment only health-checks
+        // the socket and does not resubscribe. A new session or returning to
+        // the foreground retries the sync.
         label: "Could not sync messages",
-        onPress: onRetry,
       };
   }
 }

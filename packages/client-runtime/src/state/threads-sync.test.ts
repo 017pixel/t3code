@@ -1796,6 +1796,30 @@ describe("EnvironmentThreads", () => {
       }),
   );
 
+  it.effect("shows an error when applying a streamed item hits a defect", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_PROJECTION, completionMarker: true });
+      expect(yield* Queue.take(harness.subscriptions)).toBe(CACHED_SNAPSHOT_SEQUENCE);
+      yield* Queue.offerAll(harness.inputs, [
+        snapshot(BASE_PROJECTION, CACHED_SNAPSHOT_SEQUENCE),
+        synchronized(),
+      ]);
+      yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+
+      yield* Queue.offer(harness.inputs, {
+        kind: "event",
+        event: null,
+      } as unknown as OrchestrationV2ThreadStreamItem);
+      const failed = yield* awaitThreadState(harness.observed, (value) =>
+        Option.isSome(value.error),
+      );
+      expect(Option.getOrThrow(failed.error)).toBe("Could not synchronize the thread.");
+
+      yield* harness.replaceSession;
+      expect(yield* Queue.take(harness.subscriptions)).toBe(CACHED_SNAPSHOT_SEQUENCE);
+    }),
+  );
+
   it.effect("keeps replayed updates synchronizing until the completion marker arrives", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({ cached: BASE_PROJECTION, completionMarker: true });

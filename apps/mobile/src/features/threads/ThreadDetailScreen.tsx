@@ -766,7 +766,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
       return null;
     }
     if (threadSyncPhase !== null) {
-      return threadSyncFloatingStatus(threadSyncPhase, props.onReconnectEnvironment);
+      return threadSyncFloatingStatus(threadSyncPhase);
     }
     const childInput = childThreadInputs[0];
     if (childInput && contentPresentationKind === "ready") {
