@@ -1022,14 +1022,43 @@ const make = Effect.gen(function* () {
       keysById: new Map(threads.map((thread) => [thread.id, thread.activeOrderKey])),
       movedId: input.threadId,
     });
-    // Already in place: report where the thread stands instead of a write.
+    // A reseed writes several threads with no shared transaction, so a limited
+    // caller is refused before the first write rather than partway through.
+    // Dispatch still re-checks each thread under its own lock.
+    const limit = yield* DispatchModeLimit;
+    if (limit !== undefined) {
+      const shells = new Map(active.map((thread) => [thread.id, thread]));
+      for (const assignment of assignments) {
+        const thread = shells.get(ThreadId.make(assignment.id))!;
+        const exceeded = exceededDispatchModeLimit(limit, thread);
+        if (exceeded === undefined) continue;
+        const refusal = {
+          threadId: thread.id,
+          mode: exceeded,
+          runtimeMode: thread.runtimeMode,
+          interactionMode: thread.interactionMode,
+        };
+        if (limit.refused !== undefined) yield* Ref.set(limit.refused, refusal);
+        return yield* new Orchestrator.OrchestratorThreadAboveModeLimitError({
+          commandId: input.commandId,
+          ...refusal,
+        });
+      }
+    }
+    // The reseed matched every existing key, so there is nothing to write.
     let sequence =
       assignments.length === 0 ? yield* orchestrator.getThreadEventSequence(input.threadId) : 0;
-    for (const [index, assignment] of assignments.entries()) {
+    for (const assignment of assignments) {
+      const threadId = ThreadId.make(assignment.id);
       const result = yield* dispatch({
         type: "thread.active.reorder",
-        commandId: index === 0 ? input.commandId : CommandId.make(`${input.commandId}:${index}`),
-        threadId: ThreadId.make(assignment.id),
+        // Keyed by thread so a retry after a partial reseed replays the writes
+        // that landed and only runs the rest.
+        commandId:
+          threadId === input.threadId
+            ? input.commandId
+            : CommandId.make(`${input.commandId}:${threadId}`),
+        threadId,
         orderKey: assignment.orderKey,
       });
       sequence = result.sequence;
