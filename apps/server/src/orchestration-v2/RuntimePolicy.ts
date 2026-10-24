@@ -103,15 +103,18 @@ export const layerFromProjectStore: Layer.Layer<
       });
       // A worktree on a branch without the subdirectory still starts at its root.
       if (candidate === worktreePath) return worktreePath;
-      const candidateExists = yield* fileSystem.exists(candidate).pipe(
+      const candidateIsDirectory = yield* fileSystem.stat(candidate).pipe(
+        Effect.map((info) => info.type === "Directory"),
         Effect.catch((cause) =>
-          Effect.logWarning("Could not check the thread's working directory", {
-            path: candidate,
-            cause,
-          }).pipe(Effect.as(false)),
+          cause.reason._tag === "NotFound"
+            ? Effect.succeed(false)
+            : Effect.logWarning("Could not check the thread's working directory", {
+                path: candidate,
+                cause,
+              }).pipe(Effect.as(false)),
         ),
       );
-      return candidateExists ? candidate : worktreePath;
+      return candidateIsDirectory ? candidate : worktreePath;
     });
 
     return RuntimePolicyV2.of({

@@ -138,7 +138,7 @@ it.layer(layerTest)("RuntimePolicyV2", (it) => {
 // A project rooted in a repository subdirectory, with a thread in a worktree of
 // that repository. A clone's `.git` is a directory and a worktree's is a file.
 const makeSubdirectoryProject = Effect.fn(function* (options: {
-  readonly worktreeHasIos: boolean;
+  readonly worktreeIos: "directory" | "file" | "missing";
 }) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -149,11 +149,16 @@ const makeSubdirectoryProject = Effect.fn(function* (options: {
   yield* fileSystem.makeDirectory(path.join(repoRoot, "ios"), { recursive: true });
   yield* fileSystem.makeDirectory(worktreePath, { recursive: true });
   yield* fileSystem.writeFileString(path.join(worktreePath, ".git"), "gitdir: elsewhere\n");
-  if (options.worktreeHasIos) yield* fileSystem.makeDirectory(path.join(worktreePath, "ios"));
+  if (options.worktreeIos === "directory") {
+    yield* fileSystem.makeDirectory(path.join(worktreePath, "ios"));
+  }
+  if (options.worktreeIos === "file") {
+    yield* fileSystem.writeFileString(path.join(worktreePath, "ios"), "not a directory\n");
+  }
   return { projectRoot: path.join(repoRoot, "ios"), worktreePath, path };
 });
 
-const resolveWorktreeCwd = (options: { readonly worktreeHasIos: boolean }) =>
+const resolveWorktreeCwd = (options: { readonly worktreeIos: "directory" | "file" | "missing" }) =>
   Effect.gen(function* () {
     const fixture = yield* makeSubdirectoryProject(options);
     const now = yield* DateTime.now;
@@ -169,14 +174,18 @@ const resolveWorktreeCwd = (options: { readonly worktreeHasIos: boolean }) =>
 
 it.effect("starts worktree threads in the project's subdirectory of the worktree", () =>
   Effect.gen(function* () {
-    const { cwd, worktreePath, path } = yield* resolveWorktreeCwd({ worktreeHasIos: true });
+    const { cwd, worktreePath, path } = yield* resolveWorktreeCwd({ worktreeIos: "directory" });
     assert.equal(cwd, path.join(worktreePath, "ios"));
   }),
 );
 
-it.effect("starts at the worktree root when its branch lacks the project's subdirectory", () =>
-  Effect.gen(function* () {
-    const { cwd, worktreePath } = yield* resolveWorktreeCwd({ worktreeHasIos: false });
-    assert.equal(cwd, worktreePath);
-  }),
+it.effect(
+  "starts at the worktree root when its branch has no directory at the project's path",
+  () =>
+    Effect.gen(function* () {
+      for (const worktreeIos of ["missing", "file"] as const) {
+        const { cwd, worktreePath } = yield* resolveWorktreeCwd({ worktreeIos });
+        assert.equal(cwd, worktreePath);
+      }
+    }),
 );
