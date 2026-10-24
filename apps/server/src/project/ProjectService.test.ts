@@ -204,34 +204,44 @@ it.layer(layerTest)("ProjectService", (it) => {
     }),
   );
 
-  it.effect("records a command metric for a committed project command", () =>
+  it.effect("meters a committed project command once with bounded command labels", () =>
     Effect.gen(function* () {
       const service = yield* ProjectService.ProjectService;
+      const sql = yield* SqlClient.SqlClient;
+      const projectId = ProjectId.make("project:metrics");
+      const commandId = CommandId.make("command:metrics:create");
       yield* TestClock.setTime(Date.parse("2026-06-20T10:00:00.000Z"));
       yield* service.create({
-        commandId: CommandId.make("command:metrics:create"),
-        projectId: ProjectId.make("project:metrics"),
+        commandId,
+        projectId,
         title: "Metrics",
         workspaceRoot: "/work/metrics",
       });
+      const events = yield* sql<{ readonly event_type: string }>`
+        SELECT event_type FROM orchestration_events
+        WHERE command_id = ${commandId} AND stream_id = ${projectId}
+      `;
+      assert.deepEqual(
+        events.map((event) => event.event_type),
+        ["project.created"],
+      );
 
-      const snapshots = yield* Metric.snapshot;
-      assert.isTrue(
-        snapshots.some(
-          (snapshot) =>
-            snapshot.id === "t3_orchestration_commands_total" &&
-            snapshot.attributes?.commandType === "project.create" &&
-            snapshot.attributes?.outcome === "success",
-        ),
+      const snapshots = (yield* Metric.snapshot).filter(
+        (snapshot) =>
+          snapshot.id === "t3_orchestration_commands_total" ||
+          snapshot.id === "t3_orchestration_command_duration",
       );
-      assert.isTrue(
-        snapshots.some(
-          (snapshot) =>
-            snapshot.id === "t3_orchestration_command_duration" &&
-            snapshot.attributes?.commandType === "project.create",
-        ),
-      );
-    }),
+      assert.lengthOf(snapshots, 2);
+      const counter = snapshots.find((snapshot) => snapshot.type === "Counter");
+      assert.deepEqual(counter?.attributes, { commandType: "project.create", outcome: "success" });
+      assert.equal(counter?.state.count, 1);
+      const duration = snapshots.find((snapshot) => snapshot.type === "Histogram");
+      assert.deepEqual(duration?.attributes, {
+        commandType: "project.create",
+        time_unit: "milliseconds",
+      });
+      assert.equal(duration?.state.count, 1);
+    }).pipe(Effect.provideService(Metric.MetricRegistry, new Map())),
   );
 
   it.effect("auto-bootstraps a workspace exactly once", () =>

@@ -1369,39 +1369,61 @@ it.effect("explicit settle clears snooze atomically and stays idempotent after r
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("records a command and its duration for a dispatched command", () =>
+it.effect("meters successful and rejected dispatches once with bounded command labels", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
-    yield* orchestrator.dispatch({
-      type: "thread.create",
-      commandId: CommandId.make("create-dispatch-metrics"),
-      threadId: ThreadId.make("thread:dispatch-metrics"),
-      projectId: ProjectId.make("project:dispatch-metrics"),
-      title: "Dispatch metrics",
-      modelSelection,
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      branch: null,
-      worktreePath: null,
-      createdBy: "user",
-      creationSource: "web",
-    });
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:dispatch-metrics");
+    for (const outcome of ["success", "failure"] as const) {
+      const result = yield* orchestrator
+        .dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`create-dispatch-metrics:${outcome}`),
+          threadId,
+          projectId: ProjectId.make("project:dispatch-metrics"),
+          title: "Dispatch metrics",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        })
+        .pipe(Effect.result);
+      if (outcome === "success") {
+        assert.isTrue(Result.isSuccess(result));
+        assert.equal((yield* projections.getThread(threadId)).title, "Dispatch metrics");
+      } else {
+        assert.isTrue(Result.isFailure(result));
+        if (Result.isFailure(result)) {
+          assert.equal(result.failure._tag, "OrchestratorThreadAlreadyExistsError");
+        }
+      }
 
-    const snapshots = yield* Metric.snapshot;
-    assert.isTrue(
-      snapshots.some(
+      const snapshots = (yield* Metric.snapshot).filter(
         (snapshot) =>
-          snapshot.id === "t3_orchestration_commands_total" &&
-          snapshot.attributes?.commandType === "thread.create" &&
-          snapshot.attributes?.outcome === "success",
-      ),
-    );
-    assert.isTrue(
-      snapshots.some(
-        (snapshot) =>
-          snapshot.id === "t3_orchestration_command_duration" &&
-          snapshot.attributes?.commandType === "thread.create",
-      ),
-    );
-  }).pipe(Effect.provide(layerTest)),
+          snapshot.id === "t3_orchestration_commands_total" ||
+          snapshot.id === "t3_orchestration_command_duration",
+      );
+      assert.lengthOf(snapshots, outcome === "success" ? 2 : 3);
+      const counters = snapshots.filter((snapshot) => snapshot.type === "Counter");
+      assert.deepEqual(
+        counters.map((snapshot) => ({
+          attributes: snapshot.attributes,
+          count: snapshot.state.count,
+        })),
+        (outcome === "success" ? ["success"] : ["success", "failure"]).map((outcome) => ({
+          attributes: { commandType: "thread.create", outcome },
+          count: 1,
+        })),
+      );
+      const duration = snapshots.find((snapshot) => snapshot.type === "Histogram");
+      assert.deepEqual(duration?.attributes, {
+        commandType: "thread.create",
+        time_unit: "milliseconds",
+      });
+      assert.equal(duration?.state.count, outcome === "success" ? 1 : 2);
+    }
+  }).pipe(Effect.provide(layerTest), Effect.provideService(Metric.MetricRegistry, new Map())),
 );
