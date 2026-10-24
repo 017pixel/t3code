@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as GitLabCli from "./GitLabCli.ts";
 import * as GitLabPullRequestCli from "./GitLabPullRequestCli.ts";
@@ -146,10 +147,13 @@ describe("merge request reads", () => {
               calls.mergeCapabilities += 1;
               return { merge: true, squash: true, rebase: true };
             }),
+          runMergeRequestAction: () => Effect.void,
         }),
       ),
     );
-    return { provider, calls };
+    const checks = provider.getChangeRequestChecks;
+    if (checks === undefined) return yield* Effect.die("GitLab answers checks");
+    return { provider, checks, calls };
   });
 
   it.effect("asks for a project's merge methods once across its merge requests", () =>
@@ -166,12 +170,47 @@ describe("merge request reads", () => {
 
   it.effect("answers checks from the merge request the detail just read", () =>
     Effect.gen(function* () {
+      const { provider, checks, calls } = yield* countingProvider;
+
+      yield* provider.getChangeRequest(reference);
+      yield* checks(reference);
+
+      expect(calls.detail).toBe(1);
+    }),
+  );
+
+  it.effect("reads a merge request again after a write to it", () =>
+    Effect.gen(function* () {
+      const { provider, checks, calls } = yield* countingProvider;
+
+      yield* provider.getChangeRequest(reference);
+      yield* provider.runAction({ ...reference, action: "ready" });
+      yield* checks(reference);
+
+      expect(calls.detail).toBe(2);
+    }),
+  );
+
+  it.effect("does not share reads between checkouts", () =>
+    Effect.gen(function* () {
       const { provider, calls } = yield* countingProvider;
 
       yield* provider.getChangeRequest(reference);
-      yield* provider.getChangeRequestChecks(reference);
+      yield* provider.getChangeRequest({ ...reference, cwd: "/other" });
 
-      expect(calls.detail).toBe(1);
+      expect(calls).toEqual({ detail: 2, mergeCapabilities: 2 });
+    }),
+  );
+
+  it.effect("reads a merge request again once a minute has passed", () =>
+    Effect.gen(function* () {
+      const { provider, calls } = yield* countingProvider;
+
+      yield* provider.getViewerPermissions(reference);
+      yield* TestClock.adjust("61 seconds");
+      yield* provider.getViewerPermissions(reference);
+
+      expect(calls.detail).toBe(2);
     }),
   );
 });
