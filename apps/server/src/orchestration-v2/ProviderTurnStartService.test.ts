@@ -874,6 +874,30 @@ effectIt.effect("does not resume a continuation stopped while recovery was in fl
   }),
 );
 
+effectIt.effect("recreates a managed worktree folder that holds no checkout", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-start-" });
+    const worktreePath = path.join(workspaceRoot, "project", "worktree");
+    // What a junction-skipping `git worktree remove` leaves behind: no `.git`, no files.
+    yield* fileSystem.makeDirectory(path.join(worktreePath, "node_modules"), { recursive: true });
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      worktreePath,
+      worktreesDir: workspaceRoot,
+      fileSystem,
+      failReadsAfterRunning: true,
+    });
+    yield* harness.start;
+    expect(harness.createWorktree).toHaveBeenCalledWith({
+      cwd: "/tmp/native-account-project",
+      refName: "feature/restore",
+      path: worktreePath,
+    });
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 effectIt.effect.each(["cleanup-first", "startup-first"])(
   "coordinates provider startup with %s",
   (order) =>
