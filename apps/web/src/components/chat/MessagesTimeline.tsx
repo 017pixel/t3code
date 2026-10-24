@@ -484,16 +484,19 @@ const ConversationTimeline = memo(function ConversationTimeline({
         event.target instanceof Element ? event.target.closest("[aria-expanded]") : null;
     };
     // Any direct scroll or input hands the viewport back to the user, as does unmounting.
-    // A toggle's own pointerdown or keydown precedes its click, so it only cancels the
-    // previous reveal, never the one that click establishes.
+    // It listens on the document because the composer pages the timeline (PageUp/PageDown)
+    // and find or a citation can move it from outside the viewport. A toggle's own
+    // pointerdown or keydown precedes its click, so it only cancels the previous reveal,
+    // never the one that click establishes.
     const userTakesOver = () => {
       disclosureRevealRef.current = null;
       stopDisclosureRevealRef.current?.();
       stopDisclosureRevealRef.current = null;
     };
+    const takeoverTarget = timelineViewportElement.ownerDocument;
     const takeoverEvents = ["wheel", "touchstart", "pointerdown", "keydown"] as const;
     for (const type of takeoverEvents) {
-      timelineViewportElement.addEventListener(type, userTakesOver, {
+      takeoverTarget.addEventListener(type, userTakesOver, {
         capture: true,
         passive: true,
       });
@@ -503,7 +506,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     return () => {
       userTakesOver();
       for (const type of takeoverEvents) {
-        timelineViewportElement.removeEventListener(type, userTakesOver, true);
+        takeoverTarget.removeEventListener(type, userTakesOver, true);
       }
       timelineViewportElement.removeEventListener("click", recordTrigger, true);
       timelineViewportElement.removeEventListener("keydown", recordTrigger, true);
