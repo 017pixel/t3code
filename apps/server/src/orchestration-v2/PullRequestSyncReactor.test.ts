@@ -787,6 +787,37 @@ describe("PullRequestSyncReactor", () => {
       ),
   );
 
+  it.effect("persists other changes read with unknown mergeability under the known one", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([
+            makeThread("one", {
+              pullRequests: [makeLink(42, { updatedAt: NOW, mergeability: "conflicting" })],
+            }),
+          ]),
+          summary: (input) =>
+            Effect.succeed(
+              makeSummary(input, { updatedAt: NOW, title: "Renamed", mergeability: "unknown" }),
+            ),
+        });
+
+        yield* Effect.gen(function* () {
+          yield* startAndSweep(fixture);
+
+          assert.deepStrictEqual(
+            (yield* Ref.get(fixture.syncCommands)).map(({ snapshot }) => [
+              snapshot.title,
+              snapshot.mergeability,
+            ]),
+            [["Renamed", "conflicting"]],
+          );
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
   it.effect("refreshes closed links through each project after reopening elsewhere", () =>
     Effect.scoped(
       Effect.gen(function* () {
