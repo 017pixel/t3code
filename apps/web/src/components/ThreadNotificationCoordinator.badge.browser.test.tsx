@@ -1,5 +1,6 @@
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
-import { EnvironmentId } from "@t3tools/contracts";
+import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { Atom, AtomRegistry } from "effect/reactivity";
@@ -12,7 +13,7 @@ const state = vi.hoisted(() => ({
   inApp: false,
   toast: vi.fn(),
   closeToast: vi.fn(),
-  open: (_params: { environmentId: string; threadId: string }) => {},
+  open: (_params: { environmentId: string; threadId: string } | { draftId: string }) => {},
   shells: null as unknown as { set: (id: string, value: unknown) => void },
   navigate: vi.fn(),
   sound: vi.fn(),
@@ -22,7 +23,10 @@ const state = vi.hoisted(() => ({
 vi.mock(import("@tanstack/react-router"), async (original) => ({
   ...(await original()),
   useNavigate: (() => state.navigate) as never,
-  useParams: (() => useAtomValue(paramsAtom)) as never,
+  useParams: ((options?: { select?: (params: object) => unknown }) => {
+    const params = useAtomValue(paramsAtom);
+    return options?.select ? options.select(params) : params;
+  }) as never,
 }));
 vi.mock(import("./ui/toast"), async (original) => {
   const actual = await original();
@@ -63,6 +67,12 @@ vi.mock(import("../threadNotifications"), async (original) => ({
   setNotificationBadge: state.badge,
 }));
 
+import {
+  clearComposerDraftsEnvironment,
+  DraftId,
+  markPromotedDraftThreadByRef,
+  useComposerDraftStore,
+} from "../composerDraftStore";
 import { ThreadNotificationCoordinator } from "./ThreadNotificationCoordinator";
 
 let registry: AtomRegistry.AtomRegistry;
@@ -286,4 +296,28 @@ it("keeps toasts open for threads that were not opened", async () => {
   state.open({ environmentId: "one", threadId: "thread" });
   await app.render();
   expect(state.closeToast.mock.calls).toEqual([["Thread completed:Test thread"]]);
+});
+
+it("closes the toast when a promoted draft route shows its thread", async () => {
+  await using app = setup();
+  const environmentId = EnvironmentId.make("one");
+  const threadRef = scopeThreadRef(environmentId, ThreadId.make("thread"));
+  useComposerDraftStore
+    .getState()
+    .setProjectDraftThreadId(
+      scopeProjectRef(environmentId, ProjectId.make("project")),
+      DraftId.make("draft"),
+      { threadId: threadRef.threadId },
+    );
+  markPromotedDraftThreadByRef(threadRef);
+  using _drafts = { [Symbol.dispose]: () => clearComposerDraftsEnvironment(environmentId) };
+  state.inApp = true;
+  focused = true;
+  state.toast.mockReturnValue("toast");
+  await app.render();
+  state.shells.set("one", shell(completed));
+  await app.render();
+  state.open({ draftId: "draft" });
+  await app.render();
+  expect(state.closeToast).toHaveBeenCalledWith("toast");
 });

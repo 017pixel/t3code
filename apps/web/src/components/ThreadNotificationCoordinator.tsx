@@ -4,7 +4,7 @@ import {
 } from "@t3tools/client-runtime/state/models";
 import { pendingSubagentRequestsByThread } from "@t3tools/client-runtime/state/threads";
 import { useAtomValue } from "@effect/atom-react";
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import type { EnvironmentId, OrchestrationV2ThreadShell, ThreadId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import {
@@ -15,7 +15,9 @@ import {
 } from "lucide-react";
 import { useEffect, useRef } from "react";
 
+import { useComposerDraftStore } from "../composerDraftStore";
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
+import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
 import { useEnvironmentIds } from "../state/environments";
 import { environmentShell } from "../state/shell";
 import {
@@ -26,6 +28,7 @@ import {
   threadNotificationTag,
   unlockNotificationAudio,
 } from "../threadNotifications";
+import { resolveActiveThreadRouteRef } from "../threadRoutes";
 import { resolveSidebarThreadStatus } from "./Sidebar.logic";
 import { toastManager } from "./ui/toast";
 
@@ -35,6 +38,12 @@ export function ThreadNotificationCoordinator() {
   const inAppNotificationsEnabled = useClientSettings(
     (settings) => settings.inAppNotificationsEnabled,
   );
+  const routeTarget = useThreadRouteTarget();
+  const routeDraftThread = useComposerDraftStore((store) =>
+    routeTarget?.kind === "draft" ? store.getDraftSession(routeTarget.draftId) : null,
+  );
+  // A promoted draft route already renders its server thread.
+  const openThreadRef = resolveActiveThreadRouteRef(routeTarget, routeDraftThread);
   const pending = useRef(
     new Map<string, { environmentId: EnvironmentId; notification: Notification }>(),
   );
@@ -88,6 +97,7 @@ export function ThreadNotificationCoordinator() {
     <EnvironmentNotifications
       key={environmentId}
       environmentId={environmentId}
+      openThreadId={openThreadRef?.environmentId === environmentId ? openThreadRef.threadId : null}
       onNotification={onNotification}
     />
   ));
@@ -102,9 +112,11 @@ interface NotificationState {
 
 function EnvironmentNotifications({
   environmentId,
+  openThreadId,
   onNotification,
 }: {
   environmentId: EnvironmentId;
+  openThreadId: ThreadId | null;
   onNotification: (environmentId: EnvironmentId, notification: Notification) => void;
 }) {
   const shell = useAtomValue(environmentShell.stateValueAtom(environmentId));
@@ -115,10 +127,14 @@ function EnvironmentNotifications({
     (settings) => settings.inAppNotificationsEnabled,
   );
   const navigate = useNavigate();
-  const { environmentId: activeEnvironmentId, threadId: activeThreadId } = useParams({
-    strict: false,
-  });
   const previous = useRef(new Map<ThreadId, NotificationState>());
+  const toasts = useRef(new Map<ThreadId, ReturnType<typeof toastManager.add>[]>());
+
+  useEffect(() => {
+    if (openThreadId === null) return;
+    for (const toastId of toasts.current.get(openThreadId) ?? []) toastManager.close(toastId);
+    toasts.current.delete(openThreadId);
+  }, [openThreadId]);
 
   useEffect(() => {
     if (threads === null) {
@@ -180,7 +196,7 @@ function EnvironmentNotifications({
         inAppNotificationsEnabled &&
         document.visibilityState === "visible" &&
         document.hasFocus() &&
-        (activeEnvironmentId !== environmentId || activeThreadId !== thread.id)
+        openThreadId !== thread.id
       ) {
         const toastId = toastManager.add({
           type: kind === "completion" ? "success" : status === "failed" ? "error" : "warning",
@@ -210,6 +226,7 @@ function EnvironmentNotifications({
             },
           },
         });
+        toasts.current.set(thread.id, [...(toasts.current.get(thread.id) ?? []), toastId]);
         continue;
       }
       if (
@@ -241,13 +258,12 @@ function EnvironmentNotifications({
     }
     previous.current = next;
   }, [
-    activeEnvironmentId,
-    activeThreadId,
     environmentId,
     inAppNotificationsEnabled,
     mode,
     navigate,
     onNotification,
+    openThreadId,
     threads,
   ]);
 
