@@ -1,4 +1,5 @@
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
+import { rebaseWorkspaceFilePath } from "@t3tools/shared/path";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
 import { runtimeModeConfig, runtimeModeOptions as runtimeModes } from "./runtimeModeConfig";
@@ -461,6 +462,9 @@ export interface ChatComposerProps {
   keybindings: ResolvedKeybindingsConfig;
   terminalOpen: boolean;
   gitCwd: string | null;
+  // The file panel's root. Mentions are relative to gitCwd, which a subdirectory
+  // project's worktree thread nests below it.
+  workspaceRoot: string | null;
   pullRequestProjectId: ProjectId | null;
   pullRequestRepository: string | null;
   threadPullRequests: ReadonlyArray<ThreadPullRequestLink> | undefined;
@@ -597,6 +601,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     keybindings,
     terminalOpen,
     gitCwd,
+    workspaceRoot,
     pullRequestProjectId,
     pullRequestRepository,
     threadPullRequests,
@@ -764,7 +769,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if (preview) onExpandImage(preview);
     },
     openFile: setPreviewFileId,
-    openMention: (path: string) => useRightPanelStore.getState().openFile(routeThreadRef, path),
+    openMention: (path: string) =>
+      useRightPanelStore
+        .getState()
+        .openFile(routeThreadRef, rebaseWorkspaceFilePath(path, gitCwd, workspaceRoot)),
     expandVideo: (fileId: string) => {
       const file = composerFiles.find((candidate) => candidate.id === fileId);
       if (!file || !isVideoAttachment(file)) return;

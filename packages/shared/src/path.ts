@@ -134,3 +134,17 @@ export function resolveWorkspaceFilePath(path: string, workspaceRoot: string): s
     ? `${base}\\${path.replaceAll("/", "\\")}`
     : `${base}/${path}`;
 }
+
+/**
+ * Re-roots `path`, relative to `cwd` or absolute, as a path relative to
+ * `workspaceRoot`. A subdirectory project's worktree thread works below the
+ * checkout root its file panel shows. Falls back to `path` outside the root.
+ */
+export function rebaseWorkspaceFilePath(
+  path: string,
+  cwd: string | null | undefined,
+  workspaceRoot: string | null | undefined,
+): string {
+  if (!cwd) return path;
+  return workspaceRelativeFilePath(resolveWorkspaceFilePath(path, cwd), workspaceRoot) ?? path;
+}

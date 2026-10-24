@@ -5,6 +5,7 @@ import {
   normalizeProjectPathForComparison,
   normalizeProjectPathForDispatch,
   resolveWorkspaceFilePath,
+  rebaseWorkspaceFilePath,
 } from "./path.ts";
 
 describe("path helpers", () => {
@@ -49,5 +50,21 @@ describe("workspaceRelativeFilePath", () => {
     ["/repo/project/docs/a/../b.md", "/repo/project", "docs/a/../b.md"],
   ])("relates %s to %s", (path, workspaceRoot, relativePath) => {
     expect(workspaceRelativeFilePath(path, workspaceRoot)).toBe(relativePath);
+  });
+});
+
+describe("rebaseWorkspaceFilePath", () => {
+  it("re-roots a subdirectory cwd's paths at the checkout, not a same-named root file", () => {
+    expect(rebaseWorkspaceFilePath("docs/setup.md", "/wt/a/ios", "/wt/a")).toBe(
+      "ios/docs/setup.md",
+    );
+    expect(rebaseWorkspaceFilePath("docs/setup.md", "/wt/a", "/wt/a")).toBe("docs/setup.md");
+  });
+
+  it("keeps paths it cannot place under the root", () => {
+    expect(rebaseWorkspaceFilePath("/elsewhere/SKILL.md", "/wt/a/ios", "/wt/a")).toBe(
+      "/elsewhere/SKILL.md",
+    );
+    expect(rebaseWorkspaceFilePath("docs/setup.md", null, "/wt/a")).toBe("docs/setup.md");
   });
 });

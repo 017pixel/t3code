@@ -3612,6 +3612,7 @@ export default function ChatView(props: ChatViewProps) {
                               keybindings={keybindings}
                               terminalOpen={Boolean(terminalUiState.terminalOpen)}
                               gitCwd={agentCwd}
+                              workspaceRoot={activeWorkspaceRoot ?? null}
                               pullRequestProjectId={
                                 supportsPullRequests ? (activeProject?.id ?? null) : null
                               }
