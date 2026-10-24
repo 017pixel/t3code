@@ -1,4 +1,3 @@
-import type { useClerk } from "@clerk/react";
 import { managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
 import * as Exit from "effect/Exit";
 import { AsyncResult } from "effect/reactivity";
@@ -8,7 +7,7 @@ import { act, render } from "../../test/render";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 
 type ClerkAuth = {
-  status: ReturnType<typeof useClerk>["status"];
+  status: "loading" | "ready" | "degraded";
   isLoaded: boolean;
   isSignedIn: boolean;
   userId: string | null;
@@ -21,9 +20,6 @@ const testState = vi.hoisted(() => {
     auth: { status: "loading", isLoaded: false, isSignedIn: false, userId: null } as ClerkAuth,
     clerkListeners,
     clerk: {
-      get status() {
-        return testState.auth.status;
-      },
       get client() {
         return { id: testState.auth.clientId };
       },
@@ -31,8 +27,6 @@ const testState = vi.hoisted(() => {
         clerkListeners.add(listener);
         return () => void clerkListeners.delete(listener);
       },
-      on: (_event: "status", listener: () => void) => void clerkListeners.add(listener),
-      off: (_event: "status", listener: () => void) => void clerkListeners.delete(listener),
     },
     getToken: async () => "clerk-token",
     removeRelayEnvironments: vi.fn(),
@@ -91,7 +85,7 @@ async function mountAuth(
   try {
     for (const state of rest) {
       testState.auth = state;
-      // Clerk announces status and client changes through listeners and auth state through a render.
+      // Clerk announces client changes through listeners and auth state through a render.
       await act(() => {
         for (const listener of testState.clerkListeners) listener();
       });
@@ -110,7 +104,7 @@ const activeAccount = () => appAtomRegistry.get(managedRelaySessionAtom)?.accoun
 
 describe("ManagedRelayAuthProvider", () => {
   it("keeps saved relay environments when Clerk cannot reach its API at launch", async () => {
-    await using _screen = await mountAuth([loading, signedOut("degraded")]);
+    await using _screen = await mountAuth([loading, signedOut("degraded", "client_init")]);
 
     expect(testState.removeRelayEnvironments).not.toHaveBeenCalled();
     expect(activeAccount()).toBeNull();
@@ -129,6 +123,20 @@ describe("ManagedRelayAuthProvider", () => {
       signedOut("degraded"),
       signedOut("ready", "client-1"),
     ]);
+
+    await vi.waitFor(() => expect(testState.removeRelayEnvironments).toHaveBeenCalledTimes(1));
+    expect(activeAccount()).toBeNull();
+  });
+
+  it("removes relay environments once Clerk's API answers while its status stays degraded", async () => {
+    await using _screen = await mountAuth([loading, signedOut("degraded", "client_init")]);
+    expect(testState.removeRelayEnvironments).not.toHaveBeenCalled();
+
+    // The retried client fetch only notifies resource listeners; Clerk's status and auth stay put.
+    testState.auth = signedOut("degraded", "client-1");
+    await act(() => {
+      for (const listener of testState.clerkListeners) listener();
+    });
 
     await vi.waitFor(() => expect(testState.removeRelayEnvironments).toHaveBeenCalledTimes(1));
     expect(activeAccount()).toBeNull();

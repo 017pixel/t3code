@@ -33,19 +33,16 @@ export function ManagedRelayAuthProvider({ children }: { readonly children: Reac
     treatPendingAsSignedOut: false,
   });
   const clerk = useClerk();
-  // "degraded" loads from local state when Clerk's API fails. "ready" alone is not proof either:
-  // while the browser reports offline, Clerk turns failed fetches into empty resources, leaving
-  // the client without the id every /v1/client response carries.
+  // Clerk's status cannot prove its API answered: while offline it reports "ready" with an empty,
+  // id-less client, and a failed launch fetch reports "degraded" with a "client_init" placeholder
+  // built from the session cookie. A real /v1/client response always carries its own id, and can
+  // arrive later while the status stays "degraded".
   const clerkApiAnswered = useSyncExternalStore(
-    (onChange) => {
-      clerk.on("status", onChange);
-      const removeListener = clerk.addListener(onChange);
-      return () => {
-        clerk.off("status", onChange);
-        removeListener();
-      };
+    (onChange) => clerk.addListener(onChange),
+    () => {
+      const clientId = clerk.client?.id;
+      return Boolean(clientId) && clientId !== "client_init";
     },
-    () => clerk.status === "ready" && Boolean(clerk.client?.id),
   );
   const signedOutByClerkApi = !(isSignedIn && userId) && clerkApiAnswered;
   const removeRelayEnvironments = useAtomCommand(environmentCatalog.removeRelayEnvironments, {
