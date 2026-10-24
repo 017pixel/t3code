@@ -1167,6 +1167,7 @@ it.effect("wakes a settled Codex run whose own yielded command the restart cut",
           type: "command_execution",
           input: "sleep 180",
           status: "running",
+          completionWake: "always",
         },
       ],
     } as unknown as OrchestrationV2ThreadProjection;

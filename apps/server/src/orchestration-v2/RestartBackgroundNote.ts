@@ -54,6 +54,7 @@ export function cancelledTurnItemWork(
         kind: "shell",
         label: compactLabel(item.input) ?? compactLabel(item.title) ?? "background command",
         id: item.id,
+        ...(item.completionWake === undefined ? {} : { completionWake: item.completionWake }),
       };
     case "dynamic_tool": {
       const monitor =
@@ -158,11 +159,11 @@ export function isRestartNoteSource(
 }
 
 /**
- * A shell does not wake it: most are dev servers that nobody waits on, so their
- * note waits for the next user message.
+ * A shell does not wake it unless its provider would have: most are dev
+ * servers that nobody waits on, so their note waits for the next user message.
  */
-export function isAwaitedWork(work: Pick<Work, "kind">): boolean {
-  return work.kind !== "shell";
+export function isAwaitedWork(work: Pick<Work, "kind" | "completionWake">): boolean {
+  return work.kind !== "shell" || work.completionWake === "always";
 }
 
 export function runOutcome(
