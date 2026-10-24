@@ -336,7 +336,8 @@ export function serializeRenderedMarkdownFragment(container: Node): string {
 }
 
 export function serializeTableElementToMarkdown(table: Element): string {
-  return serializeTable(table).trim();
+  // Raw HTML can put a pre in a cell; with no tidy pass here, drop its markers.
+  return serializeTable(table).replaceAll(CODE_BOUNDARY, "").trim();
 }
 
 // The wrapper MarkdownMath puts on every formula it renders. The sanitizer drops

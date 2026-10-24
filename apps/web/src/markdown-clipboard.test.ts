@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import {
   serializeCodeBlockToMarkdown,
   serializeRenderedMarkdownFragment,
+  serializeTableElementToMarkdown,
 } from "./markdown-clipboard";
 import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import {
@@ -97,6 +98,21 @@ class FakeElement {
       return null;
     };
     return search(this);
+  }
+
+  querySelectorAll(selector: string): FakeElement[] {
+    return selector.split(", ").flatMap((part) =>
+      part
+        .slice(":scope > ".length)
+        .split(" > ")
+        .reduce<FakeElement[]>(
+          (parents, tag) =>
+            parents.flatMap((parent) =>
+              parent.children.filter((child) => child.tagName === tag.toUpperCase()),
+            ),
+          [this],
+        ),
+    );
   }
 }
 
@@ -222,6 +238,35 @@ describe("serializeRenderedMarkdownFragment", () => {
 
     expect(serializeRenderedMarkdownFragment(asNode(container))).toBe(
       "printf '%s' 'TOKEN' | gh secret set CLOUDFLARE_API_TOKEN",
+    );
+  });
+});
+
+describe("serializeTableElementToMarkdown", () => {
+  beforeEach(() => {
+    vi.stubGlobal("Node", { TEXT_NODE, ELEMENT_NODE });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("copies a raw HTML code block in a cell without its internal markers", () => {
+    const table = new FakeElement("TABLE").append(
+      new FakeElement("THEAD").append(
+        new FakeElement("TR").append(new FakeElement("TH").append(new FakeText("Command"))),
+      ),
+      new FakeElement("TBODY").append(
+        new FakeElement("TR").append(
+          new FakeElement("TD").append(
+            new FakeElement("PRE").append(new FakeElement("CODE").append(new FakeText("a  b"))),
+          ),
+        ),
+      ),
+    );
+
+    expect(serializeTableElementToMarkdown(asNode(table) as Element)).toBe(
+      "| Command |\n| --- |\n| a  b |",
     );
   });
 });
