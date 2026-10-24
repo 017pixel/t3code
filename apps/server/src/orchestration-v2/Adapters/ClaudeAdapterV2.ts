@@ -3523,8 +3523,8 @@ interface ClaudeLiveQueryContext {
   permissionMode: PermissionMode;
   stopping: boolean;
   readonly subagentsFromEarlierProcesses: ReadonlySet<ActiveClaudeSubagent>;
-  // Tools granted for the whole session in this CLI process. In Plan the CLI keeps
-  // asking despite the session rule it was given, so the adapter honors the grant.
+  // Tools granted for the whole session while in Plan in this CLI process. In Plan the
+  // CLI keeps asking despite the session rule it was given, so the adapter honors the grant.
   readonly sessionAllowedTools: Set<string>;
 }
 
@@ -9000,10 +9000,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }
 
           const liveQuery = yield* Ref.get(queryContext);
+          // Outside Plan the CLI honors session rules itself, so a callback there is a
+          // safety check or ask the cached grant must not answer.
           const mayUseStandingGrant =
+            liveQuery?.permissionMode === "plan" &&
             callbackOptions.suppressAlwaysAllowRule !== true &&
             callbackOptions.matchedAskRule === undefined;
-          if (mayUseStandingGrant && liveQuery?.sessionAllowedTools.has(toolName) === true) {
+          if (mayUseStandingGrant && liveQuery.sessionAllowedTools.has(toolName)) {
             return {
               behavior: "allow",
               updatedInput: toolInput,
@@ -9085,7 +9088,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           });
           if (mayUseStandingGrant && result.behavior === "allow" && result.updatedPermissions) {
             for (const allowedTool of wholeToolAllowRules(result.updatedPermissions)) {
-              liveQuery?.sessionAllowedTools.add(allowedTool);
+              liveQuery.sessionAllowedTools.add(allowedTool);
             }
           }
           return result;

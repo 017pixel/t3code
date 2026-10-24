@@ -2990,6 +2990,67 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
     );
 
+    it.effect("keeps a Plan session approval inside Plan only", () =>
+      Effect.gen(function* () {
+        const turn = yield* openPlanTurn("full-access");
+        const setLiveMode = (permissionMode: "plan" | "default", uuid: string) =>
+          turn.offerAndWait(
+            claudeSdkFrame({
+              type: "system",
+              subtype: "status",
+              status: null,
+              permissionMode,
+              uuid,
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+        const approveForSession = Effect.fn("approveForSession")(function* (
+          toolName: string,
+          toolInput: Record<string, unknown>,
+          toolUseID: string,
+        ) {
+          const approval = yield* requestWrite(turn, toolName, toolInput, { toolUseID });
+          assert.equal(approval.first.type, "request", `${toolUseID} skipped approval`);
+          if (approval.first.type !== "request") return;
+          yield* turn.runtime.respondToRuntimeRequest({
+            requestId: approval.first.event.runtimeRequest.id,
+            decision: "acceptForSession",
+          });
+          assert.equal((yield* Fiber.join(approval.decision))?.behavior, "allow");
+        });
+        const readTool = "mcp__t3-code__t3_thread_read";
+        yield* approveForSession(readTool, { threadId: "thread-dummy" }, "read-in-plan");
+
+        yield* setLiveMode("default", "leave-plan");
+        const outsidePlan = yield* requestWrite(
+          turn,
+          readTool,
+          { threadId: "thread-dummy", afterPosition: 40 },
+          { toolUseID: "read-outside-plan" },
+        );
+        assert.equal(
+          outsidePlan.first.type,
+          "request",
+          "the Plan grant answered a callback outside Plan",
+        );
+        yield* approveForSession("Bash", { command: "echo after > target.txt" }, "bash-outside");
+
+        yield* setLiveMode("plan", "reenter-plan");
+        const bashInPlan = yield* requestWrite(
+          turn,
+          "Bash",
+          { command: "echo again > target.txt" },
+          { toolUseID: "bash-in-plan" },
+        );
+        assert.equal(bashInPlan.first.type, "request", "a grant made outside Plan was recorded");
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    );
+
     it.effect("denies Plan writes without asking when approvals are never allowed", () =>
       Effect.gen(function* () {
         const turn = yield* openPlanTurn("full-access", "never");
