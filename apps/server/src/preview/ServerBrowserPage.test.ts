@@ -333,6 +333,21 @@ describe("server browser snapshot screenshot", () => {
       colors: pixels.map(colorOf),
     }).toEqual({ size: [1280, 800], colors: ["blue", "red", "red"] });
   });
+
+  it("shrinks the screenshot of an XML document, whose createElement makes no canvas", async () => {
+    const page = await context.newPage();
+    await page.goto("data:text/xml,<a/>");
+    const { screenshot } = await ServerBrowserPage.snapshot({
+      page,
+      cdp: await context.newCDPSession(page),
+      renderScale: 2,
+      consoleEntries: [],
+      networkEntries: [],
+      actionTimeline: [],
+    });
+
+    expect([screenshot.width, screenshot.height]).toEqual([1280, 800]);
+  });
 });
 
 describe("server browser drag", () => {

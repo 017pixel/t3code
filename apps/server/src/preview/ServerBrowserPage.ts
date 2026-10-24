@@ -479,7 +479,8 @@ export const captureViewport = async (
 const SHRINK_PNG = `async function (png, width, height) {
   const bytes = Uint8Array.from(atob(png), (char) => char.charCodeAt(0));
   const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
-  const canvas = document.createElement("canvas");
+  // Namespaced, as an XML document's createElement makes a plain element with no getContext.
+  const canvas = document.createElementNS("http://www.w3.org/1999/xhtml", "canvas");
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext("2d");
