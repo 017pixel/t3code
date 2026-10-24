@@ -290,7 +290,11 @@ export const layer = Layer.effectDiscard(
                 providerThreadId: request.providerThreadId,
                 cause,
               });
-              if (request.delegatedCompletion !== undefined) {
+              // Only delegated completions retry; any other source would keep
+              // holding whatever it offered for.
+              if (request.delegatedCompletion === undefined) {
+                if (request.clearIfCurrent !== undefined) yield* request.clearIfCurrent();
+              } else {
                 const completion = request.delegatedCompletion;
                 const retryKey = delegatedCompletionRetryKey(request, completion);
                 const retryDelay = yield* nextRetryDelay(retryKey);

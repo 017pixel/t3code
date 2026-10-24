@@ -2942,6 +2942,90 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect("answers approvals Codex sends after a held turn's wake was rejected", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-external-queue-rejected-late-approval";
+        const nativeThreadId = `native-${scenario}-thread`;
+        const approval = (id: number, turnId: string): CodexReplay.CodexAppServerReplayEntry[] => [
+          {
+            type: "emit_inbound",
+            label: `approval ${id}`,
+            frame: {
+              id,
+              method: "item/commandExecution/requestApproval",
+              params: {
+                threadId: nativeThreadId,
+                turnId,
+                itemId: `external-command-${id}`,
+                startedAtMs: 1782622459500,
+                command: "cat external",
+              },
+            },
+          },
+          {
+            type: "expect_outbound",
+            label: `approval ${id} failed without a run`,
+            frame: {
+              id,
+              error: { code: -32603, message: `No T3 run adopted Codex turn ${turnId}.` },
+            },
+          },
+        ];
+        // The first approval is held and answered by the rejection, so the
+        // second reaches the adapter only after the held turn was released.
+        const transcript = externalQueueTranscript(
+          scenario,
+          "Reply with the word QUEUED.",
+          (turnId) => [...approval(200, turnId), ...approval(201, turnId)],
+          [
+            {
+              type: "emit_inbound",
+              label: "goal update after the turn",
+              frame: {
+                method: "thread/goal/updated",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: null,
+                  goal: {
+                    threadId: nativeThreadId,
+                    objective: "Finish",
+                    status: "active",
+                    tokenBudget: null,
+                    tokensUsed: 0,
+                    timeUsedSeconds: 0,
+                    createdAt: 1782622440,
+                    updatedAt: 1782622450,
+                  },
+                },
+              },
+            },
+          ],
+        );
+        const harness = yield* makeCodexReplayHarness(transcript);
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-ready"),
+            text: "Reply with the requested recovery marker.",
+          }),
+        );
+        yield* harness.awaitTerminal(1);
+        yield* harness.until(() => harness.continuationRequests.length > 0);
+        yield* harness.continuationRequests[0]!.onRunSettled!();
+        yield* harness.until(() =>
+          harness.events.some((event) => event.type === "provider_thread.updated"),
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect("answers a held approval when the woken run settles before adopting", () =>
     Effect.scoped(
       Effect.gen(function* () {
