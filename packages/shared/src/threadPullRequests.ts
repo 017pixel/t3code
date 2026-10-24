@@ -1,15 +1,12 @@
 import type {
   OrchestrationV2AppThread,
-  RepositoryIdentity,
-  SourceControlProviderKind,
   ThreadLinkedPullRequest,
   ThreadPullRequestKey,
   ThreadPullRequestLink,
 } from "@t3tools/contracts";
 
-import { pullRequestHostOf } from "@t3tools/contracts";
 import { parseChangeRequestUrl } from "./changeRequestUrl.ts";
-import { canonicalRepositoryKey, sourceControlRepositorySelector } from "./sourceControl.ts";
+import { canonicalRepositoryKey } from "./sourceControl.ts";
 
 type ThreadPullRequestKeySource = ThreadPullRequestKey & {
   readonly authority?: string;
@@ -159,53 +156,6 @@ export function resolveThreadCurrentPullRequestLink(
   return current.kind === "single" ? current.link : current.top;
 }
 
-export function legacyLinkedPullRequestOf(
-  links: ReadonlyArray<ThreadPullRequestLink>,
-  projectId: ThreadLinkedPullRequest["projectId"],
-  identity: RepositoryIdentity | null | undefined,
-): ThreadLinkedPullRequest | null {
-  if (!identity) return null;
-  const host = pullRequestHostOf(identity, identity.provider as SourceControlProviderKind);
-  if (typeof host !== "string") return null;
-  const repository = sourceControlRepositorySelector(identity);
-  if (repository === null) return null;
-  const azureKey =
-    identity.provider === "azure-devops"
-      ? canonicalRepositoryKey(identity.canonicalKey.toLowerCase())
-      : null;
-  const link = resolveThreadCurrentPullRequestLink(
-    links.filter((link) => {
-      if (azureKey !== null) {
-        const key = legacyThreadPullRequestKey(link, link.host);
-        return canonicalRepositoryKey(`${key.host}/${key.repository}`) === azureKey;
-      }
-      const parsed = parseChangeRequestUrl(link.url);
-      if (parsed?.authority !== undefined) {
-        try {
-          const remote = new URL(identity.locator.remoteUrl);
-          if (remote.protocol === "http:" || remote.protocol === "https:") {
-            return (
-              parsed.authority === remote.host && parsed.repository === repository.toLowerCase()
-            );
-          }
-        } catch {}
-        return parsed.host === host && parsed.repository === repository.toLowerCase();
-      }
-      return (
-        link.host.toLowerCase() === host.toLowerCase() &&
-        link.repository.toLowerCase() === repository.toLowerCase()
-      );
-    }),
-  );
-  if (link === null) return null;
-  return {
-    projectId,
-    repository: azureKey === null ? link.repository : repository,
-    number: link.number,
-    url: link.url,
-  };
-}
-
 export interface ThreadPullRequestChain {
   readonly kind: "native" | "derived";
   readonly layers: ReadonlyArray<ThreadPullRequestLink>;
@@ -338,29 +288,55 @@ export function resolveThreadPullRequestBadge(
   return { kind: "pull-request", others: visible.length - 1, state };
 }
 
+export interface ThreadSearchPullRequest {
+  readonly number: number;
+  readonly title: string | null;
+  /** `owner/repo#123` and the pull request URL, matched only by a whole query. */
+  readonly references: ReadonlyArray<string>;
+}
+
+const SEARCHED_PULL_REQUEST_TITLES = 3;
+
+/** Pull requests thread search matches by number, title, and reference. */
+export function threadSearchPullRequests(thread: {
+  readonly pullRequests?: ReadonlyArray<ThreadPullRequestLink> | undefined;
+  readonly linkedPullRequest?: ThreadLinkedPullRequest | null | undefined;
+  readonly branchPullRequest?: ThreadLinkedPullRequest | null | undefined;
+}): ThreadSearchPullRequest[] {
+  const entry = (
+    link: Pick<ThreadLinkedPullRequest, "number" | "repository" | "url">,
+    title: string | null,
+  ): ThreadSearchPullRequest => ({
+    number: link.number,
+    title,
+    references: [`${link.repository}#${link.number}`, link.url],
+  });
+  const branch = thread.branchPullRequest ? [entry(thread.branchPullRequest, null)] : [];
+  if (thread.pullRequests !== undefined && thread.pullRequests.length > 0) {
+    // Every pull request matches by number and link, but only the newest few
+    // by title: a triage thread linked to dozens would match almost any word.
+    const newestFirst = [...visibleThreadPullRequests(thread.pullRequests)].sort(
+      (left, right) => latestUpdatedAt(right) - latestUpdatedAt(left),
+    );
+    return branch.concat(
+      newestFirst.map((link, index) =>
+        entry(link, index < SEARCHED_PULL_REQUEST_TITLES ? (link.snapshot?.title ?? null) : null),
+      ),
+    );
+  }
+  return thread.linkedPullRequest ? branch.concat(entry(thread.linkedPullRequest, null)) : branch;
+}
+
 export function threadPullRequestSearchTerms(thread: {
   readonly pullRequests?: ReadonlyArray<ThreadPullRequestLink> | undefined;
   readonly linkedPullRequest?: ThreadLinkedPullRequest | null | undefined;
   readonly branchPullRequest?: ThreadLinkedPullRequest | null | undefined;
 }): string[] {
-  const branch = thread.branchPullRequest;
-  const terms = branch
-    ? [`#${branch.number}`, `${branch.repository}#${branch.number}`, branch.url]
-    : [];
-  if (thread.pullRequests !== undefined && thread.pullRequests.length > 0) {
-    return terms.concat(
-      visibleThreadPullRequests(thread.pullRequests).flatMap((link) => [
-        `#${link.number}`,
-        `${link.repository}#${link.number}`,
-        link.url,
-        link.snapshot?.title ?? "",
-      ]),
-    );
-  }
-  const legacy = thread.linkedPullRequest;
-  return legacy
-    ? terms.concat([`#${legacy.number}`, `${legacy.repository}#${legacy.number}`, legacy.url])
-    : terms;
+  return threadSearchPullRequests(thread).flatMap((pullRequest) => [
+    `#${pullRequest.number}`,
+    ...pullRequest.references,
+    ...(pullRequest.title ? [pullRequest.title] : []),
+  ]);
 }
 
 /** Older V2 event payloads stored one link; an explicit empty array means it was unlinked. */
