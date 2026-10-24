@@ -273,13 +273,14 @@ export class MessageDispatchUnansweredError extends Schema.TaggedError<MessageDi
   { message: Schema.String },
 ) {}
 
-// The server answers a message dispatch once it commits the command, so a healthy socket that
-// stays silent this long means a stalled pipeline. The server may still commit later, so the
-// error says so instead of retrying, which could duplicate the message.
+// The server answers a message dispatch or thread launch once it commits the command; worktree
+// preparation runs after that answer. A healthy socket that stays silent this long means a
+// stalled pipeline. The server may still commit later, so the error says so instead of
+// retrying, which could duplicate the message.
 const MESSAGE_DISPATCH_ANSWER_TIMEOUT = "2 minutes";
 
-const dispatchMessage = (command: OrchestrationV2Command) =>
-  dispatch(command).pipe(
+const requireMessageAnswer = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(
     Effect.timeoutOrElse({
       duration: MESSAGE_DISPATCH_ANSWER_TIMEOUT,
       orElse: () =>
@@ -291,6 +292,9 @@ const dispatchMessage = (command: OrchestrationV2Command) =>
         ),
     }),
   );
+
+const dispatchMessage = (command: OrchestrationV2Command) =>
+  requireMessageAnswer(dispatch(command));
 
 const getProjection = (threadId: ThreadId) =>
   request(ORCHESTRATION_V2_WS_METHODS.getThreadProjection, { threadId });
@@ -689,25 +693,27 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
                 ? {}
                 : { branch: bootstrap.branch }),
             };
-    return yield* request(ORCHESTRATION_V2_WS_METHODS.launchThread, {
-      commandId,
-      creationSource: input.creationSource ?? "web",
-      threadId: input.threadId,
-      ...(bootstrap === undefined ? { reuseExistingThread: true } : {}),
-      projectId: thread.projectId,
-      title: input.titleSeed ?? thread.title,
-      generateTitle: input.titleSeed !== undefined,
-      modelSelection: input.modelSelection ?? thread.modelSelection,
-      runtimeMode: input.runtimeMode,
-      interactionMode: input.interactionMode,
-      workspaceStrategy,
-      initialMessage: {
-        messageId: input.message.messageId,
-        text: input.message.text,
-        ...(context ? { context } : {}),
-        attachments,
-      },
-    });
+    return yield* requireMessageAnswer(
+      request(ORCHESTRATION_V2_WS_METHODS.launchThread, {
+        commandId,
+        creationSource: input.creationSource ?? "web",
+        threadId: input.threadId,
+        ...(bootstrap === undefined ? { reuseExistingThread: true } : {}),
+        projectId: thread.projectId,
+        title: input.titleSeed ?? thread.title,
+        generateTitle: input.titleSeed !== undefined,
+        modelSelection: input.modelSelection ?? thread.modelSelection,
+        runtimeMode: input.runtimeMode,
+        interactionMode: input.interactionMode,
+        workspaceStrategy,
+        initialMessage: {
+          messageId: input.message.messageId,
+          text: input.message.text,
+          ...(context ? { context } : {}),
+          attachments,
+        },
+      }),
+    );
   }
 
   const requestedMode = input.dispatchMode ?? "auto";
