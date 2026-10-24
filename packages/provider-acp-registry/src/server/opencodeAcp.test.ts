@@ -92,7 +92,10 @@ it.layer(NodeServices.layer)("discoverOpenCodeAcpSkills", (it) => {
       yield* write(`${skills}/malformed/SKILL.md`, "---\ndescription: [unclosed\n---\n");
       yield* write(`${skills}/numeric-name/SKILL.md`, "---\nname: 3\n---\n");
       yield* write(`${skills}/numeric-description/SKILL.md`, "---\ndescription: 3\n---\n");
+      // gray-matter reads an unclosed block through the end of the file.
       yield* write(`${skills}/unterminated/SKILL.md`, "---\ndescription: never closed\n");
+      yield* write(`${skills}/opener-only/SKILL.md`, "---");
+      yield* write(`${skills}/opener-language/SKILL.md`, "--- yaml");
       // `yaml` parses a 200KB mapping in seconds, so it is listed unparsed.
       const keys = Array.from({ length: 20_000 }, (_, index) => `key${index}: value`).join("\n");
       yield* write(`${skills}/huge/SKILL.md`, `---\ndescription: huge\n${keys}\n---\n`);
@@ -108,6 +111,8 @@ it.layer(NodeServices.layer)("discoverOpenCodeAcpSkills", (it) => {
         { name: "colon", displayName: "Colon Helper", description: "Use when: you need colons" },
         { name: "huge", displayName: undefined, description: undefined },
         { name: "no-frontmatter", displayName: undefined, description: undefined },
+        { name: "opener-only", displayName: undefined, description: undefined },
+        { name: "unterminated", displayName: undefined, description: "never closed" },
       ]);
     }).pipe(Effect.scoped),
   );

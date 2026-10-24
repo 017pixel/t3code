@@ -67,10 +67,12 @@ const readFrontmatter = (
 ): SkillFrontmatter | "invalid" | "unchecked" => {
   const text = contents.startsWith("\uFEFF") ? contents.slice(1) : contents;
   if (!text.startsWith("---") || text[3] === "-") return {};
-  const close = text.indexOf("\n---", 3);
-  if (close === -1) return "invalid";
   const openerEnd = text.indexOf("\n", 3);
-  const frontmatter = text.slice(openerEnd, close);
+  // gray-matter reads any text after a line-less opener as an engine name and
+  // throws, and reads an unclosed block through the end of the file.
+  if (openerEnd === -1) return text.slice(3).trim() === "" ? {} : "invalid";
+  const close = text.indexOf("\n---", 3);
+  const frontmatter = text.slice(openerEnd, close === -1 ? text.length : close);
   if (frontmatter.length > MAX_FRONTMATTER_BYTES) return "unchecked";
   const blank = frontmatter.split("\n").every((line) => {
     const trimmed = line.trim();
