@@ -60,13 +60,13 @@ export function evaluatePullRequestWatch(
   let awaitingApproval = headMoved ? [] : (watch.awaitingApproval ?? []);
   // "action-required" waits on someone, such as a maintainer approving a fork's workflows, so the
   // agent is told once and nothing passes meanwhile. A placeholder is a host that could not tell,
-  // so it never confirms a pass, though a failed, pending, or awaited check beside it ends one.
-  const failed = detail.checks.filter(isFailedCheck);
-  const awaiting = detail.checks.filter(
-    (check) => check.status === "action-required" && check.placeholder !== true,
-  );
+  // so it counts as no check and never confirms a pass, though a failed, pending, or awaited check
+  // beside it ends one.
   const unread = detail.checks.some((check) => check.placeholder === true);
-  if (detail.checks.length > 0) {
+  const checks = detail.checks.filter((check) => check.placeholder !== true);
+  const failed = checks.filter(isFailedCheck);
+  const awaiting = checks.filter((check) => check.status === "action-required");
+  if (checks.length > 0) {
     const newlyFailed = failed.filter((check) => !failedChecks.includes(check.name));
     if (newlyFailed.length > 0) changes.push({ kind: "checks-failed", failed: newlyFailed });
     // A watch saved before awaitingApproval reported these as failed checks.
@@ -83,7 +83,7 @@ export function evaluatePullRequestWatch(
     // stays awaited through reads that miss it until one of its jobs finishes.
     const awaitingNow = [...new Set(awaiting.map(approvalKey))];
     const finished = new Set(
-      detail.checks
+      checks
         .filter((check) => check.status !== "action-required" && check.status !== "pending")
         .map((check) => workflowRunOf(check.url)),
     );
@@ -94,12 +94,12 @@ export function evaluatePullRequestWatch(
       ),
     ];
   }
-  const required = detail.checks.filter((check) => check.required === true);
-  const gate = required.length > 0 ? required : detail.checks;
+  const required = checks.filter((check) => check.required === true);
+  const gate = required.length > 0 ? required : checks;
   const passedNow =
     awaitingApproval.length === 0 &&
     gate.every((check) => check.status !== "pending" && !isFailedCheck(check));
-  if (detail.checks.length > 0 && !(unread && passedNow)) {
+  if (checks.length > 0 && !(unread && passedNow)) {
     const gateNames = gate.map((check) => check.name);
     const told = passed && passedChecks.length === 0 ? gateNames : passedChecks;
     // A required job created and finished between two passes is never seen pending. Without
@@ -109,25 +109,25 @@ export function evaluatePullRequestWatch(
     // Only those are owed, so later advisory churn never wakes. One turned required is gate news.
     const owed =
       passedNow && passed
-        ? detail.checks
+        ? checks
             .filter((check) => check.required !== true && owedChecks.includes(check.name))
             .map((check) => check.name)
         : [];
     const settled =
       failed.length === 0 &&
       awaitingApproval.length === 0 &&
-      detail.checks.every((check) => check.status !== "pending");
+      checks.every((check) => check.status !== "pending");
     owedChecks = owed;
     if (passedNow && (!passed || gateGrew)) {
       changes.push({ kind: "checks-passed", count: gate.length, required: required.length > 0 });
       owedChecks =
         required.length > 0
-          ? detail.checks
+          ? checks
               .filter((check) => check.required !== true && check.status === "pending")
               .map((check) => check.name)
           : [];
     } else if (settled && owed.length > 0) {
-      changes.push({ kind: "checks-passed", count: detail.checks.length, required: false });
+      changes.push({ kind: "checks-passed", count: checks.length, required: false });
       owedChecks = [];
     }
     passed = passedNow;
@@ -143,7 +143,7 @@ export function evaluatePullRequestWatch(
     const awaitedBefore = headMoved
       ? DateTime.formatIso(DateTime.makeUnsafe(now))
       : (watch.checksAwaitedSince ?? null);
-    checksAwaitedSince = detail.checks.length > 0 ? null : awaitedBefore;
+    checksAwaitedSince = checks.length > 0 ? null : awaitedBefore;
     const awaitedMs = checksAwaitedSince === null ? 0 : now - Date.parse(checksAwaitedSince);
     if (awaitedMs >= PULL_REQUEST_WATCH_NO_CHECKS_MS) {
       changes.push({ kind: "no-checks", minutes: Math.round(awaitedMs / 60_000) });

@@ -287,6 +287,39 @@ describe("evaluatePullRequestWatch", () => {
     assert.isFalse(gated.next.passed);
   });
 
+  it("keeps failures and approvals through a read that lists only an unread approval", () => {
+    const unknown = {
+      ...check("Workflow approval status", "action-required"),
+      url: null,
+      placeholder: true,
+    };
+    const broken = check("CI", "failure");
+    const approval = { ...check("contributor tests", "action-required"), url: null };
+    const seen = evaluatePullRequestWatch(
+      watch(),
+      detail({ checks: [broken, approval] }),
+      noRemarks,
+    );
+    assert.deepEqual(seen.changes, [
+      { kind: "checks-failed", failed: [broken] },
+      { kind: "checks-awaiting-approval", checks: [approval] },
+    ]);
+    const blind = evaluatePullRequestWatch(seen.next, detail({ checks: [unknown] }), noRemarks);
+    assert.deepEqual(blind.changes, []);
+    assert.deepEqual(blind.next, seen.next);
+    assert.deepEqual(
+      evaluatePullRequestWatch(blind.next, detail({ checks: [broken, approval] }), noRemarks)
+        .changes,
+      [],
+    );
+    const pushed = evaluatePullRequestWatch(
+      blind.next,
+      detail({ headSha: "bbbbbbbbbb", checks: [unknown] }),
+      noRemarks,
+    );
+    assert.deepEqual([pushed.next.failedChecks, pushed.next.awaitingApproval], [[], []]);
+  });
+
   it("waits for an approval with no URL while the host lists it", () => {
     const bot = check("bot", "success");
     const green = evaluatePullRequestWatch(watch(), detail({ checks: [bot] }), noRemarks);
@@ -664,6 +697,15 @@ describe("evaluatePullRequestWatch", () => {
     assert.isTrue(anHourLater(legacy, detail({ checks: [] })).every((kinds) => kinds.length === 0));
     const pushed = anHourLater(legacy, detail({ headSha: "bbbbbbbbbb", checks: [] }));
     assert.deepEqual(pushed.flat(), ["no-checks"]);
+  });
+
+  it("waits for checks through reads that list only an unread approval", () => {
+    const unknown = {
+      ...check("Workflow approval status", "action-required"),
+      url: null,
+      placeholder: true,
+    };
+    assert.deepEqual(anHourLater(watch(), detail({ checks: [unknown] })).flat(), ["no-checks"]);
   });
 
   it("never reports missing checks on a host where an empty list says nothing", () => {
