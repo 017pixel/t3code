@@ -54,7 +54,10 @@ function TooltipScrollDismissArea({ onScrollCapture, ...props }: ComponentProps<
         {...props}
         onScrollCapture={(event) => {
           onScrollCapture?.(event);
-          tracker.dismissUnfocused();
+          // Portaled popups bubble their own scrolls here through React, such as a long path.
+          if (event.target instanceof Node && event.currentTarget.contains(event.target)) {
+            tracker.dismissUnfocused();
+          }
         }}
       />
     </TooltipScrollContext>
