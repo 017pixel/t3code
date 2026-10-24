@@ -35,7 +35,7 @@ const legacyTerminalMethod: AcpSchema.AuthMethod = {
     "Run `kimi login` command in the terminal, then follow the instructions to finish login.",
   _meta: {
     "terminal-auth": {
-      command: "/managed/agent",
+      command: "/opt/kimi/kimi",
       args: ["login"],
       label: "Kimi Code Login",
       env: {},
@@ -369,11 +369,14 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const h = yield* makeHarness(legacyTerminalMethod);
+      const discovered = yield* h.state((value) => (value.methods?.length ?? 0) > 0);
+      assert.strictEqual(discovered.methods?.[0]?.type, "terminal");
       yield* h.controller.start("owner", Effect.void, "login");
-      const started = yield* h.state(
-        (value) => value.phase === "waiting" || value.phase === "verifying",
-      );
+      const started = yield* h.phase("waiting");
       assert.deepEqual(h.authenticated, []);
       assert.strictEqual(started.interaction?.type, "terminal");
+      // The meta carries the whole login command, never `<agent> --acp login`.
+      assert.deepEqual(h.terminalSpawn()?.shell, "/opt/kimi/kimi");
+      assert.deepEqual(h.terminalSpawn()?.args, ["login"]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
