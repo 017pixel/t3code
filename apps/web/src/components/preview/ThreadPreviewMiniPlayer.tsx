@@ -60,6 +60,7 @@ import {
   type PreviewMiniPlayerFrame,
   resizePreviewMiniPlayer,
   resolveDeviceMiniPlayerCornerRadius,
+  PREVIEW_MINI_PLAYER_FAILURE_SOURCE,
   resolveDeviceMiniPlayerSourceSize,
   resolvePreviewMiniPlayerSourceSize,
 } from "./previewMiniPlayerLayout";
@@ -136,8 +137,13 @@ function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly 
   const serverSurfaceRef = useRef<ServerBrowserHandle | null>(null);
   const serverPictureInPicture =
     useServerPictureInPictureKey() === serverPictureInPictureKey(threadRef.threadId, tabId);
-  const sourceSize =
-    serverTab && streamViewport
+  const failure =
+    snapshot?.navStatus._tag === "LoadFailed" && !snapshot.navStatus.download
+      ? snapshot.navStatus
+      : null;
+  const sourceSize = failure
+    ? PREVIEW_MINI_PLAYER_FAILURE_SOURCE
+    : serverTab && streamViewport
       ? streamViewport
       : resolvePreviewMiniPlayerSourceSize(
           snapshot?.viewport ?? FILL_PREVIEW_VIEWPORT,
@@ -176,10 +182,6 @@ function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly 
   };
 
   if (!snapshot) return null;
-  const failure =
-    snapshot.navStatus._tag === "LoadFailed" && !snapshot.navStatus.download
-      ? snapshot.navStatus
-      : null;
   const failureMessage = failure
     ? `Couldn’t load ${failure.url}. ${describePreviewError(failure.description)}.`
     : null;
