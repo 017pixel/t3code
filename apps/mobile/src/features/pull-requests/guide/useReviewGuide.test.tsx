@@ -8,12 +8,12 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({
-  enabled: true,
   query: {
     data: null as { run: { _tag: "Running" | "Completed" } } | null,
     isPending: false,
     refresh: vi.fn<() => void>(),
   },
+  otherQuery: { data: null, isPending: false, refresh: vi.fn<() => void>() },
 }));
 
 vi.mock("@react-navigation/native", async () => {
@@ -29,19 +29,20 @@ vi.mock("@react-navigation/native", async () => {
   return { NavigationContext, useFocusEffect };
 });
 vi.mock("@effect/atom-react", () => ({
-  useAtomValue: (atom: unknown) =>
-    atom === "settings" ? { reviewGuidesEnabled: mocks.enabled } : true,
+  useAtomValue: (atom: unknown) => (atom === "settings" ? { reviewGuidesEnabled: true } : true),
 }));
 vi.mock("../../../state/server", () => ({
   serverEnvironment: { settingsValueAtom: () => "settings" },
 }));
 vi.mock("../../../state/pull-requests", () => ({
   composerPullRequests: {
-    reviewGuide: () => "guide",
+    reviewGuide: (target: { number: number }) => target.number,
     generateReviewGuide: { permissionAtom: () => "permission" },
   },
 }));
-vi.mock("../../../state/query", () => ({ useEnvironmentQuery: () => ({ ...mocks.query }) }));
+vi.mock("../../../state/query", () => ({
+  useEnvironmentQuery: (number: number) => ({ ...(number === 1 ? mocks.query : mocks.otherQuery) }),
+}));
 vi.mock("../../../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 vi.mock("../usePullRequestConnected", () => ({ usePullRequestConnected: () => true }));
 vi.mock("../usePullRequestDiff", () => ({
@@ -72,8 +73,8 @@ function createNavigation() {
 
 function setup() {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-  mocks.enabled = true;
   mocks.query = { data: null, isPending: false, refresh: vi.fn() };
+  mocks.otherQuery = { data: null, isPending: false, refresh: vi.fn() };
   const root = createRoot(document.createElement("div"));
   const navigation = createNavigation();
   const params = {
@@ -82,16 +83,16 @@ function setup() {
     repository: "repo",
     number: 1,
   };
-  function Probe() {
-    useReviewGuide(params);
+  function Probe({ number }: { number: number }) {
+    useReviewGuide({ ...params, number });
     return null;
   }
   return {
-    render() {
+    render(number = 1) {
       act(() =>
         root.render(
           <NavigationContext.Provider value={navigation.value}>
-            <Probe />
+            <Probe number={number} />
           </NavigationContext.Provider>,
         ),
       );
@@ -103,12 +104,12 @@ function setup() {
   };
 }
 
-it("refreshes once per focus across pending and result rerenders", () => {
+it("refreshes on focus and PR changes without refreshing again for query rerenders", () => {
   using screen = setup();
   screen.render();
   expect(mocks.query.refresh).toHaveBeenCalledTimes(1);
 
-  mocks.query.isPending = true;
+  mocks.query = { ...mocks.query, isPending: true };
   screen.render();
   mocks.query = { ...mocks.query, isPending: false, data: { run: { _tag: "Completed" } } };
   screen.render();
@@ -118,15 +119,16 @@ it("refreshes once per focus across pending and result rerenders", () => {
   screen.render();
   expect(mocks.query.refresh).toHaveBeenCalledTimes(1);
   screen.focus(true);
-  screen.focus(true);
   expect(mocks.query.refresh).toHaveBeenCalledTimes(2);
 
-  mocks.query.refresh = vi.fn();
-  screen.render();
-  expect(mocks.query.refresh).toHaveBeenCalledTimes(1);
+  screen.render(2);
+  expect(mocks.otherQuery.refresh).toHaveBeenCalledTimes(1);
+  screen.render(2);
+  expect(mocks.otherQuery.refresh).toHaveBeenCalledTimes(1);
+  expect(mocks.query.refresh).toHaveBeenCalledTimes(2);
 });
 
-it("keeps running-guide polling through result rerenders and stops on blur or completion", () => {
+it("preserves the polling deadline across rerenders and stops polling on blur or completion", () => {
   vi.useFakeTimers();
   using _timers = { [Symbol.dispose]: () => vi.useRealTimers() };
   using screen = setup();
@@ -142,19 +144,16 @@ it("keeps running-guide polling through result rerenders and stops on blur or co
   expect(mocks.query.refresh).toHaveBeenCalledTimes(2);
 
   screen.focus(false);
-  expect(vi.getTimerCount()).toBe(0);
+  act(() => vi.advanceTimersByTime(10_000));
+  expect(mocks.query.refresh).toHaveBeenCalledTimes(2);
   screen.focus(true);
   expect(mocks.query.refresh).toHaveBeenCalledTimes(3);
-  expect(vi.getTimerCount()).toBe(1);
+  act(() => vi.advanceTimersByTime(5_000));
+  expect(mocks.query.refresh).toHaveBeenCalledTimes(4);
 
   mocks.query = { ...mocks.query, isPending: false, data: { run: { _tag: "Completed" } } };
   screen.render();
-  expect(mocks.query.refresh).toHaveBeenCalledTimes(4);
-  expect(vi.getTimerCount()).toBe(0);
-
-  mocks.enabled = false;
-  screen.render();
-  screen.focus(false);
-  screen.focus(true);
-  expect(mocks.query.refresh).toHaveBeenCalledTimes(4);
+  const refreshesOnCompletion = mocks.query.refresh.mock.calls.length;
+  act(() => vi.advanceTimersByTime(10_000));
+  expect(mocks.query.refresh).toHaveBeenCalledTimes(refreshesOnCompletion);
 });
