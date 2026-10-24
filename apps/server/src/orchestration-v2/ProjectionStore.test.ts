@@ -2275,6 +2275,46 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         },
       });
       assert.strictEqual((yield* forkPage()).totalItems, forkTotal + 1);
+
+      // Another store instance's write reaches this one only through the committed thread event.
+      const directId = "turn-item:paged-scrollback:direct";
+      yield* sql`
+        INSERT INTO orchestration_v2_projection_turn_items (
+          turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
+          parent_item_id, ordinal, type, status, updated_at, payload_json
+        ) VALUES (
+          ${directId}, ${threadId}, ${runId}, NULL, NULL, NULL, NULL, ${itemCount + 1},
+          'command_execution', 'completed', ${nowIso},
+          ${encodeUnknownJsonString({
+            id: directId,
+            threadId,
+            runId,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: itemCount + 1,
+            status: "completed",
+            title: "direct",
+            startedAt: nowIso,
+            completedAt: nowIso,
+            updatedAt: nowIso,
+            type: "command_execution",
+            input: "echo",
+          })}
+        )
+      `;
+      yield* sql`
+        INSERT INTO orchestration_events (
+          event_id, aggregate_kind, stream_id, stream_version, event_type,
+          occurred_at, actor_kind, payload_json, metadata_json, application_event_version
+        ) VALUES (
+          'event:paged-scrollback:direct', 'thread', ${threadId}, 1,
+          'turn-item.updated', ${nowIso}, 'user', '{}', '{}', 2
+        )
+      `;
+      assert.strictEqual((yield* forkPage()).totalItems, forkTotal + 2);
     }),
   );
 

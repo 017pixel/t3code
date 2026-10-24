@@ -5460,9 +5460,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     // the same transaction, so the newest event across those threads identifies the snapshot the
     // index came from; apply also drops entries it touches, covering writes replayed without a new
     // event. Call inside the read transaction so the index and that sequence share one snapshot.
+    // Without the hint SQLite walks every V2 event newer than these threads on each page.
     const latestThreadEventSequence = (threadId: ThreadId, threadIds: ReadonlyArray<ThreadId>) =>
       sql<{ sequence: number }>`SELECT COALESCE(MAX(sequence), 0) AS sequence
-        FROM orchestration_events WHERE application_event_version = 2
+        FROM orchestration_events INDEXED BY idx_orchestration_events_agent_stream_sequence
+        WHERE application_event_version = 2
         AND aggregate_kind = 'thread' AND stream_id IN ${sql.in(threadIds)}`.pipe(
         Effect.map((rows) => rows[0]?.sequence ?? 0),
         Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })),
