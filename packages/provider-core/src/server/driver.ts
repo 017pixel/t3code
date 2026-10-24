@@ -53,6 +53,11 @@ export interface ProviderInstance {
   readonly snapshotForCwd?: (
     cwd: string,
   ) => Effect.Effect<ProviderWorkspaceSnapshot, ProviderDriverError>;
+  /**
+   * The workspace snapshot can carry `workspaceModels`, so a project's model
+   * pickers need it even while another provider is selected.
+   */
+  readonly workspaceScopedModels?: boolean;
   readonly refreshModels?: () => Effect.Effect<void, ProviderDriverError>;
   readonly invalidateCaches?: Effect.Effect<void>;
   readonly consumeResetCredit?: () => Effect.Effect<

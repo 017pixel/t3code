@@ -1302,7 +1302,25 @@ const make = Effect.gen(function* () {
     return { parent, target, shell } as const;
   });
 
-  const loadProviders = providerRegistry.getProviders;
+  // A project's own provider config can add models, so a thread's agent sees
+  // the catalog its own model picker shows.
+  const loadProviders = (parent: Pick<OrchestrationV2ThreadProjection, "thread"> | undefined) =>
+    parent === undefined
+      ? providerRegistry.getProviders
+      : (parent.thread.worktreePath
+          ? Effect.succeed(Option.some(parent.thread.worktreePath))
+          : projects.getById(parent.thread.projectId).pipe(
+              Effect.map(Option.map((project) => project.workspaceRoot)),
+              Effect.orElseSucceed(() => Option.none<string>()),
+            )
+        ).pipe(
+          Effect.flatMap(
+            Option.match({
+              onNone: () => providerRegistry.getProviders,
+              onSome: providerRegistry.getProvidersForCwd,
+            }),
+          ),
+        );
 
   const loadOrchestrationCapableInstanceIds = () =>
     providerAdapters.list().pipe(Effect.map((instanceIds) => new Set(instanceIds)));
@@ -1337,9 +1355,10 @@ const make = Effect.gen(function* () {
       Effect.catchIf(
         (error) => error.code === "provider_unavailable",
         () =>
-          providerRegistry
-            .refreshInstance(instanceId)
-            .pipe(Effect.flatMap((providers) => resolveTarget({ ...input, providers }))),
+          providerRegistry.refreshInstance(instanceId).pipe(
+            Effect.andThen(loadProviders(input.parent)),
+            Effect.flatMap((providers) => resolveTarget({ ...input, providers })),
+          ),
       ),
     );
   };
@@ -2080,7 +2099,7 @@ const make = Effect.gen(function* () {
 
     capabilities: Effect.fn("OrchestratorMcpService.capabilities")(function* (scope, input = {}) {
       const { parent, limits } = yield* loadCaller(scope);
-      const providers = yield* loadProviders;
+      const providers = yield* loadProviders(parent);
       const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
       const settings = yield* serverSettings.getSettings.pipe(
         Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
@@ -2162,7 +2181,7 @@ const make = Effect.gen(function* () {
           "Delegated tasks require an active run owned by this MCP provider session.",
         );
       }
-      const providers = yield* loadProviders;
+      const providers = yield* loadProviders(parent);
       const key = yield* requestKey(input.clientRequestId);
       const commandId = stableCommandId({
         scope,
@@ -2538,7 +2557,7 @@ const make = Effect.gen(function* () {
           );
         }
         const parentNodeId = parentRun.rootNodeId;
-        const providers = yield* loadProviders;
+        const providers = yield* loadProviders(parent);
         const key = yield* requestKey(input.clientRequestId);
         const created = yield* Effect.forEach(
           input.threads,

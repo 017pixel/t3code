@@ -284,6 +284,26 @@ export const ServerProvider = Schema.Struct({
 });
 export type ServerProvider = typeof ServerProvider.Type;
 
+/**
+ * A project's own provider config can add models, which only its workspace
+ * snapshot lists. Providers without one keep their identity, so memoized
+ * consumers do not rerender.
+ */
+export function resolveProvidersForCwd<P extends ServerProvider>(
+  providers: ReadonlyArray<P>,
+  cwd: string | null | undefined,
+): ReadonlyArray<P> {
+  if (!cwd) return providers;
+  let changed = false;
+  const resolved = providers.map((provider) => {
+    const models = provider.workspaceSnapshots?.find((snapshot) => snapshot.cwd === cwd)?.models;
+    if (!models) return provider;
+    changed = true;
+    return { ...provider, models };
+  });
+  return changed ? resolved : providers;
+}
+
 export const ServerProviders = ForwardCompatibleArray(ServerProvider);
 export type ServerProviders = typeof ServerProviders.Type;
 

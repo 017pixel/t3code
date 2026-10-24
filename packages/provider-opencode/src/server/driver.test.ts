@@ -301,16 +301,24 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
       yield* TestClock.adjust("5 seconds");
       yield* Fiber.join(ready);
 
-      const projectSnapshot = yield* instance.snapshotForCwd!(project);
+      // The catalog settles over repeated reads, as the machine catalog does.
+      const scan = (cwd: string) =>
+        Effect.gen(function* () {
+          const fiber = yield* Effect.forkChild(instance.snapshotForCwd!(cwd));
+          yield* TestClock.adjust("1 second");
+          return yield* Fiber.join(fiber);
+        });
+      const projectSnapshot = yield* scan(project);
       assert.deepStrictEqual(
-        projectSnapshot.models.map((entry) => entry.slug),
+        projectSnapshot.workspaceModels?.map((entry) => entry.slug),
         ["opencode/big-pickle", "uni/medium-gpt"],
       );
-      const otherSnapshot = yield* instance.snapshotForCwd!("/work/other-project");
+      const otherSnapshot = yield* scan("/work/other-project");
       assert.deepStrictEqual(
         otherSnapshot.models.map((entry) => entry.slug),
         ["opencode/big-pickle"],
       );
+      assert.strictEqual(otherSnapshot.workspaceModels, undefined);
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 

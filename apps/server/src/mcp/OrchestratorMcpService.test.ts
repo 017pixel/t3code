@@ -17,6 +17,7 @@ import {
   ThreadId,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2ThreadProjection,
+  resolveProvidersForCwd,
   type ServerProvider,
 } from "@t3tools/contracts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
@@ -939,6 +940,7 @@ describe("OrchestratorMcpService provider resolution", () => {
   const providerRegistryLayer = (providers: ReadonlyArray<ServerProvider>) =>
     Layer.mock(ProviderRegistry.ProviderRegistry)({
       getProviders: Effect.succeed(providers),
+      getProvidersForCwd: (cwd) => Effect.succeed(resolveProvidersForCwd(providers, cwd)),
       refreshInstance: () => Effect.succeed(providers),
     });
 
@@ -958,6 +960,7 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
 
+  const parentCwd = "/work/parent-project";
   const parentProjection = (
     subagents: ReadonlyArray<unknown>,
     modelSelection: {
@@ -971,6 +974,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         id: parentThreadId,
         projectId,
         title: "MCP parent",
+        worktreePath: parentCwd,
         createdBy: "user",
         creationSource: "web",
         modelSelection,
@@ -1063,6 +1067,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           ServerSettings.layerTest(),
           Layer.mock(ProviderRegistry.ProviderRegistry)({
             getProviders: Effect.sync(() => providers),
+            getProvidersForCwd: () => Effect.sync(() => providers),
           }),
           adapterRegistryLayer([
             codexInstanceId,
@@ -1221,7 +1226,7 @@ describe("OrchestratorMcpService provider resolution", () => {
       },
     ];
 
-    const capabilitiesWith = (search?: string) =>
+    const capabilitiesWith = (search?: string, providers = catalog) =>
       Effect.gen(function* () {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
         return yield* service.capabilities(scope, search === undefined ? {} : { search });
@@ -1246,7 +1251,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                     [opencodeInstanceId]: { hiddenModels: ["oc/m02"], modelOrder: ["oc/m12"] },
                   },
                 }),
-                providerRegistryLayer(catalog),
+                providerRegistryLayer(providers),
                 adapterRegistryLayer([codexInstanceId, opencodeInstanceId]),
                 Layer.mock(ProjectService.ProjectService)({}),
                 Layer.mock(SecretRequests.SecretRequests)({}),
@@ -1289,6 +1294,45 @@ describe("OrchestratorMcpService provider resolution", () => {
             },
           ]);
         }),
+    );
+
+    it.effect("lists models the parent's project adds to a provider", () =>
+      Effect.gen(function* () {
+        const projectModel = model("uni/medium-gpt", { name: "Medium GPT" });
+        const withProjectModels = catalog.map((provider) =>
+          provider.instanceId === opencodeInstanceId
+            ? {
+                ...provider,
+                workspaceSnapshots: [
+                  {
+                    cwd: "/work/other-project",
+                    checkedAt: provider.checkedAt,
+                    slashCommands: [],
+                    skills: [],
+                    models: [...provider.models, model("other/only-elsewhere")],
+                  },
+                  {
+                    cwd: parentCwd,
+                    checkedAt: provider.checkedAt,
+                    slashCommands: [],
+                    skills: [],
+                    models: [...provider.models, projectModel],
+                  },
+                ],
+              }
+            : provider,
+        );
+        const listed = (search: string) =>
+          capabilitiesWith(search, withProjectModels).pipe(
+            Effect.map((capabilities) =>
+              capabilities.providers
+                .find((provider) => provider.providerInstanceId === opencodeInstanceId)
+                ?.models.map((entry) => entry.id),
+            ),
+          );
+        assert.deepEqual(yield* listed("medium"), ["uni/medium-gpt"]);
+        assert.deepEqual(yield* listed("elsewhere"), []);
+      }),
     );
 
     it.effect("search matches every word and caps each provider's matches", () =>
@@ -2153,6 +2197,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                   ServerSettings.layerTest(),
                   Layer.mock(ProviderRegistry.ProviderRegistry)({
                     getProviders: Effect.succeed([]),
+                    getProvidersForCwd: () => Effect.succeed([]),
                   }),
                   Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
                     list: () => Effect.succeed([]),
@@ -2241,6 +2286,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                   ServerSettings.layerTest(),
                   Layer.mock(ProviderRegistry.ProviderRegistry)({
                     getProviders: Effect.succeed([]),
+                    getProvidersForCwd: () => Effect.succeed([]),
                   }),
                   Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
                     list: () => Effect.succeed([]),

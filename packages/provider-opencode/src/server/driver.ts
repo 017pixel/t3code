@@ -3,6 +3,7 @@ import { OpenCodeSettings } from "../settings.ts";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Equal from "effect/Equal";
 import * as Option from "effect/Option";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -174,18 +175,20 @@ export type OpenCodeDriverEnv =
   | OpenCodeRuntime.OpenCodeRuntime
   | Path.Path;
 
-/** Lists a workspace's catalog only where it differs, so most projects add nothing to the wire. */
+/**
+ * Lists a workspace's catalog only where it differs, so most projects add
+ * nothing to the wire. A project config can also rename a model or change its
+ * options, so the whole entry counts, not just the slug.
+ */
 const scopeWorkspaceModels = (
   machineModels: ReadonlyArray<ServerProviderModel>,
   workspaceModels: Option.Option<ReadonlyArray<ServerProviderModel>>,
-) => {
-  if (Option.isNone(workspaceModels) || workspaceModels.value.length === 0) return {};
-  const slugs = (models: ReadonlyArray<ServerProviderModel>) =>
-    models.map((model) => model.slug).join("\n");
-  return slugs(workspaceModels.value) === slugs(machineModels)
+) =>
+  Option.isNone(workspaceModels) ||
+  workspaceModels.value.length === 0 ||
+  Equal.equals(workspaceModels.value, machineModels)
     ? {}
     : { models: workspaceModels.value, workspaceModels: workspaceModels.value };
-};
 
 export const OpenCodeDriver: ProviderDriver<
   OpenCodeSettings,
@@ -342,15 +345,16 @@ export const OpenCodeDriver: ProviderDriver<
         }).pipe(Effect.scoped),
       );
     // A project's own opencode.jsonc can add providers, so its catalog can
-    // differ from the machine's. One that cannot be read falls back to it.
+    // differ from the machine's. It settles like the machine catalog does; one
+    // that cannot be read falls back to the machine's.
     const loadOpenCode2WorkspaceModels = (cwd: string) =>
-      openCode2Server
-        .withConnection(({ client }) => loadOpenCode2Catalog(client, cwd))
-        .pipe(
-          Effect.timeout("10 seconds"),
-          Effect.map((catalog) => openCode2ProviderModels(effectiveConfig, catalog)),
-          Effect.option,
-        );
+      makeOpenCode2ModelLoader(
+        openCode2Server.withConnection(({ client }) => loadOpenCode2Catalog(client, cwd)),
+      ).pipe(
+        Effect.flatten,
+        Effect.map((catalog) => openCode2ProviderModels(effectiveConfig, catalog)),
+        Effect.option,
+      );
     const serverOwner = yield* OpenCodeServerOwner.make({
       binaryPath: effectiveConfig.binaryPath,
       directory: host.paths.cwd,
@@ -508,6 +512,7 @@ export const OpenCodeDriver: ProviderDriver<
       accentColor,
       enabled,
       snapshot,
+      workspaceScopedModels: true,
       snapshotForCwd: (cwd) =>
         !effectiveConfig.enabled
           ? snapshot.getSnapshot

@@ -2,6 +2,7 @@ import {
   defaultInstanceIdForDriver,
   isProviderWorkspaceSnapshotCurrent,
   ProviderDriverKind,
+  resolveProvidersForCwd,
   type ProviderInstanceId,
   type ServerProvider,
   type ServerProviderUpdateState,
@@ -75,6 +76,12 @@ export class ProviderRegistry extends Context.Service<
       readonly cwd: string;
       readonly fresh?: boolean;
     }) => Effect.Effect<ReadonlyArray<ServerProvider>>;
+
+    /**
+     * Providers as a project sees them: each one's models are its workspace
+     * catalog for `cwd` where that differs from the machine's.
+     */
+    readonly getProvidersForCwd: (cwd: string) => Effect.Effect<ReadonlyArray<ServerProvider>>;
 
     readonly getProviderMaintenanceCapabilitiesForInstance: (
       instanceId: ProviderInstanceId,
@@ -1011,6 +1018,24 @@ export const layer = Layer.effect(
       );
     });
 
+    // A project can add models to a provider other than the selected one, and
+    // every model picker in it lists them. Scans inside the TTL are reused.
+    const refreshWorkspaceModels = (cwd: string, except?: ProviderInstanceId) =>
+      instanceRegistry.listInstances.pipe(
+        Effect.flatMap((instances) =>
+          Effect.forEach(
+            instances.filter(
+              (instance) => instance.workspaceScopedModels && instance.instanceId !== except,
+            ),
+            (instance) =>
+              refreshWorkspaceSnapshot({ instanceId: instance.instanceId, cwd }).pipe(
+                Effect.catchCause(recoverRefreshFailure),
+              ),
+            { concurrency: "unbounded", discard: true },
+          ),
+        ),
+      );
+
     return {
       getProviders: Ref.get(providersRef),
       refresh: (provider?: ProviderDriverKind) =>
@@ -1018,7 +1043,18 @@ export const layer = Layer.effect(
       refreshInstance: (instanceId: ProviderInstanceId) =>
         refreshInstance(instanceId).pipe(Effect.catchCause(recoverRefreshFailure)),
       refreshWorkspaceSnapshot: (input) =>
-        refreshWorkspaceSnapshot(input).pipe(Effect.catchCause(recoverRefreshFailure)),
+        Effect.all(
+          [
+            refreshWorkspaceSnapshot(input).pipe(Effect.catchCause(recoverRefreshFailure)),
+            refreshWorkspaceModels(input.cwd, input.instanceId),
+          ],
+          { concurrency: "unbounded", discard: true },
+        ).pipe(Effect.andThen(Ref.get(providersRef))),
+      getProvidersForCwd: (cwd) =>
+        refreshWorkspaceModels(cwd).pipe(
+          Effect.andThen(Ref.get(providersRef)),
+          Effect.map((providers) => resolveProvidersForCwd(providers, cwd)),
+        ),
       refreshAfterUpdate,
       getProviderMaintenanceCapabilitiesForInstance,
       setProviderMaintenanceActionState,
