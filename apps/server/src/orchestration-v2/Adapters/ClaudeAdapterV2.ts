@@ -7599,13 +7599,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 message: `The Claude Code mod "${focusedPlugin}" is waiting for input in its terminal pane, which T3 Code cannot show. Disable the mod for sessions run from T3 Code, or run the task in the Claude Code terminal.`,
               }),
             });
-            // Interrupting abandons the held tool call without answering it.
-            // Forked because closing waits for the reader running this frame.
-            yield* liveQuery.query.interrupt.pipe(
-              Effect.andThen(liveQuery.query.close),
-              Effect.ignore,
-              Effect.forkIn(sessionScope),
-            );
+            // Closing ends the CLI process and abandons the held tool call
+            // without answering it. Not interrupt: the held CLI may never ack it.
+            yield* liveQuery.query.close.pipe(Effect.ignore);
             return;
           }
           yield* trackClaudeGoal({ nativeThreadId: liveQuery.nativeThreadId, context, message });
@@ -9211,6 +9207,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           if (
             existing !== null &&
             existing.nativeThreadId === nativeThreadId &&
+            !existing.stopping &&
             isClaudeProviderContinuationTurn(turnInput)
           ) {
             return existing;
@@ -9242,6 +9239,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             existing !== null &&
             existing.nativeThreadId === nativeThreadId &&
             existing.queryPolicyKey === queryPolicyKey &&
+            !existing.stopping &&
             existing.selection.queryIdentity === compiledSelection.queryIdentity
           ) {
             // A denied ExitPlanMode leaves Claude in plan mode. Restore only from plan:

@@ -7438,9 +7438,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   ] as const)("$case", ({ focus }) =>
     Effect.scoped(
       Effect.gen(function* () {
-        const interrupted = yield* Deferred.make<void>();
+        const closed = yield* Deferred.make<void>();
         const harness = yield* makeWakeHarnessWithOptions({
-          interrupt: Deferred.succeed(interrupted, undefined),
+          close: () => Deferred.succeed(closed, undefined),
         });
         const now = yield* DateTime.now;
         yield* harness.runtime.startTurn(
@@ -7510,8 +7510,85 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.equal(terminal?.status, "failed");
         if (terminal?.status !== "failed") return;
         assert.include(terminal.failure.message, "blast-radius");
-        // The held tool call is abandoned by interrupting the query, never answered.
-        yield* Deferred.await(interrupted);
+        // The held tool call is abandoned by closing the query, never answered.
+        yield* Deferred.await(closed);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  // regression: #17531 a follow-up sent while the failed mod turn's process closes gets a new process
+  it.effect("runs a follow-up in a fresh query while the mod-blocked query is closing", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const releaseClose = yield* Deferred.make<void>();
+        const replacementClosedOld = yield* Deferred.make<void>();
+        let oldCloses = 0;
+        const harness = yield* makeWakeHarnessWithOptions({
+          // The held CLI never answers an interrupt; closure must not need one.
+          interrupt: Effect.never,
+          close: (sdkMessages) =>
+            Effect.suspend(() =>
+              ++oldCloses === 2 ? Deferred.succeed(replacementClosedOld, undefined) : Effect.void,
+            ).pipe(
+              Effect.andThen(Deferred.await(releaseClose)),
+              Effect.andThen(Queue.shutdown(sdkMessages)),
+            ),
+          freshQueueOnReopen: true,
+        });
+        // Added after the harness so it runs first: a failed assertion must not
+        // leave teardown waiting on the held close.
+        yield* Effect.addFinalizer(() => Deferred.succeed(releaseClose, undefined));
+        const now = yield* DateTime.now;
+        const turnInput = makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("attempt-claude-mod-pane-blocked"),
+          text: "Run rm -r build",
+          attachments: [],
+        });
+        yield* harness.runtime.startTurn(turnInput);
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "system",
+            subtype: "ui_panes",
+            panes: [
+              { id: "blast-radius", title: "Blast Radius", plugin: "blast-radius", rows: 10 },
+            ],
+            shown_id: "blast-radius",
+            focused_id: null,
+            focus_requested_id: "blast-radius",
+            uuid: "00000000-0000-4000-8000-000000000798",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        assert.equal((yield* Queue.take(harness.terminalReceipts)).status, "failed");
+
+        const followUp = yield* harness.runtime
+          .startTurn({
+            ...turnInput,
+            attemptId: RunAttemptId.make("attempt-claude-after-mod-pane"),
+            providerTurnOrdinal: 2,
+          })
+          .pipe(Effect.forkScoped);
+        // Reusing the closing process would offer the prompt to it instead.
+        yield* Effect.raceFirst(
+          Deferred.await(replacementClosedOld),
+          harness.until(() => harness.offeredMessages.length >= 2),
+        );
+        assert.isTrue(yield* Deferred.isDone(replacementClosedOld));
+        yield* Deferred.succeed(releaseClose, undefined);
+        yield* Fiber.join(followUp);
+        assert.equal(harness.processQueues.length, 2);
+        yield* harness.offerAndWait(
+          makeResultFrame({ uuid: "after-mod-pane-result", result: "Done." }),
+        );
+        assert.equal((yield* Queue.take(harness.terminalReceipts)).status, "completed");
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
