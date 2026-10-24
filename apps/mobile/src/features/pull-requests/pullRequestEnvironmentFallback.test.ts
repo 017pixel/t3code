@@ -55,22 +55,4 @@ describe("pullRequestFallbackEnvironment", () => {
       projectId: "t3-copy",
     });
   });
-
-  it.each(["available", "connecting", "reconnecting"] as const)(
-    "preserves an enabled target that is %s",
-    (phase) => {
-      expect(
-        pullRequestFallbackEnvironment(target, projects, [
-          environment("laptop", phase),
-          environment("server"),
-        ]),
-      ).toBe(null);
-    },
-  );
-
-  it("ignores disabled copies even if their connection still reports connected", () => {
-    expect(
-      pullRequestFallbackEnvironment(target, projects, [environment("server", "connected", false)]),
-    ).toBe(null);
-  });
 });

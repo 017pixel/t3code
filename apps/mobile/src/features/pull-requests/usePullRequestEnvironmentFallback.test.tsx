@@ -86,23 +86,7 @@ function setup() {
   };
 }
 
-it.each(["available", "connecting", "reconnecting"] as const)(
-  "keeps the requested %s target when another copy connects first",
-  (phase) => {
-    using screen = setup();
-    mocks.environments = [environment("requested", phase), environment("copy", "connected")];
-    screen.render();
-    expect(screen.target).toBe("requested/original");
-    expect(mocks.navigation.setParams).not.toHaveBeenCalled();
-
-    mocks.environments = [environment("requested", "connected"), environment("copy", "connected")];
-    screen.render();
-    expect(screen.target).toBe("requested/original");
-    expect(mocks.navigation.setParams).not.toHaveBeenCalled();
-  },
-);
-
-it("waits for the catalog before treating the requested target as missing", () => {
+it("keeps the requested target while the catalog initializes or its enabled connection is pending", () => {
   using screen = setup();
   mocks.isReady = false;
   mocks.environments = [environment("copy", "connected")];
@@ -111,15 +95,16 @@ it("waits for the catalog before treating the requested target as missing", () =
   expect(mocks.navigation.setParams).not.toHaveBeenCalled();
 
   mocks.isReady = true;
-  mocks.environments = [environment("requested", "available"), environment("copy", "connected")];
-  screen.render();
-  expect(screen.target).toBe("requested/original");
-  expect(mocks.navigation.setParams).not.toHaveBeenCalled();
+  for (const phase of ["available", "connecting", "reconnecting", "connected"] as const) {
+    mocks.environments = [environment("requested", phase), environment("copy", "connected")];
+    screen.render();
+    expect(screen.target).toBe("requested/original");
+    expect(mocks.navigation.setParams).not.toHaveBeenCalled();
+  }
 });
 
-it.each(["missing", "disabled", "offline", "error", "unsupported"] as const)(
-  "falls back to a connected copy when the requested target is %s",
-  (state) => {
+it("falls back to a connected repository copy when the requested environment cannot connect", () => {
+  for (const state of ["missing", "disabled", "offline", "error", "unsupported"] as const) {
     using screen = setup();
     mocks.environments = [
       ...(state === "missing"
@@ -135,11 +120,14 @@ it.each(["missing", "disabled", "offline", "error", "unsupported"] as const)(
     ];
     screen.render();
     expect(screen.target).toBe("copy/copy-project");
-    expect(mocks.navigation.setParams).toHaveBeenCalledTimes(1);
-  },
-);
+    expect(mocks.navigation.setParams).toHaveBeenCalledExactlyOnceWith({
+      environmentId: "copy",
+      projectId: "copy-project",
+    });
+  }
+});
 
-it("retains a connecting target before its project snapshot arrives", () => {
+it("does not replace a connecting target with a connected repository copy before its project hydrates", () => {
   using screen = setup();
   const projects = mocks.projects;
   mocks.projects = projects.filter((project) => project.environmentId !== "requested");
