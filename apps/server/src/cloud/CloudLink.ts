@@ -1191,7 +1191,21 @@ const make = Effect.gen(function* () {
 
   const applyRelayConfig = Effect.fn("environment.cloud.relayConfig")(
     function* (payload: RelayEnvironmentConfigRequest) {
-      const result = yield* applyCloudRelayConfig(payload);
+      // Startup relinks a CLI-desired link in its stored mode, so a client
+      // relink that turns exposure on or off must update that mode under the
+      // same lock. A link the CLI never asked for stays client-owned.
+      const result = yield* endpointRuntime.withLinkStateLock(
+        Effect.gen(function* () {
+          const applied = yield* applyCloudRelayConfig(payload, { lockHeld: true });
+          if (yield* readCliDesiredCloudLink.pipe(withSecrets)) {
+            yield* setCliDesiredCloudLink(
+              true,
+              payload.endpointRuntime === null ? "publish_only" : "managed",
+            ).pipe(withSecrets);
+          }
+          return applied;
+        }),
+      );
       if (payload.endpointRuntime?.providerKind === "cloudflare_tunnel") {
         const address = httpServer.address;
         if (typeof address === "string" || !("port" in address)) {
