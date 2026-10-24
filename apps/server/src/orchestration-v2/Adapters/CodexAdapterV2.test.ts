@@ -2700,34 +2700,45 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ],
         });
         const harness = yield* makeCodexReplayHarness(transcript);
-        const startTurn = (attempt: string, text: string) =>
+        const startTurn = (attempt: string, text: string, messageId?: MessageId) =>
           Effect.gen(function* () {
+            const turnInput = makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make(attempt),
+              text,
+            });
             yield* harness.runtime.startTurn(
-              makeCodexTestTurnInput({
-                threadId: harness.threadId,
-                providerThread: harness.providerThread,
-                now: yield* DateTime.now,
-                attemptId: RunAttemptId.make(attempt),
-                text,
-              }),
+              messageId === undefined
+                ? turnInput
+                : { ...turnInput, message: { ...turnInput.message, messageId } },
             );
           });
 
         yield* startTurn("attempt-codex-ready", "Reply with the requested recovery marker.");
         yield* harness.awaitTerminal(1);
+        yield* harness.until(() => harness.continuationRequests.length > 0);
+        const wake = harness.continuationRequests[0]!;
+        // The queued turn ran on this thread's native Codex thread, so T3 must
+        // wake a run with its prompt; dropping it hides the reply.
+        assert.equal(wake.detail, "Reply with the word QUEUED.");
+        assert.isDefined(wake.messageId);
+
+        // The woken run adopts the native turn rather than starting another.
+        yield* startTurn("attempt-codex-queued", wake.detail!, wake.messageId);
+        yield* harness.awaitTerminal(2);
+        assert.isTrue(
+          assistantMessages(harness.events).some(
+            (event) =>
+              event.message.text === "QUEUED" && event.message.runId === "run-attempt-codex-queued",
+          ),
+          "the externally queued Codex turn (reply QUEUED) never reached T3",
+        );
+
         yield* startTurn("attempt-codex-next", nextPrompt);
         yield* harness.until(() =>
           assistantMessages(harness.events).some((event) => event.message.text === "NEXT"),
-        );
-
-        // The queued turn ran on this thread's native Codex thread, so T3 must
-        // either project it or ask to ingest it; dropping it hides the reply.
-        const surfaced = [...harness.events, ...harness.continuationRequests].filter((entry) =>
-          JSON.stringify(entry).includes("QUEUED"),
-        );
-        assert.isNotEmpty(
-          surfaced,
-          "the externally queued Codex turn (reply QUEUED) never reached T3",
         );
       }).pipe(
         Effect.provide(
