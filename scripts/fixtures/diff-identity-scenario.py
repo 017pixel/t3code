@@ -12,6 +12,10 @@ import subprocess
 import sys
 
 root = Path(sys.argv[1]).resolve()
+def read(path):
+    return path.read_text(encoding='utf-8')
+def write(path, value):
+    path.write_text(value, encoding='utf-8', newline='\n')
 scenario = sys.argv[2]
 cell = sys.argv[3] if len(sys.argv) > 3 else '1440-light'
 assert scenario in ('defaults', 'headers', 'truncated', 'single')
@@ -22,21 +26,21 @@ base = json.loads(subprocess.check_output([
 ], text=True))
 if scenario == 'single':
     assert cell in ('ONE', 'TWO')
-    (root / 'a-modified-0.txt').write_text(f'single-file version {cell}\n')
+    write(root / 'a-modified-0.txt', f'single-file version {cell}\n')
 else:
     marker = ('C25-final-' + cell if scenario == 'defaults' else
               'C6-' + cell if scenario == 'headers' else 'C8-truncated')
     target = root / 'a-modified-0.txt'
-    target.write_text(marker + '\n' + target.read_text())
+    write(target, marker + '\n' + read(target))
     target = root / 'b-added-0.txt'
     if scenario == 'headers':
-        target.write_text(target.read_text() + 'truncation sentinel ' + 'z' * 160000 + '\n')
+        write(target, read(target) + 'truncation sentinel ' + 'z' * 160000 + '\n')
     elif scenario == 'truncated':
-        target.write_text(target.read_text() + ''.join(
+        write(target, read(target) + ''.join(
             f'{i:05d} truncation sentinel ' + 'z' * 112 + '\n' for i in range(11000)
         ))
 patch = subprocess.check_output([
-    'git', '-C', str(root), 'diff', '--find-renames', '--no-color',
+    'git', '-C', str(root), 'diff', '--unified=3', '--inter-hunk-context=0', '--find-renames', '--no-color',
     '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/',
     '--minimal', '--patch', 'HEAD', '--', *base['paths'],
 ])

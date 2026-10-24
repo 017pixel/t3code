@@ -12,16 +12,18 @@ import subprocess
 import sys
 
 seed_path = Path(__file__).with_name('diff-identity.seed.json')
-seed = json.loads(seed_path.read_text())
+seed = json.loads(seed_path.read_text(encoding='utf-8'))
 root = Path(sys.argv[1]).resolve()
 variant = sys.argv[2]
 assert variant in seed['variants']
 root.mkdir(parents=True, exist_ok=True)
-env = {**os.environ, 'GIT_AUTHOR_DATE': seed['date'], 'GIT_COMMITTER_DATE': seed['date']}
+identity = {'NAME': 'Diff identity fixture', 'EMAIL': 'fixture@example.invalid', 'DATE': seed['date']}
+# Inherited GIT_AUTHOR_*/GIT_COMMITTER_* would otherwise change the baseline commit ID.
+env = {**os.environ, **{f'GIT_{role}_{field}': value for role in ('AUTHOR', 'COMMITTER') for field, value in identity.items()}}
 def git(*args):
     return subprocess.check_output(['git', '-C', str(root), *args], env=env)
 def write(name, value):
-    (root / name).write_text(value)
+    (root / name).write_text(value, encoding='utf-8', newline='\n')
 def lines(kind, i, count):
     return ''.join(f'{n:05d} {kind} {i} ' + 'x' * seed['lineWidth'] + '\n' for n in range(count))
 if not (root / '.git').exists():
@@ -40,7 +42,7 @@ if not (root / '.git').exists():
     write('g-type-replacement.txt', 'regular file replaced with symlink\n')
     write('h-unique-neighbor.txt', 'neighbor before\n')
     git('add', '.')
-    git('commit', '-m', 'Deterministic diff identity baseline')
+    git('commit', '--no-gpg-sign', '-m', 'Deterministic diff identity baseline')
     git('tag', 'fixture-base')
 assert git('config', 'fixture.diffIdentity').strip() == b'1', 'Not a generated fixture repository'
 # Restore only generator-owned paths so unrelated work in DIR survives reruns.
@@ -68,10 +70,11 @@ elif variant != 'zero':
         (root / f'c-deleted-{i}.txt').unlink()
         (root / f'd-rename-{i}.txt').rename(root / f'e-renamed-{i}.txt')
     (root / 'f-old-changed-rename.txt').rename(root / seed['longPath'])
-    with (root / seed['longPath']).open('a') as stream:
+    with (root / seed['longPath']).open('a', encoding='utf-8', newline='\n') as stream:
         stream.write('changed rename sentinel\n')
 stage()
-args = ['diff', '--find-renames', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', '--minimal', '--patch', 'HEAD', '--', *owned]
+# Pin context so diff.context/diff.interHunkContext cannot change patch bytes; 3 is Git's default.
+args = ['diff', '--unified=3', '--inter-hunk-context=0', '--find-renames', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', '--minimal', '--patch', 'HEAD', '--', *owned]
 if variant.isdigit():
     target = int(variant)
     name = 'b-added-5.txt'
@@ -79,11 +82,11 @@ if variant.isdigit():
     padding = target - len(current)
     assert padding > 0
     # Extending an existing line changes only its byte length, not hunk metadata.
-    with (root / name).open('a') as stream:
+    with (root / name).open('a', encoding='utf-8', newline='\n') as stream:
         stream.write('p' * (padding - 1) + '\n')
     stage()
     delta = target - len(git(*args))
-    data = (root / name).read_text()
+    data = (root / name).read_text(encoding='utf-8')
     adjusted = data[:-1] + 'q' * delta + '\n' if delta >= 0 else data[:delta-1] + '\n'
     write(name, adjusted)
     stage()
