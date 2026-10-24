@@ -122,10 +122,10 @@ export function useFileTreeEntries(input: {
         })
       : null,
   );
-  const latestSearchData = useRef(search.data);
+  const latestSearchResult = useRef(search.successResult);
   useLayoutEffect(() => {
-    latestSearchData.current = search.data;
-  }, [search.data]);
+    latestSearchResult.current = search.successResult;
+  }, [search.successResult]);
   const workspaceKey = JSON.stringify([environmentId, cwd]);
   const [cache, setCache] = useState(() => ({
     key: workspaceKey,
@@ -263,7 +263,7 @@ export function useFileTreeEntries(input: {
             validatedDirectories,
             searchAtValidation: new Map(current.searchAtValidation).set(
               directoryPath,
-              latestSearchData.current,
+              latestSearchResult.current,
             ),
           };
         }
@@ -296,7 +296,7 @@ export function useFileTreeEntries(input: {
   ) {
     setDirectories(() => createDirectories());
   }
-  const { refresh: refreshSearch, data: searchData } = search;
+  const { refresh: refreshSearch, data: searchData, successResult: searchResult } = search;
   const snapshot = (() => {
     const merged = new Map(missingRoot ? [] : directories.discoveries);
     if (searching && !missingRoot) {
@@ -337,7 +337,7 @@ export function useFileTreeEntries(input: {
         if (complete && listing && !entry) {
           const validatedSearch =
             index === 0 && directories.rootListing !== rootListing
-              ? searchData
+              ? searchResult
               : directories.searchAtValidation.get(parent);
           // Search can discover paths added since a cached listing. A later listing wins.
           const retained =
@@ -349,9 +349,8 @@ export function useFileTreeEntries(input: {
             retained ||
             (searching &&
               query === debouncedQuery &&
-              search.isSuccess &&
-              !search.isPending &&
-              searchData !== validatedSearch &&
+              searchResult !== null &&
+              searchResult !== validatedSearch &&
               searchData?.entries.some(
                 (item) => item.path === child || item.path.startsWith(`${child}/`),
               ));
@@ -370,7 +369,7 @@ export function useFileTreeEntries(input: {
           if (contradictsListing(path, "", rootData.entries)) discoveries.delete(path);
         }
       }
-      if (searching && query === debouncedQuery && search.isSuccess && !search.isPending) {
+      if (searching && query === debouncedQuery && searchResult !== null) {
         const ownedPaths = [
           ...current.entries.keys(),
           ...current.expandedPaths,
@@ -416,7 +415,7 @@ export function useFileTreeEntries(input: {
           "",
           current.rootListing === rootListing
             ? (current.searchAtValidation.get("") ?? null)
-            : searchData,
+            : searchResult,
         ),
         entries,
         errors,

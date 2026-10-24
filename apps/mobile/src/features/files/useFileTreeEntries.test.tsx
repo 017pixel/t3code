@@ -517,23 +517,61 @@ describe("file tree workspace state", () => {
         expect(screen.current.entries).toContainEqual({ kind: "file", path: `${path}/other.ts` });
       }
 
-      // A later parent listing wins over retained discovery evidence.
-      if (path.includes("/")) {
-        screen.load("src", true);
-        await screen.succeed(2, []);
-      } else {
-        const cachedData = screen.rootQuery.data;
-        screen.rootQuery.isPending = true;
-        screen.render();
+      screen.searchQuery.data = {
+        entries: [
+          { kind: "directory", path },
+          { kind: "file", path: `${path}/file.ts` },
+        ],
+        truncated: false,
+      };
+      screen.render({ searchQuery: "new" });
+      for (const equalContents of [false, true]) {
+        // A later parent listing wins over retained discovery evidence.
+        if (path.includes("/")) {
+          screen.load("src", true);
+          await screen.succeed(screen.requests.length - 1, []);
+        } else {
+          const cachedData = screen.rootQuery.data;
+          screen.rootQuery.isPending = true;
+          screen.render({ searchQuery: "new" });
+          expect(screen.current.selectedPath).toBe(`${path}/file.ts`);
+          screen.rootQuery.isPending = false;
+          expect(screen.rootQuery.data).toBe(cachedData);
+          screen.render({ searchQuery: "new" });
+        }
+        expect(screen.current.selectedPath).toBeNull();
+        expect([...screen.current.expandedPaths]).toEqual(path.includes("/") ? ["src"] : []);
+        expect([...screen.current.loadedDirectories]).toEqual(["src"]);
+
+        const cachedSearchData = screen.searchQuery.data;
+        screen.searchQuery.isPending = true;
+        screen.render({ searchQuery: "new" });
+        expect(screen.current.selectedPath).toBeNull();
+        expect([...screen.current.loadedDirectories]).toEqual(["src"]);
+        screen.searchQuery.isPending = false;
+        if (!equalContents) {
+          screen.searchQuery.data = {
+            ...cachedSearchData,
+            entries: [...cachedSearchData.entries, { kind: "file", path: `${path}/added.ts` }],
+          };
+        }
+        expect(screen.searchQuery.data === cachedSearchData).toBe(equalContents);
+        screen.render({ searchQuery: "new" });
+        screen.updateView(expanded, `${path}/file.ts`);
+        screen.load(path);
+        await screen.succeed(screen.requests.length - 1, [
+          { kind: "file", path: `${path}/file.ts` },
+          { kind: "file", path: `${path}/recreated.ts` },
+        ]);
         expect(screen.current.selectedPath).toBe(`${path}/file.ts`);
-        screen.rootQuery.isPending = false;
-        // A successful refresh can retain the exact data object through structural sharing.
-        expect(screen.rootQuery.data).toBe(cachedData);
-        screen.render();
+        expect([...screen.current.expandedPaths]).toEqual(expanded);
+        expect([...screen.current.loadedDirectories]).toEqual(["src", path]);
+        expect(screen.current.entries).toContainEqual({ kind: "file", path: `${path}/file.ts` });
+        expect(screen.current.entries).toContainEqual({
+          kind: "file",
+          path: `${path}/recreated.ts`,
+        });
       }
-      expect(screen.current.selectedPath).toBeNull();
-      expect([...screen.current.expandedPaths]).toEqual(path.includes("/") ? ["src"] : []);
-      expect([...screen.current.loadedDirectories]).toEqual(["src"]);
     },
   );
 
