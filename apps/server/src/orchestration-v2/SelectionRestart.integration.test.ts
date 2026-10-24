@@ -774,3 +774,166 @@ it.live.each(["active", "idle", "selection-command", "pooled", "separate-home"] 
       }),
     ),
 );
+
+it.live.each(["runtime-mode", "provider-instance", "workspace"] as const)(
+  "keeps a session with running background work alive through a %s change",
+  (change) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const name = `background-work-${change}`;
+        const cwd = yield* checkpointWorkspace(name);
+        const otherCwd = yield* checkpointWorkspace(`${name}-other`);
+        const threadId = ThreadId.make(`thread:${name}`);
+        const targetId = ProviderInstanceId.make("codex-background-target");
+        const state = yield* Ref.make<RestartAdapterState>({
+          activeTurn: null,
+          opened: [],
+          started: [],
+          closedSessionCount: 0,
+          failedReplacementOpen: true,
+        });
+        // Claude runs background agents and shells inside its CLI process and
+        // cannot switch runtime mode in place.
+        const capabilities: OrchestrationV2ProviderCapabilities = {
+          ...exclusiveCapabilities,
+          sessions: {
+            ...exclusiveCapabilities.sessions,
+            supportsRuntimeModeSwitchInSession: false,
+          },
+        };
+        const adapters = [providerInstanceId, targetId].map((instanceId) => {
+          const base = makeRestartAdapter(state, capabilities, instanceId);
+          return {
+            ...base,
+            openSession: (input) =>
+              base.openSession(input).pipe(
+                Effect.map((session) => ({
+                  ...session,
+                  backgroundTasksEndWithProcess: true as const,
+                  hasPendingBackgroundWork: Effect.succeed(true),
+                  hasPendingBackgroundWorkForThread: () => Effect.succeed(true),
+                })),
+              ),
+          } satisfies ProviderAdapter.ProviderAdapterV2["Service"];
+        });
+        const layerRegistry = Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistryV2, {
+          get: (instanceId) =>
+            Effect.succeed(adapters.find((adapter) => adapter.instanceId === instanceId)!),
+          list: () => Effect.succeed([providerInstanceId, targetId]),
+          getMetadata: (instanceId) =>
+            Effect.succeed({
+              driver,
+              continuationKey: `codex:home:/${instanceId}`,
+              enabled: true,
+              capabilities,
+            }),
+        });
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const sink = yield* EventSink.EventSinkV2;
+          const selection = { ...initialSelection, model: "complete" };
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`${name}:create`),
+            threadId,
+            projectId: ProjectId.make(`project:${name}`),
+            title: name,
+            modelSelection: selection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+            createdBy: "user",
+            creationSource: "web",
+          });
+          const completed = yield* orchestrator.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) => event.type === "run.updated" && event.payload.status === "completed",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`${name}:first`),
+            threadId,
+            messageId: MessageId.make(`${name}:first`),
+            text: "Start a background subagent and a background shell",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          yield* worker.drain();
+          yield* Fiber.join(completed);
+          yield* worker.drain();
+          const before = yield* orchestrator.getThreadProjection(threadId);
+          const providerThread = before.providerThreads.find(
+            (thread) => thread.id === before.thread.activeProviderThreadId,
+          )!;
+          assert.deepEqual(
+            before.providerSessions
+              .filter((session) => session.id === providerThread.providerSessionId)
+              .map((session) => session.status),
+            ["ready"],
+          );
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make(`${name}:roster`),
+                type: "provider-thread.updated",
+                threadId,
+                occurredAt: yield* DateTime.now,
+                payload: {
+                  ...providerThread,
+                  pendingBackgroundTasks: [
+                    { taskId: "subagent", description: "Run 24 steps", kind: "subagent" },
+                    { taskId: "counter", description: "Append a counter", kind: "command" },
+                  ],
+                },
+              },
+            ],
+          });
+
+          // Refusing or deferring the change are both acceptable; ending the
+          // provider process while its background work runs is not.
+          yield* Effect.exit(
+            orchestrator.dispatch(
+              change === "runtime-mode"
+                ? {
+                    type: "thread.runtime-mode.set",
+                    commandId: CommandId.make(`${name}:change`),
+                    threadId,
+                    runtimeMode: "auto-accept-edits",
+                  }
+                : change === "provider-instance"
+                  ? {
+                      type: "provider.switch",
+                      commandId: CommandId.make(`${name}:change`),
+                      threadId,
+                      modelSelection: { instanceId: targetId, model: "complete" },
+                    }
+                  : {
+                      type: "thread.metadata.update",
+                      commandId: CommandId.make(`${name}:change`),
+                      threadId,
+                      worktreePath: otherCwd,
+                    },
+            ),
+          );
+          yield* worker.drain();
+
+          const after = yield* orchestrator.getThreadProjection(threadId);
+          assert.deepEqual(
+            after.providerSessions
+              .filter((session) => session.id === providerThread.providerSessionId)
+              .map((session) => session.status),
+            ["ready"],
+          );
+          assert.equal((yield* Ref.get(state)).closedSessionCount, 0);
+        }).pipe(Effect.provide(ProviderReplayHarness.layerWithRegistry({ name }, layerRegistry)));
+      }),
+    ),
+);
