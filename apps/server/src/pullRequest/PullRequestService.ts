@@ -520,6 +520,9 @@ function withRateLimitBackoff(
           listChangeRequestStats: wrap("listChangeRequestStats", api.listChangeRequestStats),
         }),
     getChangeRequest: wrap("getChangeRequest", api.getChangeRequest),
+    ...(api.forgetChangeRequestReads === undefined
+      ? {}
+      : { forgetChangeRequestReads: api.forgetChangeRequestReads }),
     ...(api.getChangeRequestPreview === undefined
       ? {}
       : { getChangeRequestPreview: wrap("getChangeRequestPreview", api.getChangeRequestPreview) }),
@@ -3349,6 +3352,13 @@ export const make = Effect.gen(function* () {
     return { stats: [...held, ...result.stats] };
   });
 
+  const forgetProviderReads = (scope?: { readonly repository: string; readonly number?: number }) =>
+    Effect.forEach(
+      registry.kinds,
+      (kind) => registry.get(kind)?.forgetChangeRequestReads?.(scope) ?? Effect.void,
+      { discard: true },
+    );
+
   const invalidate: PullRequestService["Service"]["invalidate"] = Effect.fn(
     "PullRequestService.invalidate",
   )(function* (input, options) {
@@ -3366,7 +3376,12 @@ export const make = Effect.gen(function* () {
         Effect.flatMap((ref) =>
           readCache
             .invalidate(refScope(ref))
-            .pipe(Effect.andThen(Effect.sync(() => bumpRefEpoch(ref)))),
+            .pipe(
+              Effect.andThen(Effect.sync(() => bumpRefEpoch(ref))),
+              Effect.andThen(
+                forgetProviderReads({ repository: ref.repository, number: ref.number }),
+              ),
+            ),
         ),
         Effect.ignore,
       );
@@ -3375,6 +3390,7 @@ export const make = Effect.gen(function* () {
       everyFileRevisionEpoch = ++epochCounter;
       viewersByHost.clear();
       yield* Cache.invalidateAll(viewerFlights);
+      yield* forgetProviderReads();
     }
     if (options?.notifyReaders) {
       yield* SubscriptionRef.set(pullRequestRefreshes, ++epochCounter);
@@ -3393,9 +3409,21 @@ export const make = Effect.gen(function* () {
         }
       }
       projectEpochs.set(projectId, listingsEpoch);
-      return readCache
-        .invalidate(`project:${projectId}`)
-        .pipe(Effect.andThen(SubscriptionRef.set(pullRequestRefreshes, listingsEpoch)));
+      const epoch = listingsEpoch;
+      return readCache.invalidate(`project:${projectId}`).pipe(
+        Effect.andThen(
+          projects.getShell(projectId).pipe(
+            Effect.flatMap((shell) => {
+              const repository = Option.isSome(shell)
+                ? sourceControlRepositorySelector(shell.value.repositoryIdentity)
+                : null;
+              return repository === null ? Effect.void : forgetProviderReads({ repository });
+            }),
+            Effect.ignore,
+          ),
+        ),
+        Effect.andThen(SubscriptionRef.set(pullRequestRefreshes, epoch)),
+      );
     });
 
   const invalidatedByMutation =

@@ -134,13 +134,14 @@ describe("merge request reads", () => {
 
   const countingProvider = Effect.gen(function* () {
     const calls = { detail: 0, mergeCapabilities: 0 };
+    const host = { viewerCanMerge: true };
     const provider = yield* make.pipe(
       Effect.provide(
         Layer.mock(GitLabPullRequestCli.GitLabPullRequestCli)({
           getMergeRequestDetail: (input) =>
             Effect.sync(() => {
               calls.detail += 1;
-              return { ...detail, number: input.number };
+              return { ...detail, number: input.number, viewerCanMerge: host.viewerCanMerge };
             }),
           getProjectMergeCapabilities: () =>
             Effect.sync(() => {
@@ -152,8 +153,11 @@ describe("merge request reads", () => {
       ),
     );
     const checks = provider.getChangeRequestChecks;
-    if (checks === undefined) return yield* Effect.die("GitLab answers checks");
-    return { provider, checks, calls };
+    const forget = provider.forgetChangeRequestReads;
+    if (checks === undefined || forget === undefined) {
+      return yield* Effect.die("GitLab answers checks and forgets its reads");
+    }
+    return { provider, checks, forget, calls, host };
   });
 
   it.effect("asks for a project's merge methods once across its merge requests", () =>
@@ -206,11 +210,47 @@ describe("merge request reads", () => {
     Effect.gen(function* () {
       const { provider, calls } = yield* countingProvider;
 
-      yield* provider.getViewerPermissions(reference);
+      yield* provider.getChangeRequest(reference);
       yield* TestClock.adjust("61 seconds");
-      yield* provider.getViewerPermissions(reference);
+      yield* provider.getChangeRequest(reference);
 
       expect(calls.detail).toBe(2);
+    }),
+  );
+
+  it.effect("answers viewer permissions from the host, not the page's read", () =>
+    Effect.gen(function* () {
+      const { provider, host } = yield* countingProvider;
+
+      host.viewerCanMerge = false;
+      yield* provider.getChangeRequest(reference);
+      host.viewerCanMerge = true;
+      const granted = yield* provider.getViewerPermissions(reference);
+      host.viewerCanMerge = false;
+      const revoked = yield* provider.getViewerPermissions(reference);
+
+      expect(granted.actions).toContain("merge");
+      expect(revoked.actions).not.toContain("merge");
+    }),
+  );
+
+  it.effect("reads a merge request again once its reads are forgotten", () =>
+    Effect.gen(function* () {
+      const { provider, checks, forget, calls } = yield* countingProvider;
+      const other = { ...reference, repository: "acme/api" };
+
+      yield* provider.getChangeRequest(reference);
+      yield* provider.getChangeRequest(other);
+      yield* forget({ repository: "ACME/web", number: 7 });
+      yield* checks(reference);
+      yield* checks(other);
+      expect(calls.detail).toBe(3);
+
+      yield* forget({ repository: "acme/web" });
+      yield* checks(reference);
+      yield* forget();
+      yield* checks(other);
+      expect(calls.detail).toBe(5);
     }),
   );
 });

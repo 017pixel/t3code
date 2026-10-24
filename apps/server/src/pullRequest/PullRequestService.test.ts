@@ -2180,6 +2180,40 @@ it.effect("does not revive old summaries when project epochs are evicted", () =>
   }),
 );
 
+it.effect("a refresh or a finished turn drops the provider's own change request reads", () =>
+  Effect.gen(function* () {
+    const forgotten: Array<{ readonly repository: string; readonly number?: number } | undefined> =
+      [];
+    const service = yield* makeService({
+      projects: [
+        project({
+          id: "p1",
+          title: "web",
+          workspaceRoot: "/a",
+          repository: "acme/web",
+          provider: "gitlab",
+        }),
+      ],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("gitlab"), {
+          forgetChangeRequestReads: (scope) => Effect.sync(() => void forgotten.push(scope)),
+        }),
+      ],
+    });
+    const reference = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+
+    yield* service.invalidate({ reference });
+    yield* service.refreshAfterTurn(reference.projectId);
+    yield* service.invalidate({});
+
+    assert.deepStrictEqual(forgotten, [
+      { repository: "acme/web", number: 1 },
+      { repository: "acme/web" },
+      undefined,
+    ]);
+  }),
+);
+
 it.effect("close and reopen notify subscribed readers after invalidating their cached state", () =>
   Effect.scoped(
     Effect.gen(function* () {

@@ -78,7 +78,8 @@ export function gitLabViewerPermissions(input: {
 
 /**
  * One page view asks for the detail and then its checks within a second, and the poll that
- * follows asks again. A minute keeps those to one `glab` call without hiding a pipeline for long.
+ * follows asks again. A minute keeps those to one `glab` call without hiding a pipeline for long;
+ * a refresh or a finished turn drops it sooner through `forgetChangeRequestReads`.
  */
 const MERGE_REQUEST_DETAIL_TTL = Duration.minutes(1);
 /** A project's merge methods change in its settings, which nobody does between page views. */
@@ -264,10 +265,29 @@ export const make = Effect.gen(function* () {
         })),
       ),
 
+    // Straight from the host, never the shared read: this is what a write is refused or let
+    // through on, and access granted or withdrawn within the minute must count.
     getViewerPermissions: (input) =>
-      mergeRequestDetail(input).pipe(
-        Effect.mapError(fail("getViewerPermissions")),
-        Effect.map(gitLabViewerPermissions),
+      cli
+        .getMergeRequestDetail(input)
+        .pipe(Effect.mapError(fail("getViewerPermissions")), Effect.map(gitLabViewerPermissions)),
+
+    forgetChangeRequestReads: (scope) =>
+      Cache.keys(mergeRequestDetails).pipe(
+        Effect.flatMap((keys) =>
+          Effect.forEach(
+            Array.from(keys).filter((key) => {
+              if (scope === undefined) return true;
+              const [, repository, number] = JSON.parse(key) as [string, string, number];
+              return (
+                repository.toLowerCase() === scope.repository.toLowerCase() &&
+                (scope.number === undefined || number === scope.number)
+              );
+            }),
+            (key) => Cache.invalidate(mergeRequestDetails, key),
+            { discard: true },
+          ),
+        ),
       ),
 
     getDiff: (input) => cli.getMergeRequestDiff(input).pipe(Effect.mapError(fail("getDiff"))),
