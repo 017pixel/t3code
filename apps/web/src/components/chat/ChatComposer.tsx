@@ -763,7 +763,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const previewFile = composerFiles.find((file) => file.id === previewFileId);
   const composerContextActions = {
     environmentId,
-    cwd: gitCwd ?? undefined,
+    // Mention chips name paths relative to the file panel's root.
+    cwd: workspaceRoot ?? gitCwd ?? undefined,
     expandImage: (imageId: string) => {
       const preview = buildExpandedImagePreview(composerImages, imageId);
       if (preview) onExpandImage(preview);
