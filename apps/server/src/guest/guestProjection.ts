@@ -13,6 +13,11 @@ import {
   orchestrationV2RunWorkStartedAt,
   type ServerProvider,
 } from "@t3tools/contracts";
+import {
+  appendTerminalOutput,
+  EMPTY_TERMINAL_OUTPUT,
+  type TerminalOutputState,
+} from "@t3tools/shared/terminalOutput";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
 import * as DateTime from "effect/DateTime";
 
@@ -370,28 +375,28 @@ export function projectTurnItemForGuestDetail(
   const detail = projectTurnItemForDetail(item);
   return detail.type !== "command_execution" || detail.output === undefined
     ? guest
-    : { ...guest, output: guestText(stripTerminalEscapes(detail.output), roots) };
+    : {
+        ...guest,
+        output: guestText(
+          displayedOutput(
+            // The detail is already bounded; the tail must not cut it again.
+            appendTerminalOutput(EMPTY_TERMINAL_OUTPUT, detail.output, Number.MAX_SAFE_INTEGER),
+          ),
+          roots,
+        ),
+      };
 }
 
-// CSI (`ESC [` or the 8-bit form), OSC up to BEL or ST (OSC 8 links can carry file URLs), and the
-// other two-byte escapes. Colors split paths, so a guest gets plain text and paths rewrite whole.
-const TERMINAL_ESCAPE =
-  /(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/gu;
+// The shared terminal model leaves only canonical SGR (colour) codes in its text.
+const SGR = /\u001b\[[0-9;]*m/gu;
 
-/** Guest output is plain text; see `TERMINAL_ESCAPE`. */
-function stripTerminalEscapes(text: string): string {
-  return text.replace(TERMINAL_ESCAPE, "");
-}
-
-/** Where an escape sequence that the next frame may finish starts, or the text length. */
-function unfinishedEscapeStart(text: string): number {
-  const start = Math.max(text.lastIndexOf("\u001b"), text.lastIndexOf("\u009b"));
-  if (start === -1) return text.length;
-  const tail = text.slice(start);
-  TERMINAL_ESCAPE.lastIndex = 0;
-  const match = TERMINAL_ESCAPE.exec(tail);
-  TERMINAL_ESCAPE.lastIndex = 0;
-  return match !== null && match.index === 0 ? text.length : start;
+/**
+ * Command output as a guest's timeline would display it: run through the same terminal model the
+ * owner's client uses, so backspaces, carriage returns, cursor moves, and escapes are already
+ * applied, then plain text. A path rewrite on raw bytes could be undone by any of those.
+ */
+function displayedOutput(state: TerminalOutputState): string {
+  return state.text.replace(SGR, "");
 }
 
 /**
@@ -414,22 +419,33 @@ function rootPrefixAtEnd(text: string, roots: GuestPathRoots): number {
 }
 
 /**
- * Rewrites live command output frames for a guest: plain text, with paths as in its command text.
- * A frame can end partway through a root or an escape sequence, so text that could still become
- * one waits for the next frame. A settled frame holds nothing back.
+ * Rewrites live command output frames for a guest. The server keeps the terminal state the
+ * guest's client would build, rewrites paths in what it displays, and sends the difference: an
+ * append while the displayed text only grows, else a replace. Text at the end that could still
+ * grow into a root waits for the next frame. A settled frame holds nothing back.
  */
 export function guestCommandOutputFrames(roots: GuestPathRoots) {
-  let held = "";
+  let terminal = EMPTY_TERMINAL_OUTPUT;
+  let sent: string | null = null;
   return (frame: OrchestrationV2CommandOutputFrame): OrchestrationV2CommandOutputFrame | null => {
-    const raw = (frame.kind === "replace" ? "" : held) + frame.text;
-    const escapeStart = frame.running ? unfinishedEscapeStart(raw) : raw.length;
-    const text = stripTerminalEscapes(raw.slice(0, escapeStart));
-    const cut = text.length - (frame.running ? rootPrefixAtEnd(text, roots) : 0);
-    // Held text is already plain, except an unfinished escape at the end.
-    held = text.slice(cut) + raw.slice(escapeStart);
-    const shown = guestText(text.slice(0, cut), roots);
-    if (frame.kind === "append" && shown === "") return null;
-    return { kind: frame.kind, text: shown, truncated: frame.truncated, running: frame.running };
+    terminal = appendTerminalOutput(
+      frame.kind === "replace" ? EMPTY_TERMINAL_OUTPUT : terminal,
+      frame.text,
+    );
+    const plain = displayedOutput(terminal);
+    const shown = guestText(
+      plain.slice(0, plain.length - (frame.running ? rootPrefixAtEnd(plain, roots) : 0)),
+      roots,
+    );
+    const previous = sent;
+    sent = shown;
+    if (previous !== null && shown.startsWith(previous)) {
+      const text = shown.slice(previous.length);
+      return text === "" && frame.running
+        ? null
+        : { kind: "append", text, truncated: frame.truncated, running: frame.running };
+    }
+    return { kind: "replace", text: shown, truncated: frame.truncated, running: frame.running };
   };
 }
 

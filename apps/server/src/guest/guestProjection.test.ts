@@ -501,11 +501,36 @@ describe("guestCommandOutputFrames", () => {
     expect(shown([rewrite(frame("replace", link, false))])).toBe("a.ts\n");
   });
 
+  it("rewrites what the terminal displays, so backspaces and overstrikes cannot rebuild a path", () => {
+    const backspace = guestCommandOutputFrames(roots);
+    expect(
+      shown([backspace(frame("replace", `${ROOT.slice(0, 9)}X\b${ROOT.slice(9)}/a.txt\n`))]),
+    ).toBe("a.txt\n");
+    const overstrike = guestCommandOutputFrames(roots);
+    const frames = [
+      overstrike(frame("replace", `${"X".repeat(9)}${ROOT.slice(9)}/a.txt`)),
+      overstrike(frame("append", `\r${ROOT.slice(0, 9)}`)),
+      overstrike(frame("append", "\n")),
+    ];
+    expect(shown(frames)).toBe("a.txt\n");
+    for (const next of frames) expect(next?.text ?? "").not.toContain("owner");
+  });
+
+  it("keeps sending output after escapes it does not show", () => {
+    const rewrite = guestCommandOutputFrames(roots);
+    const frames = [
+      rewrite(frame("replace", "\u001b7ready\n")),
+      rewrite(frame("append", "\u001b(Bnext line\n")),
+    ];
+    expect(shown(frames)).toBe("ready\nnext line\n");
+  });
+
   it("holds nothing back once the command settles", () => {
     const rewrite = guestCommandOutputFrames(roots);
-    rewrite(frame("append", `cd ${ROOT}`));
-    const final = rewrite(frame("replace", `cd ${ROOT}`, false));
-    expect(final).toEqual(frame("replace", "cd .", false));
+    const frames = [rewrite(frame("append", `cd ${ROOT}`))];
+    frames.push(rewrite(frame("replace", `cd ${ROOT}`, false)));
+    expect(frames.at(-1)?.running).toBe(false);
+    expect(shown(frames)).toBe("cd .");
   });
 });
 
