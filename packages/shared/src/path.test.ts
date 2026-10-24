@@ -6,6 +6,7 @@ import {
   normalizeProjectPathForDispatch,
   resolveWorkspaceFilePath,
   rebaseWorkspaceFilePath,
+  composerMentionPath,
 } from "./path.ts";
 
 describe("path helpers", () => {
@@ -66,5 +67,27 @@ describe("rebaseWorkspaceFilePath", () => {
       "/elsewhere/SKILL.md",
     );
     expect(rebaseWorkspaceFilePath("docs/setup.md", null, "/wt/a")).toBe("docs/setup.md");
+  });
+});
+
+describe("composer mention paths", () => {
+  const nested = { agentCwd: "/wt/a/ios", workspaceRoot: "/wt/a" };
+
+  it("records picker and tree mentions of a subdirectory thread as the same absolute file", () => {
+    // The picker searches the agent's cwd; the file tree lists the checkout.
+    expect(composerMentionPath("file.ts", nested.agentCwd, nested)).toBe("/wt/a/ios/file.ts");
+    expect(composerMentionPath("ios/file.ts", nested.workspaceRoot, nested)).toBe(
+      "/wt/a/ios/file.ts",
+    );
+    expect(composerMentionPath("README.md", nested.workspaceRoot, nested)).toBe("/wt/a/README.md");
+    expect(rebaseWorkspaceFilePath("/wt/a/ios/file.ts", "/wt/a", "/wt/a")).toBe("ios/file.ts");
+    expect(rebaseWorkspaceFilePath("/wt/a/README.md", "/wt/a", "/wt/a")).toBe("README.md");
+  });
+
+  it("keeps relative mentions, including saved ones, relative to the checkout", () => {
+    const flat = { agentCwd: "/wt/a/", workspaceRoot: "/wt/a" };
+    expect(composerMentionPath("ios/file.ts", "/wt/a", flat)).toBe("ios/file.ts");
+    expect(rebaseWorkspaceFilePath("ios/file.ts", "/wt/a", "/wt/a")).toBe("ios/file.ts");
+    expect(rebaseWorkspaceFilePath("README.md", "/wt/a", "/wt/a")).toBe("README.md");
   });
 });

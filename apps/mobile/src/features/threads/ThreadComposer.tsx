@@ -568,6 +568,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     threadShells: useThreadShells(),
     currentThreadId: props.selectedThread.id,
     projectCwd: props.projectCwd,
+    workspaceRoot: props.workspaceRoot,
     pullRequestProjectId: props.serverConfig?.environment.capabilities.pullRequests
       ? (project?.id ?? null)
       : null,
@@ -1073,7 +1074,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
                       environmentId: String(props.environmentId),
                       threadId: String(props.selectedThread.id),
                       path: fileRoutePathSegments(
-                        rebaseWorkspaceFilePath(path, props.projectCwd, props.workspaceRoot),
+                        rebaseWorkspaceFilePath(path, props.workspaceRoot, props.workspaceRoot),
                       ),
                     });
                   }

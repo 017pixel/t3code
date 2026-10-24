@@ -1,5 +1,5 @@
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
-import { rebaseWorkspaceFilePath } from "@t3tools/shared/path";
+import { composerMentionPath, rebaseWorkspaceFilePath } from "@t3tools/shared/path";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
 import { runtimeModeConfig, runtimeModeOptions as runtimeModes } from "./runtimeModeConfig";
@@ -462,8 +462,8 @@ export interface ChatComposerProps {
   keybindings: ResolvedKeybindingsConfig;
   terminalOpen: boolean;
   gitCwd: string | null;
-  // The file panel's root. Mentions are relative to gitCwd, which a subdirectory
-  // project's worktree thread nests below it.
+  // The file panel's root, which a subdirectory project's worktree thread's
+  // gitCwd nests below; see `composerMentionPath`.
   workspaceRoot: string | null;
   pullRequestProjectId: ProjectId | null;
   pullRequestRepository: string | null;
@@ -772,7 +772,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     openMention: (path: string) =>
       useRightPanelStore
         .getState()
-        .openFile(routeThreadRef, rebaseWorkspaceFilePath(path, gitCwd, workspaceRoot)),
+        .openFile(routeThreadRef, rebaseWorkspaceFilePath(path, workspaceRoot, workspaceRoot)),
     expandVideo: (fileId: string) => {
       const file = composerFiles.find((candidate) => candidate.id === fileId);
       if (!file || !isVideoAttachment(file)) return;
@@ -1939,7 +1939,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (!trigger) return;
     if (item.type === "path") {
       if (!isPathSuggestionCurrent(item.searchTarget, trigger, environmentId, gitCwd)) return;
-      const replacement = `${serializeComposerFileLink(item.path)} `;
+      const replacement = `${serializeComposerFileLink(
+        composerMentionPath(item.path, gitCwd, { agentCwd: gitCwd, workspaceRoot }),
+      )} `;
       const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
         snapshot.value,
         trigger.rangeEnd,

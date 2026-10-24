@@ -78,7 +78,7 @@ function UserMessageMentionChip(props: {
                   .getState()
                   .openFile(
                     ctx.threadRef,
-                    rebaseWorkspaceFilePath(props.record.path, ctx.markdownCwd, filePanelRoot),
+                    rebaseWorkspaceFilePath(props.record.path, filePanelRoot, filePanelRoot),
                   );
             }}
           >

@@ -258,7 +258,10 @@ it.effect("deduplicates requests, bounds pending work, and reloads invalidated r
   }),
 );
 
-it.effect("reports the checkout containing a subdirectory project without a remote", () =>
+it.effect.each([
+  ["without a remote", Effect.succeed(null)],
+  ["whose identity lookup fails", Effect.die("git is unavailable")],
+] as const)("reports the checkout containing a subdirectory project %s", ([, identity]) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -268,7 +271,7 @@ it.effect("reports the checkout containing a subdirectory project without a remo
     yield* fileSystem.makeDirectory(projectRoot);
     const layerMetadata = Layer.merge(
       Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
-        resolve: () => Effect.succeed(null),
+        resolve: () => identity,
       }),
       Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
         invalidate: () => Effect.void,
@@ -282,7 +285,7 @@ it.effect("reports the checkout containing a subdirectory project without a remo
       return yield* waitForAvailable(
         service,
         projectRoot,
-        (value) => value.repositoryIdentityResolved,
+        (value) => value.repositoryRoot !== null,
       );
     }).pipe(Effect.provide(layer(layerMetadata)));
 

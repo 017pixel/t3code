@@ -106,23 +106,23 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
   const path = yield* Path.Path;
   const repositoryIdentityCache = yield* Cache.makeWith(
     (workspaceRoot: string) =>
-      Effect.exit(
-        Effect.all(
-          {
-            repositoryIdentity: repositoryIdentityResolver.resolve(workspaceRoot),
-            repositoryRoot: findRepositoryRoot(workspaceRoot).pipe(
-              Effect.provideService(FileSystem.FileSystem, fileSystem),
-              Effect.provideService(Path.Path, path),
-            ),
-          },
-          { concurrency: "unbounded" },
-        ),
+      Effect.all(
+        {
+          // A failed identity lookup still leaves the checkout root usable.
+          repositoryIdentity: Effect.exit(repositoryIdentityResolver.resolve(workspaceRoot)),
+          repositoryRoot: findRepositoryRoot(workspaceRoot).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+          ),
+        },
+        { concurrency: "unbounded" },
       ),
     {
       capacity: cacheCapacity,
       timeToLive: Exit.match({
         onFailure: () => failureTtl,
-        onSuccess: (result) => (Exit.isSuccess(result) ? successTtl : failureTtl),
+        onSuccess: (result) =>
+          Exit.isSuccess(result.repositoryIdentity) ? successTtl : failureTtl,
       }),
     },
   );
@@ -183,7 +183,8 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
 
   const resolveRepositoryIdentity = Effect.fn("ProjectEnrichmentService.resolveRepositoryIdentity")(
     function* (workspaceRoot: string) {
-      const repositoryIdentity = yield* Cache.get(repositoryIdentityCache, workspaceRoot);
+      const repository = yield* Cache.get(repositoryIdentityCache, workspaceRoot);
+      const repositoryIdentity = repository.repositoryIdentity;
       yield* logFailure(workspaceRoot, "repositoryIdentity", repositoryIdentity);
       const faviconPath = yield* Cache.getSuccess(faviconCache, workspaceRoot);
       const repositoryIdentityResolved = Exit.isSuccess(repositoryIdentity);
@@ -191,9 +192,8 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
         workspaceRoot,
         repositoryIdentityResolved,
         enrichment: {
-          repositoryIdentity:
-            availableValue(Option.some(repositoryIdentity))?.repositoryIdentity ?? null,
-          repositoryRoot: availableValue(Option.some(repositoryIdentity))?.repositoryRoot ?? null,
+          repositoryIdentity: availableValue(Option.some(repositoryIdentity)),
+          repositoryRoot: repository.repositoryRoot,
           faviconPath: availableValue(faviconPath),
           repositoryIdentityResolved,
         },
@@ -255,17 +255,17 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
   const peek: ProjectEnrichmentService["Service"]["peek"] = Effect.fn(
     "ProjectEnrichmentService.peek",
   )(function* (workspaceRoot) {
-    const [repositoryIdentity, faviconPath] = yield* Effect.all(
+    const [repository, faviconPath] = yield* Effect.all(
       [
         Cache.getSuccess(repositoryIdentityCache, workspaceRoot),
         Cache.getSuccess(faviconCache, workspaceRoot),
       ] as const,
       { concurrency: "unbounded" },
     );
-    const repository = availableValue(repositoryIdentity);
+    const repositoryIdentity = Option.map(repository, (value) => value.repositoryIdentity);
     return {
-      repositoryIdentity: repository?.repositoryIdentity ?? null,
-      repositoryRoot: repository?.repositoryRoot ?? null,
+      repositoryIdentity: availableValue(repositoryIdentity),
+      repositoryRoot: Option.getOrNull(Option.map(repository, (value) => value.repositoryRoot)),
       faviconPath: availableValue(faviconPath),
       repositoryIdentityResolved: isSuccessfullyResolved(repositoryIdentity),
     };

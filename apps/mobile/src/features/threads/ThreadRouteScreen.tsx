@@ -292,6 +292,9 @@ function ThreadRouteContent(
     selectedThread?.environmentId ?? null,
     selectedThreadProject ?? null,
     selectedThread?.worktreePath ?? null,
+    `${selectedThread?.branch ?? ""}\0${selectedThread?.latestRun?.runId ?? ""}\0${
+      selectedThread?.latestRun?.status ?? ""
+    }`,
   );
   const canReadTerminal = useEnvironmentScope(
     selectedThread?.environmentId ?? null,

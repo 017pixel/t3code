@@ -185,6 +185,7 @@ export function NewTaskDraftScreen(props: {
     selectedProject?.environmentId ?? null,
     selectedProject ?? null,
     flow.workspaceMode === "worktree" ? null : (flow.selectedWorktreePath ?? null),
+    "",
   );
   const connectionState = environmentRuntime?.connectionState ?? "offline";
   const selectedEnvironmentServerConfig = useEnvironmentServerConfig(

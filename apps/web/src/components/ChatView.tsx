@@ -1585,6 +1585,7 @@ export default function ChatView(props: ChatViewProps) {
     environmentId,
     activeProject ?? null,
     activeThread?.worktreePath ?? null,
+    `${activeThread?.branch ?? ""}\0${workspaceMutationId ?? ""}`,
   );
   const gitStatusCwd = activeThread?.worktreePath ?? gitCwd;
   const gitStatusQuery = useEnvironmentQuery(
@@ -3117,6 +3118,7 @@ export default function ChatView(props: ChatViewProps) {
       files={{
         projectName: activeProject?.title ?? null,
         workspaceRoot: activeWorkspaceRoot,
+        agentCwd: agentCwd ?? undefined,
         availableEditors,
         pendingSurfaceIds: pendingFileSurfaceIds,
         onOpenFile: openFileSurfaceStable,
