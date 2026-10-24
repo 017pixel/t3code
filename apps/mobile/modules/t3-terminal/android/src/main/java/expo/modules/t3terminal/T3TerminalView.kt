@@ -57,6 +57,8 @@ class T3TerminalView(context: Context, appContext: AppContext) : ExpoView(contex
   private var fedBuffer = ""
   private var cols = 0
   private var rows = 0
+  private var measuredCols = 0
+  private var measuredRows = 0
   private var clearingInput = false
   private var isCleanedUp = false
   private var backgroundColorValue = Color.parseColor("#24292E")
@@ -89,6 +91,16 @@ class T3TerminalView(context: Context, appContext: AppContext) : ExpoView(contex
     }
 
   var appearanceScheme: String = "dark"
+
+  // The PTY grid shared by every attached client, or empty before the server reports one.
+  // The terminal draws this grid so its wrapping and cursor match the PTY; the view's own
+  // fit still goes out through onResize.
+  var sharedGrid: List<Int> = emptyList()
+    set(value) {
+      if (field == value) return
+      field = value
+      applyGrid()
+    }
 
   var themeConfig: String = ""
     set(value) {
@@ -327,6 +339,19 @@ class T3TerminalView(context: Context, appContext: AppContext) : ExpoView(contex
     val nextRows = (terminalCanvas.usableHeight() / terminalCanvas.cellHeightPx)
       .toInt()
       .coerceIn(2, 200)
+    if (nextCols != measuredCols || nextRows != measuredRows) {
+      measuredCols = nextCols
+      measuredRows = nextRows
+      onResize(mapOf("cols" to measuredCols, "rows" to measuredRows))
+    }
+    applyGrid()
+  }
+
+  private fun applyGrid() {
+    if (measuredCols <= 0 || measuredRows <= 0 || isCleanedUp) return
+    val shared = sharedGrid.takeIf { it.size == 2 && it[0] > 0 && it[1] > 0 }
+    val nextCols = shared?.get(0) ?: measuredCols
+    val nextRows = shared?.get(1) ?: measuredRows
     if (nextCols == cols && nextRows == rows && terminalHandle != 0L) return
     cols = nextCols
     rows = nextRows
@@ -343,7 +368,6 @@ class T3TerminalView(context: Context, appContext: AppContext) : ExpoView(contex
       )
     }
     emitResponse(response)
-    onResize(mapOf("cols" to cols, "rows" to rows))
     feedPendingBuffer()
     renderSnapshot()
   }

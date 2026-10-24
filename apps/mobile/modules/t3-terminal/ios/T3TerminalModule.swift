@@ -58,6 +58,10 @@ public class T3TerminalModule: Module {
       Prop("captureRequest") { (view: T3TerminalView, request: Double) in
         view.captureRequest = request
       }
+
+      Prop("sharedGrid") { (view: T3TerminalView, sharedGrid: [Int]) in
+        view.sharedGrid = sharedGrid
+      }
       Events("onInput", "onResize", "onCapture")
     }
   }
