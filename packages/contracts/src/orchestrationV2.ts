@@ -3144,7 +3144,8 @@ const OrchestrationV2InternalCommand = Schema.Union([
     threadId: ThreadId,
     shareId: GuestShareId,
     guestMessageId: GuestMessageId,
-    text: TrimmedNonEmptyString,
+    text: Schema.String,
+    attachments: Schema.optional(Schema.Array(ChatAttachment)),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.pull-request-watch.sync"),
