@@ -1,5 +1,5 @@
 import { AuthFilesystemReadScope, EnvironmentId } from "@t3tools/contracts";
-import { act, useLayoutEffect } from "react";
+import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vite-plus/test";
 
@@ -43,33 +43,14 @@ function setup() {
   vi.useFakeTimers();
   mocks.searchEntries.mockClear();
   const root = createRoot(document.createElement("div"));
-  let commits = 0;
-  let isPending = false;
-
   function Probe({ target }: { readonly target: ComposerPathSearchTarget }) {
-    const result = useComposerPathSearch(target);
-    useLayoutEffect(() => {
-      commits += 1;
-      isPending = result.isPending;
-    });
+    useComposerPathSearch(target);
     return null;
   }
 
   return {
-    render(query: string | null) {
-      act(() =>
-        root.render(
-          <Probe
-            target={{ environmentId: EnvironmentId.make("test-environment"), cwd: "/repo", query }}
-          />,
-        ),
-      );
-    },
-    get commits() {
-      return commits;
-    },
-    get isPending() {
-      return isPending;
+    render(target: ComposerPathSearchTarget) {
+      act(() => root.render(<Probe target={{ ...target }} />));
     },
     [Symbol.dispose]() {
       act(() => root.unmount());
@@ -78,36 +59,47 @@ function setup() {
   };
 }
 
-it.each([null, "src"])("stops rendering after the path target settles (%s)", (query) => {
-  using harness = setup();
-  harness.render(query);
-  // A parent render before the debounce fires used to start a self-sustaining loop.
-  harness.render(query);
-  act(() => vi.advanceTimersByTime(200));
-  const settledCommits = harness.commits;
+const target = {
+  environmentId: EnvironmentId.make("test-environment"),
+  cwd: "/repo",
+  query: "src",
+};
 
-  act(() => vi.advanceTimersByTime(200));
-  expect(harness.commits).toBe(settledCommits);
-  act(() => vi.advanceTimersByTime(2_000));
-  expect(harness.commits).toBe(settledCommits);
-  expect(harness.isPending).toBe(false);
-  if (query === null) expect(mocks.searchEntries).not.toHaveBeenCalled();
-});
-
-it("still debounces a changed path query before searching", () => {
+it("keeps the original search deadline when rerenders have equivalent targets", () => {
   using harness = setup();
-  harness.render(null);
-  harness.render(" src ");
-  expect(harness.isPending).toBe(true);
+  harness.render({ ...target, query: null });
+  harness.render({ ...target, query: " src " });
   act(() => vi.advanceTimersByTime(100));
-  harness.render("src");
+  harness.render(target);
   act(() => vi.advanceTimersByTime(99));
   expect(mocks.searchEntries).not.toHaveBeenCalled();
 
   act(() => vi.advanceTimersByTime(1));
-  expect(mocks.searchEntries).toHaveBeenLastCalledWith({
-    environmentId: EnvironmentId.make("test-environment"),
-    input: { cwd: "/repo", query: "src", limit: 20 },
+  expect(mocks.searchEntries).toHaveBeenCalledExactlyOnceWith({
+    environmentId: target.environmentId,
+    input: { cwd: target.cwd, query: target.query, limit: 20 },
   });
-  expect(harness.isPending).toBe(false);
+});
+
+it.each([
+  { field: "environment", changed: { ...target, environmentId: EnvironmentId.make("other") } },
+  { field: "project directory", changed: { ...target, cwd: "/other" } },
+  { field: "query", changed: { ...target, query: "test" } },
+])("restarts the search deadline when the $field changes", ({ changed }) => {
+  using harness = setup();
+  harness.render({ ...target, query: null });
+  harness.render(target);
+  act(() => vi.advanceTimersByTime(100));
+  harness.render(changed);
+
+  act(() => vi.advanceTimersByTime(100));
+  expect(mocks.searchEntries).not.toHaveBeenCalled();
+  act(() => vi.advanceTimersByTime(99));
+  expect(mocks.searchEntries).not.toHaveBeenCalled();
+
+  act(() => vi.advanceTimersByTime(1));
+  expect(mocks.searchEntries).toHaveBeenCalledExactlyOnceWith({
+    environmentId: changed.environmentId,
+    input: { cwd: changed.cwd, query: changed.query, limit: 20 },
+  });
 });
