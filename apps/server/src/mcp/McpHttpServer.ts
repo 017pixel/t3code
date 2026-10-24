@@ -1067,9 +1067,10 @@ const layerWorktreeToolkitRegistration = toolkitRegistration(
   WorktreeHandlers.layer,
 ).pipe(Layer.provide(WorktreeMcpService.layer));
 
-const layerPreviewControlsRegistration = toolkitRegistration(
+export const layerPreviewControlsRegistration = toolkitRegistration(
   PreviewControlsToolkit,
   PreviewControlsHandlers.layer,
+  "preview",
 );
 
 const layerEnvironmentToolkit = toolkitRegistration(

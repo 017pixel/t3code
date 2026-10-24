@@ -851,6 +851,7 @@ it.effect.each([
             }),
           ),
           McpHttpServer.layerPreviewToolkit,
+          McpHttpServer.layerPreviewControlsRegistration,
           McpHttpServer.layerDeviceToolkit,
         ).pipe(
           Layer.provideMerge(McpHttpServer.layerMcpTransport),
@@ -911,6 +912,8 @@ it.effect.each([
         expect(names.some((name) => name.startsWith("preview_"))).toBe(preview);
         expect(names.some((name) => name.startsWith("device_"))).toBe(device);
         expect(names.includes("preview_snapshot")).toBe(preview);
+        expect(names.includes("t3_preview_list")).toBe(preview);
+        expect(names.includes("t3_preview_close")).toBe(preview);
         expect(names.includes("device_screenshot")).toBe(device);
       }),
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
