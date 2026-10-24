@@ -203,7 +203,11 @@ describe("evaluatePullRequestWatch", () => {
 
   it("keeps the last state when a host cannot tell whether workflows await approval", () => {
     const bot = check("bot", "success");
-    const unknown = { ...check("Workflow approval status", "action-required"), url: null };
+    const unknown = {
+      ...check("Workflow approval status", "action-required"),
+      url: null,
+      placeholder: true,
+    };
     const unread = evaluatePullRequestWatch(watch(), detail({ checks: [bot, unknown] }), noRemarks);
     assert.deepEqual(unread.changes, []);
     assert.isFalse(unread.next.passed);
@@ -220,6 +224,59 @@ describe("evaluatePullRequestWatch", () => {
       evaluatePullRequestWatch(again.next, detail({ checks: [bot] }), noRemarks).changes,
       [],
     );
+  });
+
+  it("waits for an approval with no URL while the host lists it", () => {
+    const bot = check("bot", "success");
+    const green = evaluatePullRequestWatch(watch(), detail({ checks: [bot] }), noRemarks);
+    assert.isTrue(green.next.passed);
+    const approval = { ...check("contributor tests", "action-required"), url: null };
+    const gated = evaluatePullRequestWatch(
+      green.next,
+      detail({ checks: [bot, approval] }),
+      noRemarks,
+    );
+    assert.deepEqual(gated.changes, [{ kind: "checks-awaiting-approval", checks: [approval] }]);
+    assert.isFalse(gated.next.passed);
+    const still = evaluatePullRequestWatch(
+      gated.next,
+      detail({ checks: [bot, approval] }),
+      noRemarks,
+    );
+    assert.deepEqual(still.changes, []);
+    // Nothing else names it, so it is held only while listed, unlike a workflow run.
+    const done = evaluatePullRequestWatch(
+      still.next,
+      detail({ checks: [bot, check("contributor tests", "success")] }),
+      noRemarks,
+    );
+    assert.deepEqual(done.changes, [{ kind: "checks-passed", count: 2, required: false }]);
+    assert.deepEqual(done.next.awaitingApproval, []);
+  });
+
+  it("keeps the head and awaited approvals through a read that names no head", () => {
+    const bot = check("bot", "success");
+    const approval = { ...check("CI", "action-required"), url: run(1) };
+    const unknown = {
+      ...check("Workflow approval status", "action-required"),
+      url: null,
+      placeholder: true,
+    };
+    const first = evaluatePullRequestWatch(watch(), detail({ checks: [bot, approval] }), noRemarks);
+    const { headSha: _headSha, ...headless } = detail({ checks: [bot, unknown] });
+    const blind = evaluatePullRequestWatch(first.next, headless, noRemarks);
+    assert.deepEqual(blind.changes, []);
+    assert.equal(blind.next.headSha, "aaaaaaaaaa");
+    assert.deepEqual(blind.next.awaitingApproval, [run(1)]);
+    const same = evaluatePullRequestWatch(blind.next, detail({ checks: [bot] }), noRemarks);
+    assert.deepEqual(same.changes, []);
+    assert.isFalse(same.next.passed);
+    const pushed = evaluatePullRequestWatch(
+      same.next,
+      detail({ headSha: "bbbbbbbbbb", checks: [bot] }),
+      noRemarks,
+    );
+    assert.deepEqual(pushed.changes, [{ kind: "checks-passed", count: 1, required: false }]);
   });
 
   it("does not tell a watch saved before approvals were recorded about one it reported", () => {

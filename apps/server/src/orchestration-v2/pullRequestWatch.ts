@@ -48,7 +48,8 @@ export function evaluatePullRequestWatch(
   now: number,
 ): PullRequestWatchReport {
   const changes: Array<PullRequestWatchChange> = [];
-  const headSha = detail.headSha ?? null;
+  // A read that names no head is not a push: the watch keeps the head it knew.
+  const headSha = detail.headSha ?? watch.headSha;
   const headMoved = headSha !== watch.headSha;
 
   // An empty list keeps the last state: a host can answer with one when its check read fails.
@@ -58,15 +59,13 @@ export function evaluatePullRequestWatch(
   let owedChecks = headMoved ? [] : (watch.owedChecks ?? []);
   let awaitingApproval = headMoved ? [] : (watch.awaitingApproval ?? []);
   // "action-required" waits on someone, such as a maintainer approving a fork's workflows, so the
-  // agent is told once and nothing passes meanwhile. One with no URL is a host that could not
-  // tell, so that pass leaves the gate as it was.
+  // agent is told once and nothing passes meanwhile. A placeholder is a host that could not tell,
+  // so that pass leaves the gate as it was.
   const failed = detail.checks.filter(isFailedCheck);
   const awaiting = detail.checks.filter(
-    (check) => check.status === "action-required" && check.url !== null,
+    (check) => check.status === "action-required" && check.placeholder !== true,
   );
-  const unread = detail.checks.some(
-    (check) => check.status === "action-required" && check.url === null,
-  );
+  const unread = detail.checks.some((check) => check.placeholder === true);
   if (detail.checks.length > 0) {
     const newlyFailed = failed.filter((check) => !failedChecks.includes(check.name));
     if (newlyFailed.length > 0) changes.push({ kind: "checks-failed", failed: newlyFailed });
