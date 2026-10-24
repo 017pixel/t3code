@@ -119,7 +119,7 @@
           }
         }
       },
-      "expected": ["Max (requires final-fix alias lookup for opus -> claude-opus-5-5)"]
+      "expected": ["Max"]
     },
     "effort-alias": {
       "model": "claude-opus-5-5",
