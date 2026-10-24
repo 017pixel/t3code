@@ -4316,7 +4316,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           {
             readonly nativeThreadId: string;
             readonly startedAt: DateTime.Utc;
-            readonly frames: Array<Effect.Effect<void>>;
+            /** `adopted` is false when the wake was rejected or the session closed. */
+            readonly frames: Array<(adopted: boolean) => Effect.Effect<void>>;
             messageId: MessageId | undefined;
           }
         >();
@@ -4330,6 +4331,30 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 : undefined;
           return typeof turnId === "string" && heldExternalTurns.has(turnId) ? turnId : undefined;
         };
+        /**
+         * Delivers the held frames in order and stops holding. Without adoption,
+         * notifications are dropped as for any unknown turn and requests reach
+         * their handlers, which fail fast without an active turn.
+         */
+        const releaseHeldExternalTurn = Effect.fnUntraced(function* (
+          nativeTurnId: string,
+          adopted: boolean,
+        ) {
+          const held = heldExternalTurns.get(nativeTurnId);
+          if (held === undefined) return;
+          heldExternalTurns.delete(nativeTurnId);
+          // Requests are forked, so a frame never waits on a user decision.
+          // Uninterruptible so no held request is left without a response.
+          yield* Effect.uninterruptible(
+            Effect.forEach(held.frames, (frame) => frame(adopted), { discard: true }),
+          );
+        });
+        yield* Scope.addFinalizer(
+          scope,
+          Effect.forEach([...heldExternalTurns.keys()], (nativeTurnId) =>
+            releaseHeldExternalTurn(nativeTurnId, false),
+          ).pipe(Effect.asVoid),
+        );
         const offerExternalTurnWake = Effect.fnUntraced(function* (
           nativeTurnId: string,
           payload: unknown,
@@ -4347,27 +4372,34 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           if (held === undefined || held.messageId !== undefined || !(isPrompt || isEnd)) return;
           const providerThread = rootProviderThreads.get(held.nativeThreadId);
           if (providerThread?.appThreadId == null || continuationRequests === undefined) {
-            heldExternalTurns.delete(nativeTurnId);
-            return;
+            return yield* releaseHeldExternalTurn(nativeTurnId, false);
           }
-          held.messageId = idAllocator.derive.messageFromProviderItem({
+          const messageId = idAllocator.derive.messageFromProviderItem({
             driver: CODEX_PROVIDER,
             nativeItemId: isPrompt ? item.id : nativeTurnId,
           });
+          held.messageId = messageId;
           const text = isPrompt
             ? item.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
             : "";
+          const rejectIfCurrent = () =>
+            heldExternalTurns.get(nativeTurnId)?.messageId === messageId
+              ? releaseHeldExternalTurn(nativeTurnId, false)
+              : Effect.void;
           yield* continuationRequests.offer({
             threadId: providerThread.appThreadId,
             providerThreadId: providerThread.id,
             driver: CODEX_PROVIDER,
             detail: text.trim() === "" ? null : text,
-            messageId: held.messageId,
+            messageId,
             notification: {
               source: { kind: "background_task" },
               outcome: "updated",
               summary: "Message queued in Codex",
             },
+            dispatchIfCurrent: (dispatch) =>
+              dispatch.pipe(Effect.asSome, Effect.onError(rejectIfCurrent)),
+            clearIfCurrent: rejectIfCurrent,
           });
         });
         const handleCodexNotification: CodexClient.CodexAppServerClient["Service"]["handleServerNotification"] =
@@ -4376,8 +4408,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               const nativeTurnId = heldExternalTurnIdOf(payload);
               const held = nativeTurnId && heldExternalTurns.get(nativeTurnId);
               if (!held) return handler(payload);
-              held.frames.push(
-                Effect.suspend(() => handler(payload)).pipe(Effect.exit, Effect.asVoid),
+              held.frames.push((adopted) =>
+                adopted
+                  ? Effect.suspend(() => handler(payload)).pipe(Effect.exit, Effect.asVoid)
+                  : Effect.void,
               );
               return offerExternalTurnWake(nativeTurnId, payload);
             });
@@ -4392,28 +4426,33 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   Effect.Success<ReturnType<typeof handler>>,
                   Effect.Error<ReturnType<typeof handler>>
                 >();
-                held.frames.push(
+                // Forked like the protocol reader forks live requests: an
+                // approval waits on the user, who answers through the effect
+                // outbox that this adoption's startTurn would otherwise block.
+                held.frames.push(() =>
                   Effect.suspend(() => handler(payload)).pipe(
-                    Effect.exit,
-                    Effect.flatMap((exit) => Deferred.done(response, exit)),
+                    Deferred.into(response),
+                    Effect.forkIn(scope, { startImmediately: true }),
                     Effect.asVoid,
                   ),
                 );
                 return yield* Deferred.await(response);
               });
             });
-        /** Replays the held frames in order, then lets new ones run directly. */
+        /** Adopts the native turn a provider continuation woke this run for. */
         const adoptExternalTurn = Effect.fnUntraced(function* (
           turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
         ) {
-          const entry = [...heldExternalTurns].find(
-            ([, held]) => held.messageId === turnInput.message.messageId,
+          let nativeTurnId: string | undefined;
+          for (const [id, held] of heldExternalTurns) {
+            if (held.messageId === turnInput.message.messageId) nativeTurnId = id;
+          }
+          if (nativeTurnId === undefined) return false;
+          const held = heldExternalTurns.get(nativeTurnId)!;
+          yield* registerRootTurn({ turnInput, nativeTurnId, startedAt: held.startedAt }).pipe(
+            Effect.onInterrupt(() => releaseHeldExternalTurn(nativeTurnId, false)),
           );
-          if (entry === undefined) return false;
-          const [nativeTurnId, held] = entry;
-          yield* registerRootTurn({ turnInput, nativeTurnId, startedAt: held.startedAt });
-          while (held.frames.length > 0) yield* held.frames.shift()!;
-          heldExternalTurns.delete(nativeTurnId);
+          yield* releaseHeldExternalTurn(nativeTurnId, true);
           return true;
         });
 
@@ -6906,6 +6945,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ),
           compactThread: Effect.fn("CodexAdapterV2.compactThread")(
             function* (turnInput) {
+              // RunExecutionService routes `/compact` here before startTurn.
+              if (yield* adoptExternalTurn(turnInput)) return;
               const threadId = yield* getNativeThreadId(turnInput.providerThread);
               yield* Ref.update(pendingRootTurns, (current) =>
                 new Map(current).set(threadId, turnInput),
@@ -6970,7 +7011,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               turnInput.restartContinuationOfRunId === undefined
                 ? parseCodexGoalCommand(turnInput.message.text)
                 : null;
-            if (goalCommand !== null) return runGoalCommand(turnInput, goalCommand);
+            // An adopted turn's text was typed into Codex, not a T3 command.
+            if (goalCommand !== null)
+              return Effect.flatMap(adoptExternalTurn(turnInput), (adopted) =>
+                adopted ? Effect.void : runGoalCommand(turnInput, goalCommand),
+              );
             return Effect.gen(function* () {
               if (yield* adoptExternalTurn(turnInput)) return;
               yield* startNativeTurn(
