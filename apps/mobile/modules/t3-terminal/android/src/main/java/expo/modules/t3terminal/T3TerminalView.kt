@@ -93,8 +93,9 @@ class T3TerminalView(context: Context, appContext: AppContext) : ExpoView(contex
   var appearanceScheme: String = "dark"
 
   // The PTY grid shared by every attached client, or empty before the server reports one.
-  // The terminal draws this grid so its wrapping and cursor match the PTY; the view's own
-  // fit still goes out through onResize.
+  // The terminal draws this grid, clamped to the view's own fit (the server's grid lags a
+  // local resize, and read-only observers never constrain it), so its wrapping and cursor
+  // match the PTY; the view's own fit still goes out through onResize.
   var sharedGrid: List<Int> = emptyList()
     set(value) {
       if (field == value) return
@@ -350,8 +351,8 @@ class T3TerminalView(context: Context, appContext: AppContext) : ExpoView(contex
   private fun applyGrid() {
     if (measuredCols <= 0 || measuredRows <= 0 || isCleanedUp) return
     val shared = sharedGrid.takeIf { it.size == 2 && it[0] > 0 && it[1] > 0 }
-    val nextCols = shared?.get(0) ?: measuredCols
-    val nextRows = shared?.get(1) ?: measuredRows
+    val nextCols = shared?.get(0)?.coerceAtMost(measuredCols) ?: measuredCols
+    val nextRows = shared?.get(1)?.coerceAtMost(measuredRows) ?: measuredRows
     if (nextCols == cols && nextRows == rows && terminalHandle != 0L) return
     cols = nextCols
     rows = nextRows

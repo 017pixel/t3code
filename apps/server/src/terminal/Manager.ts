@@ -58,6 +58,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as ServerConfig from "../config.ts";
@@ -75,6 +76,7 @@ import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as ProcessRunner from "../processRunner.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
+import { terminalOutputStream } from "./OutputProtocol.ts";
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 
 export {
@@ -176,6 +178,15 @@ export class TerminalManager extends Context.Service<
       registerCleanup?: (stop: () => void) => void,
       viewerId?: string,
     ) => Effect.Effect<() => void, TerminalError>;
+
+    /**
+     * The `terminal.attach` RPC stream. Overflow recovery swaps the inner subscription, so
+     * `viewerId` and the size it reported stay attached until the whole stream ends.
+     */
+    readonly attachOutputStream: (
+      input: TerminalAttachInput,
+      viewerId: string,
+    ) => Stream.Stream<TerminalAttachStreamEvent, TerminalError>;
 
     readonly observeStream: (
       input: TerminalObserveInput,
@@ -3152,26 +3163,35 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
   };
 
-  const attachStream: TerminalManager["Service"]["attachStream"] = (
-    input,
-    listener,
-    registerCleanup,
-    viewerId,
+  /** Retains `viewer` and returns its release, which runs at most once. */
+  const retainViewerOnce = (
+    input: TerminalObserveInput,
+    viewer: string,
+    grid: TerminalGrid | null,
   ) => {
     const sessionKey = toSessionKey(input.threadId, input.terminalId);
-    const viewer = viewerId ?? `stream:${++anonymousViewerCount}`;
-    let retained = false;
-    const detach = () => {
+    retainViewer(sessionKey, viewer, grid);
+    let retained = true;
+    return () => {
       if (!retained) return;
       retained = false;
       if (releaseViewer(sessionKey, viewer)) {
         runFork(withThreadLock(input.threadId, applySharedGrid(input.threadId, input.terminalId)));
       }
     };
+  };
+
+  const attachStream: TerminalManager["Service"]["attachStream"] = (
+    input,
+    listener,
+    registerCleanup,
+    viewerId,
+  ) => {
+    const viewer = viewerId ?? `stream:${++anonymousViewerCount}`;
+    let detach = () => {};
     const initial = Effect.suspend(() => {
-      retained = true;
-      retainViewer(
-        sessionKey,
+      detach = retainViewerOnce(
+        input,
         viewer,
         input.cols !== undefined && input.rows !== undefined
           ? { cols: input.cols, rows: input.rows }
@@ -3222,6 +3242,21 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       ),
       listener,
       registerCleanup,
+    );
+
+  const attachOutputStream: TerminalManager["Service"]["attachOutputStream"] = (input, viewerId) =>
+    Stream.unwrap(
+      Effect.acquireRelease(
+        Effect.sync(() => retainViewerOnce(input, viewerId, null)),
+        (release) => Effect.sync(release),
+      ).pipe(
+        Effect.as(
+          terminalOutputStream(
+            (listener, registerCleanup) => attachStream(input, listener, registerCleanup, viewerId),
+            (listener, registerCleanup) => resyncStream(input, listener, registerCleanup),
+          ),
+        ),
+      ),
     );
 
   const metadataEventFromTerminalEvent = (
@@ -3542,6 +3577,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   return TerminalManager.of({
     open,
     attachStream,
+    attachOutputStream,
     observeStream,
     resyncStream,
     write,

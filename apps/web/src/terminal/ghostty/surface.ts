@@ -516,7 +516,7 @@ export class GhosttyTerminalSurface {
   readonly canvas: HTMLCanvasElement;
   readonly input: HTMLTextAreaElement;
   readonly scrollbar: HTMLDivElement;
-  /** The drawn grid: the shared PTY grid when known, otherwise the measured one. */
+  /** The drawn grid: the shared PTY grid, clamped per axis to the measured one. */
   cols = 1;
   rows = 1;
 
@@ -891,8 +891,9 @@ export class GhosttyTerminalSurface {
 
   /**
    * Other clients can share this PTY, so the server owns its grid. Drawing that grid
-   * keeps wrapping and cursor positions in step with the PTY, and the server keeps it
-   * no larger than this surface's own fit.
+   * keeps wrapping and cursor positions in step with the PTY. Each axis is clamped to
+   * this surface's own fit: the server's grid lags a local resize, and read-only
+   * observers never constrain it.
    */
   setSharedGrid(grid: { readonly cols: number; readonly rows: number } | null): void {
     if (this.disposed) return;
@@ -902,8 +903,8 @@ export class GhosttyTerminalSurface {
   }
 
   private applyGrid(): boolean {
-    const cols = this.sharedGrid?.cols ?? this.measuredCols;
-    const rows = this.sharedGrid?.rows ?? this.measuredRows;
+    const cols = Math.min(this.sharedGrid?.cols ?? this.measuredCols, this.measuredCols);
+    const rows = Math.min(this.sharedGrid?.rows ?? this.measuredRows, this.measuredRows);
     if (cols === this.cols && rows === this.rows) return false;
     this.cols = cols;
     this.rows = rows;
