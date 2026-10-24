@@ -21,6 +21,8 @@ import * as Logger from "effect/Logger";
 import * as References from "effect/References";
 import { PullRequestProviderError } from "@t3tools/source-control-core/server/PullRequestProvider";
 import { SourceControlRateLimitPausedError } from "@t3tools/source-control-core/server/SourceControlRateLimit";
+import { GitCafeApiError } from "../../../../packages/source-control-gitcafe/src/server/GitCafeApi.ts";
+import { GitHubApiRateLimitError } from "../../../../packages/source-control-github/src/server/GitHubRequestPolicy.ts";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
@@ -425,6 +427,50 @@ describe("ThreadPullRequestServiceV2 reads", () => {
             level: "Info",
             parts: [
               `thread branch pull request lookup failed: rate limited until ${DateTime.formatIso(DateTime.makeUnsafe(RETRY_AT))} (threads: ${thread.id})`,
+            ],
+          },
+        ]);
+      }),
+    );
+
+    // A forge's first refusal reaches the sweep before its host pause starts.
+    it.effect.each([
+      {
+        name: "GitHub",
+        refusal: () =>
+          new GitHubApiRateLimitError({
+            host: "github.com",
+            operation: "listPullRequests",
+            retryAt: RETRY_AT,
+          }),
+        until: ` until ${DateTime.formatIso(DateTime.makeUnsafe(RETRY_AT))}`,
+      },
+      {
+        name: "GitCafe",
+        refusal: () =>
+          new GitCafeApiError({
+            host: "git.cafe",
+            operation: "listPullRequests",
+            status: 429,
+            reason: "rate-limited",
+            detail: "Too Many Requests",
+          }),
+        until: "",
+      },
+    ])("logs a $name rate limit refusal as one info line", ({ name, refusal, until }) =>
+      Effect.gen(function* () {
+        const thread = { ...threadShell(`${name}-refusal`), branch: "feature" };
+        const { logs, commands } = yield* sweep({
+          thread,
+          branchPullRequest: () => Effect.fail(lookupFailure(refusal())),
+        });
+
+        expect(commands).toEqual([]);
+        expect(logs).toEqual([
+          {
+            level: "Info",
+            parts: [
+              `thread branch pull request lookup failed: rate limited${until} (threads: ${thread.id})`,
             ],
           },
         ]);
