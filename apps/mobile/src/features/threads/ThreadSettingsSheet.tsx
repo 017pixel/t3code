@@ -102,6 +102,7 @@ import {
   providerSectionIsCollapsed,
 } from "./thread-settings-sheet-state";
 import { formatProviderUpdateRequiredNotice } from "@t3tools/client-runtime/providerUpdateRequiredModels";
+import { resolveProvidersForCwd } from "@t3tools/client-runtime/providerSkills";
 
 const PRIMARY_PROVIDER_DRIVERS: ReadonlySet<string> = new Set([
   "claudeAgent",
@@ -248,6 +249,7 @@ type ThreadSettingsSubmenuPage =
 type ThreadSettingsSessionProps = {
   readonly environmentId: EnvironmentId | null;
   readonly projectId: ProjectId | null;
+  readonly projectCwd?: string | null;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly lockedProviderInstanceId?: ProviderInstanceId;
   readonly providerGroups: ReadonlyArray<ProviderGroup>;
@@ -362,7 +364,7 @@ function ThreadSettingsSessionProvider(
     manageHidden && config
       ? groupByProvider(
           buildModelOptions(
-            config,
+            { ...config, providers: resolveProvidersForCwd(config.providers, props.projectCwd) },
             props.selectedModel,
             props.lockedProviderInstanceId,
             props.projectId,
@@ -1544,6 +1546,7 @@ export function NewTaskThreadSettingsRouteScreen() {
     <ThreadSettingsPickerScreen
       environmentId={flow.selectedEnvironmentId}
       projectId={flow.selectedProject?.id ?? null}
+      projectCwd={flow.selectedProject?.workspaceRoot || null}
       {...(flow.selectedModel ? { providerInstanceId: flow.selectedModel.instanceId } : {})}
       providerGroups={flow.providerGroups}
       selectedModel={flow.selectedModel}

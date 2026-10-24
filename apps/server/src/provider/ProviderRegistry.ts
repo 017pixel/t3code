@@ -79,9 +79,13 @@ export class ProviderRegistry extends Context.Service<
 
     /**
      * Providers as a project sees them: each one's models are its workspace
-     * catalog for `cwd` where that differs from the machine's.
+     * catalog for `cwd` where that differs from the machine's. `instanceIds`
+     * limits which catalogs are read; the rest keep their last known models.
      */
-    readonly getProvidersForCwd: (cwd: string) => Effect.Effect<ReadonlyArray<ServerProvider>>;
+    readonly getProvidersForCwd: (
+      cwd: string,
+      options?: { readonly instanceIds?: ReadonlyArray<ProviderInstanceId> },
+    ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
 
     readonly getProviderMaintenanceCapabilitiesForInstance: (
       instanceId: ProviderInstanceId,
@@ -131,6 +135,44 @@ function dropProviderWorkspaceSnapshot(provider: ServerProvider, cwd: string): S
         workspaceSnapshots: provider.workspaceSnapshots.filter((snapshot) => snapshot.cwd !== cwd),
       }
     : provider;
+}
+
+/**
+ * Sets a workspace's catalog without claiming its skills or commands were
+ * scanned: a new entry stays pending, so selecting the provider still scans.
+ */
+function withWorkspaceModels(
+  provider: ServerProvider,
+  cwd: string,
+  models: ServerProvider["models"] | undefined,
+): ServerProvider {
+  const existing = provider.workspaceSnapshots?.find((snapshot) => snapshot.cwd === cwd);
+  if (Equal.equals(existing?.models, models)) return provider;
+  if (!existing) {
+    if (!models) return provider;
+    return {
+      ...provider,
+      workspaceSnapshots: [
+        ...(provider.workspaceSnapshots ?? []),
+        {
+          cwd,
+          checkedAt: provider.checkedAt,
+          slashCommands: provider.slashCommands,
+          slashCommandsPending: true,
+          skills: provider.skills,
+          models,
+        },
+      ].slice(-MAX_WORKSPACE_SNAPSHOTS_PER_PROVIDER),
+    };
+  }
+  const { models: _models, ...rest } = existing;
+  const next = models ? { ...rest, models } : rest;
+  return {
+    ...provider,
+    workspaceSnapshots: provider.workspaceSnapshots!.map((snapshot) =>
+      snapshot === existing ? next : snapshot,
+    ),
+  };
 }
 
 export function upsertProviderWorkspaceSnapshot(
@@ -1019,21 +1061,43 @@ export const layer = Layer.effect(
     });
 
     // A project can add models to a provider other than the selected one, and
-    // every model picker in it lists them. Scans inside the TTL are reused.
-    const refreshWorkspaceModels = (cwd: string, except?: ProviderInstanceId) =>
+    // every model picker in it lists them. Drivers cache these reads, so this
+    // stays cheap and shares one in-flight read with a full workspace scan.
+    const refreshWorkspaceModels = (
+      cwd: string,
+      include: (instanceId: ProviderInstanceId) => boolean,
+    ) =>
       instanceRegistry.listInstances.pipe(
         Effect.flatMap((instances) =>
           Effect.forEach(
             instances.filter(
-              (instance) => instance.workspaceScopedModels && instance.instanceId !== except,
+              (instance) =>
+                instance.modelsForCwd !== undefined &&
+                include(instance.instanceId) &&
+                Ref.getUnsafe(providersRef).some(
+                  (provider) => provider.instanceId === instance.instanceId && provider.enabled,
+                ),
             ),
             (instance) =>
-              refreshWorkspaceSnapshot({ instanceId: instance.instanceId, cwd }).pipe(
-                Effect.catchCause(recoverRefreshFailure),
+              instance.modelsForCwd!(cwd).pipe(
+                Effect.tap((models) =>
+                  updateProviders((providers) =>
+                    // A full scan in flight publishes the same cached catalog.
+                    Ref.getUnsafe(workspaceRefreshesRef).get(instance)?.has(cwd)
+                      ? providers
+                      : providers.map((provider) =>
+                          provider.instanceId === instance.instanceId
+                            ? withWorkspaceModels(provider, cwd, models)
+                            : provider,
+                        ),
+                  ),
+                ),
+                Effect.map((models) => [instance.instanceId, models] as const),
               ),
-            { concurrency: "unbounded", discard: true },
+            { concurrency: "unbounded" },
           ),
         ),
+        Effect.map((entries) => new Map(entries)),
       );
 
     return {
@@ -1046,14 +1110,27 @@ export const layer = Layer.effect(
         Effect.all(
           [
             refreshWorkspaceSnapshot(input).pipe(Effect.catchCause(recoverRefreshFailure)),
-            refreshWorkspaceModels(input.cwd, input.instanceId),
+            refreshWorkspaceModels(input.cwd, (instanceId) => instanceId !== input.instanceId),
           ],
           { concurrency: "unbounded", discard: true },
         ).pipe(Effect.andThen(Ref.get(providersRef))),
-      getProvidersForCwd: (cwd) =>
-        refreshWorkspaceModels(cwd).pipe(
-          Effect.andThen(Ref.get(providersRef)),
-          Effect.map((providers) => resolveProvidersForCwd(providers, cwd)),
+      getProvidersForCwd: (cwd, options) =>
+        refreshWorkspaceModels(
+          cwd,
+          (instanceId) => options?.instanceIds?.includes(instanceId) ?? true,
+        ).pipe(
+          Effect.flatMap((read) =>
+            Ref.get(providersRef).pipe(
+              Effect.map((providers) =>
+                resolveProvidersForCwd(providers, cwd).map((provider, index) => {
+                  if (!read.has(provider.instanceId)) return provider;
+                  // What was just read, even while a full scan has not published it.
+                  const models = read.get(provider.instanceId) ?? providers[index]!.models;
+                  return provider.models === models ? provider : { ...provider, models };
+                }),
+              ),
+            ),
+          ),
         ),
       refreshAfterUpdate,
       getProviderMaintenanceCapabilitiesForInstance,

@@ -239,9 +239,11 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
       }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
-  it.effect("lists a project's own opencode.jsonc models for that project only", () =>
-    Effect.gen(function* () {
-      const project = "/work/project-with-config";
+  const workspaceModelServer = (input: {
+    readonly project: string;
+    readonly failProject?: boolean;
+  }) =>
+    Effect.sync(() => {
       const model = (providerID: string, id: string, name: string) => ({
         id,
         modelID: id,
@@ -264,33 +266,43 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
         { ...OPENCODE_2_RESPONSES, ...OPENCODE_2_WORKSPACE_RESPONSES },
         "secret",
       );
-      const server = HttpClient.make((request) => {
+      const projectRequests: Array<string> = [];
+      const client = HttpClient.make((request) => {
         const url = new URL(request.url);
         const directory = Option.getOrUndefined(
           UrlParams.getFirst(request.urlParams, "location[directory]"),
         );
-        const json = (body: unknown) =>
+        if (directory === input.project) projectRequests.push(url.pathname);
+        const json = (body: unknown, status = 200) =>
           Effect.succeed(
             HttpClientResponse.fromWeb(
               request,
               new Response(JSON.stringify(body), {
-                status: 200,
+                status,
                 headers: { "content-type": "application/json" },
               }),
             ),
           );
         if (url.pathname === "/api/model") {
+          if (directory === input.project && input.failProject) {
+            return json({ error: "unreadable opencode.jsonc" }, 500);
+          }
           return json({
             location: { directory },
-            data: directory === project ? [globalModel, projectModel] : [globalModel],
+            data: directory === input.project ? [globalModel, projectModel] : [globalModel],
           });
         }
         if (url.pathname === "/api/provider") return json({ location: { directory }, data: [] });
         return replay.execute(request);
       });
+      return { client, projectRequests };
+    });
+
+  const readyInstance = (client: HttpClient.HttpClient) =>
+    Effect.gen(function* () {
       const instance = yield* create(
         { serverUrl: "http://127.0.0.1:4096", serverPassword: "secret" },
-        server,
+        client,
       );
       const ready = yield* instance.snapshot.streamChanges.pipe(
         Stream.filter((snapshot) => snapshot.status === "ready"),
@@ -300,25 +312,61 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
       );
       yield* TestClock.adjust("5 seconds");
       yield* Fiber.join(ready);
+      return instance;
+    });
 
-      // The catalog settles over repeated reads, as the machine catalog does.
-      const scan = (cwd: string) =>
-        Effect.gen(function* () {
-          const fiber = yield* Effect.forkChild(instance.snapshotForCwd!(cwd));
-          yield* TestClock.adjust("1 second");
-          return yield* Fiber.join(fiber);
-        });
-      const projectSnapshot = yield* scan(project);
+  // The catalog settles over repeated reads, as the machine catalog does.
+  const settled = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    Effect.gen(function* () {
+      const fiber = yield* Effect.forkChild(effect);
+      yield* TestClock.adjust("1 second");
+      return yield* Fiber.join(fiber);
+    });
+
+  it.effect("lists a project's own opencode.jsonc models for that project only", () =>
+    Effect.gen(function* () {
+      const project = "/work/project-with-config";
+      const server = yield* workspaceModelServer({ project });
+      const instance = yield* readyInstance(server.client);
+
+      const projectSnapshot = yield* settled(instance.snapshotForCwd!(project));
       assert.deepStrictEqual(
         projectSnapshot.workspaceModels?.map((entry) => entry.slug),
         ["opencode/big-pickle", "uni/medium-gpt"],
       );
-      const otherSnapshot = yield* scan("/work/other-project");
+      const otherSnapshot = yield* settled(instance.snapshotForCwd!("/work/other-project"));
       assert.deepStrictEqual(
         otherSnapshot.models.map((entry) => entry.slug),
         ["opencode/big-pickle"],
       );
       assert.strictEqual(otherSnapshot.workspaceModels, undefined);
+
+      // Pickers for other providers reuse that read and never list skills or commands.
+      const scanned = server.projectRequests.length;
+      assert.deepStrictEqual(
+        (yield* instance.modelsForCwd!(project))?.map((entry) => entry.slug),
+        ["opencode/big-pickle", "uni/medium-gpt"],
+      );
+      assert.strictEqual(server.projectRequests.length, scanned);
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("retries an unreadable project catalog after a cooldown, not on every read", () =>
+    Effect.gen(function* () {
+      const project = "/work/broken-config";
+      const server = yield* workspaceModelServer({ project, failProject: true });
+      const instance = yield* readyInstance(server.client);
+
+      assert.strictEqual(yield* settled(instance.modelsForCwd!(project)), undefined);
+      const attempts = server.projectRequests.length;
+      assert.ok(attempts > 0);
+      assert.ok(server.projectRequests.every((path) => path === "/api/model"));
+      assert.strictEqual(yield* settled(instance.modelsForCwd!(project)), undefined);
+      assert.strictEqual(server.projectRequests.length, attempts);
+
+      yield* TestClock.adjust("30 seconds");
+      yield* settled(instance.modelsForCwd!(project));
+      assert.ok(server.projectRequests.length > attempts);
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 

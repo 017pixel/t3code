@@ -50,6 +50,7 @@ import {
 import { scopedProjectKey } from "../../lib/scopedEntities";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { projectEnvironment } from "../../state/projects";
+import { serverEnvironment } from "../../state/server";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
 import {
@@ -103,6 +104,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
+import { resolveProvidersForCwd } from "@t3tools/client-runtime/providerSkills";
 import { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { type VcsRef } from "@t3tools/client-runtime/state/vcs";
 import {
@@ -357,9 +359,18 @@ export function NewTaskFlowProvider(
       ? editingPendingProject
       : (projectsForEnvironment[0] ?? null));
 
-  const selectedEnvironmentServerConfig = useEnvironmentServerConfig(
+  const environmentServerConfig = useEnvironmentServerConfig(
     selectedProject?.environmentId ?? null,
   );
+  const selectedProjectCwd = selectedProject?.workspaceRoot || null;
+  // A project's own provider config can add models only its picker lists.
+  const projectProviders =
+    environmentServerConfig &&
+    resolveProvidersForCwd(environmentServerConfig.providers, selectedProjectCwd);
+  const selectedEnvironmentServerConfig =
+    environmentServerConfig && projectProviders !== environmentServerConfig.providers
+      ? { ...environmentServerConfig, providers: projectProviders! }
+      : environmentServerConfig;
   const isScratchDraft =
     selectedProject !== null &&
     isScratchProject(selectedProject, selectedEnvironmentServerConfig?.scratchWorkspaceRoot);
@@ -598,6 +609,30 @@ export function NewTaskFlowProvider(
   const selectedModelKey = selectedModel
     ? `${selectedModel.instanceId}:${selectedModel.model}`
     : null;
+  // The composer scans its project once a thread exists; a new task needs the
+  // project's catalog before that. The server reuses scans inside its TTL.
+  const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
+    reportFailure: false,
+  });
+  const projectModelsRequestKeyRef = useRef<string | null>(null);
+  const projectModelsInstanceId = selectedModel?.instanceId ?? null;
+  const projectEnvironmentId = selectedProject?.environmentId ?? null;
+  useEffect(() => {
+    if (!projectEnvironmentId || !selectedProjectCwd || !projectModelsInstanceId) return;
+    const key = JSON.stringify([projectEnvironmentId, selectedProjectCwd]);
+    if (projectModelsRequestKeyRef.current === key) return;
+    projectModelsRequestKeyRef.current = key;
+    void refreshProviders({
+      environmentId: projectEnvironmentId,
+      input: { instanceId: projectModelsInstanceId, cwd: selectedProjectCwd },
+    });
+  }, [
+    projectEnvironmentId,
+    projectModelsInstanceId,
+    projectModelsRequestKeyRef,
+    refreshProviders,
+    selectedProjectCwd,
+  ]);
 
   const selectedModelOption =
     modelOptions.find(

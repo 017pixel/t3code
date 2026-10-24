@@ -1411,8 +1411,8 @@ it.layer(
         ];
         const makeInstance = (
           id: string,
-          snapshotForCwd: (cwd: string) => Partial<ProviderWorkspaceSnapshot>,
-          workspaceScopedModels?: boolean,
+          snapshotForCwd: (cwd: string) => Effect.Effect<Partial<ProviderWorkspaceSnapshot>>,
+          modelsForCwd?: ProviderInstance["modelsForCwd"],
         ): ProviderInstance => {
           const driver = ProviderDriverKind.make(id);
           const provider = {
@@ -1447,18 +1447,36 @@ it.layer(
               streamChanges: Stream.empty,
               applyUsageLimits: () => Effect.void,
             },
-            snapshotForCwd: (cwd) => Effect.sync(() => ({ ...provider, ...snapshotForCwd(cwd) })),
-            ...(workspaceScopedModels ? { workspaceScopedModels } : {}),
+            snapshotForCwd: (cwd) =>
+              snapshotForCwd(cwd).pipe(Effect.map((scoped) => ({ ...provider, ...scoped }))),
+            ...(modelsForCwd ? { modelsForCwd } : {}),
             orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
             textGeneration: {} as ProviderInstance["textGeneration"],
           };
         };
-        const codex = makeInstance("codex", () => ({}));
+        const workspaceModelsFor = (cwd: string) =>
+          cwd === "/project" ? projectModels : undefined;
+        // OpenCode's full scan of /project waits here, as a slow skill scan would.
+        const openCodeScanStarted = yield* Deferred.make<void>();
+        const releaseOpenCodeScan = yield* Deferred.make<void>();
+        let openCodeFullScans = 0;
+        const openCodeModelReads: Array<string> = [];
+        const codex = makeInstance("codex", () => Effect.succeed({}));
         const openCode = makeInstance(
           "opencode",
           (cwd) =>
-            cwd === "/project" ? { models: projectModels, workspaceModels: projectModels } : {},
-          true,
+            Effect.gen(function* () {
+              openCodeFullScans += 1;
+              yield* Deferred.succeed(openCodeScanStarted, undefined);
+              yield* Deferred.await(releaseOpenCodeScan);
+              const models = workspaceModelsFor(cwd);
+              return models ? { models, workspaceModels: models } : {};
+            }),
+          (cwd) =>
+            Effect.sync(() => {
+              openCodeModelReads.push(cwd);
+              return workspaceModelsFor(cwd);
+            }),
         );
         const instances = [codex, openCode];
         const layerInstanceRegistry = Layer.succeed(
@@ -1503,14 +1521,33 @@ it.layer(
             "uni/medium-gpt",
           ]);
           assert.deepStrictEqual(openCodeModels(scanned), ["opencode/big-pickle"]);
+          // Listing models for an unselected provider does not scan its skills or commands.
+          assert.strictEqual(openCodeFullScans, 0);
 
-          // Agents read the catalog for their own project, scanning it if needed.
+          // Selecting OpenCode still scans: the models-only entry claims no skills.
+          const fullScan = yield* registry
+            .refreshWorkspaceSnapshot({ instanceId: openCode.instanceId, cwd: "/project" })
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(openCodeScanStarted);
+
+          // An agent reading while that scan is in flight still sees the project's models.
           assert.deepStrictEqual(openCodeModels(yield* registry.getProvidersForCwd("/project")), [
             "opencode/big-pickle",
             "uni/medium-gpt",
           ]);
           assert.deepStrictEqual(openCodeModels(yield* registry.getProvidersForCwd("/other")), [
             "opencode/big-pickle",
+          ]);
+          // A delegation to Codex reads no OpenCode catalog.
+          yield* registry.getProvidersForCwd("/elsewhere", { instanceIds: [codex.instanceId] });
+          assert.notInclude(openCodeModelReads, "/elsewhere");
+
+          yield* Deferred.succeed(releaseOpenCodeScan, undefined);
+          const published = yield* Fiber.join(fullScan);
+          assert.strictEqual(openCodeFullScans, 1);
+          assert.deepStrictEqual(openCodeModels(resolveProvidersForCwd(published, "/project")), [
+            "opencode/big-pickle",
+            "uni/medium-gpt",
           ]);
         }).pipe(Effect.provide(runtimeServices));
       }),

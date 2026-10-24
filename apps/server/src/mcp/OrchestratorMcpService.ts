@@ -1303,8 +1303,12 @@ const make = Effect.gen(function* () {
   });
 
   // A project's own provider config can add models, so a thread's agent sees
-  // the catalog its own model picker shows.
-  const loadProviders = (parent: Pick<OrchestrationV2ThreadProjection, "thread"> | undefined) =>
+  // the catalog its own model picker shows. `instanceIds` keeps a delegation
+  // from waiting on catalogs of providers it does not target.
+  const loadProviders = (
+    parent: Pick<OrchestrationV2ThreadProjection, "thread"> | undefined,
+    instanceIds?: ReadonlyArray<ProviderInstanceId>,
+  ) =>
     parent === undefined
       ? providerRegistry.getProviders
       : (parent.thread.worktreePath
@@ -1317,10 +1321,18 @@ const make = Effect.gen(function* () {
           Effect.flatMap(
             Option.match({
               onNone: () => providerRegistry.getProviders,
-              onSome: providerRegistry.getProvidersForCwd,
+              onSome: (cwd) =>
+                providerRegistry.getProvidersForCwd(cwd, instanceIds ? { instanceIds } : undefined),
             }),
           ),
         );
+
+  const targetInstanceId = (
+    parent: Pick<OrchestrationV2ThreadProjection, "thread">,
+    target: Parameters<typeof resolveTarget>[0]["target"],
+  ) =>
+    target?.providerInstanceId ??
+    (target?.driverKind === undefined ? parent.thread.modelSelection.instanceId : undefined);
 
   const loadOrchestrationCapableInstanceIds = () =>
     providerAdapters.list().pipe(Effect.map((instanceIds) => new Set(instanceIds)));
@@ -1344,11 +1356,7 @@ const make = Effect.gen(function* () {
       .pipe(Effect.mapError(threadManagementFailure));
 
   const resolveTargetRechecking = (input: Parameters<typeof resolveTarget>[0]) => {
-    const instanceId =
-      input.target?.providerInstanceId ??
-      (input.target?.driverKind === undefined
-        ? input.parent.thread.modelSelection.instanceId
-        : undefined);
+    const instanceId = targetInstanceId(input.parent, input.target);
     const resolved = resolveTarget(input);
     if (instanceId === undefined) return resolved;
     return resolved.pipe(
@@ -1356,7 +1364,7 @@ const make = Effect.gen(function* () {
         (error) => error.code === "provider_unavailable",
         () =>
           providerRegistry.refreshInstance(instanceId).pipe(
-            Effect.andThen(loadProviders(input.parent)),
+            Effect.andThen(loadProviders(input.parent, [instanceId])),
             Effect.flatMap((providers) => resolveTarget({ ...input, providers })),
           ),
       ),
@@ -2181,7 +2189,11 @@ const make = Effect.gen(function* () {
           "Delegated tasks require an active run owned by this MCP provider session.",
         );
       }
-      const providers = yield* loadProviders(parent);
+      const delegatedInstanceId = targetInstanceId(parent, input.target);
+      const providers = yield* loadProviders(
+        parent,
+        delegatedInstanceId === undefined ? undefined : [delegatedInstanceId],
+      );
       const key = yield* requestKey(input.clientRequestId);
       const commandId = stableCommandId({
         scope,

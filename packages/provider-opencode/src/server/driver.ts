@@ -1,5 +1,10 @@
-import { ProviderDriverKind, type ServerProviderModel } from "@t3tools/contracts";
+import {
+  PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS,
+  ProviderDriverKind,
+  type ServerProviderModel,
+} from "@t3tools/contracts";
 import { OpenCodeSettings } from "../settings.ts";
+import * as Cache from "effect/Cache";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -176,9 +181,9 @@ export type OpenCodeDriverEnv =
   | Path.Path;
 
 /**
- * Lists a workspace's catalog only where it differs, so most projects add
- * nothing to the wire. A project config can also rename a model or change its
- * options, so the whole entry counts, not just the slug.
+ * A workspace's catalog only where it differs, so most projects add nothing to
+ * the wire. A project config can also rename a model or change its options, so
+ * the whole entry counts, not just the slug.
  */
 const scopeWorkspaceModels = (
   machineModels: ReadonlyArray<ServerProviderModel>,
@@ -187,8 +192,12 @@ const scopeWorkspaceModels = (
   Option.isNone(workspaceModels) ||
   workspaceModels.value.length === 0 ||
   Equal.equals(workspaceModels.value, machineModels)
-    ? {}
-    : { models: workspaceModels.value, workspaceModels: workspaceModels.value };
+    ? undefined
+    : workspaceModels.value;
+
+// A catalog that could not be read is retried after this, not on every read:
+// every model picker and agent in the project asks for it.
+const WORKSPACE_MODELS_RETRY_MS = 30_000;
 
 export const OpenCodeDriver: ProviderDriver<
   OpenCodeSettings,
@@ -344,17 +353,6 @@ export const OpenCodeDriver: ProviderDriver<
           );
         }).pipe(Effect.scoped),
       );
-    // A project's own opencode.jsonc can add providers, so its catalog can
-    // differ from the machine's. It settles like the machine catalog does; one
-    // that cannot be read falls back to the machine's.
-    const loadOpenCode2WorkspaceModels = (cwd: string) =>
-      makeOpenCode2ModelLoader(
-        openCode2Server.withConnection(({ client }) => loadOpenCode2Catalog(client, cwd)),
-      ).pipe(
-        Effect.flatten,
-        Effect.map((catalog) => openCode2ProviderModels(effectiveConfig, catalog)),
-        Effect.option,
-      );
     const serverOwner = yield* OpenCodeServerOwner.make({
       binaryPath: effectiveConfig.binaryPath,
       directory: host.paths.cwd,
@@ -504,6 +502,47 @@ export const OpenCodeDriver: ProviderDriver<
       ),
     );
 
+    // A project's own opencode.jsonc can add providers, so its catalog can
+    // differ from the machine's. It settles like the machine catalog does; one
+    // that cannot be read falls back to the machine's. Only a healthy OpenCode 2
+    // reads per-directory catalogs.
+    const workspaceModelsCache = yield* Cache.makeWith(
+      (cwd: string) =>
+        byOpenCodeRuntime(runtimeProbe.get, {
+          v1: Effect.succeed(Option.none<ReadonlyArray<ServerProviderModel>>()),
+          v2: snapshot.getSnapshot.pipe(
+            Effect.flatMap((machine) =>
+              !machine.installed || machine.status === "error" || machine.status === "disabled"
+                ? Effect.succeed(Option.none<ReadonlyArray<ServerProviderModel>>())
+                : makeOpenCode2ModelLoader(
+                    openCode2Server.withConnection(({ client }) =>
+                      loadOpenCode2Catalog(client, cwd),
+                    ),
+                  ).pipe(
+                    Effect.flatten,
+                    Effect.map((catalog) => openCode2ProviderModels(effectiveConfig, catalog)),
+                    Effect.option,
+                  ),
+            ),
+            Effect.orElseSucceed(() => Option.none<ReadonlyArray<ServerProviderModel>>()),
+          ),
+        }),
+      {
+        capacity: 64,
+        timeToLive: (exit) =>
+          exit._tag === "Success" && Option.isSome(exit.value)
+            ? PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS
+            : WORKSPACE_MODELS_RETRY_MS,
+      },
+    );
+    const modelsForCwd = (cwd: string) =>
+      !effectiveConfig.enabled
+        ? Effect.succeed(undefined)
+        : Effect.all([snapshot.getSnapshot, Cache.get(workspaceModelsCache, cwd)]).pipe(
+            Effect.map(([machine, models]) => scopeWorkspaceModels(machine.models, models)),
+            Effect.orElseSucceed(() => undefined),
+          );
+
     return {
       instanceId,
       driverKind: DRIVER_KIND,
@@ -512,7 +551,8 @@ export const OpenCodeDriver: ProviderDriver<
       accentColor,
       enabled,
       snapshot,
-      workspaceScopedModels: true,
+      modelsForCwd,
+      invalidateCaches: Cache.invalidateAll(workspaceModelsCache),
       snapshotForCwd: (cwd) =>
         !effectiveConfig.enabled
           ? snapshot.getSnapshot
@@ -520,7 +560,7 @@ export const OpenCodeDriver: ProviderDriver<
               v2: Effect.all(
                 [
                   snapshot.getSnapshot,
-                  loadOpenCode2WorkspaceModels(cwd),
+                  modelsForCwd(cwd),
                   listOpenCode2Workspace(cwd).pipe(
                     Effect.timeout("20 seconds"),
                     Effect.mapError(
@@ -538,7 +578,7 @@ export const OpenCodeDriver: ProviderDriver<
               ).pipe(
                 Effect.map(([machineSnapshot, workspaceModels, { skills, commands }]) => ({
                   ...machineSnapshot,
-                  ...scopeWorkspaceModels(machineSnapshot.models, workspaceModels),
+                  ...(workspaceModels ? { models: workspaceModels, workspaceModels } : {}),
                   skills: openCode2SkillsToServerProviderSkills(skills),
                   slashCommands: openCode2CommandsToServerProviderSlashCommands(commands),
                   // A finished scan lists at least the built-ins. None means it

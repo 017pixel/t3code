@@ -745,6 +745,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     ownerId: settingsOwnerId,
     environmentId: props.environmentId,
     projectId: props.selectedThread.projectId,
+    projectCwd: props.projectCwd,
     providerInstanceId: currentModelSelection.instanceId,
     ...(lockedProviderInstanceId ? { lockedProviderInstanceId } : {}),
     providerGroups: threadProviderGroups,
