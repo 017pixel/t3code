@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { beforeEach, vi } from "vite-plus/test";
@@ -23,13 +24,26 @@ const { fromWebContents } = vi.hoisted(() => ({
   fromWebContents: vi.fn<(webContents: unknown) => unknown>(() => null),
 }));
 
+const { appListeners } = vi.hoisted(() => ({
+  appListeners: new Map<string, (...args: unknown[]) => void>(),
+}));
+
 vi.mock("electron", () => ({
+  app: {
+    on: (eventName: string, listener: (...args: unknown[]) => void) => {
+      appListeners.set(eventName, listener);
+    },
+    removeListener: (eventName: string) => {
+      appListeners.delete(eventName);
+    },
+  },
   BrowserWindow: { fromWebContents },
   session: {
     fromPartition,
   },
 }));
 
+import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as BrowserSession from "./BrowserSession.ts";
 
@@ -46,12 +60,53 @@ const layerDialog = Layer.succeed(ElectronDialog.ElectronDialog, {
   showErrorBox: () => Effect.void,
 });
 const layer = BrowserSession.layer.pipe(
-  Layer.provide(Layer.merge(NodeServices.layer, layerDialog)),
+  Layer.provide(Layer.mergeAll(NodeServices.layer, layerDialog, ElectronApp.layer)),
 );
+
+const selfSignedCertificate = {
+  fingerprint: "sha256/self-signed",
+  subjectName: "localhost",
+  issuerName: "localhost",
+  validStart: 1_735_776_000,
+  validExpiry: 1_807_056_000,
+} as Electron.Certificate;
+
+/** Raises Electron's `certificate-error` for a preview guest in `browserSession`. */
+const certificateError = (
+  browserSession: unknown,
+  input: { readonly url: string; readonly certificate?: Electron.Certificate },
+) => {
+  const listener = appListeners.get("certificate-error");
+  assert.isDefined(listener, "preview sessions should handle certificate errors");
+  const guest = { session: browserSession, hostWebContents: null, isDestroyed: () => false };
+  const event = { preventDefault: vi.fn() };
+  const decision = Deferred.makeUnsafe<boolean>();
+  const callback = vi.fn((trusted: boolean) => {
+    Deferred.doneUnsafe(decision, Effect.succeed(trusted));
+  });
+  listener(
+    event,
+    guest,
+    input.url,
+    "net::ERR_CERT_AUTHORITY_INVALID",
+    input.certificate ?? selfSignedCertificate,
+    callback,
+    true,
+  );
+  return { event, callback, trusted: Deferred.await(decision) };
+};
+
+/** Answers the certificate prompt with its "Trust…" button. */
+const trustCertificateButton = (options: Electron.MessageBoxOptions): number => {
+  const index = (options.buttons ?? []).findIndex((label) => label.startsWith("Trust"));
+  assert.notStrictEqual(index, -1, "the certificate prompt should offer to trust");
+  return index;
+};
 
 describe("BrowserSession", () => {
   beforeEach(() => {
     sessions.clear();
+    appListeners.clear();
     fromPartition.mockReset();
     fromPartition.mockImplementation((partition: string) => {
       const browserSession = {
@@ -248,6 +303,67 @@ describe("BrowserSession", () => {
       const created = sessions.get(partition);
       assert.isDefined(created);
       assert.strictEqual(created.clearStorageData.mock.calls.length, 1);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("asks before trusting an untrusted certificate and remembers the approval", () =>
+    Effect.gen(function* () {
+      const browserSessions = yield* BrowserSession.BrowserSession;
+      const partition = yield* browserSessions.getPartition("scope-a");
+      yield* browserSessions.getSession("scope-a");
+      const browserSession = sessions.get(partition);
+
+      showMessageBox.mockReset();
+      showMessageBox.mockImplementation(trustCertificateButton);
+      const first = certificateError(browserSession, { url: "https://localhost:18443/" });
+      assert.strictEqual(first.event.preventDefault.mock.calls.length, 1);
+      assert.isTrue(yield* first.trusted);
+      assert.strictEqual(showMessageBox.mock.calls.length, 1);
+
+      // The approval covers this origin, port, and certificate in this profile.
+      const again = certificateError(browserSession, { url: "https://localhost:18443/other" });
+      assert.isTrue(yield* again.trusted);
+      assert.strictEqual(showMessageBox.mock.calls.length, 1);
+
+      showMessageBox.mockReset();
+      showMessageBox.mockReturnValue(1);
+      const otherPort = certificateError(browserSession, { url: "https://localhost:18444/" });
+      assert.isFalse(yield* otherPort.trusted);
+      const renewed = certificateError(browserSession, {
+        url: "https://localhost:18443/",
+        certificate: { ...selfSignedCertificate, fingerprint: "sha256/renewed" },
+      });
+      assert.isFalse(yield* renewed.trusted);
+      assert.strictEqual(showMessageBox.mock.calls.length, 2);
+
+      // A Session that is not a preview profile keeps Electron's denial.
+      const appSession = certificateError({}, { url: "https://localhost:18443/" });
+      assert.strictEqual(appSession.event.preventDefault.mock.calls.length, 0);
+      assert.strictEqual(appSession.callback.mock.calls.length, 0);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("revokes certificate approvals when cookies are cleared, not the cache", () =>
+    Effect.gen(function* () {
+      const browserSessions = yield* BrowserSession.BrowserSession;
+      const partition = yield* browserSessions.getPartition("scope-a");
+      yield* browserSessions.getSession("scope-a");
+      const browserSession = sessions.get(partition);
+      const url = "https://localhost:18443/";
+
+      showMessageBox.mockReset();
+      showMessageBox.mockImplementation(trustCertificateButton);
+      assert.isTrue(yield* certificateError(browserSession, { url }).trusted);
+
+      yield* browserSessions.clearCache([partition]);
+      assert.isTrue(yield* certificateError(browserSession, { url }).trusted);
+      assert.strictEqual(showMessageBox.mock.calls.length, 1);
+
+      yield* browserSessions.clearCookies([partition]);
+      showMessageBox.mockReset();
+      showMessageBox.mockReturnValue(1);
+      assert.isFalse(yield* certificateError(browserSession, { url }).trusted);
+      assert.strictEqual(showMessageBox.mock.calls.length, 1);
     }).pipe(Effect.provide(layer)),
   );
 });
