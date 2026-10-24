@@ -32,6 +32,7 @@ import {
 } from "react";
 
 import { AgentCursorMark } from "~/components/preview/AgentBrowserCursor";
+import { PreviewLoadFailure } from "~/components/preview/PreviewLoadFailure";
 import { CommandBlock } from "~/components/CommandBlock";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -825,27 +826,25 @@ export function ServerBrowserSurface(props: {
         ) : null}
         {failure ? (
           // Leaves the control bar uncovered: reload is refused until this viewer takes control.
-          <div
-            role="alert"
-            className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-background p-4 text-center"
-          >
-            <p className="line-clamp-4 break-all text-xs text-muted-foreground">
-              {failure.message}
-            </p>
-            <div className="flex gap-2">
-              <Button size="sm" variant="outline" onClick={failure.onClose}>
-                Close
-              </Button>
-              {control?.controller === "you" ? (
-                <Button size="sm" onClick={() => send({ type: "reload" })}>
-                  Retry
+          <PreviewLoadFailure
+            className="z-10"
+            message={failure.message}
+            hint={
+              control?.canOperate && control.controller !== "you" ? "Take control to retry." : null
+            }
+            actions={
+              <>
+                <Button size="sm" variant="outline" onClick={failure.onClose}>
+                  Close
                 </Button>
-              ) : null}
-            </div>
-            {control?.canOperate && control.controller !== "you" ? (
-              <p className="text-xs text-muted-foreground">Take control to retry.</p>
-            ) : null}
-          </div>
+                {control?.controller === "you" ? (
+                  <Button size="sm" onClick={() => send({ type: "reload" })}>
+                    Retry
+                  </Button>
+                ) : null}
+              </>
+            }
+          />
         ) : null}
         {control?.dialog ? (
           <div
