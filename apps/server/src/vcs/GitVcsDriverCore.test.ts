@@ -911,7 +911,11 @@ it.effect.each(["healthy", "hung"] as const)("bounds a %s remote fetch at five m
     yield* Deferred.await(started);
     yield* TestClock.adjust("31 seconds");
     if (fetch === "healthy") yield* Deferred.succeed(finished, undefined);
-    else yield* TestClock.adjust("269 seconds");
+    else {
+      yield* TestClock.adjust("268 seconds");
+      assert.isUndefined(fetching.pollUnsafe());
+      yield* TestClock.adjust("1 second");
+    }
 
     const result = yield* Fiber.join(fetching);
     assert.equal(
