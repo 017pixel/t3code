@@ -444,7 +444,8 @@ describe("reorderActiveThread", () => {
         ),
         Effect.provide(layerTest),
       );
-    return { run, order, dispatched, refuse };
+    const keyOf = (id: string) => threads.find((thread) => thread.id === id)?.activeOrderKey;
+    return { run, order, dispatched, refuse, keyOf };
   };
 
   const reorder = (
@@ -535,11 +536,27 @@ describe("reorderActiveThread", () => {
       yield* Effect.flip(service.run({ threadId: "a", placement: "after", targetThreadId: "b" }));
       expect(service.dispatched.map((command) => command.threadId)).toEqual(["b", "a"]);
       service.refuse.clear();
-      // Keyless c now sorts above the keyed pair, which already satisfies the
-      // request, so the retry replays a's landed write instead of conflicting.
+      // Keyless c now sorts above the keyed pair, so the retry replans a single
+      // write for a under a new key instead of conflicting with its receipt.
       yield* service.run({ threadId: "a", placement: "after", targetThreadId: "b" });
       expect(service.order()).toEqual(["c", "b", "a"]);
-      expect(service.dispatched.map((command) => command.threadId)).toEqual(["b", "a"]);
+      expect(service.dispatched.map((command) => command.threadId)).toEqual(["b", "a", "a"]);
+    }),
+  );
+
+  it.effect("retrying after the moved thread's write failed still places it", () =>
+    Effect.gen(function* () {
+      const service = reorderService(keyless());
+      service.refuse.add("a");
+      yield* Effect.flip(service.run({ threadId: "a", placement: "before", targetThreadId: "c" }));
+      expect(service.dispatched.map((command) => command.threadId)).toEqual(["b"]);
+      service.refuse.clear();
+      // The retry plans different keys; b's receipt must not replay its old one.
+      yield* service.run({ threadId: "a", placement: "before", targetThreadId: "c" });
+      const order = service.order();
+      expect(order.indexOf(ThreadId.make("c"))).toBe(order.indexOf(ThreadId.make("a")) + 1);
+      const keys = service.order().map((id) => service.keyOf(id));
+      expect(new Set(keys).size).toBe(keys.length);
     }),
   );
 });

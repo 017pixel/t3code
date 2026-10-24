@@ -1052,12 +1052,10 @@ const make = Effect.gen(function* () {
       const threadId = ThreadId.make(assignment.id);
       const result = yield* dispatch({
         type: "thread.active.reorder",
-        // Keyed by thread so a retry after a partial reseed replays the writes
-        // that landed and only runs the rest.
-        commandId:
-          threadId === input.threadId
-            ? input.commandId
-            : CommandId.make(`${input.commandId}:${threadId}`),
+        // Bound to the thread and its key: a retry after a partial reseed
+        // replans from the landed keys, and a receipt must replay only the
+        // write it recorded, never stand in for a different key.
+        commandId: CommandId.make(`${input.commandId}:${threadId}:${assignment.orderKey}`),
         threadId,
         orderKey: assignment.orderKey,
       });
