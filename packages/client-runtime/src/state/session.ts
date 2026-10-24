@@ -45,12 +45,33 @@ function initialConfigOption<E>(
 export function currentSessionGrant(
   result: AsyncResult.AsyncResult<AuthSessionState, unknown>,
 ): AuthSessionState | null {
-  const timedOut =
-    result._tag === "Failure" &&
-    Option.getOrNull(Cause.findErrorOption(result.cause)) instanceof
-      RemoteEnvironmentAuthTimeoutError;
-  if (result._tag === "Failure" && !timedOut) return null;
+  if (result._tag === "Failure" && !isTimedOut(result)) return null;
   return Option.getOrNull(AsyncResult.value(result));
+}
+
+function isTimedOut(result: AsyncResult.Failure<unknown, unknown>): boolean {
+  return (
+    Option.getOrNull(Cause.findErrorOption(result.cause)) instanceof
+    RemoteEnvironmentAuthTimeoutError
+  );
+}
+
+/**
+ * A failure carries the last success forward, even across a rejection. Once the
+ * environment rejects the session, later timeouts must not revive that grant;
+ * only a fresh success restores it.
+ */
+function forgetRejectedGrant<A, E>(
+  get: Atom.AtomContext,
+  source: Atom.Atom<AsyncResult.AsyncResult<A, E>>,
+): AsyncResult.AsyncResult<A, E> {
+  const result = get(source);
+  if (result._tag !== "Failure" || Option.isNone(result.previousSuccess)) return result;
+  const previous = Option.getOrNull(get.self<AsyncResult.AsyncResult<A, E>>());
+  const revoked =
+    !isTimedOut(result) ||
+    (previous?._tag === "Failure" && Option.isNone(previous.previousSuccess));
+  return revoked ? AsyncResult.failure(result.cause, { waiting: result.waiting }) : result;
 }
 
 const DEFAULT_SESSION_STATE_TIMEOUT_MS = 6_000;
@@ -160,6 +181,7 @@ function makeEnvironmentSessionAtoms<R, E>(
         });
       })
       .pipe(
+        Atom.transform(forgetRejectedGrant),
         Atom.swr({ staleTime: 30_000, revalidateOnMount: true }),
         Atom.setIdleTTL(5 * 60_000),
         Atom.withLabel(`environment-session-state:${environmentId}`),
