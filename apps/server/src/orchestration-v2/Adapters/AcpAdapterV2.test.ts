@@ -395,6 +395,10 @@ function assertReinjectedInstructions(
   assert.include(text, "T3 Code collaborative browser");
   assert.include(text, "T3 Code orchestration");
   assert.include(text, "acp-mcp-call orchestrator_capabilities");
+  assert.include(
+    text,
+    'ELECTRON_RUN_AS_NODE=1 "$T3_ACP_MCP_NODE" ${T3_ACP_MCP_ENTRYPOINT:+"$T3_ACP_MCP_ENTRYPOINT"} acp-mcp-call delegate_task \'{"task":',
+  );
   assert.include(text, `<user_request>\n${request}\n</user_request>`);
 }
 
