@@ -49,7 +49,6 @@ describe("parseMarkdownFileLink", () => {
     },
   );
 
-  // regression: #16096 non-ASCII relative paths become file chips
   it.each([
     [
       "<Summer 2026/pastexam/線性代數/2025_midterm_exam1_易志偉_1222.pdf>",
