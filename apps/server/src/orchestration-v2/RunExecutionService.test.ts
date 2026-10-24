@@ -2367,7 +2367,10 @@ it.effect("settles native subagents when a workspace handoff completes the root 
             write: () => Effect.succeed([]),
             writeWithEffects: (input) =>
               Ref.update(written, (current) => [...current, ...input.events]).pipe(Effect.as([])),
-            writeIfRunCurrent: () => Effect.succeed({ committed: true, storedEvents: [] }),
+            writeIfRunCurrent: (input) =>
+              Ref.update(written, (current) => [...current, ...input.events]).pipe(
+                Effect.as({ committed: true, storedEvents: [] }),
+              ),
           }),
           IdAllocator.layer,
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
@@ -2431,7 +2434,7 @@ it.effect("settles native subagents when a workspace handoff completes the root 
         } as OrchestrationV2RunAttempt,
         attemptId: ids.attemptId,
         providerTurnOrdinal: 1,
-        hasUnpairedRunInterruptRequest: () => Effect.succeed(false),
+        shouldFinalizeRun: () => Effect.succeed(true),
         hasWorkspaceMoved: () => Effect.succeed(true),
         message: {
           messageId: MessageId.make("message:subagent-workspace-handoff:user"),
@@ -2518,6 +2521,37 @@ it.effect("emits run_interrupt_result when superseded attempt still has a hard-s
       });
     }).pipe(Effect.provide(IdAllocator.layer));
     assert.equal(written[0]?.parentItemId, expectedRequestId);
+  }),
+);
+
+it.effect("keeps a Stop that commits while a workspace handoff completes the run", () =>
+  Effect.gen(function* () {
+    const stopCommitted = yield* Ref.make(false);
+    const { written, finalEvents, committedEffects } = yield* captureRootRunTermination({
+      key: "stop-races-workspace-handoff",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      // Stop commits after the handoff is detected and before the terminal write.
+      hasWorkspaceMoved: () => Ref.set(stopCommitted, true).pipe(Effect.as(true)),
+      // The sink refuses a guarded write once the Stop request is stored.
+      beforeTerminalWrite: (request) =>
+        Ref.get(stopCommitted).pipe(
+          Effect.map((stopped) => !(stopped && request.unlessInterruptRequested !== undefined)),
+        ),
+    });
+    const statuses = (type: OrchestrationV2DomainEvent["type"]) =>
+      finalEvents.flatMap((event) =>
+        event.type === type ? [(event.payload as { readonly status: string }).status] : [],
+      );
+    assert.deepEqual(statuses("run.updated"), ["interrupted"]);
+    assert.deepEqual(statuses("run-attempt.updated"), ["interrupted"]);
+    assert.deepEqual(
+      written.map((item) => item.type),
+      ["run_interrupt_result"],
+    );
+    assert.deepEqual(
+      committedEffects.map((effect) => effect.request.type),
+      ["checkpoint.capture"],
+    );
   }),
 );
 
@@ -2835,6 +2869,7 @@ function captureRootRunTermination(input: {
   readonly shouldFinalizeRun: () => Effect.Effect<boolean, ProjectionStore.ProjectionStoreV2Error>;
   readonly rejectTerminalWrite?: boolean;
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
+  readonly hasWorkspaceMoved?: () => Effect.Effect<boolean, never>;
   readonly seedOpenSubagent?: boolean;
   readonly events?: (
     ids: BackgroundScenarioIds,
@@ -3022,6 +3057,9 @@ function captureRootRunTermination(input: {
           : {
               hasUnpairedRunInterruptRequest: input.hasUnpairedRunInterruptRequest,
             }),
+        ...(input.hasWorkspaceMoved === undefined
+          ? {}
+          : { hasWorkspaceMoved: input.hasWorkspaceMoved }),
         message: {
           messageId: MessageId.make(`message:${input.key}`),
           text: "interrupt projection",

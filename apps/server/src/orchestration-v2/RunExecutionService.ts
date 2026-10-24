@@ -634,6 +634,7 @@ export const layer: Layer.Layer<
         readonly writeIfRunCurrent?: {
           readonly activeAttemptId: RunAttemptId;
           readonly expectedStatus: OrchestrationV2Run["status"];
+          readonly unlessInterruptRequested?: boolean;
         };
       }) {
         const completedAt = input.completedAt ?? (yield* DateTime.now);
@@ -680,7 +681,7 @@ export const layer: Layer.Layer<
               yield* input.refreshAfterTurn;
             }
           }
-          return;
+          return false;
         }
         const allocateEventId = () => idAllocator.allocate.event({ threadId: input.run.threadId });
         const reason =
@@ -871,16 +872,31 @@ export const layer: Layer.Layer<
             runId: input.run.id,
             activeAttemptId: input.writeIfRunCurrent.activeAttemptId,
             expectedStatus: input.writeIfRunCurrent.expectedStatus,
+            ...(input.writeIfRunCurrent.unlessInterruptRequested === true
+              ? {
+                  unlessInterruptRequested: {
+                    requestId: idAllocator.derive.runSignalTurnItem({
+                      runId: input.run.id,
+                      signal: "interrupt-request",
+                    }),
+                    resultId: idAllocator.derive.runSignalTurnItem({
+                      runId: input.run.id,
+                      signal: "interrupt-result",
+                    }),
+                  },
+                }
+              : {}),
             events: finalization.events,
             effects: finalization.effects,
           });
           if (!result.committed) {
-            return;
+            return false;
           }
         } else {
           yield* eventSink.writeWithEffects(finalization);
         }
         yield* input.refreshAfterTurn;
+        return true;
       },
     );
 
@@ -1051,53 +1067,60 @@ export const layer: Layer.Layer<
           if (yield* Ref.get(rootRunFinalized)) {
             return;
           }
+          const providerThread = yield* Ref.get(latestProviderThread);
+          const openSubagents = yield* Ref.get(openRunOwnedSubagents);
+          const writeTerminal = (settledTerminal: ProviderTerminalEvent) =>
+            writeFinalRunEvents({
+              run: input.run,
+              rootNode: input.rootNode,
+              checkpointScope: input.checkpointScope,
+              providerThread,
+              attempt: input.attempt,
+              ...(input.shouldFinalizeRun === undefined
+                ? {}
+                : {
+                    shouldFinalizeRun: input.shouldFinalizeRun,
+                    // Stop may commit between the ownership read and this
+                    // terminal write. Gate the events and checkpoint together.
+                    writeIfRunCurrent: {
+                      activeAttemptId: input.attempt.id,
+                      expectedStatus: "running" as const,
+                      unlessInterruptRequested: settledTerminal !== terminal,
+                    },
+                  }),
+              ...(input.hasUnpairedRunInterruptRequest === undefined
+                ? {}
+                : {
+                    hasUnpairedRunInterruptRequest: input.hasUnpairedRunInterruptRequest,
+                  }),
+              ...(input.loadRunInterruptReason === undefined
+                ? {}
+                : { loadRunInterruptReason: input.loadRunInterruptReason }),
+              openRunOwnedSubagents: openSubagents,
+              openRunOwnedSubagentsTerminal: terminal,
+              terminal: settledTerminal,
+              failureItemPersisted: settledTerminal.status === "failed",
+              refreshAfterTurn,
+            }).pipe(
+              Effect.mapError(
+                (cause) => new RunExecutionIngestError({ runId: input.run.id, cause }),
+              ),
+            );
           // Moving the thread to another workspace detaches its provider
           // session, which stops the turn that asked for the move. That ends
           // the turn as the handoff intended; only a Stop makes it an interrupt.
           // Its native subagents died with the session, so they still settle as
-          // interrupted from the raw terminal.
-          const settledTerminal: ProviderTerminalEvent =
+          // interrupted from the raw terminal. The completed write refuses in
+          // the same transaction as a committed Stop request, so a Stop racing
+          // the handoff falls back to the interrupted terminal.
+          const handedOff =
             terminal.status === "interrupted" &&
+            input.shouldFinalizeRun !== undefined &&
             input.hasWorkspaceMoved !== undefined &&
-            !(yield* input.hasUnpairedRunInterruptRequest?.() ?? Effect.succeed(false)) &&
-            (yield* input.hasWorkspaceMoved())
-              ? { ...terminal, status: "completed" }
-              : terminal;
-          const providerThread = yield* Ref.get(latestProviderThread);
-          const openSubagents = yield* Ref.get(openRunOwnedSubagents);
-          yield* writeFinalRunEvents({
-            run: input.run,
-            rootNode: input.rootNode,
-            checkpointScope: input.checkpointScope,
-            providerThread,
-            attempt: input.attempt,
-            ...(input.shouldFinalizeRun === undefined
-              ? {}
-              : {
-                  shouldFinalizeRun: input.shouldFinalizeRun,
-                  // Stop may commit between the ownership read and this
-                  // terminal write. Gate the events and checkpoint together.
-                  writeIfRunCurrent: {
-                    activeAttemptId: input.attempt.id,
-                    expectedStatus: "running" as const,
-                  },
-                }),
-            ...(input.hasUnpairedRunInterruptRequest === undefined
-              ? {}
-              : {
-                  hasUnpairedRunInterruptRequest: input.hasUnpairedRunInterruptRequest,
-                }),
-            ...(input.loadRunInterruptReason === undefined
-              ? {}
-              : { loadRunInterruptReason: input.loadRunInterruptReason }),
-            openRunOwnedSubagents: openSubagents,
-            openRunOwnedSubagentsTerminal: terminal,
-            terminal: settledTerminal,
-            failureItemPersisted: settledTerminal.status === "failed",
-            refreshAfterTurn,
-          }).pipe(
-            Effect.mapError((cause) => new RunExecutionIngestError({ runId: input.run.id, cause })),
-          );
+            (yield* input.hasWorkspaceMoved());
+          if (!handedOff || !(yield* writeTerminal({ ...terminal, status: "completed" }))) {
+            yield* writeTerminal(terminal);
+          }
           if (isRunOwnedSubagentTerminalStatus(terminal.status) && !childTurnsContinue(terminal)) {
             yield* Ref.set(openRunOwnedSubagents, emptyOpenRunOwnedSubagentProjection());
           }
