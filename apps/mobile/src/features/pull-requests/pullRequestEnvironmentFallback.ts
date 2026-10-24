@@ -18,10 +18,12 @@ export function pullRequestFallbackEnvironment(
   const requested = environments.find(
     (environment) => environment.environmentId === target.environmentId,
   );
-  // Available is also the initial state before the connection supervisor starts.
+  // Pending connections retain the requested target until an explicit failure, even before
+  // its project hydrates. Available includes the period before connection startup.
   if (
     requested?.isEnabled &&
-    (requested.connectionState === "available" ||
+    (requested.connectionState === "connected" ||
+      requested.connectionState === "available" ||
       requested.connectionState === "connecting" ||
       requested.connectionState === "reconnecting")
   )
@@ -31,7 +33,6 @@ export function pullRequestFallbackEnvironment(
       .filter((environment) => environment.isEnabled && environment.connectionState === "connected")
       .map((environment) => environment.environmentId),
   );
-  if (connectedEnvironmentIds.has(target.environmentId)) return null;
   const own = projects.find(
     (project) => project.environmentId === target.environmentId && project.id === target.projectId,
   );
