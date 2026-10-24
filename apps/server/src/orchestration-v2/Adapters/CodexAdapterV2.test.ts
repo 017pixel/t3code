@@ -2632,6 +2632,111 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect("surfaces a root turn queued on the native thread from outside T3", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-external-queue";
+        const nativeThreadId = `native-${scenario}-thread`;
+        const externalTurnId = `native-${scenario}-external-turn`;
+        const nextTurnId = `native-${scenario}-next-turn`;
+        const nextPrompt = "Reply with the word NEXT.";
+        const notification = (
+          method: string,
+          params: Record<string, unknown>,
+        ): CodexReplay.CodexAppServerReplayEntry => ({
+          type: "emit_inbound",
+          label: method,
+          frame: { method, params: { threadId: nativeThreadId, ...params } },
+        });
+        const agentMessage = (turnId: string, id: string, text: string) =>
+          notification("item/completed", {
+            item: { type: "agentMessage", id, text, phase: "final_answer", memoryCitation: null },
+            turnId,
+            completedAtMs: 1782622460000,
+          });
+        const externalUserMessage = {
+          type: "userMessage",
+          id: "external-user-message",
+          clientId: "external-client",
+          content: [{ type: "text", text: "Reply with the word QUEUED.", text_elements: [] }],
+        };
+        const nextTurnStart = codexReplayPreamble({
+          nativeThreadId,
+          nativeTurnId: nextTurnId,
+          prompt: nextPrompt,
+        }).slice(-3);
+        // Frames as `codex queue --thread <id>` produced them on a live app-server.
+        const transcript = makeCodexReplayTranscript({
+          scenario,
+          entries: [
+            ...finalAnswerTranscript(scenario, [{ id: "answer-ready", text: "READY" }]).entries,
+            notification("thread/queue/changed", {}),
+            notification("thread/status/changed", { status: { type: "active", activeFlags: [] } }),
+            notification("turn/started", {
+              turn: makeCodexReplayTurn({ id: externalTurnId, status: "inProgress" }),
+            }),
+            notification("item/started", {
+              item: externalUserMessage,
+              turnId: externalTurnId,
+              startedAtMs: 1782622459000,
+            }),
+            notification("item/completed", {
+              item: externalUserMessage,
+              turnId: externalTurnId,
+              completedAtMs: 1782622459000,
+            }),
+            agentMessage(externalTurnId, "answer-queued", "QUEUED"),
+            notification("turn/completed", {
+              turn: makeCodexReplayTurn({ id: externalTurnId, status: "completed" }),
+            }),
+            notification("thread/queue/changed", {}),
+            withReplayRequestId(nextTurnStart[0]!, 4),
+            withReplayRequestId(nextTurnStart[1]!, 4),
+            nextTurnStart[2]!,
+            agentMessage(nextTurnId, "answer-next", "NEXT"),
+            notification("turn/completed", {
+              turn: makeCodexReplayTurn({ id: nextTurnId, status: "completed" }),
+            }),
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        const startTurn = (attempt: string, text: string) =>
+          Effect.gen(function* () {
+            yield* harness.runtime.startTurn(
+              makeCodexTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now: yield* DateTime.now,
+                attemptId: RunAttemptId.make(attempt),
+                text,
+              }),
+            );
+          });
+
+        yield* startTurn("attempt-codex-ready", "Reply with the requested recovery marker.");
+        yield* harness.awaitTerminal(1);
+        yield* startTurn("attempt-codex-next", nextPrompt);
+        yield* harness.until(() =>
+          assistantMessages(harness.events).some((event) => event.message.text === "NEXT"),
+        );
+
+        // The queued turn ran on this thread's native Codex thread, so T3 must
+        // either project it or ask to ingest it; dropping it hides the reply.
+        const surfaced = [...harness.events, ...harness.continuationRequests].filter((entry) =>
+          JSON.stringify(entry).includes("QUEUED"),
+        );
+        assert.isNotEmpty(
+          surfaced,
+          "the externally queued Codex turn (reply QUEUED) never reached T3",
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   const BG_SCENARIO = "codex-bg-exec-wake";
   const BG_NATIVE_THREAD = "native-codex-bg-thread";
   const BG_NATIVE_TURN = "native-codex-bg-turn";
