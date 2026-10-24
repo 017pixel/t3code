@@ -13,6 +13,8 @@ export function WorkspaceEmptyDetail(props: {
   readonly onAddConnection?: () => void;
 }) {
   const pullRequests = props.tab === "pullRequests";
+  if (props.tab && props.tab !== "threads" && props.tab !== "pullRequests")
+    return <View className="flex-1 bg-screen" />;
   return (
     <View
       className={
@@ -65,7 +67,7 @@ export function WorkspaceEmptyDetail(props: {
                 className="mt-2 flex-row items-center gap-2 rounded-full bg-primary px-5 py-3 active:opacity-70"
                 onPress={props.onStartNewTask}
               >
-                <Text className="text-base font-t3-bold text-primary-foreground">New Task</Text>
+                <Text className="text-base font-t3-bold text-primary-foreground">New thread</Text>
               </Pressable>
             )
           ) : null}
