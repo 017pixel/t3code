@@ -1527,6 +1527,25 @@ export interface QueuedComposerSubmit<Mode, Intent> {
 }
 
 /**
+ * Where Enter goes while a message may still be sending: null sends now, otherwise the
+ * submit waits behind the send running on this thread. `runningSends` holds each thread's
+ * running send generation, since one composer sends on several threads as the user moves.
+ * A queued submit no send on this thread will settle is stale and gives way to the new Enter.
+ */
+export function queueComposerSubmitBehind(input: {
+  readonly routeThreadKey: string;
+  /** Whether this thread's send is still in flight, rather than finishing up. */
+  readonly sendInFlight: boolean;
+  readonly runningSends: ReadonlyMap<string, number>;
+  readonly queued: { readonly afterSend: number; readonly ready: boolean } | null;
+}): { readonly afterSend: number; readonly ready: boolean } | null {
+  const { queued } = input;
+  if (queued?.ready) return queued;
+  const running = input.sendInFlight ? input.runningSends.get(input.routeThreadKey) : undefined;
+  return running === undefined ? null : { afterSend: running, ready: false };
+}
+
+/**
  * What a finished send does to the submit waiting behind it. Only the send it waits behind,
  * on the same thread, settles it: another thread's send finishing says nothing about this one.
  */

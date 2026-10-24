@@ -16,6 +16,7 @@ import {
   makeThreadErrorSetter,
   composerDraftContentUnchanged,
   resolveQueuedComposerSubmit,
+  queueComposerSubmitBehind,
   settleQueuedComposerSubmit,
   type QueuedComposerSubmit,
 } from "../ChatView.logic";
@@ -1453,15 +1454,16 @@ export function useComposerSend(input: ComposerSendInput) {
   // Enter pressed while the previous message is still sending. The draft stays in the
   // composer; once that send starts its turn, this one sends it, unless the user edited it,
   // left the thread, an approval or question arrived, or the earlier send did not start a
-  // turn (an unanswered send may still have landed, so nothing here retries it). This covers
-  // the single-model composer send only; resume and multiple-model sends never queue one. Sends read the ref, since one finishing runs
-  // in the closure it started in; the state only re-renders so the effect below can fire.
+  // turn (an unanswered send may still have landed, so nothing here retries it). A
+  // multiple-model send never reports a started turn, so a submit behind it is cancelled.
+  // Sends read the ref, since one finishing runs in the closure it started in; the state
+  // only re-renders so the effect below can fire.
   type QueuedSubmit = QueuedComposerSubmit<ComposerDispatchMode, ComposerSubmissionIntent>;
   const queuedSubmitRef = useRef<QueuedSubmit | null>(null);
   const [queuedSubmit, setQueuedSubmitState] = useState<QueuedSubmit | null>(null);
-  // Only a send started here reports back whether its turn started; the resume and
-  // multiple-model sends that share the in-flight flag do not.
-  const composerSendsRunningRef = useRef(0);
+  // The generation of the send running on each thread. The hook outlives navigation, so a
+  // submit has to wait behind its own thread's send, not whichever send started last.
+  const runningSendsRef = useRef(new Map<string, number>());
   const setQueuedSubmit = (next: QueuedSubmit | null) => {
     queuedSubmitRef.current = next;
     setQueuedSubmitState(next);
@@ -1475,10 +1477,15 @@ export function useComposerSend(input: ComposerSendInput) {
   ) => {
     const queued =
       queuedSubmitRef.current?.routeThreadKey === routeThreadKey ? queuedSubmitRef.current : null;
-    if (
-      !directAnnotation &&
-      ((composerSendsRunningRef.current > 0 && sendInFlightRef.current) || queued !== null)
-    ) {
+    const behind = directAnnotation
+      ? null
+      : queueComposerSubmitBehind({
+          routeThreadKey,
+          sendInFlight: sendInFlightRef.current,
+          runningSends: runningSendsRef.current,
+          queued,
+        });
+    if (behind !== null) {
       e?.preventDefault();
       const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
       setQueuedSubmit(
@@ -1490,23 +1497,31 @@ export function useComposerSend(input: ComposerSendInput) {
               // turn instead of steering it.
               dispatchMode: dispatchMode === "auto" ? "queue" : dispatchMode,
               submissionIntent,
-              afterSend: queued?.afterSend ?? composerSendGenerationRef.current,
-              ready: queued?.ready ?? false,
+              ...behind,
             }
           : null,
       );
       return;
     }
+    if (queued !== null) setQueuedSubmit(null);
     const generationBefore = composerSendGenerationRef.current;
-    composerSendsRunningRef.current += 1;
     const sending = sendComposerDraft(e, dispatchMode, submissionIntent, directAnnotation);
     // The send claims its generation before its first await. Read it now: once this awaits,
     // a send started on another thread from this same composer moves the counter on.
     const claimedGeneration = composerSendGenerationRef.current;
     const sendGeneration = claimedGeneration === generationBefore ? null : claimedGeneration;
-    const started = await sending.finally(() => {
-      composerSendsRunningRef.current -= 1;
-    });
+    const runningSends = runningSendsRef.current;
+    if (sendGeneration !== null) runningSends.set(routeThreadKey, sendGeneration);
+    let started: boolean | undefined = false;
+    let failure: { readonly error: unknown } | null = null;
+    try {
+      started = await sending;
+    } catch (error) {
+      failure = { error };
+    }
+    if (sendGeneration !== null && runningSends.get(routeThreadKey) === sendGeneration) {
+      runningSends.delete(routeThreadKey);
+    }
     const waiting = queuedSubmitRef.current;
     const settled = settleQueuedComposerSubmit({
       waiting,
@@ -1514,13 +1529,13 @@ export function useComposerSend(input: ComposerSendInput) {
       sendGeneration,
       started: started === true,
     });
-    if (settled === "unrelated" || waiting === null) return started;
-    if (settled === "ready") {
+    if (waiting !== null && settled === "ready") {
       setQueuedSubmit({ ...waiting, ready: true });
-      return started;
+    } else if (waiting !== null && settled === "cancel") {
+      setQueuedSubmit(null);
+      notifyQueuedSubmitNotSent();
     }
-    setQueuedSubmit(null);
-    notifyQueuedSubmitNotSent();
+    if (failure !== null) throw failure.error;
     return started;
   };
   const onSendRef = useRef(onSend);

@@ -55,6 +55,7 @@ import {
   resolveDraftPromotionNavigationTarget,
   waitForRevertedMessage,
   composerDraftContentUnchanged,
+  queueComposerSubmitBehind,
   resolveQueuedComposerSubmit,
   settleQueuedComposerSubmit,
 } from "./ChatView.logic";
@@ -1163,6 +1164,73 @@ describe("settleQueuedComposerSubmit", () => {
         started: false,
       }),
     ).toBe("unrelated");
+  });
+});
+
+describe("queueComposerSubmitBehind", () => {
+  it("waits behind the send running on its own thread, not the one started last", () => {
+    // A is sending on thread X (generation 1); the user moved to Y, sent C (generation 2), came
+    // back to X and pressed Enter on B while both still send.
+    const runningSends = new Map([
+      ["thread-x", 1],
+      ["thread-y", 2],
+    ]);
+    const behind = queueComposerSubmitBehind({
+      routeThreadKey: "thread-x",
+      sendInFlight: true,
+      runningSends,
+      queued: null,
+    });
+    expect(behind).toEqual({ afterSend: 1, ready: false });
+    const waiting = { routeThreadKey: "thread-x", ...behind! };
+    expect(
+      settleQueuedComposerSubmit({
+        waiting,
+        sendRouteThreadKey: "thread-y",
+        sendGeneration: runningSends.get("thread-y")!,
+        started: true,
+      }),
+    ).toBe("unrelated");
+    expect(
+      settleQueuedComposerSubmit({
+        waiting,
+        sendRouteThreadKey: "thread-x",
+        sendGeneration: runningSends.get("thread-x")!,
+        started: true,
+      }),
+    ).toBe("ready");
+  });
+
+  it("lets a new Enter send once no send on this thread can settle the queued one", () => {
+    const stale = { afterSend: 2, ready: false };
+    expect(
+      queueComposerSubmitBehind({
+        routeThreadKey: "thread-x",
+        sendInFlight: false,
+        runningSends: new Map(),
+        queued: stale,
+      }),
+    ).toBeNull();
+    expect(
+      queueComposerSubmitBehind({
+        routeThreadKey: "thread-x",
+        sendInFlight: true,
+        runningSends: new Map([["thread-y", 2]]),
+        queued: stale,
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps a submit that is already cleared to send", () => {
+    const ready = { afterSend: 1, ready: true };
+    expect(
+      queueComposerSubmitBehind({
+        routeThreadKey: "thread-x",
+        sendInFlight: false,
+        runningSends: new Map(),
+        queued: ready,
+      }),
+    ).toBe(ready);
   });
 });
 
