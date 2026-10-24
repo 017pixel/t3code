@@ -1430,9 +1430,12 @@ it.effect("a user message dispatched first stays run 1 when its lineage read is 
     const user = yield* message("message:user-first", "user").pipe(Effect.forkChild);
     yield* Deferred.await(lineageReadEntered);
     // Agent-queued messages skip the lineage read, as in queued_cancelled_while_active.
-    const agent = yield* message("message:agent-second", "agent").pipe(Effect.forkChild);
-    yield* Fiber.join(agent);
+    // Starting immediately lets it take any free thread lock before the read resumes.
+    const agent = yield* message("message:agent-second", "agent").pipe(
+      Effect.forkChild({ startImmediately: true }),
+    );
     yield* Deferred.succeed(lineageReadRelease, undefined);
+    yield* Fiber.join(agent);
     yield* Fiber.join(user);
 
     const { runs } = yield* orchestrator.getThreadProjection(threadId);
