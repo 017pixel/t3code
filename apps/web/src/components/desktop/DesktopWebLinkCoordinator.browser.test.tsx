@@ -1,6 +1,6 @@
 import { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import type { Atom } from "effect/reactivity";
-import { expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { act, render, stubGlobal } from "../../../test/render";
 
@@ -8,6 +8,7 @@ const state = vi.hoisted(() => ({
   projects: [] as never[],
   navigate: vi.fn(async (): Promise<void> => undefined),
   openScratchProject: vi.fn(async () => null),
+  scratchRoots: {} as Record<string, string>,
 }));
 
 // One connected primary environment that can read pull requests. Its project list and
@@ -46,12 +47,15 @@ vi.mock(import("../../state/entities"), async (original) => ({
 }));
 vi.mock(import("../../hooks/useScratchProject"), async (original) => ({
   ...(await original()),
+  // Mirrors the real hook: the only machine with a scratch root takes project-free work.
   useScratchProject: (() => ({
-    scratchEnvironmentId: () => "local",
+    scratchWorkspaceRootFor: (id: string | null) => (id && state.scratchRoots[id]) || null,
+    scratchEnvironmentId: () => Object.keys(state.scratchRoots)[0] ?? null,
     openScratchProject: state.openScratchProject,
   })) as never,
 }));
 
+import { toastManager } from "../ui/toast";
 import { AppAtomRegistryProvider, appAtomRegistry } from "../../rpc/atomRegistry";
 import { allReachableShellsLiveAtom } from "../../state/shell";
 import { DesktopWebLinkCoordinator } from "./DesktopWebLinkCoordinator";
@@ -90,6 +94,7 @@ const pullRequestView = {
 function setup() {
   vi.clearAllMocks();
   state.projects = [];
+  state.scratchRoots = { local: "/scratch" };
   appAtomRegistry.set(discoverySettled, false);
 }
 
@@ -137,4 +142,31 @@ it("holds a launch PR link until project discovery settles, then opens the PR vi
   });
   expect(state.navigate).toHaveBeenCalledExactlyOnceWith(pullRequestView);
   expect(state.openScratchProject).not.toHaveBeenCalled();
+});
+
+describe("when only a remote machine can start a project-free thread", () => {
+  const useRemoteScratch = () => {
+    setup();
+    state.scratchRoots = { remote: "/scratch" };
+  };
+
+  it("refuses a native file instead of opening it on the remote", async () => {
+    useRemoteScratch();
+    const toast = vi.spyOn(toastManager, "add");
+    await using _coordinator = await mount("file:///tmp/page.html");
+    await vi.waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: "Could not open the link" }),
+      ),
+    );
+    expect(state.openScratchProject).not.toHaveBeenCalled();
+  });
+
+  it("still opens a web link there", async () => {
+    useRemoteScratch();
+    await using _coordinator = await mount("https://example.com/");
+    await vi.waitFor(() =>
+      expect(state.openScratchProject).toHaveBeenCalledWith("remote", "Could not open the link"),
+    );
+  });
 });
