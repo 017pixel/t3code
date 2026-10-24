@@ -17,6 +17,7 @@ import {
   ComposerControlSeparator,
   ComposerSelectControl,
 } from "./ComposerControl";
+import { ComposerAttachButton } from "./ComposerAttachmentStrip";
 import { useComposerMenuProps } from "./composerEventScope";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ContextWindowMeter, ContextWindowMeterPlaceholder } from "./ContextWindowMeter";
@@ -187,9 +188,18 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
   compactBeforeSendTokens: number | null;
   keepFullHistory: boolean;
   onToggleKeepFullHistory: () => void;
+  /** Null hides the attach button. */
+  addComposerAttachments: ((files: File[]) => Promise<boolean>) | null;
+  focusComposer: () => void;
 }) {
-  return (
+  const leadingActions = (
     <>
+      {props.addComposerAttachments ? (
+        <ComposerAttachButton
+          addComposerAttachments={props.addComposerAttachments}
+          focusComposer={props.focusComposer}
+        />
+      ) : null}
       {props.activeContextWindow ? (
         <ContextWindowMeter
           usage={props.activeContextWindow}
@@ -201,36 +211,39 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
       ) : props.reserveContextWindowMeter ? (
         <ContextWindowMeterPlaceholder />
       ) : null}
-      <ComposerPrimaryActions
-        compact={props.compact}
-        canOperateThread={props.canOperateThread}
-        pendingAction={props.pendingAction}
-        isRunning={props.isRunning}
-        canInterrupt={props.canInterrupt}
-        followUpBehavior={props.followUpBehavior}
-        canSteer={props.canSteer}
-        alternateShortcutLabel={props.alternateShortcutLabel}
-        showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
-        promptHasText={props.promptHasText}
-        isSendBusy={props.isSendBusy}
-        sendDisabledReason={props.sendDisabledReason}
-        isConnecting={props.isConnecting}
-        isEnvironmentUnavailable={props.isEnvironmentUnavailable}
-        isPreparingWorktree={props.isPreparingWorktree}
-        hasSendableContent={props.hasSendableContent}
-        canResume={props.canResume}
-        preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
-        isEditingQueuedMessage={props.isEditingQueuedMessage}
-        onSubmitMessage={props.onSubmitMessage}
-        onResume={props.onResume}
-        onPreviousPendingQuestion={props.onPreviousPendingQuestion}
-        onInterrupt={props.onInterrupt}
-        onImplementPlanInNewThread={props.onImplementPlanInNewThread}
-        compactBeforeSendTokens={props.compactBeforeSendTokens}
-        keepFullHistory={props.keepFullHistory}
-        onToggleKeepFullHistory={props.onToggleKeepFullHistory}
-      />
     </>
+  );
+  return (
+    <ComposerPrimaryActions
+      leadingActions={leadingActions}
+      compact={props.compact}
+      canOperateThread={props.canOperateThread}
+      pendingAction={props.pendingAction}
+      isRunning={props.isRunning}
+      canInterrupt={props.canInterrupt}
+      followUpBehavior={props.followUpBehavior}
+      canSteer={props.canSteer}
+      alternateShortcutLabel={props.alternateShortcutLabel}
+      showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
+      promptHasText={props.promptHasText}
+      isSendBusy={props.isSendBusy}
+      sendDisabledReason={props.sendDisabledReason}
+      isConnecting={props.isConnecting}
+      isEnvironmentUnavailable={props.isEnvironmentUnavailable}
+      isPreparingWorktree={props.isPreparingWorktree}
+      hasSendableContent={props.hasSendableContent}
+      canResume={props.canResume}
+      preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
+      isEditingQueuedMessage={props.isEditingQueuedMessage}
+      onSubmitMessage={props.onSubmitMessage}
+      onResume={props.onResume}
+      onPreviousPendingQuestion={props.onPreviousPendingQuestion}
+      onInterrupt={props.onInterrupt}
+      onImplementPlanInNewThread={props.onImplementPlanInNewThread}
+      compactBeforeSendTokens={props.compactBeforeSendTokens}
+      keepFullHistory={props.keepFullHistory}
+      onToggleKeepFullHistory={props.onToggleKeepFullHistory}
+    />
   );
 });
 

@@ -196,7 +196,6 @@ import {
 } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import {
-  ComposerAttachButton,
   ComposerAttachmentFileList,
   ComposerAttachmentMediaRow,
   ComposerFilePreviewDialog,
@@ -2746,6 +2745,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       removeComposerImageFromDraft,
       insertAttachmentReferences,
     });
+  const addComposerAttachmentsStable = useStableCallback(addComposerAttachments);
+  const focusComposerStable = useStableCallback(focusComposer);
 
   const onComposerCommandKeyStable = useStableCallback(onComposerCommandKey);
   const isPathQueryActiveStable = useStableCallback(
@@ -3408,12 +3409,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onRemoveFile={removeComposerFileFromDraft}
       />
     ) : null;
-  const composerAttachButton = showComposerAttachAction ? (
-    <ComposerAttachButton
-      addComposerAttachments={addComposerAttachments}
-      focusComposer={focusComposer}
-    />
-  ) : null;
   return (
     <form
       ref={composerFormRef}
@@ -3906,8 +3901,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   }
                   className="flex shrink-0 flex-nowrap items-center justify-end gap-2"
                 >
-                  {composerAttachButton}
                   <ComposerFooterPrimaryActions
+                    addComposerAttachments={
+                      showComposerAttachAction ? addComposerAttachmentsStable : null
+                    }
+                    focusComposer={focusComposerStable}
                     compact={isComposerResting || isComposerPrimaryActionsCompact}
                     canOperateThread={canOperateThread}
                     activeContextWindow={
