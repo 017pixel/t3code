@@ -1145,3 +1145,68 @@ it.effect.each(["completed", "failed", "interrupted"] as const)(
       );
     }),
 );
+
+it.effect("wakes a settled Codex run whose own yielded command the restart cut", () =>
+  Effect.gen(function* () {
+    // Codex promises the root agent a continuation when a command it yielded
+    // finishes after the turn; a restart that cuts the command must keep that.
+    const base = makeProjection();
+    const projection = {
+      ...base,
+      runs: [{ ...base.runs[0]!, status: "completed", completedAt: now }],
+      providerThreads: [{ ...base.providerThreads[0]!, status: "idle" }],
+      providerSessions: [{ ...base.providerSessions[0]!, status: "ready" }],
+      providerTurns: [{ ...base.providerTurns[0]!, status: "completed" }],
+      turnItems: [
+        {
+          id: "turn-item:sleep",
+          runId,
+          nodeId: null,
+          providerThreadId,
+          providerInstanceId: instanceId,
+          type: "command_execution",
+          input: "sleep 180",
+          status: "running",
+        },
+      ],
+    } as unknown as OrchestrationV2ThreadProjection;
+    const commits: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0][] = [];
+    const recovery = yield* ProviderRuntimeRecovery.make.pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getRecoveryThreadIds: () => Effect.succeed([threadId]),
+            getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+          }),
+          Layer.mock(EventSink.EventSinkV2)({
+            commitCommand: (input) =>
+              Effect.sync(() => {
+                commits.push(input);
+                return { committed: true, cancelledEffectCount: 0 } as never;
+              }),
+          }),
+          IdAllocator.layer,
+          Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({
+            runRecoveryOnce: Effect.succeed(false),
+          }),
+          Layer.mock(EffectOutbox.EffectOutboxV2)({
+            listByCommandId: () => Effect.succeed([]),
+            reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+          }),
+        ),
+      ),
+    );
+    yield* recovery.reconcile("startup");
+    assert.lengthOf(commits, 1);
+    assert.isTrue(
+      commits[0]!.events.some(
+        (event) => event.type === "turn-item.updated" && event.payload.status === "cancelled",
+      ),
+    );
+    assert.deepEqual(
+      commits[0]!.effects.map((effect) => effect.request),
+      [{ type: "provider-runtime.continue", sourceRunId: runId }],
+    );
+  }),
+);
