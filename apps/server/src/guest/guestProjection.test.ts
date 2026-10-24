@@ -4,6 +4,7 @@ import {
   GuestItemDetail,
   GuestStreamEvent,
   type GuestTurnItem,
+  type OrchestrationV2CommandOutputFrame,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2Run,
   type OrchestrationV2TurnItem,
@@ -523,6 +524,57 @@ describe("guestCommandOutputFrames", () => {
       rewrite(frame("append", "\u001b(Bnext line\n")),
     ];
     expect(shown(frames)).toBe("ready\nnext line\n");
+  });
+
+  /** The guest's client after the frames, as `applyCommandOutputFrame` builds it. */
+  const client = (frames: ReadonlyArray<OrchestrationV2CommandOutputFrame | null>) =>
+    frames.reduce(
+      (state, next) =>
+        next === null
+          ? state
+          : appendTerminalOutput(
+              {
+                ...(next.kind === "replace" ? EMPTY_TERMINAL_OUTPUT : state),
+                truncated: (next.kind === "replace" ? false : state.truncated) || next.truncated,
+              },
+              next.text,
+            ),
+      EMPTY_TERMINAL_OUTPUT,
+    );
+
+  it("keeps a long log to small appends once its tail starts dropping lines", () => {
+    const rewrite = guestCommandOutputFrames(roots);
+    const line = (index: number) => `line ${String(index).padStart(6, "0")} ${"x".repeat(1009)}\n`;
+    const frames = Array.from({ length: 200 }, (_, index) =>
+      rewrite(frame(index === 0 ? "replace" : "append", line(index))),
+    );
+    for (const next of frames.slice(1)) {
+      expect(next?.kind).toBe("append");
+      expect(next!.text.length).toBeLessThan(2 * 1024);
+    }
+    const state = client(frames);
+    expect(state.truncated).toBe(true);
+    expect(state.text.endsWith(line(199))).toBe(true);
+  });
+
+  it("redraws only the lines a progress bar or a multi-line reporter changed", () => {
+    const rewrite = guestCommandOutputFrames(roots);
+    const frames = [rewrite(frame("replace", "start\n".repeat(500)))];
+    for (let percent = 1; percent <= 100; percent += 1) {
+      frames.push(rewrite(frame("append", `\rDownloading ${percent}%`)));
+    }
+    frames.push(rewrite(frame("append", "\ntest a ...\ntest b ...")));
+    frames.push(rewrite(frame("append", "\u001b[1A\rtest a ok\u001b[K\ntest b ok\u001b[K")));
+    for (const next of frames.slice(1)) expect(next!.text.length).toBeLessThan(64);
+    expect(client(frames).text.endsWith("Downloading 100%\ntest a ok\ntest b ok")).toBe(true);
+  });
+
+  it("reports output that scrolled out even when the visible text did not change", () => {
+    const rewrite = guestCommandOutputFrames(roots);
+    const first = rewrite(frame("replace", "ready"));
+    const next = rewrite({ kind: "append", text: "", truncated: true, running: true });
+    expect(next).toMatchObject({ kind: "append", text: "", truncated: true });
+    expect(client([first, next]).truncated).toBe(true);
   });
 
   it("holds nothing back once the command settles", () => {

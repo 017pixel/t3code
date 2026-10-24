@@ -16,6 +16,7 @@ import {
 import {
   appendTerminalOutput,
   EMPTY_TERMINAL_OUTPUT,
+  LIVE_LINES,
   type TerminalOutputState,
 } from "@t3tools/shared/terminalOutput";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
@@ -418,15 +419,58 @@ function rootPrefixAtEnd(text: string, roots: GuestPathRoots): number {
   return longest;
 }
 
+const commonPrefixLength = (left: string, right: string) => {
+  const limit = Math.min(left.length, right.length);
+  let index = 0;
+  while (index < limit && left.charCodeAt(index) === right.charCodeAt(index)) index += 1;
+  return index;
+};
+
+const countLines = (text: string) => {
+  let count = 0;
+  for (let index = text.indexOf("\n"); index !== -1; index = text.indexOf("\n", index + 1)) {
+    count += 1;
+  }
+  return count;
+};
+
+// A trimmed tail drops whole lines from the front; past this many, a replace is cheaper.
+const MAX_TRIMMED_LINES = 4096;
+
+/**
+ * The text that turns what the guest's client shows (`previous`) into `shown`, through the same
+ * terminal model, or null when only a replace can. Plain growth is appended as is. A tail that
+ * dropped lines from the front is matched further in, since the client trims its own. A change in
+ * the last lines, such as a progress bar, moves the cursor up to the first changed line, erases
+ * from there, and writes the rest: the client never gets more than the lines that changed.
+ */
+function guestOutputDelta(previous: string, shown: string): string | null {
+  let start = 0;
+  for (let trimmed = 0; trimmed <= MAX_TRIMMED_LINES && start <= previous.length; trimmed += 1) {
+    const base = previous.slice(start);
+    const common = commonPrefixLength(base, shown);
+    if (common === base.length) return shown.slice(common);
+    const lineStart = base.lastIndexOf("\n", common - 1) + 1;
+    const below = countLines(base.slice(lineStart));
+    if (common > 0 && below < LIVE_LINES) {
+      return `${below > 0 ? `\u001b[${below}A` : ""}\r\u001b[J${shown.slice(lineStart)}`;
+    }
+    const next = previous.indexOf("\n", start);
+    if (next === -1) break;
+    start = next + 1;
+  }
+  return null;
+}
+
 /**
  * Rewrites live command output frames for a guest. The server keeps the terminal state the
- * guest's client would build, rewrites paths in what it displays, and sends the difference: an
- * append while the displayed text only grows, else a replace. Text at the end that could still
- * grow into a root waits for the next frame. A settled frame holds nothing back.
+ * guest's client would build from the owner's frames, rewrites paths in what it displays, and
+ * sends the smallest frame that brings the guest's client to the same text. Text at the end that
+ * could still grow into a root waits for the next frame. A settled frame holds nothing back.
  */
 export function guestCommandOutputFrames(roots: GuestPathRoots) {
   let terminal = EMPTY_TERMINAL_OUTPUT;
-  let sent: string | null = null;
+  let sent: { readonly text: string; readonly truncated: boolean } | null = null;
   return (frame: OrchestrationV2CommandOutputFrame): OrchestrationV2CommandOutputFrame | null => {
     terminal = appendTerminalOutput(
       frame.kind === "replace" ? EMPTY_TERMINAL_OUTPUT : terminal,
@@ -437,15 +481,17 @@ export function guestCommandOutputFrames(roots: GuestPathRoots) {
       plain.slice(0, plain.length - (frame.running ? rootPrefixAtEnd(plain, roots) : 0)),
       roots,
     );
+    const truncated = terminal.truncated || frame.truncated;
     const previous = sent;
-    sent = shown;
-    if (previous !== null && shown.startsWith(previous)) {
-      const text = shown.slice(previous.length);
-      return text === "" && frame.running
-        ? null
-        : { kind: "append", text, truncated: frame.truncated, running: frame.running };
+    sent = { text: shown, truncated: (previous?.truncated ?? false) || truncated };
+    const delta = previous === null ? null : guestOutputDelta(previous.text, shown);
+    if (delta === null) {
+      return { kind: "replace", text: shown, truncated, running: frame.running };
     }
-    return { kind: "replace", text: shown, truncated: frame.truncated, running: frame.running };
+    // Nothing new to show still reports output that scrolled out, or the command settling.
+    return delta === "" && frame.running && truncated === previous!.truncated
+      ? null
+      : { kind: "append", text: delta, truncated, running: frame.running };
   };
 }
 
