@@ -374,6 +374,7 @@ describe("mobile SQLite environment cache store", () => {
       );
       const original = threadSnapshotWithItems();
       const local = original.projection.visibleTurnItems[1]!;
+      const inherited = original.projection.visibleTurnItems[0]!;
       const synthetic = { ...local.item, id: TurnItemId.make("synthetic-notice"), ordinal: 12 };
       const fork = {
         id: TurnItemId.make("fork-marker"),
@@ -404,7 +405,12 @@ describe("mobile SQLite environment cache store", () => {
           turnItems: [local.item, synthetic, original.projection.turnItems[1]!],
           visibleTurnItems: [
             { ...local, position: 0 },
-            { ...original.projection.visibleTurnItems[0]!, position: 1 },
+            {
+              ...inherited,
+              position: 1,
+              sourceItemId: local.sourceItemId,
+              item: { ...inherited.item, id: local.item.id },
+            },
             {
               ...local,
               position: 2,
@@ -433,6 +439,18 @@ describe("mobile SQLite environment cache store", () => {
       expect(encoded.snapshot.projection.turnItems.map((item: { id: string }) => item.id)).toEqual([
         "hidden-notice",
       ]);
+
+      const duplicate = JSON.parse(memory.values.get(id)!);
+      duplicate.snapshot.projection.visibleTurnItems.push({
+        ...duplicate.snapshot.projection.visibleTurnItems[1],
+        position: 4,
+      });
+      duplicate.snapshot.visibleTurnItemCount += 1;
+      memory.values.set(id, JSON.stringify(duplicate));
+      expect(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID)).toEqual(Option.none());
+      expect(memory.values.has(id)).toBe(false);
+      expect(memory.removed).toEqual([id]);
+      yield* store.saveThread(ENVIRONMENT_ID, snapshot);
 
       const loaded = Option.getOrThrow(yield* store.loadThread(ENVIRONMENT_ID, THREAD_ID));
       expect(loaded).toEqual(snapshot);
