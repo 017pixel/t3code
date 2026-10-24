@@ -54,7 +54,11 @@ function leadingExternalLinkTextLength(text: string): number {
   return Math.min(text.length, 1);
 }
 
+// Only URL-shaped labels get a break opportunity after every character. A short
+// label such as `#363` would otherwise split mid-number wherever a table column
+// shrinks to its min-content width.
 function breakableExternalLinkText(text: string): ReactNode[] {
+  if (!/[./]/.test(text)) return [text];
   return Array.from(text, (character, index) => (
     <Fragment key={`${index}:${character}`}>
       {character}
