@@ -48,6 +48,7 @@ import { useDeviceState } from "~/state/device";
 import { DeviceStreamView } from "../device/DeviceStreamView";
 import type { DeviceScreenSize } from "@t3tools/client-runtime/device/stream";
 import type { PreviewStreamViewport } from "@t3tools/client-runtime/preview/server-browser-stream";
+import { describePreviewError } from "./errorCodeMessages";
 import { previewBridge } from "./previewBridge";
 import { showPreviewPopup } from "./showPreviewPopup";
 import {
@@ -173,7 +174,16 @@ function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly 
     }
   };
 
+  const retry = () => {
+    if (serverTab) serverSurfaceRef.current?.reload();
+    else if (previewBridge) void previewBridge.refresh(runtimeTabId);
+  };
+
   if (!snapshot) return null;
+  const failure =
+    snapshot.navStatus._tag === "LoadFailed" && !snapshot.navStatus.download
+      ? snapshot.navStatus
+      : null;
   const pdfUrl =
     snapshot.navStatus._tag === "Success"
       ? previewPdfAssetUrl(snapshot.navStatus.url, httpBaseUrl)
@@ -191,6 +201,14 @@ function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly 
       label="Floating browser preview"
       recording={recording}
       onOpenInPanel={openInPanel}
+      failure={
+        failure
+          ? {
+              message: `Couldn’t load ${failure.url}. ${describePreviewError(failure.description)}.`,
+              onRetry: retry,
+            }
+          : null
+      }
       pillActions={
         canPopOut ? (
           <Tooltip>
@@ -241,14 +259,14 @@ function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly 
           <>
             <BrowserSurfaceSlot
               tabId={runtimeTabId}
-              visible={Boolean(desktopOverlay?.hasWebContents)}
+              visible={Boolean(desktopOverlay?.hasWebContents) && !failure}
               cornerRadius={PREVIEW_MINI_PLAYER_CORNER_RADIUS}
               zIndex={PREVIEW_MINI_PLAYER_WEBVIEW_Z_INDEX}
               fitSourceContent
               layoutVersion={`${frame.x}:${frame.y}`}
               className="absolute inset-0"
             />
-            {!desktopOverlay?.hasWebContents ? (
+            {!desktopOverlay?.hasWebContents && !failure ? (
               <div className="pointer-events-none absolute inset-0 z-[49] flex items-center justify-center rounded-[inherit] bg-muted text-xs text-muted-foreground">
                 Reconnecting preview…
               </div>
@@ -327,6 +345,7 @@ function MiniPlayerShell({
   label,
   onOpenInPanel,
   pillActions,
+  failure = null,
   recording = false,
   cornerRadius = frameCornerRadius,
   children,
@@ -337,6 +356,7 @@ function MiniPlayerShell({
   readonly label: string;
   readonly onOpenInPanel: () => void;
   readonly pillActions?: ReactNode;
+  readonly failure?: { readonly message: string; readonly onRetry: () => void } | null;
   readonly recording?: boolean;
   readonly cornerRadius?: (frame: PreviewMiniPlayerSize) => number;
   readonly children: (frame: PreviewMiniPlayerFrame) => ReactNode;
@@ -543,6 +563,26 @@ function MiniPlayerShell({
 
           <div className="absolute inset-0 z-[47] rounded-[inherit] bg-muted shadow-2xl/35" />
           {children(frame)}
+          {failure ? (
+            // Covers the failed page with its own Close, which the hover-only pill hides.
+            <div
+              role="alert"
+              className="pointer-events-auto absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-[inherit] bg-background p-4 text-center"
+              style={{ zIndex: PREVIEW_MINI_PLAYER_WEBVIEW_Z_INDEX }}
+            >
+              <p className="line-clamp-4 break-all text-xs text-muted-foreground">
+                {failure.message}
+              </p>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={close}>
+                  Close
+                </Button>
+                <Button size="sm" onClick={failure.onRetry}>
+                  Retry
+                </Button>
+              </div>
+            </div>
+          ) : null}
           <div className="pointer-events-none absolute inset-0 z-[49] rounded-[inherit] ring-1 ring-inset ring-border/80" />
           {RESIZE_HANDLES.map(({ direction, className }) => (
             <div

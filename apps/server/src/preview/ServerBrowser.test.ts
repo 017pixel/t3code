@@ -870,6 +870,16 @@ it.live("status after a refused navigation reports the failed URL and its error"
         url: refused,
         navStatus: { _tag: "LoadFailed", url: refused, description: "ERR_CONNECTION_REFUSED" },
       });
+      // Retrying starts a new navigation, which clears the failure.
+      page.emit("request", navigation);
+      const retrying = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(retrying.loading).toBe(true);
+      expect(retrying.navStatus).toBeUndefined();
     }),
   ).pipe(Effect.provide(layer)),
 );
