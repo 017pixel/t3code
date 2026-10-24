@@ -157,7 +157,9 @@ const GUEST_PROJECTORS: { readonly [T in OrchestrationV2TurnItem["type"]]: Proje
     text: item.text,
     streaming: item.streaming,
   }),
-  reasoning: (item, base) => ({ ...base, type: "reasoning", text: "", streaming: item.streaming }),
+  // The text can quote anything the agent read, and a reasoning row without text is hidden in
+  // the timeline, as the owner's empty ones are. The live Thinking row comes from the run state.
+  reasoning: drop,
   proposed_plan: (item, base) => ({
     ...base,
     type: "proposed_plan",

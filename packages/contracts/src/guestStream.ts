@@ -91,13 +91,6 @@ export const GuestTurnItem = Schema.Union([
     text: Schema.String,
     streaming: Schema.Boolean,
   }),
-  /** The row shows that the agent thought; the text can quote anything it read. */
-  Schema.Struct({
-    ...GuestTurnItemBaseFields,
-    type: Schema.Literal("reasoning"),
-    text: Schema.Literal(""),
-    streaming: Schema.Boolean,
-  }),
   Schema.Struct({
     ...GuestTurnItemBaseFields,
     type: Schema.Literal("proposed_plan"),

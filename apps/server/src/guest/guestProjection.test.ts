@@ -130,11 +130,6 @@ const SHOWN: ReadonlyArray<readonly [string, Record<string, unknown>, Record<str
     { type: "assistant_message", messageId: "message", text: "Hel", streaming: true },
   ],
   [
-    "reasoning as a row without its text",
-    { type: "reasoning", text: "The .env holds TOKEN=1", streaming: false },
-    { type: "reasoning", text: "", streaming: false },
-  ],
-  [
     "a plan",
     { type: "proposed_plan", planId: "plan", markdown: "1. Fix it", streaming: false },
     { type: "proposed_plan", planId: "plan", markdown: "1. Fix it", streaming: false },
@@ -364,6 +359,7 @@ describe("projectTurnItemForGuest", () => {
     ["a notification", { type: "notification", summary: "child finished", detail: "result" }],
     ["a created thread", { type: "thread_created", targetThreadId: "thread:child" }],
     ["a todo list", { type: "todo_list", steps: [] }],
+    ["reasoning", { type: "reasoning", text: "The .env holds TOKEN=1", streaming: false }],
     ["a checkpoint", { type: "checkpoint", files: [] }],
     ["a type this build does not know", { type: "future_item", text: "hidden" }],
     ["an item outside a run", { type: "assistant_message", runId: null, text: "hidden" }],
@@ -415,8 +411,10 @@ describe("guest stream encoding", () => {
     expect(() =>
       encodeEvent({ type: "item", item: { ...projected, title: "cat .env" } }),
     ).toThrow();
-    const reasoning = projectTurnItemForGuest(item({ type: "reasoning", text: "x" }), roots);
-    expect(() => encodeEvent({ type: "item", item: { ...reasoning, text: "TOKEN=1" } })).toThrow();
+    // A type the schema does not declare cannot be sent at all.
+    expect(() =>
+      encodeEvent({ type: "item", item: { ...projected, type: "reasoning", text: "TOKEN=1" } }),
+    ).toThrow();
   });
 });
 
