@@ -867,19 +867,17 @@ index 6e7b486..5b7290f 100644
  		connectedCallback() {
  			const shadowRoot = this.shadowRoot ?? this.attachShadow({ mode: "open" });
 diff --git a/dist/editor/editor.js b/dist/editor/editor.js
-index 8f04a6f..c203023 100644
+index 8f04a6f..33ecbf5 100644
 --- a/dist/editor/editor.js
 +++ b/dist/editor/editor.js
-@@ -1899,7 +1899,11 @@ var Editor = class {
+@@ -1899,7 +1899,9 @@ var Editor = class {
  			changedDocumentLines: this.#isDiff && !didLineCountChange ? getChangedDocumentLines(textDocument, change) : void 0,
  			documentLineCount: textDocument.lineCount
  		});
 -		if (didLineCountChange) applyDocumentChange(textDocument, newLineAnnotations, shouldUpdateBuffer);
-+		if (didLineCountChange) {
-+			// A wider or narrower line-number gutter can rewrap unchanged rows.
-+			const layoutStartLine = String(change.previousLineCount).length === String(change.lineCount).length ? change.startLine : 0;
-+			applyDocumentChange(textDocument, newLineAnnotations, shouldUpdateBuffer, layoutStartLine);
-+		}
++		// Keep unchanged rows' heights even when the gutter widens: rendered rows are remeasured,
++		// while dropping offscreen wrapped heights moves the viewport away from the caret.
++		if (didLineCountChange) applyDocumentChange(textDocument, newLineAnnotations, shouldUpdateBuffer, change.startLine);
  		if (didLineCountChange || this.#isDiff && this.#diffSyle === "unified") this.#resetCache();
  		if (newLineAnnotations != null) {
  			this.#lineAnnotations = newLineAnnotations;
