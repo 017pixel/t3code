@@ -390,6 +390,55 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.live("applies the lowest maxEffortLevel across Claude's settings sources", () =>
+    Effect.gen(function* () {
+      if (yield* HostProcess.isWindows) return;
+
+      const fixtures = yield* makeTildeProviderFixtures();
+      const claudeId = ProviderInstanceId.make("claude_source_effort_cap");
+      const { registry } = yield* makeProviderInstanceRegistry<ClaudeDriverEnv>({
+        drivers: [ClaudeDriver],
+        configMap: {
+          [claudeId]: {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            enabled: true,
+            environment: [
+              {
+                name: "T3_CLAUDE_SETTINGS_SOURCES",
+                // The merged `effective` settings read as exempting Opus 5; the flag tier's
+                // top-level cap still applies to it.
+                value: JSON.stringify([
+                  {
+                    source: "userSettings",
+                    settings: { modelSettings: { "claude-opus-5": { maxEffortLevel: "max" } } },
+                  },
+                  { source: "flagSettings", settings: { maxEffortLevel: "high" } },
+                ]),
+                sensitive: false,
+              },
+            ],
+            config: makeClaudeConfig({
+              enabled: true,
+              binaryPath: fixtures.claudeBinaryPath,
+              homePath: fixtures.claudeHomePath,
+            }),
+          },
+        },
+      });
+      const claude = yield* registry.getInstance(claudeId);
+
+      const snapshot = yield* claude!.snapshot.refresh;
+      const maxLabel = snapshot.models
+        .find((model) => model.slug === "claude-opus-5")
+        ?.capabilities?.optionDescriptors?.flatMap((descriptor) =>
+          descriptor.id === "effort" && descriptor.type === "select"
+            ? descriptor.options.filter((option) => option.id === "max")
+            : [],
+        )[0]?.label;
+      expect(maxLabel).toBe("Max (capped to High)");
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.live("keeps usage and uncapped efforts when the CLI rejects get_settings", () =>
     Effect.gen(function* () {
       if (yield* HostProcess.isWindows) return;

@@ -82,23 +82,33 @@ lines.on("line", (line) => {
     return;
   }
   if (message.request?.subtype === "get_settings") {
+    const userSettings = {
+      ...(process.env.T3_CLAUDE_MAX_EFFORT_LEVEL
+        ? { maxEffortLevel: process.env.T3_CLAUDE_MAX_EFFORT_LEVEL }
+        : {}),
+      ...(process.env.T3_CLAUDE_MODEL_SETTINGS
+        ? { modelSettings: JSON.parse(process.env.T3_CLAUDE_MODEL_SETTINGS) }
+        : {}),
+    };
+    const sources = process.env.T3_CLAUDE_SETTINGS_SOURCES
+      ? JSON.parse(process.env.T3_CLAUDE_SETTINGS_SOURCES)
+      : Object.keys(userSettings).length > 0
+        ? [{ source: "userSettings", settings: userSettings }]
+        : [];
+    // Like Claude Code, `effective` is the last-writer merge, which hides per-source caps.
+    const effective = { modelSettings: {} };
+    for (const { settings } of sources) {
+      Object.assign(effective, settings, {
+        modelSettings: Object.assign(effective.modelSettings, settings.modelSettings),
+      });
+    }
     process.stdout.write(
       JSON.stringify({
         type: "control_response",
         response: {
           subtype: "success",
           request_id: message.request_id,
-          response: {
-            effective: {
-              ...(process.env.T3_CLAUDE_MAX_EFFORT_LEVEL
-                ? { maxEffortLevel: process.env.T3_CLAUDE_MAX_EFFORT_LEVEL }
-                : {}),
-              ...(process.env.T3_CLAUDE_MODEL_SETTINGS
-                ? { modelSettings: JSON.parse(process.env.T3_CLAUDE_MODEL_SETTINGS) }
-                : {}),
-            },
-            sources: [],
-          },
+          response: { effective, sources },
         },
       }) + "\n",
     );

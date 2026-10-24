@@ -2269,7 +2269,7 @@ it.layer(
         // `maxEffortLevel`, so a plain "Max" label would show an effort the turn never uses.
         const status = yield* checkClaudeProviderStatus(
           defaultClaudeSettings,
-          claudeCapabilities({ maxEffortLevel: "xhigh" }),
+          claudeCapabilities({ effortCapSources: [{ maxEffortLevel: "xhigh" }] }),
         );
         const maxOptions = status.models.flatMap((model) =>
           (model.capabilities?.optionDescriptors ?? []).flatMap((descriptor) =>

@@ -212,6 +212,35 @@ function claudeEffortRank(level: string | undefined): number {
   return CLAUDE_EFFORT_LEVELS.indexOf(level as ClaudeEffortLevel);
 }
 
+/** One settings source's effort caps, with `modelSettings` keys as the user wrote them. */
+export interface ClaudeEffortCapSource {
+  readonly maxEffortLevel?: ClaudeEffortLevel;
+  readonly modelMaxEffortLevels?: ReadonlyMap<string, ClaudeEffortLevel>;
+}
+
+const CLAUDE_1M_SUFFIX = "[1m]";
+
+/**
+ * Keys `modelSettings` caps by canonical slug. Claude Code matches a key's aliases and `[1m]`
+ * spelling case-insensitively, and keeps the lowest cap when several keys name one model.
+ */
+function resolveClaudeModelMaxEffortLevels(
+  catalog: ClaudeModelCatalog,
+  levels: ReadonlyMap<string, ClaudeEffortLevel> | undefined,
+): ReadonlyMap<string, ClaudeEffortLevel> {
+  const resolved = new Map<string, ClaudeEffortLevel>();
+  for (const [key, level] of levels ?? []) {
+    const lowered = key.trim().toLowerCase();
+    const slug = resolveClaudeModelSlug(
+      catalog,
+      lowered.endsWith(CLAUDE_1M_SUFFIX) ? lowered.slice(0, -CLAUDE_1M_SUFFIX.length) : lowered,
+    );
+    const current = resolved.get(slug);
+    if (!current || claudeEffortRank(level) < claudeEffortRank(current)) resolved.set(slug, level);
+  }
+  return resolved;
+}
+
 /**
  * Claude Code clamps every effort above settings.json `maxEffortLevel` to the highest level the
  * model supports at or below it, so a model without Extra High runs Max at High under an `xhigh`
@@ -220,20 +249,37 @@ function claudeEffortRank(level: string | undefined): number {
  * would fall back to the descriptor default and run below the cap. An option counts as above the
  * cap only when both the level it reads as and the level the CLI is sent are, so an `effortMap`
  * that already sends Max as High keeps its label, and values that map to no level (prompt-injected
- * Ultrathink) are never capped. A model's `modelSettings.<model>.maxEffortLevel` replaces the
- * top-level cap for that model, and `max` exempts it.
+ * Ultrathink) are never capped.
+ *
+ * The cap is resolved like Claude Code does: within each settings source, the lowest
+ * `modelSettings.<model>.maxEffortLevel` naming the model replaces that source's top-level cap and
+ * `max` means no cap; across sources the lowest cap wins. The merged settings cannot express this,
+ * since a per-model `max` in one file would hide another file's top-level cap.
  */
 export function capClaudeCatalogEffort(
   catalog: ClaudeModelCatalog,
   models: ReadonlyArray<ServerProviderModel>,
-  maxEffortLevel: ClaudeEffortLevel | undefined,
-  modelMaxEffortLevels?: ReadonlyMap<string, ClaudeEffortLevel>,
+  sources: ReadonlyArray<ClaudeEffortCapSource>,
 ): ReadonlyArray<ServerProviderModel> {
-  if (!maxEffortLevel && !modelMaxEffortLevels) return models;
+  if (sources.length === 0) return models;
+  const resolvedSources = sources.map((source) => ({
+    maxEffortLevel: source.maxEffortLevel,
+    modelMaxEffortLevels: resolveClaudeModelMaxEffortLevels(catalog, source.modelMaxEffortLevels),
+  }));
   return models.map((model) => {
     // Custom model labels are user-authored, so they are left alone.
     if (model.isCustom || !model.capabilities?.optionDescriptors) return model;
-    const modelMaxEffortLevel = modelMaxEffortLevels?.get(model.slug) ?? maxEffortLevel;
+    const modelMaxEffortLevel = resolvedSources.reduce<ClaudeEffortLevel | undefined>(
+      (lowest, source) => {
+        const level = source.modelMaxEffortLevels.get(model.slug) ?? source.maxEffortLevel;
+        return level &&
+          level !== "max" &&
+          (!lowest || claudeEffortRank(level) < claudeEffortRank(lowest))
+          ? level
+          : lowest;
+      },
+      undefined,
+    );
     if (!modelMaxEffortLevel) return model;
     const capRank = claudeEffortRank(modelMaxEffortLevel);
     return {

@@ -264,7 +264,7 @@ describe("Claude model catalog", () => {
       ],
     };
     const options = (cap: "high" | "xhigh") =>
-      capClaudeCatalogEffort(catalog, models, cap).map((model) => {
+      capClaudeCatalogEffort(catalog, models, [{ maxEffortLevel: cap }]).map((model) => {
         const effort = model.capabilities?.optionDescriptors?.[0];
         return effort?.type === "select" ? effort.options : undefined;
       });
@@ -299,12 +299,12 @@ describe("Claude model catalog", () => {
 
     // A per-model cap applies without a top-level one and leaves other models uncapped.
     assert.deepStrictEqual(
-      capClaudeCatalogEffort(catalog, models, undefined, new Map([["claude-plain", "high"]])).map(
-        (model) => {
-          const effort = model.capabilities?.optionDescriptors?.[0];
-          return effort?.type === "select" ? effort.options.map((option) => option.label) : [];
-        },
-      ),
+      capClaudeCatalogEffort(catalog, models, [
+        { modelMaxEffortLevels: new Map([["claude-plain", "high"]]) },
+      ]).map((model) => {
+        const effort = model.capabilities?.optionDescriptors?.[0];
+        return effort?.type === "select" ? effort.options.map((option) => option.label) : [];
+      }),
       [
         [
           "Medium",
@@ -339,7 +339,11 @@ describe("Claude model catalog", () => {
         ],
       },
     };
-    const [capped] = capClaudeCatalogEffort({ models: [] }, [noXhigh], "xhigh");
+    const [capped] = capClaudeCatalogEffort(
+      { models: [] },
+      [noXhigh],
+      [{ maxEffortLevel: "xhigh" }],
+    );
     const cappedEffort = capped?.capabilities?.optionDescriptors?.[0];
     assert.deepStrictEqual(
       cappedEffort?.type === "select" ? cappedEffort.options.map((option) => option.label) : [],
@@ -367,6 +371,69 @@ describe("Claude model catalog", () => {
       },
     };
 
-    assert.deepStrictEqual(capClaudeCatalogEffort({ models: [] }, [custom], "high"), [custom]);
+    assert.deepStrictEqual(
+      capClaudeCatalogEffort({ models: [] }, [custom], [{ maxEffortLevel: "high" }]),
+      [custom],
+    );
+  });
+
+  it("resolves maxEffortLevel per settings source and per model key like Claude Code", () => {
+    const opus = {
+      slug: "claude-opus-5-5",
+      name: "Opus 5.5",
+      isCustom: false,
+      aliases: ["opus"],
+      capabilities: {
+        optionDescriptors: [
+          {
+            id: "effort",
+            label: "Reasoning",
+            type: "select" as const,
+            options: [
+              { id: "low", label: "Low" },
+              { id: "medium", label: "Medium" },
+              { id: "high", label: "High", isDefault: true },
+              { id: "max", label: "Max" },
+            ],
+          },
+        ],
+      },
+    };
+    const catalog: ClaudeModelCatalog = {
+      models: [{ model: opus, runtime: {}, compatibility: {} }],
+    };
+    const maxLabel = (sources: Parameters<typeof capClaudeCatalogEffort>[2]) => {
+      const effort = capClaudeCatalogEffort(catalog, [opus], sources)[0]?.capabilities
+        ?.optionDescriptors?.[0];
+      return effort?.type === "select" ? effort.options.at(-1)?.label : undefined;
+    };
+    const perModel = (entries: Record<string, "low" | "medium" | "high" | "max">) => ({
+      modelMaxEffortLevels: new Map(Object.entries(entries)),
+    });
+
+    // Claude Code matches family aliases and [1m] spellings case-insensitively.
+    assert.strictEqual(maxLabel([perModel({ Opus: "medium" })]), "Max (capped to Medium)");
+    assert.strictEqual(
+      maxLabel([perModel({ "claude-opus-5-5[1M]": "medium" })]),
+      "Max (capped to Medium)",
+    );
+    // Keys naming the same model keep the lowest cap, and a `max` key does not exempt it.
+    assert.strictEqual(
+      maxLabel([perModel({ opus: "max", "claude-opus-5-5": "low" })]),
+      "Max (capped to Low)",
+    );
+    // A per-model `max` only exempts the model from its own source's top-level cap.
+    assert.strictEqual(
+      maxLabel([{ maxEffortLevel: "medium", ...perModel({ opus: "max" }) }]),
+      "Max",
+    );
+    assert.strictEqual(
+      maxLabel([perModel({ opus: "max" }), { maxEffortLevel: "high" }]),
+      "Max (capped to High)",
+    );
+    assert.strictEqual(
+      maxLabel([{ maxEffortLevel: "medium" }, perModel({ opus: "high" })]),
+      "Max (capped to Medium)",
+    );
   });
 });
