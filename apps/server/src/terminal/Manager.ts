@@ -1745,6 +1745,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     yield* resizePtyProcess(session, process, cols, rows);
     session.cols = cols;
     session.rows = rows;
+    session.updatedAt = yield* nowIso;
     const eventStamp = advanceEventSequence(session);
     yield* publishEvent({
       type: "activity",
@@ -3326,7 +3327,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     viewerId: string | undefined,
   ) {
     const sessionKey = toSessionKey(input.threadId, input.terminalId);
-    const viewer = viewerId === undefined ? undefined : terminalViewers.get(sessionKey)?.get(viewerId);
+    const viewer =
+      viewerId === undefined ? undefined : terminalViewers.get(sessionKey)?.get(viewerId);
     if (viewer) {
       viewer.grid = { cols: input.cols, rows: input.rows };
       return yield* applySharedGrid(input.threadId, input.terminalId);
