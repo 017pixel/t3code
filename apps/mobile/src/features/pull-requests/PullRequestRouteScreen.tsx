@@ -116,15 +116,9 @@ import { usePullRequestEnvironmentFallback } from "./usePullRequestEnvironmentFa
 const EMPTY_IDS: readonly string[] = [];
 
 function PullRequestTabScrollView(props: ScrollViewProps) {
-  const insets = useSafeAreaInsets();
   return (
     <ScrollViewMarker style={{ flex: 1 }}>
-      <ScrollView
-        {...props}
-        automaticallyAdjustContentInsets={false}
-        contentInsetAdjustmentBehavior="never"
-        contentOffset={props.contentOffset ?? { x: 0, y: -insets.top }}
-      />
+      <ScrollView {...props} />
     </ScrollViewMarker>
   );
 }
@@ -558,7 +552,9 @@ export function PullRequestRouteScreen({ route }: StaticScreenProps<PullRequestP
               >
                 <AnimatedLegendList
                   ref={listRefs[tab]}
-                  initialScrollOffset={-insets.top}
+                  // The scroll view owns its resting offset. LegendList keeps the first
+                  // initialScrollOffset it gets, and the first render has the window's top
+                  // inset (0 on the folded iPhone Duo), not the header's.
                   onScroll={(event) => {
                     const offset = event.nativeEvent.contentOffset.y;
                     scrollOffsets.current[tab] = offset;
@@ -568,10 +564,9 @@ export function PullRequestRouteScreen({ route }: StaticScreenProps<PullRequestP
                   renderScrollComponent={
                     Platform.OS === "ios" ? PullRequestTabScrollView : undefined
                   }
-                  contentInsetAdjustmentBehavior="never"
-                  contentInset={
-                    Platform.OS === "ios" ? { top: insets.top, bottom: insets.bottom } : undefined
-                  }
+                  // UIKit owns the bar's inset, so a minimizing bar and a resized column
+                  // move the list in the same frame as the bar.
+                  contentInsetAdjustmentBehavior="automatic"
                   contentInsetStartAdjustment={Platform.OS === "ios" ? insets.top : 0}
                   refreshControl={
                     <RefreshControl
