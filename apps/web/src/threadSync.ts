@@ -1,11 +1,12 @@
 import type { EnvironmentThreadStatus } from "@t3tools/client-runtime/state/threads";
 
-export type ThreadSyncPhase = "loading" | "syncing";
+export type ThreadSyncPhase = "loading" | "syncing" | "failed";
 
 export function resolveThreadSyncPhase(input: {
   readonly detailExists: boolean;
   readonly shellExists: boolean;
   readonly status: EnvironmentThreadStatus;
+  readonly hasError: boolean;
 }): ThreadSyncPhase | null {
   if (!input.shellExists) {
     return null;
@@ -15,6 +16,7 @@ export function resolveThreadSyncPhase(input: {
     case "empty":
     case "cached":
     case "synchronizing":
+      if (input.hasError) return "failed";
       return input.detailExists ? "syncing" : "loading";
     case "deleted":
     case "live":
@@ -23,5 +25,12 @@ export function resolveThreadSyncPhase(input: {
 }
 
 export function threadSyncLabel(phase: ThreadSyncPhase): string {
-  return phase === "loading" ? "Loading messages..." : "Syncing messages...";
+  switch (phase) {
+    case "loading":
+      return "Loading messages...";
+    case "syncing":
+      return "Syncing messages...";
+    case "failed":
+      return "Could not sync messages";
+  }
 }

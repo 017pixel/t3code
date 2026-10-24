@@ -172,7 +172,12 @@ import {
   FLOATING_WORKING_CONTROL_COVERAGE,
   FloatingWorkingControl,
 } from "./floating-working-control";
-import { connectionFloatingStatus, type FloatingWorkingStatus } from "./floating-working-status";
+import {
+  connectionFloatingStatus,
+  resolveThreadSyncPhase,
+  threadSyncFloatingStatus,
+  type FloatingWorkingStatus,
+} from "./floating-working-status";
 import {
   derivePendingUserInputMaxHeight,
   ESTIMATED_KEYBOARD_HEIGHT,
@@ -245,6 +250,7 @@ export interface ThreadDetailScreenProps {
   readonly respondingUserInputId: RuntimeRequestId | null;
   readonly connectionStateLabel: EnvironmentConnectionPhase;
   readonly threadSyncStatus?: EnvironmentThreadStatus;
+  readonly threadSyncError?: string | null;
   readonly historyControls?: ThreadFeedHistoryControls;
   readonly activeThreadBusy: boolean;
   readonly canStopThread: boolean;
@@ -635,20 +641,14 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   );
   const composerKeyboardOffset = composerBottomInset;
   const contentPresentationKind = props.contentPresentation.kind;
-  const realThreadSyncLabel = (() => {
-    switch (props.threadSyncStatus) {
-      case "empty":
-      case "cached":
-      case "synchronizing":
-        if (contentPresentationKind === "ready") {
-          return "Syncing messages...";
-        }
-        return contentPresentationKind === "loading" ? "Loading messages..." : null;
-      default:
-        return null;
-    }
-  })();
-  const threadSyncLabel = useDelayedStatus(selectedThreadKey, realThreadSyncLabel);
+  const threadSyncPhase = useDelayedStatus(
+    selectedThreadKey,
+    resolveThreadSyncPhase({
+      status: props.threadSyncStatus,
+      hasError: (props.threadSyncError ?? null) !== null,
+      contentKind: contentPresentationKind,
+    }),
+  );
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, {
     reportFailure: false,
   });
@@ -765,8 +765,8 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     if (props.creationState?.kind === "failed") {
       return null;
     }
-    if (threadSyncLabel !== null) {
-      return { kind: "syncing", label: threadSyncLabel };
+    if (threadSyncPhase !== null) {
+      return threadSyncFloatingStatus(threadSyncPhase, props.onReconnectEnvironment);
     }
     const childInput = childThreadInputs[0];
     if (childInput && contentPresentationKind === "ready") {

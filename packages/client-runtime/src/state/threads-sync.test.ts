@@ -1767,21 +1767,33 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
-  it.effect("shows an error when the snapshot reload after a failed resume hits a defect", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeHarness({ cached: BASE_PROJECTION, completionMarker: true });
-      expect(yield* Queue.take(harness.subscriptions)).toBe(CACHED_SNAPSHOT_SEQUENCE);
-      yield* Queue.offer(harness.inputs, new TestStreamDefect("Replayed event did not decode"));
-      expect(yield* Queue.take(harness.subscriptions)).toBeUndefined();
+  it.effect(
+    "shows an error when the snapshot reload after a failed resume hits a defect, then retries on a new session",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ cached: BASE_PROJECTION, completionMarker: true });
+        expect(yield* Queue.take(harness.subscriptions)).toBe(CACHED_SNAPSHOT_SEQUENCE);
+        yield* Queue.offer(harness.inputs, new TestStreamDefect("Replayed event did not decode"));
+        expect(yield* Queue.take(harness.subscriptions)).toBeUndefined();
 
-      yield* Queue.offer(harness.inputs, new TestStreamDefect("Snapshot did not decode"));
-      const failed = yield* awaitThreadState(harness.observed, (value) =>
-        Option.isSome(value.error),
-      );
-      expect(Option.getOrThrow(failed.error)).toBe("Could not synchronize the thread.");
-      expect(failed.data).toEqual(Option.some(BASE_PROJECTION));
-      expect(yield* Queue.size(harness.subscriptions)).toBe(0);
-    }),
+        yield* Queue.offer(harness.inputs, new TestStreamDefect("Snapshot did not decode"));
+        const failed = yield* awaitThreadState(harness.observed, (value) =>
+          Option.isSome(value.error),
+        );
+        expect(Option.getOrThrow(failed.error)).toBe("Could not synchronize the thread.");
+        expect(failed.data).toEqual(Option.some(BASE_PROJECTION));
+        expect(yield* Queue.size(harness.subscriptions)).toBe(0);
+
+        // A new session retries once, still from the snapshot.
+        yield* harness.replaceSession;
+        expect(yield* Queue.take(harness.subscriptions)).toBeUndefined();
+        yield* Queue.offerAll(harness.inputs, [
+          snapshot(BASE_PROJECTION, CACHED_SNAPSHOT_SEQUENCE + 5),
+          synchronized(),
+        ]);
+        const live = yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+        expect(Option.isNone(live.error)).toBe(true);
+      }),
   );
 
   it.effect("keeps replayed updates synchronizing until the completion marker arrives", () =>

@@ -33,6 +33,7 @@ import * as Persistence from "../platform/persistence.ts";
 import { runCachePersistence } from "./cachePersistence.ts";
 import * as ManagedRelay from "../relay/managedRelay.ts";
 import { request, subscribeDynamic } from "../rpc/client.ts";
+import type { RpcSession } from "../rpc/session.ts";
 import { parseThreadKey, threadKey } from "./entities.ts";
 import { applyOrchestrationV2ProjectionEvent } from "./orchestrationV2Projection.ts";
 import { THREAD_SNAPSHOT_IDLE_TTL_MS } from "./threadRetention.ts";
@@ -260,6 +261,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   const resuming = yield* Ref.make(false);
   const resumeDied = yield* Ref.make(false);
   const forceSnapshot = yield* Ref.make(false);
+  const attemptSession = yield* Ref.make<RpcSession | undefined>(undefined);
   const applyLock = yield* Semaphore.make(1);
   // Save only completed data/cursor updates. A canceled scope must not cache
   // a cursor whose event has not reached the data yet.
@@ -895,6 +897,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
           Effect.map((config) => config.threadResumeCompletionMarker === true),
           Effect.orElseSucceed(() => false),
         );
+        yield* Ref.set(attemptSession, session);
         yield* Ref.set(awaitingCompletion, supportsCompletionMarker);
         yield* markSynchronizing;
         yield* Ref.set(resumingLive, false);
@@ -993,14 +996,25 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     ).pipe(
       Stream.runForEachArray(applyItems),
       Effect.as(false),
-      // A defect on the snapshot attempt reports its error and stays terminal,
-      // so recovery cannot loop.
-      Effect.catchCause((cause) =>
-        Ref.getAndSet(resumeDied, false).pipe(
-          Effect.flatMap((died) =>
-            died ? Ref.set(forceSnapshot, true).pipe(Effect.as(true)) : Effect.failCause(cause),
-          ),
-        ),
+      Effect.catchCause(
+        Effect.fn("EnvironmentThreadState.recoverSubscription")(function* (cause) {
+          if (Cause.hasInterruptsOnly(cause)) return yield* Effect.failCause(cause);
+          if (yield* Ref.getAndSet(resumeDied, false)) {
+            yield* Ref.set(forceSnapshot, true);
+            return true;
+          }
+          // Any other defect keeps its error on screen and waits for a new
+          // session or a foreground wakeup, so recovery cannot loop. A session
+          // that changed before this wait counts as the next one.
+          const failedSession = yield* Ref.get(attemptSession);
+          yield* Stream.merge(
+            SubscriptionRef.changes(supervisor.session).pipe(
+              Stream.filter((session) => Option.getOrUndefined(session) !== failedSession),
+            ),
+            foregroundResubscriptions,
+          ).pipe(Stream.runHead);
+          return true;
+        }),
       ),
       Effect.repeat({ while: (retry) => retry }),
     ),

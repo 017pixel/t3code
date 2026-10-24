@@ -1,4 +1,7 @@
 import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
+import type { EnvironmentThreadStatus } from "@t3tools/client-runtime/state/threads";
+
+import type { ThreadContentPresentation } from "./threadContentPresentation";
 
 export interface FloatingStatusAction {
   readonly label: string;
@@ -80,5 +83,42 @@ export function connectionFloatingStatus(input: {
       return unavailable(`${environmentLabel} is not connected`);
     case "connected":
       return null;
+  }
+}
+
+export type ThreadSyncPhase = "loading" | "syncing" | "failed";
+
+export function resolveThreadSyncPhase(input: {
+  readonly status: EnvironmentThreadStatus | undefined;
+  readonly hasError: boolean;
+  readonly contentKind: ThreadContentPresentation["kind"];
+}): ThreadSyncPhase | null {
+  switch (input.status) {
+    case "empty":
+    case "cached":
+    case "synchronizing":
+      if (input.contentKind === "ready") return input.hasError ? "failed" : "syncing";
+      return input.contentKind === "loading" ? "loading" : null;
+    default:
+      return null;
+  }
+}
+
+export function threadSyncFloatingStatus(
+  phase: ThreadSyncPhase,
+  onRetry: () => void,
+): FloatingWorkingStatus {
+  switch (phase) {
+    case "loading":
+      return { kind: "syncing", label: "Loading messages..." };
+    case "syncing":
+      return { kind: "syncing", label: "Syncing messages..." };
+    case "failed":
+      return {
+        kind: "connection",
+        tone: "unavailable",
+        label: "Could not sync messages",
+        onPress: onRetry,
+      };
   }
 }
