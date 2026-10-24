@@ -40,6 +40,7 @@ import {
 import * as CloudLink from "./CloudLink.ts";
 import * as ConnectReachability from "./ConnectReachability.ts";
 import { consumeCloudReplayGuards } from "./CloudLink.ts";
+import { getOrCreateEnvironmentKeyPairFromSecretStore } from "./environmentKeys.ts";
 import { pendingServiceUpdateExists } from "./updateHandoff.ts";
 import { managedTunnelStartupAction } from "./managedTunnelStartup.ts";
 import * as ManagedEndpointRuntime from "./ManagedEndpointRuntime.ts";
@@ -304,6 +305,78 @@ describe("releaseManagedTunnelOnShutdown", () => {
       expect(requests).toEqual([]);
       expect(values.has(CLOUD_ENDPOINT_RUNTIME_CONFIG)).toBe(true);
     }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests }));
+  });
+
+  describe("applyRelayConfig", () => {
+    const cloudMintPublicKey = getOrCreateEnvironmentKeyPairFromSecretStore(
+      makeMemorySecretStore().store,
+    ).pipe(Effect.map((keyPair) => keyPair.publicKey));
+    const relayConfig = (
+      cloudMintPublicKey: string,
+      endpointRuntime: {
+        readonly providerKind: "cloudflare_tunnel";
+        readonly connectorToken: string;
+        readonly tunnelId: string;
+      } | null,
+    ) => ({
+      relayUrl: "https://relay.example.test",
+      cloudUserId: "user-123",
+      environmentCredential: "environment-credential",
+      cloudMintPublicKey,
+      endpointRuntime,
+    });
+    const desiredMode = (values: Map<string, Uint8Array>) => {
+      const value = values.get(CLOUD_CLI_DESIRED_LINK_SECRET);
+      return value === undefined ? null : new TextDecoder().decode(value);
+    };
+
+    // Startup reconciles a CLI-desired link to its stored mode, so turning
+    // exposure off in Settings must persist it or the restart turns it back on.
+    it.effect("records publish-only for a CLI-desired link relinked without exposure", () => {
+      const { store, values } = makeMemorySecretStore(managedLinkSecrets);
+
+      return Effect.gen(function* () {
+        const link = yield* CloudLink.CloudLink;
+        yield* link.applyRelayConfig(relayConfig(yield* cloudMintPublicKey, null));
+        expect(desiredMode(values)).toBe("publish_only");
+      }).pipe(provideReleaseHarness({ store, applyConfigCalls: [], requests: [] }));
+    });
+
+    it.effect("records managed for a CLI-desired link relinked with exposure", () => {
+      const { store, values } = makeMemorySecretStore([
+        [RELAY_URL_SECRET, "https://relay.example.test"],
+        [CLOUD_CLI_DESIRED_LINK_SECRET, "publish_only"],
+      ]);
+
+      return Effect.gen(function* () {
+        const link = yield* CloudLink.CloudLink;
+        yield* link.applyRelayConfig(
+          relayConfig(yield* cloudMintPublicKey, {
+            providerKind: "cloudflare_tunnel",
+            connectorToken: "new-token",
+            tunnelId: "new-tunnel",
+          }),
+        );
+        expect(desiredMode(values)).toBe("managed");
+      }).pipe(
+        provideReleaseHarness({
+          store,
+          applyConfigCalls: [],
+          requests: [],
+          respond: () => Response.json({ status: "ready" }),
+        }),
+      );
+    });
+
+    it.effect("leaves a web-only link client-owned", () => {
+      const { store, values } = makeMemorySecretStore();
+
+      return Effect.gen(function* () {
+        const link = yield* CloudLink.CloudLink;
+        yield* link.applyRelayConfig(relayConfig(yield* cloudMintPublicKey, null));
+        expect(desiredMode(values)).toBeNull();
+      }).pipe(provideReleaseHarness({ store, applyConfigCalls: [], requests: [] }));
+    });
   });
 
   it.effect("keeps the tunnel when shutdown hands off to a pending update", () => {
