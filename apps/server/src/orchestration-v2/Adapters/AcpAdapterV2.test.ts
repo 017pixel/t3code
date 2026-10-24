@@ -394,6 +394,7 @@ function assertReinjectedInstructions(
   assert.include(text, "T3 Code interaction mode: Default");
   assert.include(text, "T3 Code collaborative browser");
   assert.include(text, "T3 Code orchestration");
+  assert.include(text, "acp-mcp-call orchestrator_capabilities");
   assert.include(text, `<user_request>\n${request}\n</user_request>`);
 }
 

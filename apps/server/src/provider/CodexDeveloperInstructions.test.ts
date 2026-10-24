@@ -61,6 +61,15 @@ describe("Codex orchestration context", () => {
     );
     NodeAssert.ok(!orchestration.includes("Do not use `t3_thread_send`"));
   });
+
+  it("keeps the Codex code-mode discovery hint without the ACP terminal fallback", () => {
+    const context = Object.values(buildCodexAdditionalContext({ model: "gpt-6.1-sol" }))
+      .map((entry) => entry.value)
+      .join("\n");
+
+    NodeAssert.ok(context.includes("tools.mcp__t3_code__orchestrator_capabilities({})"));
+    NodeAssert.ok(!context.includes("acp-mcp-call"));
+  });
 });
 
 function runtimeInstructions(runtime: Parameters<typeof buildCodexAdditionalContext>[0]) {

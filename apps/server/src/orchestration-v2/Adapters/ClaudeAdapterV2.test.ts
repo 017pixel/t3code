@@ -569,6 +569,27 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
     assert.equal(logged.hasMcpServers, true);
     assert.notInclude(JSON.stringify(logged), "secret-claude-token");
   });
+
+  it("leaves ACP and Codex tool-discovery workarounds out of Claude's system prompt", () => {
+    const options = ClaudeAdapterV2.makeClaudeQueryOptions({
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-sonnet-4-6",
+      },
+      nativeThreadId: "native-thread-claude-scoped-instructions",
+      resume: false,
+      cwd: "/workspace",
+      allowedTools: [],
+      mcpServers: { "t3-code": { type: "http", url: "http://127.0.0.1:43123/mcp" } },
+      environment: {},
+    });
+    const append = (options.systemPrompt as { readonly append?: string }).append ?? "";
+
+    assert.include(append, "Use `delegate_task`");
+    assert.notInclude(append, "acp-mcp-call");
+    assert.notInclude(append, "T3_ACP_MCP_NODE");
+    assert.notInclude(append, "tools.mcp__t3_code__orchestrator_capabilities");
+  });
 });
 
 describe("ClaudeAdapterV2 context usage", () => {
