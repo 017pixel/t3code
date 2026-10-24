@@ -26,7 +26,7 @@ describe("mobile Markdown draft media", () => {
     const threadId = ThreadId.make("markdown-thread");
     expect(
       resolveMobileMarkdownMediaSource("image.png", { threadId, workspaceRoot: "/project" }),
-    ).toMatchObject({ resource: { _tag: "media-file", threadId, path: "/project/image.png" } });
+    ).toMatchObject({ resource: { _tag: "media-file", threadId, path: "image.png" } });
   });
 
   it("keeps direct URLs direct and rejects unresolvable or blocked references", () => {

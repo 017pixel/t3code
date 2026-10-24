@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { classifyMarkdownImageSource } from "./markdownImages.js";
+import { classifyMarkdownImageSource, markdownImageMediaPath } from "./markdownImages.js";
 
 describe("classifyMarkdownImageSource", () => {
   it.each([
@@ -37,5 +37,18 @@ describe("classifyMarkdownImageSource", () => {
     expect(classifyMarkdownImageSource(source, "\\\\server\\share\\project")).toEqual({
       _tag: "Blocked",
     });
+  });
+});
+
+describe("markdownImageMediaPath", () => {
+  it.each([
+    ["../shot.png", "/repo/docs", "docs/../shot.png"],
+    ["/repo/docs/shot.png", "/repo/docs", "/repo/docs/shot.png"],
+    ["file:///repo/docs/shot.png", "/repo/docs", "/repo/docs/shot.png"],
+  ])("resolves %s from %s against the thread's own host", (source, baseDir, path) => {
+    const classified = classifyMarkdownImageSource(source, baseDir);
+    expect(classified._tag).toBe("WorkspaceFile");
+    if (classified._tag !== "WorkspaceFile") return;
+    expect(markdownImageMediaPath(source, classified.path, "/repo")).toBe(path);
   });
 });

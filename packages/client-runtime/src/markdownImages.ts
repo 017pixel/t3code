@@ -42,6 +42,31 @@ function hostFileSource(
 }
 
 /**
+ * The media-file path for a classified workspace image. A source authored relative
+ * to the workspace stays relative, so only the thread's own host resolves it; an
+ * explicit host path may still be served from this desktop when the host lacks it.
+ */
+export function markdownImageMediaPath(
+  value: string,
+  classifiedPath: string,
+  threadWorkspaceRoot: string | null | undefined,
+): string {
+  const authored = classifyMarkdownImageSource(value, ".");
+  if (
+    !threadWorkspaceRoot ||
+    authored._tag !== "WorkspaceFile" ||
+    !authored.path.startsWith("./")
+  ) {
+    return classifiedPath;
+  }
+  const root = threadWorkspaceRoot.replace(/[\\/]+$/, "");
+  const separator = classifiedPath.charAt(root.length);
+  return classifiedPath.startsWith(root) && (separator === "/" || separator === "\\")
+    ? classifiedPath.slice(root.length + 1)
+    : classifiedPath;
+}
+
+/**
  * Filesystem paths belong to the environment host and must never reach a
  * browser or native image component without first becoming a signed asset URL.
  */

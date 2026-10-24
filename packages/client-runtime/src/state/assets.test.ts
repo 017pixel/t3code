@@ -23,7 +23,7 @@ import {
 } from "../connection/model.ts";
 import { EnvironmentRegistry } from "../connection/registry.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
-import { classifyMarkdownImageSource } from "../markdownImages.ts";
+import { classifyMarkdownImageSource, markdownImageMediaPath } from "../markdownImages.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { createAssetEnvironmentAtoms, createProjectFaviconUrlAtomFamily } from "./assets.ts";
@@ -75,7 +75,10 @@ describe("createAssetEnvironmentAtoms", () => {
         return {
           _tag: "media-file",
           threadId,
-          path: source._tag === "WorkspaceFile" ? source.path : authored,
+          path:
+            source._tag === "WorkspaceFile"
+              ? markdownImageMediaPath(authored, source.path, workspaceRoot)
+              : authored,
         };
       };
       const calls: EnvironmentId[] = [];
