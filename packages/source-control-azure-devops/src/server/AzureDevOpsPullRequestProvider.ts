@@ -318,6 +318,21 @@ export const make = Effect.gen(function* () {
         })),
       ),
 
+    // Previews show no checks, so they skip the policy reads that full detail fails closed on.
+    getChangeRequestPreview: (input) =>
+      cli.getPullRequest({ cwd: input.cwd, number: input.number }).pipe(
+        Effect.mapError(fail("getChangeRequestPreview")),
+        Effect.map((pullRequest) => ({
+          number: pullRequest.number,
+          title: pullRequest.title,
+          url: pullRequest.url,
+          author: pullRequest.author,
+          state: pullRequest.state,
+          isDraft: pullRequest.isDraft,
+          createdAt: pullRequest.createdAt,
+        })),
+      ),
+
     getChangeRequest: Effect.fn("AzureDevOpsPullRequestProvider.getChangeRequest")(
       function* (input) {
         const pullRequest = yield* cli.getPullRequest({ cwd: input.cwd, number: input.number });
