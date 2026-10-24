@@ -11,13 +11,21 @@ import { expect, it, vi } from "vite-plus/test";
 import type { NativeTerminalSurfaceProps } from "./nativeTerminalModule";
 
 const mocks = vi.hoisted(() => ({
-  revision: 0,
+  revision: null as number | null,
   initialBuffers: [] as string[],
+  mounts: vi.fn(),
+  unmounts: vi.fn(),
   write: vi.fn(async (_data: string, _reset: boolean) => {}),
 }));
 
 function RawView({ ref: nativeRef, initialBuffer, onResize }: NativeTerminalSurfaceProps) {
   useImperativeHandle(nativeRef, () => ({ writeOutput: mocks.write }));
+  useLayoutEffect(() => {
+    mocks.mounts();
+    return () => {
+      mocks.unmounts();
+    };
+  }, []);
   useLayoutEffect(() => {
     mocks.initialBuffers.push(initialBuffer);
   }, [initialBuffer]);
@@ -32,7 +40,8 @@ function RawView({ ref: nativeRef, initialBuffer, onResize }: NativeTerminalSurf
 
 vi.mock("expo", () => ({
   requireNativeView: () => RawView,
-  requireOptionalNativeModule: () => ({ outputRevision: mocks.revision }),
+  requireOptionalNativeModule: () =>
+    mocks.revision === null ? {} : { outputRevision: mocks.revision },
 }));
 vi.mock("react-native", () => ({ View: ({ children }: { children: ReactNode }) => children }));
 vi.mock("../../components/ui/AppText", () => ({ AppText: () => null }));
@@ -47,10 +56,13 @@ vi.mock("./terminalTheme", () => ({
 
 import { TerminalSurface } from "./NativeTerminalSurface";
 
-function setup(revision: number) {
+function setup(revision: number | null) {
   mocks.revision = revision;
   mocks.initialBuffers = [];
-  mocks.write.mockClear();
+  mocks.write.mockReset();
+  mocks.write.mockResolvedValue(undefined);
+  mocks.mounts.mockClear();
+  mocks.unmounts.mockClear();
   const document = { nodeType: 9, addEventListener() {}, removeEventListener() {} };
   const container = {
     nodeType: 1,
@@ -76,7 +88,11 @@ function setup(revision: number) {
             terminalKey={terminalKey}
             output={state.version === 0 ? null : state.output}
             buffer={
-              state.version === 0 ? null : revision >= 1 ? "" : terminalOutputText(state.output)
+              state.version === 0
+                ? null
+                : (revision ?? 0) >= 1
+                  ? ""
+                  : terminalOutputText(state.output)
             }
             isRunning
             onInput={() => {}}
@@ -92,8 +108,8 @@ function setup(revision: number) {
   };
 }
 
-it.each([0, 1])(
-  "uses append/reset only on capable installed binaries (revision %s)",
+it.each([null, 1])(
+  "preserves the native view across rollover and uses legacy history on older binaries (revision %s)",
   async (revision) => {
     await using harness = setup(revision);
     let state = applyTerminalAttachStreamEvent(
@@ -119,6 +135,8 @@ it.each([0, 1])(
     );
     await harness.render(state);
     await harness.render(EMPTY_TERMINAL_BUFFER_STATE);
+    expect(mocks.mounts).toHaveBeenCalledTimes(1);
+    expect(mocks.unmounts).not.toHaveBeenCalled();
     if (revision === 1) {
       expect(mocks.initialBuffers).toEqual([""]);
       expect(mocks.write.mock.calls).toEqual([
