@@ -45,10 +45,25 @@ describe("markdownImageMediaPath", () => {
     ["../shot.png", "/repo/docs", "docs/../shot.png"],
     ["/repo/docs/shot.png", "/repo/docs", "/repo/docs/shot.png"],
     ["file:///repo/docs/shot.png", "/repo/docs", "/repo/docs/shot.png"],
+    ["report.png", "/tmp/docs", "../tmp/docs/report.png"],
+    ["report.png", "/repo-other/docs", "../repo-other/docs/report.png"],
   ])("resolves %s from %s against the thread's own host", (source, baseDir, path) => {
     const classified = classifyMarkdownImageSource(source, baseDir);
     expect(classified._tag).toBe("WorkspaceFile");
     if (classified._tag !== "WorkspaceFile") return;
-    expect(markdownImageMediaPath(source, classified.path, "/repo")).toBe(path);
+    expect(markdownImageMediaPath(source, classified.path, "/repo/")).toBe(path);
+  });
+
+  it.each([
+    ["report.png", "C:\\repo\\docs", "C:\\repo", "docs\\report.png"],
+    ["report.png", "C:\\tmp\\docs", "C:\\repo", "..\\tmp\\docs\\report.png"],
+    // No relative path reaches another drive or share, so the path stays absolute.
+    ["report.png", "D:\\docs", "C:\\repo", "D:\\docs\\report.png"],
+    ["report.png", "\\\\host\\other", "\\\\host\\share", "\\\\host\\other\\report.png"],
+  ])("keeps %s from %s relative to %s only when reachable", (source, baseDir, root, path) => {
+    const classified = classifyMarkdownImageSource(source, baseDir);
+    expect(classified._tag).toBe("WorkspaceFile");
+    if (classified._tag !== "WorkspaceFile") return;
+    expect(markdownImageMediaPath(source, classified.path, root)).toBe(path);
   });
 });

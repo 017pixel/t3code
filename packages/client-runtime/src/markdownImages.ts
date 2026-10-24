@@ -43,8 +43,10 @@ function hostFileSource(
 
 /**
  * The media-file path for a classified workspace image. A source authored relative
- * to the workspace stays relative, so only the thread's own host resolves it; an
- * explicit host path may still be served from this desktop when the host lacks it.
+ * to its document stays relative to the thread workspace, `..` included for a
+ * document outside it, so only the thread's own host resolves it; an explicit host
+ * path may still be served from this desktop when the host lacks it. A path with no
+ * relative form from the root, such as another Windows drive or share, stays absolute.
  */
 export function markdownImageMediaPath(
   value: string,
@@ -59,11 +61,28 @@ export function markdownImageMediaPath(
   ) {
     return classifiedPath;
   }
-  const root = threadWorkspaceRoot.replace(/[\\/]+$/, "");
-  const separator = classifiedPath.charAt(root.length);
-  return classifiedPath.startsWith(root) && (separator === "/" || separator === "\\")
-    ? classifiedPath.slice(root.length + 1)
-    : classifiedPath;
+  const rootSegments = threadWorkspaceRoot.split(/[\\/]+/).filter(Boolean);
+  const pathSegments = classifiedPath.split(/[\\/]+/).filter(Boolean);
+  let shared = 0;
+  while (
+    shared < rootSegments.length &&
+    shared < pathSegments.length &&
+    rootSegments[shared] === pathSegments[shared]
+  ) {
+    shared += 1;
+  }
+  const ascents = rootSegments.slice(shared);
+  if (
+    // Both sides must start on the same drive, and `..` cannot leave a share's root.
+    (isWindowsAbsolutePath(threadWorkspaceRoot) && shared === 0) ||
+    (ascents.length > 0 && (isNetworkPath(threadWorkspaceRoot) || isNetworkPath(classifiedPath))) ||
+    ascents.some((segment) => segment === "." || segment === "..") ||
+    shared === pathSegments.length
+  ) {
+    return classifiedPath;
+  }
+  const separator = isWindowsAbsolutePath(threadWorkspaceRoot) ? "\\" : "/";
+  return [...ascents.map(() => ".."), ...pathSegments.slice(shared)].join(separator);
 }
 
 /**

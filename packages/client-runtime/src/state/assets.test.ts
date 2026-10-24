@@ -69,8 +69,11 @@ describe("createAssetEnvironmentAtoms", () => {
       const workspaceRoot = "/tmp/t3-17392/repo";
       const threadId = ThreadId.make("remote-thread");
       // Mirrors how ChatMarkdown turns an authored image source into an asset resource.
-      const markdownImageResource = (authored: string): AssetResource => {
-        const source = classifyMarkdownImageSource(authored, workspaceRoot);
+      const markdownImageResource = (
+        authored: string,
+        documentDir = workspaceRoot,
+      ): AssetResource => {
+        const source = classifyMarkdownImageSource(authored, documentDir);
         expect(source._tag).toBe("WorkspaceFile");
         return {
           _tag: "media-file",
@@ -125,12 +128,12 @@ describe("createAssetEnvironmentAtoms", () => {
         Atom.runtime(Layer.succeed(EnvironmentRegistry, environments)),
         Atom.make({ environmentId: localId, httpBaseUrl: "https://local.test" }),
       );
-      const resolve = (authored: string) =>
+      const resolve = (authored: string, documentDir?: string) =>
         AtomRegistry.getResult(
           registry,
           assets.createUrl({
             environmentId: remoteId,
-            input: { resource: markdownImageResource(authored) },
+            input: { resource: markdownImageResource(authored, documentDir) },
           }),
           { suspendOnWaiting: true },
         );
@@ -144,6 +147,21 @@ describe("createAssetEnvironmentAtoms", () => {
       calls.length = 0;
       const relative = yield* Effect.result(resolve("docs/report.png"));
       expect(relative).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "AssetWorkspaceAssetNotFoundError" },
+      });
+      expect(calls).toEqual([remoteId]);
+
+      // A host-path document outside the workspace keeps its relative image on the host too,
+      // and does not share the cached local result for the same absolute path.
+      calls.length = 0;
+      expect((yield* resolve("/tmp/t3-17392/docs/report.png")).relativeUrl).toBe(
+        "https://local.test/api/assets/local/report.png",
+      );
+      expect(calls).toEqual([remoteId, localId]);
+      calls.length = 0;
+      const outside = yield* Effect.result(resolve("report.png", "/tmp/t3-17392/docs"));
+      expect(outside).toMatchObject({
         _tag: "Failure",
         failure: { _tag: "AssetWorkspaceAssetNotFoundError" },
       });
