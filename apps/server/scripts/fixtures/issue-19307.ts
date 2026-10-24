@@ -332,10 +332,15 @@ export const browserInstaller = `async (fixtures, checkout) => {
     root.__evidenceRealDate = RealDate;
     root.__evidenceClock = RealDate.parse("2026-10-21T12:00:00.000Z");
     // Patch wall-clock reads only; recordings keep normal browser animation timing.
-    const FixedDate = class extends RealDate {
-      constructor(...args) { super(...(args.length === 0 ? [Number(root.__evidenceClock)] : args)); }
-      static now() { return Number(root.__evidenceClock); }
-    };
+    // A function, not a class, so Date() called without new still returns a string.
+    function FixedDate(...args) {
+      const clock = Number(root.__evidenceClock);
+      if (!new.target) return new RealDate(clock).toString();
+      return Reflect.construct(RealDate, args.length === 0 ? [clock] : args, new.target);
+    }
+    FixedDate.prototype = Object.create(RealDate.prototype, { constructor: { value: FixedDate, writable: true, configurable: true } });
+    Object.setPrototypeOf(FixedDate, RealDate);
+    FixedDate.now = () => Number(root.__evidenceClock);
     Object.defineProperty(globalThis, "Date", { value: FixedDate, configurable: true });
     const bind = (atom, value) => {
       atom.read = () => value;
