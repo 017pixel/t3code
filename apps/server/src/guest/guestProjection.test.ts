@@ -569,6 +569,24 @@ describe("guestCommandOutputFrames", () => {
     expect(client(frames).text.endsWith("Downloading 100%\ntest a ok\ntest b ok")).toBe(true);
   });
 
+  it("replaces what a cleared screen erased instead of keeping it above the new output", () => {
+    const cleared = guestCommandOutputFrames(roots);
+    const frames = [cleared(frame("replace", "old\n")), cleared(frame("append", "\u001b[2Jnew\n"))];
+    expect(client(frames).text).toBe("new\n");
+    const emptied = guestCommandOutputFrames(roots);
+    const empty = [emptied(frame("replace", "old\n")), emptied(frame("append", "\u001b[2J"))];
+    expect(client(empty).text).toBe("");
+  });
+
+  it("falls back to a replace when repeated lines make the overlap ambiguous", () => {
+    const rewrite = guestCommandOutputFrames(roots);
+    const frames = [
+      rewrite(frame("replace", "a\n".repeat(32_768))),
+      rewrite(frame("append", "b\n".repeat(4096))),
+    ];
+    expect(client(frames).text.endsWith(`a\n${"b\n".repeat(4096)}`)).toBe(true);
+  });
+
   it("reports output that scrolled out even when the visible text did not change", () => {
     const rewrite = guestCommandOutputFrames(roots);
     const first = rewrite(frame("replace", "ready"));

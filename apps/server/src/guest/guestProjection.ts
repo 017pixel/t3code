@@ -17,6 +17,7 @@ import {
   appendTerminalOutput,
   EMPTY_TERMINAL_OUTPUT,
   LIVE_LINES,
+  TERMINAL_OUTPUT_TAIL_CHARS,
   type TerminalOutputState,
 } from "@t3tools/shared/terminalOutput";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
@@ -434,29 +435,39 @@ const countLines = (text: string) => {
   return count;
 };
 
-// A trimmed tail drops whole lines from the front; past this many, a replace is cheaper.
+// Matching a tail that dropped lines from the front: lines tried, and full comparisons allowed.
+// Past either, a replace is cheaper than the search.
 const MAX_TRIMMED_LINES = 4096;
+const MAX_TRIMMED_COMPARISONS = 8;
+const TRIMMED_PROBE_CHARS = 256;
 
 /**
  * The text that turns what the guest's client shows (`previous`) into `shown`, through the same
- * terminal model, or null when only a replace can. Plain growth is appended as is. A tail that
- * dropped lines from the front is matched further in, since the client trims its own. A change in
+ * terminal model, or null when only a replace can. Plain growth is appended as is. A change in
  * the last lines, such as a progress bar, moves the cursor up to the first changed line, erases
- * from there, and writes the rest: the client never gets more than the lines that changed.
+ * from there, and writes the rest. When the tail dropped lines from the front (`trimmed`), the
+ * match may start further into `previous`: the client trims its own front, so the lines it keeps
+ * above the match are the same older output. A cleared screen shares nothing and is replaced.
  */
-function guestOutputDelta(previous: string, shown: string): string | null {
+function guestOutputDelta(previous: string, shown: string, trimmed: boolean): string | null {
   let start = 0;
-  for (let trimmed = 0; trimmed <= MAX_TRIMMED_LINES && start <= previous.length; trimmed += 1) {
+  let comparisons = 0;
+  for (let lines = 0; lines <= MAX_TRIMMED_LINES; lines += 1) {
     const base = previous.slice(start);
-    const common = commonPrefixLength(base, shown);
-    if (common === base.length) return shown.slice(common);
-    const lineStart = base.lastIndexOf("\n", common - 1) + 1;
-    const below = countLines(base.slice(lineStart));
-    if (common > 0 && below < LIVE_LINES) {
-      return `${below > 0 ? `\u001b[${below}A` : ""}\r\u001b[J${shown.slice(lineStart)}`;
+    const probe = base.slice(0, TRIMMED_PROBE_CHARS);
+    if (start === 0 || (base.length > 0 && shown.startsWith(probe))) {
+      if (start > 0 && (comparisons += 1) > MAX_TRIMMED_COMPARISONS) return null;
+      const common = commonPrefixLength(base, shown);
+      if (common === base.length && (start === 0 || common > 0)) return shown.slice(common);
+      const lineStart = base.lastIndexOf("\n", common - 1) + 1;
+      const below = common > 0 ? countLines(base.slice(lineStart)) : LIVE_LINES;
+      if (below < LIVE_LINES) {
+        return `${below > 0 ? `\u001b[${below}A` : ""}\r\u001b[J${shown.slice(lineStart)}`;
+      }
     }
+    if (!trimmed) return null;
     const next = previous.indexOf("\n", start);
-    if (next === -1) break;
+    if (next === -1 || next + 1 >= previous.length) return null;
     start = next + 1;
   }
   return null;
@@ -484,7 +495,9 @@ export function guestCommandOutputFrames(roots: GuestPathRoots) {
     const truncated = terminal.truncated || frame.truncated;
     const previous = sent;
     sent = { text: shown, truncated: (previous?.truncated ?? false) || truncated };
-    const delta = previous === null ? null : guestOutputDelta(previous.text, shown);
+    // Only a tail near its limit drops lines from the front.
+    const trimmed = truncated && plain.length >= TERMINAL_OUTPUT_TAIL_CHARS / 2;
+    const delta = previous === null ? null : guestOutputDelta(previous.text, shown, trimmed);
     if (delta === null) {
       return { kind: "replace", text: shown, truncated, running: frame.running };
     }
