@@ -15,6 +15,7 @@ function createDirectories() {
     errors: new Map<string, string>(),
     completeDirectories: new Set<string>(),
     searchAtValidation: new Map<string, object | null>(),
+    discoveries: new Map<string, ProjectEntry>(),
     rootListing: null as object | null,
     validatedDirectories: new Set<string>(),
     loading: new Set<string>(),
@@ -35,7 +36,18 @@ function boundDirectories(current: ReturnType<typeof createDirectories>, preserv
   const inactive = [
     ...new Set([...current.entries.keys(), ...current.errors.keys(), ...current.expandedPaths]),
   ].filter((path) => !preserveVisible || !visible(path));
-  if (inactive.length <= 64) return current;
+  const ownedPaths = [
+    ...current.entries.keys(),
+    ...current.expandedPaths,
+    current.selectedPath,
+  ].filter((path) => path !== null);
+  const discoveries = new Map(
+    [...current.discoveries].filter(([path]) =>
+      ownedPaths.some((owned) => owned === path || owned.startsWith(`${path}/`)),
+    ),
+  );
+  if (inactive.length <= 64)
+    return discoveries.size === current.discoveries.size ? current : { ...current, discoveries };
   const evicted = new Set(inactive.slice(0, -64));
   const isEvicted = (path: string) => {
     const parts = path.split("/");
@@ -43,6 +55,7 @@ function boundDirectories(current: ReturnType<typeof createDirectories>, preserv
   };
   return {
     ...current,
+    discoveries: new Map([...discoveries].filter(([path]) => !isEvicted(path))),
     expandedPaths: new Set([...current.expandedPaths].filter((path) => !isEvicted(path))),
     entries: new Map([...current.entries].filter(([path]) => !isEvicted(path))),
     errors: new Map([...current.errors].filter(([path]) => !isEvicted(path))),
@@ -56,6 +69,14 @@ function boundDirectories(current: ReturnType<typeof createDirectories>, preserv
       [...current.searchAtValidation].filter(([path]) => !isEvicted(path)),
     ),
   };
+}
+
+function contradictsListing(path: string, parent: string, entries: ReadonlyArray<ProjectEntry>) {
+  if (parent !== "" && !path.startsWith(`${parent}/`)) return false;
+  const child = path.slice(parent === "" ? 0 : parent.length + 1).split("/")[0];
+  const childPath = parent === "" ? child : `${parent}/${child}`;
+  const entry = entries.find((item) => item.path === childPath);
+  return !entry || (path !== childPath && entry.kind !== "directory");
 }
 
 function createRequests() {
@@ -189,6 +210,7 @@ export function useFileTreeEntries(input: {
     const requests = getRequests(requestsByTarget.current, target);
     if (
       !requests.active ||
+      missingRoot ||
       cwd === null ||
       environmentId === null ||
       (!refresh && directories.validatedDirectories.has(directoryPath)) ||
@@ -234,6 +256,13 @@ export function useFileTreeEntries(input: {
             entries,
             loading,
             completeDirectories,
+            discoveries: result.value.truncated
+              ? current.discoveries
+              : new Map(
+                  [...current.discoveries].filter(
+                    ([path]) => !contradictsListing(path, directoryPath, result.value.entries),
+                  ),
+                ),
             validatedDirectories,
             searchAtValidation: new Map(current.searchAtValidation).set(
               directoryPath,
@@ -264,14 +293,15 @@ export function useFileTreeEntries(input: {
       directories.errors.size > 0 ||
       directories.loading.size > 0 ||
       directories.expandedPaths.size > 0 ||
-      directories.selectedPath !== null)
+      directories.selectedPath !== null ||
+      directories.discoveries.size > 0)
   ) {
     setDirectories(() => createDirectories());
   }
   const { refresh: refreshSearch, data: searchData } = search;
   const snapshot = (() => {
-    const merged = new Map<string, ProjectEntry>();
-    if (searching) {
+    const merged = new Map(missingRoot ? [] : directories.discoveries);
+    if (searching && !missingRoot) {
       for (const entry of searchData?.entries ?? []) merged.set(entry.path, entry);
     }
     const reachableDirectories = new Set<string>();
@@ -284,13 +314,15 @@ export function useFileTreeEntries(input: {
         }
       }
     };
+    if (!missingRoot) visit([...directories.discoveries.values()]);
     visit((rootData?.entries ?? []).filter((entry) => !entry.path.includes("/")));
     return {
       entries: [...merged.values()],
       reachableDirectories,
-      searchResultPaths: searching
-        ? new Set((searchData?.entries ?? []).map((entry) => entry.path))
-        : null,
+      searchResultPaths:
+        searching && !missingRoot
+          ? new Set((searchData?.entries ?? []).map((entry) => entry.path))
+          : null,
     };
   })();
 
@@ -310,15 +342,21 @@ export function useFileTreeEntries(input: {
               ? searchData
               : directories.searchAtValidation.get(parent);
           // Search can discover paths added since a cached listing. A later listing wins.
-          const discovered =
-            searching &&
-            query === debouncedQuery &&
-            search.isSuccess &&
-            !search.isPending &&
-            searchData !== validatedSearch &&
-            searchData?.entries.some(
-              (item) => item.path === child || item.path.startsWith(`${child}/`),
+          const retained =
+            !(index === 0 && directories.rootListing !== rootData) &&
+            [...directories.discoveries.keys()].some(
+              (path) => path === child || path.startsWith(`${child}/`),
             );
+          const discovered =
+            retained ||
+            (searching &&
+              query === debouncedQuery &&
+              search.isSuccess &&
+              !search.isPending &&
+              searchData !== validatedSearch &&
+              searchData?.entries.some(
+                (item) => item.path === child || item.path.startsWith(`${child}/`),
+              ));
           if (!discovered) return true;
         }
         if (entry && (directory || index < parts.length - 1) && entry.kind !== "directory")
@@ -328,6 +366,26 @@ export function useFileTreeEntries(input: {
     };
     const reconciled = (() => {
       const current = directories;
+      const discoveries = new Map(current.discoveries);
+      if (current.rootListing !== rootData && !rootData.truncated) {
+        for (const path of discoveries.keys()) {
+          if (contradictsListing(path, "", rootData.entries)) discoveries.delete(path);
+        }
+      }
+      if (searching && query === debouncedQuery && search.isSuccess && !search.isPending) {
+        const ownedPaths = [
+          ...current.entries.keys(),
+          ...current.expandedPaths,
+          current.selectedPath,
+        ];
+        for (const entry of searchData?.entries ?? []) {
+          if (
+            ownedPaths.some((path) => path === entry.path || path?.startsWith(`${entry.path}/`)) &&
+            !deleted(entry.path, entry.kind === "directory")
+          )
+            discoveries.set(entry.path, entry);
+        }
+      }
       const entries = new Map([...current.entries].filter(([path]) => !deleted(path, true)));
       const errors = new Map([...current.errors].filter(([path]) => !deleted(path, true)));
       const expandedPaths = new Set(
@@ -342,7 +400,9 @@ export function useFileTreeEntries(input: {
         errors.size === current.errors.size &&
         expandedPaths.size === current.expandedPaths.size &&
         selectedPath === current.selectedPath &&
-        current.rootListing === rootData
+        current.rootListing === rootData &&
+        discoveries.size === current.discoveries.size &&
+        [...discoveries].every(([path, entry]) => current.discoveries.get(path) === entry)
       )
         return current;
       const completeDirectories = new Set(
@@ -351,6 +411,7 @@ export function useFileTreeEntries(input: {
       return {
         ...current,
         rootListing: rootData,
+        discoveries,
         searchAtValidation: new Map(
           [...current.searchAtValidation].filter(([path]) => path === "" || entries.has(path)),
         ).set(
@@ -376,7 +437,7 @@ export function useFileTreeEntries(input: {
     const requests = getRequests(requestsByTarget.current, target);
     if (!requests.active) return Promise.resolve();
     refreshRoot();
-    if (searching) refreshSearch();
+    if (searching && !missingRoot) refreshSearch();
     const paths = new Set(
       [...directories.entries.keys(), ...directories.errors.keys(), ...directories.loading].filter(
         (path) => snapshot.reachableDirectories.has(path),
@@ -403,7 +464,7 @@ export function useFileTreeEntries(input: {
       cwd !== null && environmentId !== null
         ? [
             projectEnvironment.listEntries({ environmentId, input: { cwd, directoryPath: "" } }),
-            ...(searching
+            ...(searching && !missingRoot
               ? [
                   projectEnvironment.searchEntries({
                     environmentId,
@@ -427,6 +488,7 @@ export function useFileTreeEntries(input: {
   };
 
   const revealSelection = (path: string | null) => {
+    if (missingRoot) return;
     updateDirectories((current) => {
       const previous = current.revealedSelection;
       const handled = previous.path === path ? previous.ancestors : new Set<string>();
@@ -475,10 +537,11 @@ export function useFileTreeEntries(input: {
       [...directories.errors].find(([path]) => snapshot.reachableDirectories.has(path))?.[1] ??
       null,
     isPending:
-      root.isPending ||
-      directories.loading.size > 0 ||
-      (searching && (query !== debouncedQuery || search.isPending)),
-    searchTruncated: searching && (search.data?.truncated ?? false),
+      !missingRoot &&
+      (root.isPending ||
+        directories.loading.size > 0 ||
+        (searching && (query !== debouncedQuery || search.isPending))),
+    searchTruncated: !missingRoot && searching && (search.data?.truncated ?? false),
     loadedDirectories: new Set(directories.entries.keys()),
     loadingDirectories: directories.loading,
     loadDirectory,

@@ -155,6 +155,7 @@ function setup(withBrowser = false) {
   const root = createRoot(document.createElement("div"));
   let current: ReturnType<Hook>;
   let renders = 0;
+  let controlledSelection: string | undefined;
   function Probe(input: Input) {
     if (++renders > 100 && withBrowser) throw new Error("File tree did not settle");
     const result = useFileTreeEntries(input);
@@ -165,7 +166,7 @@ function setup(withBrowser = false) {
       <browserExports.FileTreeBrowser
         key={JSON.stringify([input.environmentId, input.cwd])}
         {...result}
-        selectedPath={result.selectedPath}
+        selectedPath={controlledSelection ?? result.selectedPath}
         searchQuery=""
         onLoadDirectory={result.loadDirectory}
         onRefresh={result.refresh}
@@ -178,6 +179,9 @@ function setup(withBrowser = false) {
     requests,
     rootQuery,
     searchQuery,
+    controlSelection(path: string) {
+      controlledSelection = path;
+    },
     updateView(expanded: string[], selected: string) {
       renders = 0;
       act(() => {
@@ -373,6 +377,32 @@ describe("file tree workspace state", () => {
     screen.render();
     expect([...screen.current.expandedPaths]).toEqual([]);
     expect(screen.current.selectedPath).toBeNull();
+    if (action === "delete") {
+      screen.controlSelection("src/nested/file.ts");
+      screen.searchQuery.data = {
+        entries: [
+          { kind: "directory", path: "src" },
+          { kind: "directory", path: "src/nested" },
+          { kind: "file", path: "src/nested/file.ts" },
+        ],
+        truncated: false,
+      };
+      screen.rootQuery.failure = new ProjectListEntriesError({
+        cwd: "/first",
+        failure: "workspace_root_not_found",
+      });
+      screen.rootQuery.error = screen.rootQuery.failure.message;
+      const requestCount = screen.requests.length;
+      for (const error of [null, "Search unavailable"]) {
+        screen.searchQuery.error = error;
+        screen.render({ searchQuery: "nested" });
+        expect(screen.current.entries).toEqual([]);
+        expect([...screen.current.expandedPaths]).toEqual([]);
+        expect([...screen.current.loadedDirectories]).toEqual([]);
+        expect(screen.current.isPending).toBe(false);
+        expect(screen.requests).toHaveLength(requestCount);
+      }
+    }
   });
 
   it.each(["return", "missing root"])(
@@ -436,10 +466,23 @@ describe("file tree workspace state", () => {
       expect(screen.current.selectedPath).toBe(`${path}/file.ts`);
       expect([...screen.current.expandedPaths]).toEqual(expanded);
       screen.load(path);
-      await screen.succeed(1, [{ kind: "file", path: `${path}/file.ts` }]);
+      await screen.succeed(1, [
+        { kind: "file", path: `${path}/file.ts` },
+        { kind: "file", path: `${path}/other.ts` },
+      ]);
       expect([...screen.current.loadedDirectories]).toEqual(["src", path]);
 
-      // A later parent listing wins over the unchanged search response.
+      for (const searchQuery of ["", "other"]) {
+        screen.searchQuery.data = { entries: [], truncated: false };
+        screen.render({ searchQuery });
+        expect(screen.current.selectedPath).toBe(`${path}/file.ts`);
+        expect([...screen.current.expandedPaths]).toEqual(expanded);
+        expect([...screen.current.loadedDirectories]).toEqual(["src", path]);
+        expect(screen.current.entries).toContainEqual({ kind: "file", path: `${path}/file.ts` });
+        expect(screen.current.entries).toContainEqual({ kind: "file", path: `${path}/other.ts` });
+      }
+
+      // A later parent listing wins over retained discovery evidence.
       if (path.includes("/")) {
         screen.load("src", true);
         await screen.succeed(2, []);
