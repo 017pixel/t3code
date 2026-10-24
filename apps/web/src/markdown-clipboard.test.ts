@@ -177,13 +177,13 @@ describe("serializeRenderedMarkdownFragment", () => {
     expect(serializeRenderedMarkdownFragment(asNode(container))).toBe("first line\nsecond line");
   });
 
-  it("keeps fences when a bare list item sits alongside the code block", () => {
+  it("keeps a bare list item that sits alongside the code block", () => {
     const container = new FakeElement("DIV").append(
       new FakeElement("UL").append(new FakeElement("LI")),
       renderedCodeBlock(["pnpm test"]),
     );
 
-    expect(serializeRenderedMarkdownFragment(asNode(container))).toBe("-\n\n```\npnpm test\n```");
+    expect(serializeRenderedMarkdownFragment(asNode(container))).toBe("-\n\npnpm test");
   });
 
   it("copies a command and the prose after it as shown, without code fences", () => {

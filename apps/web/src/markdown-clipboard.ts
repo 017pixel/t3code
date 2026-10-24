@@ -60,22 +60,18 @@ function codeFenceFor(code: string): string {
   return "`".repeat(Math.max(3, longestRun + 1));
 }
 
-function resolveCodeBlockLanguage(pre: Element): string | null {
-  const declared =
-    pre.closest("[data-language]")?.getAttribute("data-language") ??
-    /(?:^|\s)language-(\S+)/.exec(pre.querySelector("code")?.className ?? "")?.[1] ??
-    null;
-  return declared && declared !== "text" ? declared : null;
-}
-
 export function serializeCodeBlockToMarkdown(source: string, language: string | null): string {
   const code = source.replace(/\n$/, "");
   const fence = codeFenceFor(code);
   return `${fence}${language ?? ""}\n${code}\n${fence}\n\n`;
 }
 
+// Brackets copied code so tidyMarkdown leaves its whitespace alone. Code is
+// copied as shown, without fences; DOM text from rendered markdown carries no NUL.
+const CODE_BOUNDARY = "\u0000";
+
 function serializeCodeBlock(pre: Element): string {
-  return serializeCodeBlockToMarkdown(pre.textContent ?? "", resolveCodeBlockLanguage(pre));
+  return `${CODE_BOUNDARY}${(pre.textContent ?? "").replace(/\n$/, "")}${CODE_BOUNDARY}\n\n`;
 }
 
 function serializeTableCell(cell: Element): string {
@@ -309,13 +305,19 @@ function soleCodeBlock(container: Node): Element | null {
 }
 
 function tidyMarkdown(markdown: string): string {
-  return markdown
-    .split(/(```[\s\S]*?(?:```|$))/)
-    .map((part, index) =>
-      index % 2 === 1 ? part : part.replace(/[ \t]+(?=\n)/g, "").replace(/\n{3,}/g, "\n\n"),
-    )
-    .join("")
-    .trim();
+  // Odd parts are code, kept verbatim, so a selection that starts or ends inside
+  // code keeps that code's leading and trailing whitespace.
+  const parts = markdown.split(CODE_BOUNDARY);
+  const last = parts.length - 1;
+  return parts
+    .map((part, index) => {
+      if (index % 2 === 1) return part;
+      let prose = part.replace(/[ \t]+(?=\n)/g, "").replace(/\n{3,}/g, "\n\n");
+      if (index === 0) prose = prose.trimStart();
+      if (index === last) prose = prose.trimEnd();
+      return prose;
+    })
+    .join("");
 }
 
 export function serializeRenderedMarkdownFragment(container: Node): string {
