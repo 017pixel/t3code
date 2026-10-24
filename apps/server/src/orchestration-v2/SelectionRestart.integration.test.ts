@@ -1002,3 +1002,140 @@ it.live.each(
       }),
     ),
 );
+
+it.live("a refused queued send fails alone, and the queue behind it keeps running", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const name = "background-work-queue";
+      const cwd = yield* checkpointWorkspace(name);
+      const threadId = ThreadId.make(`thread:${name}`);
+      const targetId = ProviderInstanceId.make("codex-background-target");
+      const state = yield* Ref.make<RestartAdapterState>({
+        activeTurn: null,
+        opened: [],
+        started: [],
+        closedSessionCount: 0,
+        failedReplacementOpen: true,
+      });
+      const sessions: Array<ProviderAdapter.ProviderAdapterV2SessionRuntime> = [];
+      const adapters = [providerInstanceId, targetId].map((instanceId) => {
+        const base = makeRestartAdapter(state, exclusiveCapabilities, instanceId);
+        return {
+          ...base,
+          openSession: (input) =>
+            base.openSession(input).pipe(
+              Effect.map((session) => {
+                const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
+                  ...session,
+                  backgroundTasksEndWithProcess: true,
+                  hasPendingBackgroundWork: Effect.succeed(true),
+                  hasPendingBackgroundWorkForThread: () => Effect.succeed(false),
+                };
+                sessions.push(runtime);
+                return runtime;
+              }),
+            ),
+        } satisfies ProviderAdapter.ProviderAdapterV2["Service"];
+      });
+      const layerRegistry = Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistryV2, {
+        get: (instanceId) =>
+          Effect.succeed(adapters.find((adapter) => adapter.instanceId === instanceId)!),
+        list: () => Effect.succeed([providerInstanceId, targetId]),
+        getMetadata: () =>
+          Effect.succeed({
+            driver,
+            continuationKey: "codex:home:/shared",
+            enabled: true,
+            capabilities: exclusiveCapabilities,
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`${name}:create`),
+          threadId,
+          projectId: ProjectId.make(`project:${name}`),
+          title: name,
+          modelSelection: initialSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: cwd,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const send = (
+          id: string,
+          dispatchMode: { readonly type: "start_immediately" | "queue_after_active" },
+          modelSelection?: ModelSelection,
+        ) =>
+          orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`${name}:${id}`),
+            threadId,
+            messageId: MessageId.make(`${name}:${id}`),
+            text: id,
+            attachments: [],
+            ...(modelSelection === undefined ? {} : { modelSelection }),
+            dispatchMode,
+            createdBy: "user",
+            creationSource: "web",
+          });
+        // A held queue never starts another turn, so holding ends the wait too.
+        const runningTurnOrHeldQueue = () =>
+          orchestrator.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                (event.type === "provider-turn.updated" && event.payload.status === "running") ||
+                (event.type === "run.updated" && event.payload.queueHeld === true),
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+        const firstRunning = yield* runningTurnOrHeldQueue();
+        yield* send("first", { type: "start_immediately" });
+        yield* worker.drain();
+        yield* Fiber.join(firstRunning);
+        yield* worker.drain();
+        const before = yield* orchestrator.getThreadProjection(threadId);
+        const providerThread = before.providerThreads.find(
+          (thread) => thread.id === before.thread.activeProviderThreadId,
+        )!;
+
+        const targetSelection = { instanceId: targetId, model: initialSelection.model };
+        yield* send("other-1", { type: "queue_after_active" }, targetSelection);
+        yield* send("other-2", { type: "queue_after_active" }, targetSelection);
+        yield* send("same", { type: "queue_after_active" });
+        yield* worker.drain();
+
+        // Both sends to the other account are refused; the send that keeps
+        // the session starts on it.
+        const sameRunning = yield* runningTurnOrHeldQueue();
+        yield* sessions[0]!.interruptTurn({ providerThread } as never);
+        yield* Fiber.join(sameRunning);
+        yield* worker.drain();
+
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        const status = (id: string) =>
+          after.runs.find((run) => run.userMessageId === `${name}:${id}`)?.status;
+        assert.deepEqual(["other-1", "other-2", "same"].map(status), [
+          "failed",
+          "failed",
+          "running",
+        ]);
+        assert.isFalse(after.runs.some((run) => run.queueHeld === true));
+        assert.deepEqual(
+          after.providerSessions
+            .filter((session) => session.id === providerThread.providerSessionId)
+            .map((session) => session.status),
+          ["ready"],
+        );
+        assert.equal(sessions.length, 1);
+        assert.equal((yield* Ref.get(state)).closedSessionCount, 0);
+      }).pipe(Effect.provide(ProviderReplayHarness.layerWithRegistry({ name }, layerRegistry)));
+    }),
+  ),
+);

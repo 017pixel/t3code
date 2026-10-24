@@ -917,6 +917,9 @@ function lastDeliveredRunForProviderThread(
   );
 }
 
+const BACKGROUND_WORK_REFUSAL =
+  "Background work is still running in this thread, and this change would end it. Try again once it finishes, or stop the thread first.";
+
 const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(function* () {
   const checkpointService = yield* CheckpointServiceV2;
   const commandPolicy = yield* CommandPolicyV2;
@@ -1335,7 +1338,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       // Orchestrator refusals carry their user-facing reason as text.
       ...(typeof failureCause === "string" ? { message: failureCause } : {}),
       code: handoffUnsupported ? "context_handoff_unsupported" : "queued_start_failed",
-      class: handoffUnsupported ? "validation_error" : "unknown",
+      // Background work refuses only this start; the queue behind it may run.
+      class:
+        handoffUnsupported || failureCause === BACKGROUND_WORK_REFUSAL
+          ? "validation_error"
+          : "unknown",
     });
     yield* writeSystemEvents([
       ...(attempt !== undefined && rootNode !== undefined
@@ -2707,8 +2714,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     new OrchestratorDispatchError({
       commandId: command.commandId,
       commandType: command.type,
-      cause:
-        "Background work is still running in this thread, and this change would end it. Try again once it finishes, or stop the thread first.",
+      cause: BACKGROUND_WORK_REFUSAL,
     });
 
   const dispatchThreadMutation = Effect.fn("orchestrationV2.dispatch.threadMutation")(function* (
