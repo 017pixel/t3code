@@ -1,4 +1,4 @@
-import { useAuth } from "@clerk/react";
+import { useAuth, useClerk } from "@clerk/react";
 import { ManagedRelay, setManagedRelaySession } from "@t3tools/client-runtime/relay";
 import {
   reportAtomCommandResult,
@@ -6,7 +6,7 @@ import {
   settlePromise,
 } from "@t3tools/client-runtime/state/runtime";
 import * as Effect from "effect/Effect";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
 
 import { environmentCatalog } from "../connection/catalog";
 import { runtime } from "../lib/runtime";
@@ -32,6 +32,17 @@ export function ManagedRelayAuthProvider({ children }: { readonly children: Reac
   const { getToken, isLoaded, isSignedIn, userId } = useAuth({
     treatPendingAsSignedOut: false,
   });
+  const clerk = useClerk();
+  const clerkStatus = useSyncExternalStore(
+    (onChange) => {
+      clerk.on("status", onChange);
+      return () => clerk.off("status", onChange);
+    },
+    () => clerk.status,
+  );
+  // Clerk loads "degraded" from local state when its API is unreachable, often signed out,
+  // so only a "ready" load is Clerk's answer that no session exists.
+  const signedOutByClerkApi = !(isSignedIn && userId) && clerkStatus === "ready";
   const removeRelayEnvironments = useAtomCommand(environmentCatalog.removeRelayEnvironments, {
     reportFailure: false,
     reportDefect: false,
@@ -47,7 +58,9 @@ export function ManagedRelayAuthProvider({ children }: { readonly children: Reac
     let cancelled = false;
     const previousAccount = observedAccountRef.current;
     const nextAccount = isSignedIn && userId ? userId : null;
-    observedAccountRef.current = nextAccount;
+    // An unconfirmed sign-out stays unobserved so a later confirmed one still cleans up.
+    const resolved = nextAccount !== null || previousAccount !== undefined || signedOutByClerkApi;
+    observedAccountRef.current = resolved ? nextAccount : undefined;
 
     const queueAccountCleanup = () => {
       const previousTransition = accountTransitionRef.current ?? Promise.resolve();
@@ -71,8 +84,7 @@ export function ManagedRelayAuthProvider({ children }: { readonly children: Reac
 
     if (!isSignedIn || !userId) {
       deactivateManagedRelayAuthentication();
-      // Clerk also loads signed out offline, so only a sign-out seen in this session clears.
-      if (previousAccount !== undefined && previousAccount !== null) {
+      if (resolved && previousAccount !== null) {
         void queueAccountCleanup();
       }
     } else {
@@ -101,7 +113,7 @@ export function ManagedRelayAuthProvider({ children }: { readonly children: Reac
     return () => {
       cancelled = true;
     };
-  }, [getToken, isLoaded, isSignedIn, removeRelayEnvironments, userId]);
+  }, [getToken, isLoaded, isSignedIn, removeRelayEnvironments, signedOutByClerkApi, userId]);
 
   useEffect(() => () => deactivateManagedRelayAuthentication(), []);
 
