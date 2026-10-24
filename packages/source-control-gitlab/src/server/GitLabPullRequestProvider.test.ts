@@ -103,6 +103,79 @@ describe("getChangeRequest base freshness", () => {
   );
 });
 
+describe("merge request reads", () => {
+  const reference = { cwd: "/w", repository: "acme/web", host: "gitlab.com", number: 7 };
+  const detail = {
+    number: 7,
+    title: "Merge request 7",
+    url: "https://gitlab.com/acme/web/-/merge_requests/7",
+    author: null,
+    headBranch: "feat/page",
+    baseBranch: "main",
+    state: "open" as const,
+    isDraft: false,
+    mergeability: "mergeable" as const,
+    additions: 0,
+    deletions: 0,
+    createdAt: "2026-07-01T00:00:00Z",
+    updatedAt: "2026-07-02T00:00:00Z",
+    reviewRequestLogins: [],
+    labels: [],
+    body: "",
+    changedFiles: 1,
+    mergedAt: null,
+    closedAt: null,
+    reviewers: [],
+    checks: [],
+    viewerCanMerge: true,
+    reviewerIds: [],
+  };
+
+  const countingProvider = Effect.gen(function* () {
+    const calls = { detail: 0, mergeCapabilities: 0 };
+    const provider = yield* make.pipe(
+      Effect.provide(
+        Layer.mock(GitLabPullRequestCli.GitLabPullRequestCli)({
+          getMergeRequestDetail: (input) =>
+            Effect.sync(() => {
+              calls.detail += 1;
+              return { ...detail, number: input.number };
+            }),
+          getProjectMergeCapabilities: () =>
+            Effect.sync(() => {
+              calls.mergeCapabilities += 1;
+              return { merge: true, squash: true, rebase: true };
+            }),
+        }),
+      ),
+    );
+    return { provider, calls };
+  });
+
+  it.effect("asks for a project's merge methods once across its merge requests", () =>
+    Effect.gen(function* () {
+      const { provider, calls } = yield* countingProvider;
+
+      yield* provider.getChangeRequest(reference);
+      yield* provider.getChangeRequest(reference);
+      yield* provider.getChangeRequest({ ...reference, number: 8 });
+
+      expect(calls.mergeCapabilities).toBe(1);
+    }),
+  );
+
+  it.effect("answers checks from the merge request the detail just read", () =>
+    Effect.gen(function* () {
+      const { provider, calls } = yield* countingProvider;
+
+      yield* provider.getChangeRequest(reference);
+      yield* provider.getChangeRequestChecks(reference);
+
+      expect(calls.detail).toBe(1);
+    }),
+  );
+});
+
 describe("optional activity reads", () => {
   const reference = { cwd: "/w", repository: "acme/web", host: "gitlab.com", number: 7 };
   const comment = {
