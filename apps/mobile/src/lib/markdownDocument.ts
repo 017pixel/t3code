@@ -175,17 +175,14 @@ function transformNativeMarkdown(
     for (const [, code] of markdown.matchAll(INLINE_CODE_SPAN)) {
       if (fileLink.test(code!.trim())) {
         linkFiles = true;
-        // File rewrites expose pipes that can change the next pass's table structure.
-        // Preserve that ordering only for these rare candidates, including after earlier files.
-        if (breakTables && code!.includes("|")) {
-          return markdownWithTableBreaks(markdownWithInlineFileLinks(markdown, fileLink));
-        }
-        if (!breakTables) break;
+        break;
       }
     }
   }
   if (!linkFiles && !breakTables) return markdown;
   const edits: MarkdownEdit[] = [];
+  const fileEdits: MarkdownEdit[] = [];
+  let rewritesPipe = false;
   const visit = (node: MarkdownNode) => {
     if (linkFiles && node.type === "inlineCode") {
       const start = node.position?.start.offset;
@@ -196,12 +193,16 @@ function transformNativeMarkdown(
         end !== undefined &&
         fileLink?.test(node.value) &&
         !/[<>]/.test(node.value)
-      )
-        edits.push({
+      ) {
+        const edit = {
           start,
           end,
           content: `[${escaped}](<${escaped}>)`,
-        });
+        };
+        edits.push(edit);
+        fileEdits.push(edit);
+        if (node.value.includes("|")) rewritesPipe = true;
+      }
     } else if (node.type !== "link" && node.type !== "linkReference" && "children" in node)
       node.children.forEach((child, index) => {
         const previous = node.children[index - 1];
@@ -227,6 +228,9 @@ function transformNativeMarkdown(
       });
   };
   visit(parser.parse(markdown));
+  // Rewritten pipes can change table structure, so preserve the original pass ordering.
+  if (breakTables && rewritesPipe)
+    return markdownWithTableBreaks(applyMarkdownEdits(markdown, fileEdits));
   return applyMarkdownEdits(markdown, edits);
 }
 

@@ -30,6 +30,14 @@ describe("inline code that names a file", () => {
       "escaped pipe after a normal file span",
       "Intro `./normal.ts`\n| `./a\\|b.ts` | c |\n|---|---|\n| a | b |",
     ],
+    [
+      "unmatched delimiter before escaped pipe in header",
+      "Intro `./normal.ts`\n| `x``./a\\|b.ts`` | c |\n|---|---|\n|a|b|",
+    ],
+    [
+      "unmatched delimiter before escaped pipe in body",
+      "Intro `./normal.ts`\n| a | c |\n|---|---|\n| `x``./a\\|b.ts`` | b |",
+    ],
     ["lazy quote header", "> Intro\n`./README.md` | file\n> | - | - |\n> | ok | yes |"],
     ["lazy list header", "- Intro\n`./README.md` | file\n  | - | - |\n  | ok | yes |"],
     [
