@@ -342,7 +342,14 @@ describe("pendingRequestsAtom", () => {
         requestId: id,
         responseMode: "message",
         questions: [
-          { id, header: "Next", question: "Next?", required: true, allowCustomAnswer: true },
+          {
+            id,
+            header: "Next",
+            question: "Next?",
+            options: [],
+            required: true,
+            allowCustomAnswer: true,
+          },
         ],
       })),
     };
