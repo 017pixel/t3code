@@ -910,6 +910,8 @@ it.effect.each([
         expect(names).toContain("probe");
         expect(names.some((name) => name.startsWith("preview_"))).toBe(preview);
         expect(names.some((name) => name.startsWith("device_"))).toBe(device);
+        expect(names.includes("preview_snapshot")).toBe(preview);
+        expect(names.includes("device_screenshot")).toBe(device);
       }),
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
