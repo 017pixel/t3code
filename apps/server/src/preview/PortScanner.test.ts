@@ -496,3 +496,45 @@ effectIt.effect("ignores a partial Windows netstat snapshot when one query exits
     expect(yield* scanner.scan()).toEqual([]);
   }).pipe(Effect.provide(layer));
 });
+
+// #15238: an agent's background server (Claude `run_in_background`, Codex background terminal)
+// runs under the provider CLI, not a T3 terminal, so it needs its own thread registration.
+type AgentProcessRegistration = {
+  readonly registerThreadProcesses?: (input: {
+    readonly threadId: string;
+    readonly processIds: ReadonlyArray<number>;
+  }) => Effect.Effect<void>;
+};
+
+effectIt.effect("attributes an agent-started background server to its thread", () => {
+  const agentServerPid = 4321;
+  const fetchFn = (() =>
+    Promise.resolve(
+      new Response("listing", { headers: { "content-type": "text/html" } }),
+    )) as typeof globalThis.fetch;
+  const layer = layerLsofScanner({
+    pid: () => agentServerPid,
+    fetch: fetchFn,
+    stdout: () => `p${agentServerPid}\ncpython3\nn*:${LSOF_TEST_PORT}\n`,
+  });
+
+  return Effect.gen(function* () {
+    const scanner: PortScanner.PortDiscovery["Service"] & AgentProcessRegistration =
+      yield* PortScanner.PortDiscovery;
+    yield* (
+      scanner.registerThreadProcesses?.({
+        threadId: "agent-thread",
+        processIds: [agentServerPid],
+      }) ?? Effect.void
+    );
+
+    const servers = yield* scanner.scan();
+    expect(
+      servers.map((server) => ({
+        port: server.port,
+        pid: server.pid,
+        threadId: server.terminal?.threadId ?? null,
+      })),
+    ).toEqual([{ port: LSOF_TEST_PORT, pid: agentServerPid, threadId: "agent-thread" }]);
+  }).pipe(Effect.provide(layer));
+});
