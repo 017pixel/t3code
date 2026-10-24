@@ -283,8 +283,7 @@ export function derivePendingBackgroundWork(input: {
 
   for (const item of pendingBackgroundTurnItems(input)) {
     const taskId = nativeTaskIdFromTurnItem(item);
-    // Rosters may key a row by its item id rather than its native id.
-    if (byTaskId.has(taskId) || byTaskId.has(String(item.id))) {
+    if (byTaskId.has(taskId)) {
       continue;
     }
 

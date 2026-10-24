@@ -1691,8 +1691,7 @@ const LIVE_RUN_STATUSES = new Set(["queued", "preparing", "starting", "running"]
  * Background work the provider still runs after an earlier run ended. It
  * stays listed while a later run is live; that live run's own items are its
  * foreground work, so they never count as background. The provider roster is
- * not run-tied, so it drops entries naming a live run's item by row or native id
- * (Muse keys its roster by item id, the row by child session id).
+ * not run-tied, so it drops entries naming a live run's item by native id.
  */
 export function deriveThreadPendingBackgroundTasks(projection: ThreadStructure | null) {
   if (projection === null) return [];
@@ -1706,7 +1705,6 @@ export function deriveThreadPendingBackgroundTasks(projection: ThreadStructure |
   const foregroundTaskIds = new Set<string>();
   for (const item of projection.turnItems) {
     if (item.runId === null || !liveRunIds.has(item.runId)) continue;
-    foregroundTaskIds.add(item.id);
     if (item.nativeItemRef?.nativeId) foregroundTaskIds.add(item.nativeItemRef.nativeId);
   }
   const latestRun =

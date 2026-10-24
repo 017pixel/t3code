@@ -1680,8 +1680,21 @@ describe("MuseAdapterV2", () => {
           role: "general-purpose",
         },
       });
+      const roster = yield* harness.takeEvent(
+        "provider_thread.updated",
+        (event) => (event.providerThread.pendingBackgroundTasks?.length ?? 0) > 0,
+      );
       const created = yield* harness.takeEvent("app_thread.created");
       const childThreadId = created.appThread.id;
+      const row = yield* harness.takeEvent(
+        "turn_item.updated",
+        (event) => event.turnItem.type === "subagent",
+      );
+      // Clients drop roster entries whose task is a live run's own row.
+      assert.deepStrictEqual(
+        roster.providerThread.pendingBackgroundTasks?.map((task) => task.taskId),
+        [row.turnItem.nativeItemRef?.nativeId],
+      );
       yield* fake.emit("item/updated", {
         turnId: nativeId,
         item: {

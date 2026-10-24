@@ -1285,8 +1285,7 @@ describe("deriveThreadPendingBackgroundTasks", () => {
   );
 
   it("does not list a live run's child from the provider roster as background", () => {
-    // The roster is not run-tied, and Muse keys it by item id while the child's row uses the
-    // child session id, so the live run's child would reappear here.
+    // The roster is not run-tied; Muse keys it by the child session id its rows carry.
     expect(
       deriveThreadPendingBackgroundTasks(
         projection({
@@ -1296,28 +1295,20 @@ describe("deriveThreadPendingBackgroundTasks", () => {
               id: "provider-thread-1",
               providerInstanceId: base.thread.providerInstanceId,
               pendingBackgroundTasks: [
-                { taskId: "item-child-1", kind: "subagent" },
-                { taskId: "item-child-2", kind: "subagent" },
+                { taskId: "child-session-1", kind: "subagent" },
+                { taskId: "child-session-2", kind: "subagent" },
               ],
             },
           ],
           turnItems: [
-            {
-              ...item(1, "subagent", "session-child-1", ""),
-              id: TurnItemId.make("item-child-1"),
-              prompt: "child 1",
-            },
-            {
-              ...item(2, "subagent", "session-child-2", ""),
-              id: TurnItemId.make("item-child-2"),
-              prompt: "child 2",
-            },
+            { ...item(1, "subagent", "child-session-1", ""), prompt: "child 1" },
+            { ...item(2, "subagent", "child-session-2", ""), prompt: "child 2" },
           ],
         }),
       ),
     ).toEqual([
       {
-        taskId: "item-child-1",
+        taskId: "child-session-1",
         kind: "subagent",
         providerInstanceId: base.thread.providerInstanceId,
       },
