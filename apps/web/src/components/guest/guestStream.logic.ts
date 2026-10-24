@@ -179,6 +179,7 @@ export function deriveGuestActivity(runs: ReadonlyArray<GuestRun>): GuestActivit
             startedAt: run.startedAt,
             completedAt: run.completedAt,
             assistantMessageId: null,
+            ...(run.turnEnded ? { turnEnded: true } : {}),
           },
     workStartedAt: working?.workStartedAt ?? null,
   };

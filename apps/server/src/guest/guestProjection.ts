@@ -347,7 +347,40 @@ export function projectTurnItemForGuest(
   return project(wire, guestBase(wire, runId), roots);
 }
 
-export function projectRunForGuest(run: OrchestrationV2Run): GuestRun {
+type GuestProviderTurn = Pick<
+  OrchestrationV2ThreadProjection["providerTurns"][number],
+  "runAttemptId" | "ordinal" | "status"
+>;
+
+const ACTIVITY_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
+  "preparing",
+  "starting",
+  "running",
+  "waiting",
+]);
+
+/**
+ * Whether the provider finished the run's current turn, as the owner's run summary reports it,
+ * so the guest's timeline stops showing Thinking while the checkpoint is captured.
+ */
+export function guestRunTurnEnded(
+  run: Pick<OrchestrationV2Run, "status" | "activeAttemptId">,
+  providerTurns: Iterable<GuestProviderTurn>,
+): boolean {
+  if (!ACTIVITY_RUN_STATUSES.has(run.status) || run.activeAttemptId === null) return false;
+  let latest: GuestProviderTurn | null = null;
+  for (const turn of providerTurns) {
+    if (
+      turn.runAttemptId === run.activeAttemptId &&
+      (latest === null || turn.ordinal > latest.ordinal)
+    ) {
+      latest = turn;
+    }
+  }
+  return latest !== null && latest.status !== "pending" && latest.status !== "running";
+}
+
+export function projectRunForGuest(run: OrchestrationV2Run, turnEnded: boolean): GuestRun {
   return {
     id: run.id,
     ordinal: run.ordinal,
@@ -356,6 +389,7 @@ export function projectRunForGuest(run: OrchestrationV2Run): GuestRun {
     startedAt: run.startedAt === null ? null : DateTime.formatIso(run.startedAt),
     completedAt: run.completedAt === null ? null : DateTime.formatIso(run.completedAt),
     workStartedAt: DateTime.formatIso(orchestrationV2RunWorkStartedAt(run)),
+    turnEnded,
   };
 }
 
@@ -370,7 +404,7 @@ export const isGuestVisibleRun = (
  * thread.
  */
 export function projectSnapshotForGuest(
-  projection: Pick<OrchestrationV2ThreadProjection, "runs" | "visibleTurnItems">,
+  projection: Pick<OrchestrationV2ThreadProjection, "runs" | "visibleTurnItems" | "providerTurns">,
   historyStartRunOrdinal: number,
   roots: GuestPathRoots,
 ): { readonly runs: ReadonlyArray<GuestRun>; readonly items: ReadonlyArray<GuestTurnItem> } {
@@ -382,7 +416,12 @@ export function projectSnapshotForGuest(
     const item = projectTurnItemForGuest(entry.item, roots);
     return item === null ? [] : [item];
   });
-  return { runs: runs.map(projectRunForGuest), items };
+  return {
+    runs: runs.map((run) =>
+      projectRunForGuest(run, guestRunTurnEnded(run, projection.providerTurns)),
+    ),
+    items,
+  };
 }
 
 export function guestShareView(thread: OrchestrationV2AppThread): GuestShareView | null {

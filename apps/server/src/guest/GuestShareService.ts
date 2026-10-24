@@ -12,6 +12,7 @@ import {
   type OrchestrationV2AppThread,
   type RunId,
   ThreadId,
+  type OrchestrationV2Run,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
@@ -44,6 +45,7 @@ import {
   guestPathRoots,
   guestShareView,
   isGuestVisibleRun,
+  guestRunTurnEnded,
   projectRunForGuest,
   projectSnapshotForGuest,
   projectTurnItemForGuest,
@@ -340,6 +342,15 @@ const make = Effect.gen(function* () {
     let roots = guestPathRoots([thread.worktreePath, projectRoot], home);
     const guestSnapshot = projectSnapshotForGuest(projection, share.historyStartRunOrdinal, roots);
     const visibleRunIds = new Set<RunId>(guestSnapshot.runs.map((run) => run.id));
+    // Kept to re-send a run when its provider turn ends, which arrives as its own event.
+    const visibleRuns = new Map(
+      projection.runs.filter((run) => visibleRunIds.has(run.id)).map((run) => [run.id, run]),
+    );
+    const providerTurns = new Map(projection.providerTurns.map((turn) => [turn.id, turn]));
+    const guestRun = (run: OrchestrationV2Run): GuestStreamEvent => ({
+      type: "run",
+      run: projectRunForGuest(run, guestRunTurnEnded(run, providerTurns.values())),
+    });
     const initialView = guestShareView(thread);
     if (initialView === null) return yield* inactive;
 
@@ -354,7 +365,19 @@ const make = Effect.gen(function* () {
             case "run.updated": {
               if (!isGuestVisibleRun(event.payload, share.historyStartRunOrdinal)) return [];
               visibleRunIds.add(event.payload.id);
-              return [{ type: "run", run: projectRunForGuest(event.payload) }];
+              visibleRuns.set(event.payload.id, event.payload);
+              return [guestRun(event.payload)];
+            }
+            case "provider-turn.updated": {
+              providerTurns.set(event.payload.id, event.payload);
+              const attemptId = event.payload.runAttemptId;
+              const run =
+                attemptId === null
+                  ? undefined
+                  : [...visibleRuns.values()].find(
+                      (candidate) => candidate.activeAttemptId === attemptId,
+                    );
+              return run === undefined ? [] : [guestRun(run)];
             }
             case "turn-item.updated": {
               const runId = event.payload.runId;

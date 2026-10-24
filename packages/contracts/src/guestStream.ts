@@ -225,6 +225,8 @@ export const GuestRun = Schema.Struct({
   completedAt: Schema.NullOr(IsoDateTime),
   /** When the agent began working, for the elapsed time on the working row. */
   workStartedAt: IsoDateTime,
+  /** The provider finished its reply; the run may still be capturing a checkpoint. */
+  turnEnded: Schema.Boolean,
 });
 export type GuestRun = typeof GuestRun.Type;
 

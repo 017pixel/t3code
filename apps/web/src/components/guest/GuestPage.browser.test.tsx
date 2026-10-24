@@ -95,6 +95,7 @@ const snapshot = encodeEvent({
       startedAt: "2026-10-23T10:00:00.000Z",
       completedAt: "2026-10-23T10:00:05.000Z",
       workStartedAt: "2026-10-23T10:00:00.000Z",
+      turnEnded: false,
     },
   ],
   items,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
+  RunAttemptId,
   GuestStreamEvent,
   type GuestTurnItem,
   type OrchestrationV2ProjectedTurnItem,
@@ -12,6 +13,7 @@ import * as Schema from "effect/Schema";
 import {
   coalesceGuestEvents,
   guestPathRoots,
+  guestRunTurnEnded,
   projectSnapshotForGuest,
   projectTurnItemForGuest,
 } from "./guestProjection.ts";
@@ -452,6 +454,7 @@ describe("projectSnapshotForGuest", () => {
     const snapshot = projectSnapshotForGuest(
       {
         runs: [run("run:before", 1), run("run:shared", 2)],
+        providerTurns: [],
         visibleTurnItems: [
           row("before", "run:before"),
           row("inherited", "run:shared", "inherited"),
@@ -471,6 +474,7 @@ describe("projectSnapshotForGuest", () => {
       startedAt: "1970-01-01T00:00:00.000Z",
       completedAt: null,
       workStartedAt: "1970-01-01T00:00:00.000Z",
+      turnEnded: false,
     });
   });
 });
@@ -492,5 +496,23 @@ describe("coalesceGuestEvents", () => {
         reply("a", "late"),
       ]),
     ).toEqual([reply("a", "Hello"), reply("b", "New"), { type: "ended" }]);
+  });
+});
+
+describe("guestRunTurnEnded", () => {
+  const attempt = RunAttemptId.make("attempt-1");
+  const turn = (ordinal: number, status: "running" | "completed") => ({
+    runAttemptId: attempt,
+    ordinal,
+    status,
+  });
+
+  it("reports a finished reply while the run is still waiting on its checkpoint", () => {
+    const waiting = { status: "waiting", activeAttemptId: attempt } as const;
+    expect(guestRunTurnEnded(waiting, [turn(1, "completed")])).toBe(true);
+    expect(guestRunTurnEnded(waiting, [turn(1, "completed"), turn(2, "running")])).toBe(false);
+    expect(guestRunTurnEnded({ ...waiting, status: "completed" }, [turn(1, "completed")])).toBe(
+      false,
+    );
   });
 });

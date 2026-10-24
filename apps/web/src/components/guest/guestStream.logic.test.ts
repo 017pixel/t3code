@@ -79,6 +79,7 @@ const run = (id: string, ordinal: number, status: GuestRun["status"]): GuestRun 
   startedAt: status === "queued" ? null : "2026-10-23T10:00:01.000Z",
   completedAt: null,
   workStartedAt: "2026-10-23T10:00:02.000Z",
+  turnEnded: false,
 });
 
 const snapshot = (
@@ -191,6 +192,11 @@ describe("deriveGuestActivity", () => {
     expect(activity.isWorking).toBe(true);
     expect(activity.run).toMatchObject({ runId: "run-2", status: "running" });
     expect(activity.workStartedAt).toBe("2026-10-23T10:00:02.000Z");
+  });
+
+  it("passes on that the reply ended while the run still captures its checkpoint", () => {
+    const capturing = { ...run("run-1", 1, "waiting"), turnEnded: true };
+    expect(deriveGuestActivity([capturing]).run).toMatchObject({ turnEnded: true });
   });
 
   it("shows the newest run that left the queue when nothing works", () => {
