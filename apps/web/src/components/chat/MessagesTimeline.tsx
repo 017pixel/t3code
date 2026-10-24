@@ -151,8 +151,15 @@ function TimelineListFooter({
   );
 }
 
+interface DisclosureReveal {
+  readonly trigger: Element;
+  readonly anchorKey: string;
+  readonly contentRowId: string | null;
+}
+
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
 const DISCLOSURE_REVEAL_MARGIN = 8;
+const DISCLOSURE_REVEAL_FOLLOW_MS = 3000;
 const TIMELINE_MAINTAIN_SCROLL_AT_END = {
   animated: false,
   on: {
@@ -456,35 +463,54 @@ const ConversationTimeline = memo(function ConversationTimeline({
   // The disclosure header the user just activated. Expanded content can be hidden
   // under the composer, so the settle scrolls it into view without losing the header.
   const lastDisclosureTriggerRef = useRef<Element | null>(null);
-  const disclosureRevealRef = useRef<{
-    trigger: Element;
-    anchorKey: string;
-    contentRowId: string | null;
-  } | null>(null);
+  const disclosureRevealRef = useRef<DisclosureReveal | null>(null);
+  const stopDisclosureRevealRef = useRef<(() => void) | null>(null);
+  const stopDisclosureReveal = () => {
+    stopDisclosureRevealRef.current?.();
+    stopDisclosureRevealRef.current = null;
+  };
+  const contentInsetEndAdjustmentRef = useRef(contentInsetEndAdjustment);
+  useEffect(() => {
+    contentInsetEndAdjustmentRef.current = contentInsetEndAdjustment;
+  }, [contentInsetEndAdjustment]);
   useEffect(() => {
     if (!timelineViewportElement) return;
     const recordTrigger = (event: Event) => {
       lastDisclosureTriggerRef.current =
         event.target instanceof Element ? event.target.closest("[aria-expanded]") : null;
     };
+    // Any direct scroll or input hands the viewport back to the user, as does unmounting.
+    const userTakesOver = () => {
+      stopDisclosureRevealRef.current?.();
+      stopDisclosureRevealRef.current = null;
+    };
+    const takeoverEvents = ["wheel", "touchstart", "pointerdown", "keydown"] as const;
+    for (const type of takeoverEvents) {
+      timelineViewportElement.addEventListener(type, userTakesOver, {
+        capture: true,
+        passive: true,
+      });
+    }
     timelineViewportElement.addEventListener("click", recordTrigger, true);
     timelineViewportElement.addEventListener("keydown", recordTrigger, true);
     return () => {
+      userTakesOver();
+      for (const type of takeoverEvents) {
+        timelineViewportElement.removeEventListener(type, userTakesOver, true);
+      }
       timelineViewportElement.removeEventListener("click", recordTrigger, true);
       timelineViewportElement.removeEventListener("keydown", recordTrigger, true);
     };
   }, [timelineViewportElement]);
 
-  const revealDisclosureContent = () => {
-    const reveal = disclosureRevealRef.current;
-    disclosureRevealRef.current = null;
+  const revealDisclosureContent = (reveal: DisclosureReveal) => {
     const element = listRef.current?.getScrollableNode();
-    if (!reveal || disclosurePinsEndRef.current || !element) return;
+    if (!element) return null;
     // A re-rendered header row can replace the clicked node; its row stands in.
     const trigger = reveal.trigger.isConnected
       ? reveal.trigger
       : element.querySelector(`[data-timeline-row-id="${CSS.escape(reveal.anchorKey)}"]`);
-    if (!trigger) return;
+    if (!trigger) return null;
     const triggerRect = trigger.getBoundingClientRect();
     let contentBottom = triggerRect.bottom;
     const controlsId = trigger.getAttribute("aria-controls");
@@ -499,10 +525,33 @@ const ConversationTimeline = memo(function ConversationTimeline({
     }
     const viewport = element.getBoundingClientRect();
     const overflow =
-      contentBottom - (viewport.bottom - contentInsetEndAdjustment - DISCLOSURE_REVEAL_MARGIN);
+      contentBottom -
+      (viewport.bottom - contentInsetEndAdjustmentRef.current - DISCLOSURE_REVEAL_MARGIN);
     const headroom = triggerRect.top - (viewport.top + DISCLOSURE_REVEAL_MARGIN);
     const delta = Math.min(overflow, headroom);
     if (delta > 0) element.scrollTop += delta;
+    return element;
+  };
+
+  const followDisclosureReveal = () => {
+    const reveal = disclosureRevealRef.current;
+    disclosureRevealRef.current = null;
+    if (!reveal || disclosurePinsEndRef.current) return;
+    const element = revealDisclosureContent(reveal);
+    if (!element) return;
+    // Fetched details, syntax highlighting, and row measurement can grow the content
+    // after the settle frames. Keep revealing briefly; the header still caps the scroll,
+    // and navigating away disconnects the header, which ends the follow.
+    const observed = [...element.children];
+    if (reveal.trigger.isConnected) observed.push(reveal.trigger);
+    const unobserve = observeResize(observed, () => {
+      if (!revealDisclosureContent(reveal)) stopDisclosureReveal();
+    });
+    const timeout = window.setTimeout(stopDisclosureReveal, DISCLOSURE_REVEAL_FOLLOW_MS);
+    stopDisclosureRevealRef.current = () => {
+      unobserve();
+      window.clearTimeout(timeout);
+    };
   };
 
   const scheduleDisclosureSettle = () => {
@@ -516,7 +565,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       pinDisclosureToEnd();
       disclosureSettleSecondFrameRef.current = requestAnimationFrame(() => {
         pinDisclosureToEnd();
-        revealDisclosureContent();
+        followDisclosureReveal();
         disclosurePinsEndRef.current = false;
         disclosureAnchorKeyRef.current = null;
         setDisclosureToggleSettling(false);
@@ -537,6 +586,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     collapsed = false,
     contentRowId: string | null = null,
   ) => {
+    stopDisclosureReveal();
     const trigger = lastDisclosureTriggerRef.current;
     lastDisclosureTriggerRef.current = null;
     disclosureRevealRef.current =
