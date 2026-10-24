@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off - Standalone repro CLI that seeds an isolated .t3 database before any server runs.
 import * as NodeSqlite from "node:sqlite";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
