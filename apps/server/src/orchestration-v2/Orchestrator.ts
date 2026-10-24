@@ -1332,6 +1332,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         : cause;
     const failure = makeProviderFailure({
       cause: failureCause,
+      // Orchestrator refusals carry their user-facing reason as text.
+      ...(typeof failureCause === "string" ? { message: failureCause } : {}),
       code: handoffUnsupported ? "context_handoff_unsupported" : "queued_start_failed",
       class: handoffUnsupported ? "validation_error" : "unknown",
     });
@@ -1972,6 +1974,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           session.status !== "stopped" &&
           session.status !== "error",
       );
+      // Fails this run rather than holding the queue: nothing would restart it
+      // when the work ends, and the user can send again then (#16000).
+      if (
+        sessionsToDetach.length > 0 &&
+        (yield* hasLiveBackgroundWork(
+          threadId,
+          new Set(sessionsToDetach.map((session) => session.id)),
+        ))
+      ) {
+        return yield* backgroundWorkRefusal({ commandId, type: "message.dispatch" });
+      }
       yield* writeSystemEvents(
         [
           ...(selectionChanged
@@ -2660,10 +2673,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .get(sessionId)
         .pipe(Effect.orElseSucceed(() => Option.none()));
       if (Option.isNone(session)) continue;
-      const { hasPendingBackgroundWork, hasPendingBackgroundWorkForThread } = session.value;
-      // A pooled session can serve other threads; only this thread's work counts.
+      const { hasPendingBackgroundWork, hasPendingBackgroundWorkForThread, providerSession } =
+        session.value;
+      // A pooled session can serve other threads, so only this thread's work
+      // counts. An exclusive session is all this thread's: ask the whole
+      // session, because Claude's thread probe sees shells but not its
+      // native background Agents.
+      const pooled =
+        providerSession.capabilities.sessions.supportsMultipleProviderThreadsPerSession;
       const probes =
-        hasPendingBackgroundWorkForThread === undefined
+        hasPendingBackgroundWorkForThread === undefined ||
+        (!pooled && hasPendingBackgroundWork !== undefined)
           ? hasPendingBackgroundWork === undefined
             ? []
             : [hasPendingBackgroundWork]
@@ -2679,6 +2699,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     return false;
   });
+
+  const backgroundWorkRefusal = (command: {
+    readonly commandId: CommandId;
+    readonly type: string;
+  }) =>
+    new OrchestratorDispatchError({
+      commandId: command.commandId,
+      commandType: command.type,
+      cause:
+        "Background work is still running in this thread, and this change would end it. Try again once it finishes, or stop the thread first.",
+    });
 
   const dispatchThreadMutation = Effect.fn("orchestrationV2.dispatch.threadMutation")(function* (
     command: Extract<
@@ -3054,11 +3085,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         mapDispatchError(command),
       ))
     ) {
-      return yield* new OrchestratorDispatchError({
-        commandId: command.commandId,
-        commandType: command.type,
-        cause: `Thread ${command.threadId} has background work running that this change would end. Try again once it finishes, or stop the thread first.`,
-      });
+      return yield* backgroundWorkRefusal(command);
     }
 
     const now = yield* DateTime.now;
@@ -5715,6 +5742,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           targetModelSelection: modelSelection,
         })
         .pipe(mapDispatchError(command))).transition.type === "restart_and_resume";
+    // Continuing the native thread on another account detaches the old
+    // session below, which would end its background work (#16000).
+    if (
+      canResumeAcrossInstances &&
+      activeProviderThread.providerSessionId !== null &&
+      (yield* hasLiveBackgroundWork(
+        command.threadId,
+        new Set([activeProviderThread.providerSessionId]),
+      ).pipe(mapDispatchError(command)))
+    ) {
+      return yield* backgroundWorkRefusal(command);
+    }
 
     if (
       pendingForkTransfer === undefined &&

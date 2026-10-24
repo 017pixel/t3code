@@ -16,8 +16,10 @@ import {
   type RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
@@ -775,15 +777,29 @@ it.live.each(["active", "idle", "selection-command", "pooled", "separate-home"] 
     ),
 );
 
-it.live.each(["runtime-mode", "provider-instance", "workspace"] as const)(
-  "keeps a session with running background work alive through a %s change",
-  (change) =>
+const backgroundWorkChanges = [
+  "runtime-mode",
+  "provider-instance",
+  "workspace",
+  "send-to-other-account",
+  "queued-send-to-other-account",
+] as const;
+
+it.live.each(
+  backgroundWorkChanges.flatMap((change) => [
+    { change, backgroundWork: true },
+    { change, backgroundWork: false },
+  ]),
+)(
+  "a $change change keeps a session alive only while it runs background work ($backgroundWork)",
+  ({ change, backgroundWork }) =>
     Effect.scoped(
       Effect.gen(function* () {
-        const name = `background-work-${change}`;
+        const name = `background-work-${change}-${backgroundWork}`;
         const cwd = yield* checkpointWorkspace(name);
         const otherCwd = yield* checkpointWorkspace(`${name}-other`);
         const threadId = ThreadId.make(`thread:${name}`);
+        // Same home, so a send continues the native thread on the new account.
         const targetId = ProviderInstanceId.make("codex-background-target");
         const state = yield* Ref.make<RestartAdapterState>({
           activeTurn: null,
@@ -792,6 +808,7 @@ it.live.each(["runtime-mode", "provider-instance", "workspace"] as const)(
           closedSessionCount: 0,
           failedReplacementOpen: true,
         });
+        const sessions: Array<ProviderAdapter.ProviderAdapterV2SessionRuntime> = [];
         // Claude runs background agents and shells inside its CLI process and
         // cannot switch runtime mode in place.
         const capabilities: OrchestrationV2ProviderCapabilities = {
@@ -807,12 +824,19 @@ it.live.each(["runtime-mode", "provider-instance", "workspace"] as const)(
             ...base,
             openSession: (input) =>
               base.openSession(input).pipe(
-                Effect.map((session) => ({
-                  ...session,
-                  backgroundTasksEndWithProcess: true as const,
-                  hasPendingBackgroundWork: Effect.succeed(true),
-                  hasPendingBackgroundWorkForThread: () => Effect.succeed(true),
-                })),
+                Effect.map((session) => {
+                  const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
+                    ...session,
+                    backgroundTasksEndWithProcess: true,
+                    // Claude's thread probe sees background shells but not
+                    // native background Agents, so a lone Agent shows only
+                    // session-wide.
+                    hasPendingBackgroundWork: Effect.succeed(backgroundWork),
+                    hasPendingBackgroundWorkForThread: () => Effect.succeed(false),
+                  };
+                  sessions.push(runtime);
+                  return runtime;
+                }),
               ),
           } satisfies ProviderAdapter.ProviderAdapterV2["Service"];
         });
@@ -820,10 +844,10 @@ it.live.each(["runtime-mode", "provider-instance", "workspace"] as const)(
           get: (instanceId) =>
             Effect.succeed(adapters.find((adapter) => adapter.instanceId === instanceId)!),
           list: () => Effect.succeed([providerInstanceId, targetId]),
-          getMetadata: (instanceId) =>
+          getMetadata: () =>
             Effect.succeed({
               driver,
-              continuationKey: `codex:home:/${instanceId}`,
+              continuationKey: "codex:home:/shared",
               enabled: true,
               capabilities,
             }),
@@ -831,8 +855,13 @@ it.live.each(["runtime-mode", "provider-instance", "workspace"] as const)(
         yield* Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-          const sink = yield* EventSink.EventSinkV2;
-          const selection = { ...initialSelection, model: "complete" };
+          const queued = change === "queued-send-to-other-account";
+          // A queued send waits behind a running turn.
+          const selection = {
+            ...initialSelection,
+            model: queued ? initialSelection.model : "complete",
+          };
+          const targetSelection = { instanceId: targetId, model: "complete" };
           yield* orchestrator.dispatch({
             type: "thread.create",
             commandId: CommandId.make(`${name}:create`),
@@ -847,9 +876,11 @@ it.live.each(["runtime-mode", "provider-instance", "workspace"] as const)(
             createdBy: "user",
             creationSource: "web",
           });
-          const completed = yield* orchestrator.streamDomainEvents.pipe(
-            Stream.filter(
-              (event) => event.type === "run.updated" && event.payload.status === "completed",
+          const started = yield* orchestrator.streamDomainEvents.pipe(
+            Stream.filter((event) =>
+              queued
+                ? event.type === "provider-turn.updated" && event.payload.status === "running"
+                : event.type === "run.updated" && event.payload.status === "completed",
             ),
             Stream.take(1),
             Stream.runDrain,
@@ -867,71 +898,105 @@ it.live.each(["runtime-mode", "provider-instance", "workspace"] as const)(
             creationSource: "web",
           });
           yield* worker.drain();
-          yield* Fiber.join(completed);
+          yield* Fiber.join(started);
           yield* worker.drain();
           const before = yield* orchestrator.getThreadProjection(threadId);
           const providerThread = before.providerThreads.find(
             (thread) => thread.id === before.thread.activeProviderThreadId,
           )!;
-          assert.deepEqual(
-            before.providerSessions
+          const sessionStatus = (projection: typeof before) =>
+            projection.providerSessions
               .filter((session) => session.id === providerThread.providerSessionId)
-              .map((session) => session.status),
-            ["ready"],
-          );
-          yield* sink.write({
-            events: [
-              {
-                id: EventId.make(`${name}:roster`),
-                type: "provider-thread.updated",
-                threadId,
-                occurredAt: yield* DateTime.now,
-                payload: {
-                  ...providerThread,
-                  pendingBackgroundTasks: [
-                    { taskId: "subagent", description: "Run 24 steps", kind: "subagent" },
-                    { taskId: "counter", description: "Append a counter", kind: "command" },
-                  ],
-                },
-              },
-            ],
-          });
+              .map((session) => session.status);
+          assert.deepEqual(sessionStatus(before), ["ready"]);
 
-          // Refusing or deferring the change are both acceptable; ending the
-          // provider process while its background work runs is not.
-          yield* Effect.exit(
-            orchestrator.dispatch(
-              change === "runtime-mode"
-                ? {
-                    type: "thread.runtime-mode.set",
+          const send = (dispatchMode: {
+            readonly type: "start_immediately" | "queue_after_active";
+          }) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(`${name}:change`),
+              threadId,
+              messageId: MessageId.make(`${name}:change`),
+              text: "Continue on the other account",
+              attachments: [],
+              modelSelection: targetSelection,
+              dispatchMode,
+              createdBy: "user",
+              creationSource: "web",
+            });
+          const result = yield* Effect.exit(
+            change === "runtime-mode"
+              ? orchestrator.dispatch({
+                  type: "thread.runtime-mode.set",
+                  commandId: CommandId.make(`${name}:change`),
+                  threadId,
+                  runtimeMode: "auto-accept-edits",
+                })
+              : change === "provider-instance"
+                ? orchestrator.dispatch({
+                    type: "provider.switch",
                     commandId: CommandId.make(`${name}:change`),
                     threadId,
-                    runtimeMode: "auto-accept-edits",
-                  }
-                : change === "provider-instance"
-                  ? {
-                      type: "provider.switch",
-                      commandId: CommandId.make(`${name}:change`),
-                      threadId,
-                      modelSelection: { instanceId: targetId, model: "complete" },
-                    }
-                  : {
+                    modelSelection: targetSelection,
+                  })
+                : change === "workspace"
+                  ? orchestrator.dispatch({
                       type: "thread.metadata.update",
                       commandId: CommandId.make(`${name}:change`),
                       threadId,
                       worktreePath: otherCwd,
-                    },
-            ),
+                    })
+                  : send({ type: queued ? "queue_after_active" : "start_immediately" }),
           );
           yield* worker.drain();
+          if (queued) {
+            assert.isTrue(Exit.isSuccess(result));
+            // The first turn ends, and the queued send would start on the
+            // other account.
+            const queuedRunLeftQueue = yield* orchestrator.streamDomainEvents.pipe(
+              Stream.filter(
+                (event) =>
+                  event.type === "run.updated" &&
+                  event.payload.userMessageId === `${name}:change` &&
+                  event.payload.status !== "queued",
+              ),
+              Stream.take(1),
+              Stream.runDrain,
+              Effect.forkScoped,
+            );
+            yield* sessions[0]!.interruptTurn({ providerThread } as never);
+            yield* Fiber.join(queuedRunLeftQueue);
+            yield* worker.drain();
+          }
 
           const after = yield* orchestrator.getThreadProjection(threadId);
-          assert.deepEqual(
-            after.providerSessions
-              .filter((session) => session.id === providerThread.providerSessionId)
-              .map((session) => session.status),
-            ["ready"],
-          );
+          if (!backgroundWork) {
+            assert.isTrue(Exit.isSuccess(result));
+            assert.notDeepEqual(sessionStatus(after), ["ready"]);
+            return;
+          }
+          const refusal =
+            "Background work is still running in this thread, and this change would end it. Try again once it finishes, or stop the thread first.";
+          if (queued) {
+            const failedRun = after.runs.find((run) => run.userMessageId === `${name}:change`);
+            assert.equal(failedRun?.status, "failed");
+            assert.isTrue(
+              after.turnItems.some(
+                (item) =>
+                  item.runId === failedRun?.id &&
+                  item.type === "error" &&
+                  item.failure.message === refusal,
+              ),
+            );
+          } else {
+            assert.isTrue(Exit.isFailure(result));
+            if (Exit.isFailure(result)) {
+              const error = Cause.squash(result.cause);
+              assert.equal((error as Orchestrator.OrchestratorDispatchError).cause, refusal);
+            }
+          }
+          assert.deepEqual(sessionStatus(after), ["ready"]);
           assert.equal((yield* Ref.get(state)).closedSessionCount, 0);
         }).pipe(Effect.provide(ProviderReplayHarness.layerWithRegistry({ name }, layerRegistry)));
       }),
