@@ -503,6 +503,58 @@ it.effect("a client caller targets any thread within its ceiling and cannot act 
   ),
 );
 
+it.effect("reorders an active thread through t3_thread_organize", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const result = yield* server
+      .callTool({
+        name: "t3_thread_organize",
+        arguments: { action: "reorder", threadId: "other-project-thread", orderKey: "a1" },
+      })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, clientScope("auto")),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+    expect(result.isError).toBe(false);
+    expect(reorderCommands).toEqual([
+      expect.objectContaining({
+        type: "thread.active.reorder",
+        threadId: "other-project-thread",
+        orderKey: "a1",
+      }),
+    ]);
+  }).pipe(
+    Effect.provide(
+      layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (id) =>
+              Effect.succeed(McpToolAccessTestkit.liveThreadShell(id, { runtimeMode: "auto" })),
+            getProjectThreadRecords: () =>
+              Effect.succeed({
+                thread: {
+                  id: ThreadId.make("other-project-thread"),
+                  projectId: "other-project",
+                  runtimeMode: "auto",
+                  interactionMode: "default",
+                  deletedAt: null,
+                },
+              } as never),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                reorderCommands.push(command);
+                return { sequence: 7, storedEvents: [] };
+              }),
+          }),
+        ),
+      ),
+    ),
+  ),
+);
+const reorderCommands: Array<unknown> = [];
+
 it.effect("a read-only client reads threads and is refused every write before it runs", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
