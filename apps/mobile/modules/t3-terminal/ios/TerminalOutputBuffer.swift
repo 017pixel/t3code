@@ -2,20 +2,27 @@ import Foundation
 
 // Keep only replay history for intentional surface recreation (font/theme changes).
 final class TerminalOutputBuffer {
-  private(set) var data = Data()
+  private var storage = Data()
+  private var retainedStart = 0
   private let limit = 512 * 1024
 
-  func write(_ text: String, reset: Bool) {
-    if reset {
-      data = Data(text.utf8)
+  var data: Data { storage.subdata(in: retainedStart..<storage.count) }
+
+  func write(_ incoming: Data, reset: Bool) {
+    if reset || incoming.count >= limit {
+      storage = incoming.subdata(in: max(0, incoming.count - limit)..<incoming.count)
+      retainedStart = 0
     } else {
-      data.append(contentsOf: text.utf8)
+      storage.append(incoming)
+      retainedStart = max(retainedStart, storage.count - limit)
     }
-    guard data.count > limit else { return }
-    var start = data.count - limit
-    while start < data.count && data[data.startIndex + start] & 0xC0 == 0x80 {
-      start += 1
+    while retainedStart < storage.count && storage[retainedStart] & 0xC0 == 0x80 {
+      retainedStart += 1
     }
-    data = Data(data.dropFirst(start))
+    // Compact once per history window, rather than copying 512 KiB on every append.
+    if retainedStart >= limit {
+      storage = storage.subdata(in: retainedStart..<storage.count)
+      retainedStart = 0
+    }
   }
 }

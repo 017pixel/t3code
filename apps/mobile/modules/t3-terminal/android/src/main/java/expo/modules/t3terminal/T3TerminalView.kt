@@ -405,12 +405,13 @@ class T3TerminalView(context: Context, appContext: AppContext) : ExpoView(contex
   fun writeOutput(data: String, reset: Boolean) {
     if (isCleanedUp) return
     val output = streamedOutput ?: TerminalOutputBuffer()
-    output.write(data, reset)
+    val bytes = data.toByteArray(Charsets.UTF_8)
+    output.write(bytes, reset)
     streamedOutput = output
     if (reset) {
       recreateTerminal()
     } else if (terminalHandle != 0L) {
-      feedOutput(data.toByteArray(Charsets.UTF_8))
+      feedOutput(bytes)
       renderSnapshot()
     }
   }

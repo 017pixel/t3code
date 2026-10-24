@@ -596,14 +596,15 @@ public final class T3TerminalView: ExpoView, UITextFieldDelegate {
 
   func writeOutput(_ data: String, reset: Bool) {
     let output = streamedOutput ?? TerminalOutputBuffer()
-    output.write(data, reset: reset)
+    let bytes = Data(data.utf8)
+    output.write(bytes, reset: reset)
     streamedOutput = output
     if reset {
       refreshSurface()
     } else if surface == nil {
       createSurfaceIfPossible()
     } else {
-      feedData(Data(data.utf8))
+      feedData(bytes)
     }
   }
 

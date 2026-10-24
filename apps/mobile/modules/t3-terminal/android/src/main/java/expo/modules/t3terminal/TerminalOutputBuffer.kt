@@ -27,8 +27,7 @@ internal class TerminalOutputBuffer {
       return result
     }
 
-  fun write(text: String, reset: Boolean) {
-    val incoming = text.toByteArray(Charsets.UTF_8)
+  fun write(incoming: ByteArray, reset: Boolean) {
     if (reset || incoming.size >= REPLAY_LIMIT) clear()
     var start = maxOf(0, incoming.size - REPLAY_LIMIT)
     while (start < incoming.size && incoming[start].toInt() and 0xC0 == 0x80) start += 1
