@@ -73,8 +73,8 @@ elif variant != 'zero':
     with (root / seed['longPath']).open('a', encoding='utf-8', newline='\n') as stream:
         stream.write('changed rename sentinel\n')
 stage()
-# Pin context so diff.context/diff.interHunkContext cannot change patch bytes; 3 is Git's default.
-args = ['diff', '--unified=3', '--inter-hunk-context=0', '--find-renames', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', '--minimal', '--patch', 'HEAD', '--', *owned]
+# Pin context and file order so diff.context/diff.interHunkContext/diff.orderFile cannot change patch bytes; 3 is Git's default.
+args = ['diff', '-O/dev/null', '--unified=3', '--inter-hunk-context=0', '--find-renames', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', '--minimal', '--patch', 'HEAD', '--', *owned]
 if variant.isdigit():
     target = int(variant)
     name = 'b-added-5.txt'
@@ -92,4 +92,4 @@ if variant.isdigit():
     stage()
     assert len(git(*args)) == target
 patch = git(*args)
-print(json.dumps({'schema': 1, 'variant': variant, 'baseline': git('rev-parse', 'HEAD').decode().strip(), 'seedSha256': hashlib.sha256(seed_path.read_bytes()).hexdigest(), 'patchBytes': len(patch), 'patchSha256': hashlib.sha256(patch).hexdigest(), 'stat': git('diff', '--find-renames', '--numstat', 'HEAD', '--', *owned).decode(), 'paths': owned, 'status': git('diff', '--find-renames', '--summary', 'HEAD', '--', *owned).decode()}, indent=2))
+print(json.dumps({'schema': 1, 'variant': variant, 'baseline': git('rev-parse', 'HEAD').decode().strip(), 'seedSha256': hashlib.sha256(seed_path.read_bytes()).hexdigest(), 'patchBytes': len(patch), 'patchSha256': hashlib.sha256(patch).hexdigest(), 'stat': git('diff', '-O/dev/null', '--find-renames', '--numstat', 'HEAD', '--', *owned).decode(), 'paths': owned, 'status': git('diff', '-O/dev/null', '--find-renames', '--summary', 'HEAD', '--', *owned).decode()}, indent=2))

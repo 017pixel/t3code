@@ -40,7 +40,7 @@ else:
             f'{i:05d} truncation sentinel ' + 'z' * 112 + '\n' for i in range(11000)
         ))
 patch = subprocess.check_output([
-    'git', '-C', str(root), 'diff', '--unified=3', '--inter-hunk-context=0', '--find-renames', '--no-color',
+    'git', '-C', str(root), 'diff', '-O/dev/null', '--unified=3', '--inter-hunk-context=0', '--find-renames', '--no-color',
     '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/',
     '--minimal', '--patch', 'HEAD', '--', *base['paths'],
 ])
