@@ -1,7 +1,7 @@
 // Display-only records: no provider session, native thread, events or outbox effects.
 export const namespace = "evidence-19307:";
 export const timestamp = "2026-10-21T12:00:00.000Z";
-export const fixtureNames = ["F0", "F1", "F2", "F3", "F4"] as const;
+export const fixtureNames = ["F0", "F1", "F2", "F2-watch", "F3", "F4"] as const;
 
 export function buildFixture(name: string, foregroundStatus = "running") {
   if (!fixtureNames.some((candidate) => candidate === name)) throw new Error("Unknown fixture");
@@ -12,12 +12,16 @@ export function buildFixture(name: string, foregroundStatus = "running") {
   }
   const threadId = `${namespace}thread`;
   const providerThreadId = `${namespace}provider-thread`;
-  const modelSelection = { instanceId: "codex", model: "gpt-5.4" };
+  const provider = name === "F4" ? "claudeAgent" : "codex";
+  const modelSelection = {
+    instanceId: provider,
+    model: name === "F4" ? "claude-sonnet-4-6" : "gpt-5.4",
+  };
   const thread = {
     id: threadId,
     projectId: `${namespace}project`,
     title: "Background work evidence",
-    providerInstanceId: "codex",
+    providerInstanceId: provider,
     modelSelection,
     runtimeMode: "full-access",
     interactionMode: "default",
@@ -27,7 +31,7 @@ export function buildFixture(name: string, foregroundStatus = "running") {
     lineage: { rootThreadId: threadId, parentThreadId: null, relationshipToParent: null },
     forkedFrom: null,
     pullRequests:
-      name === "F3"
+      name === "F3" || name === "F2-watch"
         ? [
             {
               host: "example.invalid",
@@ -66,7 +70,7 @@ export function buildFixture(name: string, foregroundStatus = "running") {
     id: `${namespace}run-${ordinal}`,
     threadId,
     ordinal,
-    providerInstanceId: "codex",
+    providerInstanceId: provider,
     modelSelection,
     providerThreadId,
     userMessageId: `${namespace}message-${ordinal}`,
@@ -92,7 +96,7 @@ export function buildFixture(name: string, foregroundStatus = "running") {
     nodeId: null,
     providerThreadId,
     providerTurnId: null,
-    nativeItemRef: { driver: "codex", nativeId: `${namespace}${id}`, strength: "strong" },
+    nativeItemRef: { driver: provider, nativeId: `${namespace}${id}`, strength: "strong" },
     parentItemId: null,
     ordinal,
     status: "running",
@@ -116,8 +120,8 @@ export function buildFixture(name: string, foregroundStatus = "running") {
     type: "subagent",
     subagentId: `${namespace}node-${id}`,
     origin: "provider_native",
-    driver: "codex",
-    providerInstanceId: "codex",
+    driver: provider,
+    providerInstanceId: provider,
     childThreadId: linked ? `${namespace}child` : null,
     prompt: "Inspect background result",
     result: null,
@@ -144,7 +148,7 @@ export function buildFixture(name: string, foregroundStatus = "running") {
     },
   ];
   const tasks =
-    name === "F0"
+    name === "F0" || name === "F2-watch"
       ? []
       : name === "F4"
         ? [
@@ -182,7 +186,7 @@ export function buildFixture(name: string, foregroundStatus = "running") {
     {
       ...command("foreground", 10, "sleep 15", runs[1]!.id),
       nativeItemRef: {
-        driver: "codex",
+        driver: provider,
         nativeId: `${namespace}foreground-native`,
         strength: "strong",
       },
@@ -200,12 +204,15 @@ export function buildFixture(name: string, foregroundStatus = "running") {
             description: "Watch synthetic checks",
           },
           { taskId: `${namespace}roster-command`, kind: "command", description: "sleep 600" },
-          { taskId: `${namespace}foreground`, kind: "command", description: "Live row identity" },
-          {
-            taskId: `${namespace}foreground-native`,
-            kind: "command",
-            description: "Live native identity",
-          },
+          ...(foregroundStatus === "idle" || foregroundStatus === "waiting"
+            ? []
+            : [
+                {
+                  taskId: `${namespace}foreground-native`,
+                  kind: "command",
+                  description: "sleep 15",
+                },
+              ]),
         ]
       : name === "F3"
         ? [
@@ -225,8 +232,8 @@ export function buildFixture(name: string, foregroundStatus = "running") {
         : [];
   const providerThread = {
     id: providerThreadId,
-    driver: "codex",
-    providerInstanceId: "codex",
+    driver: provider,
+    providerInstanceId: provider,
     providerSessionId: null,
     appThreadId: threadId,
     ownerNodeId: null,
@@ -353,8 +360,12 @@ export const browserInstaller = `async (fixtures, checkout) => {
       }) }));
       return { accepted: true, synthetic: true, retainedTasks: true };
     };
-    root.installEvidence = (name, phase) => {
+    root.installEvidence = (name, phase, runtimeStatus = phase) => {
       const encoded = structuredClone(fixtures[\`\${name}:\${phase}\`]);
+      if (phase === "queued" && runtimeStatus === "waiting") {
+        encoded.runs[0].status = "waiting";
+        encoded.runs[0].completedAt = null;
+      }
       const projection = schema.decodeUnknownSync(contracts.OrchestrationV2ThreadProjectionJson)(encoded);
       projection.visibleTurnItems = projection.turnItems.map((item, position) => ({
         position, visibility: "local", sourceThreadId: projection.thread.id, sourceItemId: item.id, item,
@@ -365,14 +376,15 @@ export const browserInstaller = `async (fixtures, checkout) => {
       const detailAtom = details.stateAtom(ref);
       const state = registry.get(detailAtom);
       bind(detailAtom, { ...state, status: "live", data: { ...state.data, value: projection } });
-      const shell = { ...original, updatedAt: now, goal: projection.providerThreads[0].goal,
+      const shell = { ...original, providerInstanceId: projection.thread.providerInstanceId, modelSelection: projection.thread.modelSelection, updatedAt: now, goal: projection.providerThreads[0].goal,
         latestRun: { runId: latest.id, status: latest.status, requestedAt: now, startedAt: phase === "queued" ? null : now, completedAt: active ? null : now, assistantMessageId: null },
-        runtime: { ...original.runtime, status: active ? phase : "idle", activeRunId: active ? latest.id : null, activityStartedAt: active ? now : null, updatedAt: now },
+        runtime: { ...original.runtime, status: active ? runtimeStatus : "idle", activeRunId: active ? (phase === "queued" && runtimeStatus === "waiting" ? projection.runs[0].id : latest.id) : null, activityStartedAt: active ? now : null, updatedAt: now },
       };
       for (const method of ["threadShellAtom", "quietThreadShellAtom"]) bind(threads[method](ref), shell);
       root.__evidenceProjection = projection;
-      root.__evidenceFixture = { name, phase };
-      return { name, phase, tasks: projection.turnItems.length };
+      const derivedPhase = ["queued", "preparing", "starting"].includes(runtimeStatus) ? "connecting" : ["running", "waiting"].includes(runtimeStatus) ? "running" : "ready";
+      root.__evidenceFixture = { name, phase, runtimeStatus, derivedPhase, syntheticRuntime: true };
+      return { ...root.__evidenceFixture, tasks: projection.turnItems.length };
     };
     root.pinEvidenceEndpoint = async (appearance) => {
       localStorage.setItem("t3code:theme", appearance);
