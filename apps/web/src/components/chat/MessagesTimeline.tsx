@@ -159,7 +159,6 @@ interface DisclosureReveal {
 
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
 const DISCLOSURE_REVEAL_MARGIN = 8;
-const DISCLOSURE_REVEAL_FOLLOW_MS = 3000;
 const TIMELINE_MAINTAIN_SCROLL_AT_END = {
   animated: false,
   on: {
@@ -466,9 +465,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const disclosureRevealRef = useRef<DisclosureReveal | null>(null);
   const stopDisclosureRevealRef = useRef<(() => void) | null>(null);
   const stopDisclosureReveal = () => {
+    disclosureRevealRef.current = null;
     stopDisclosureRevealRef.current?.();
     stopDisclosureRevealRef.current = null;
   };
+  // Another thread can reuse this component; a layout effect ends the old reveal before
+  // a pending settle frame can resolve it against the new thread's rows.
+  // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Leaving the thread ends its reveal.
+  useLayoutEffect(() => stopDisclosureReveal, [listIdentityKey]);
   const contentInsetEndAdjustmentRef = useRef(contentInsetEndAdjustment);
   useEffect(() => {
     contentInsetEndAdjustmentRef.current = contentInsetEndAdjustment;
@@ -480,7 +484,10 @@ const ConversationTimeline = memo(function ConversationTimeline({
         event.target instanceof Element ? event.target.closest("[aria-expanded]") : null;
     };
     // Any direct scroll or input hands the viewport back to the user, as does unmounting.
+    // A toggle's own pointerdown or keydown precedes its click, so it only cancels the
+    // previous reveal, never the one that click establishes.
     const userTakesOver = () => {
+      disclosureRevealRef.current = null;
       stopDisclosureRevealRef.current?.();
       stopDisclosureRevealRef.current = null;
     };
@@ -510,8 +517,11 @@ const ConversationTimeline = memo(function ConversationTimeline({
     const trigger = reveal.trigger.isConnected
       ? reveal.trigger
       : element.querySelector(`[data-timeline-row-id="${CSS.escape(reveal.anchorKey)}"]`);
-    if (!trigger) return null;
+    if (!trigger || trigger.getAttribute("aria-expanded") === "false") return null;
+    const viewport = element.getBoundingClientRect();
     const triggerRect = trigger.getBoundingClientRect();
+    // Something else moved the viewport (jump to end, find, a citation); stop following.
+    if (triggerRect.bottom < viewport.top || triggerRect.top > viewport.bottom) return null;
     let contentBottom = triggerRect.bottom;
     const controlsId = trigger.getAttribute("aria-controls");
     const contentElements = [
@@ -523,7 +533,6 @@ const ConversationTimeline = memo(function ConversationTimeline({
     for (const content of contentElements) {
       if (content) contentBottom = Math.max(contentBottom, content.getBoundingClientRect().bottom);
     }
-    const viewport = element.getBoundingClientRect();
     const overflow =
       contentBottom -
       (viewport.bottom - contentInsetEndAdjustmentRef.current - DISCLOSURE_REVEAL_MARGIN);
@@ -539,19 +548,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
     if (!reveal || disclosurePinsEndRef.current) return;
     const element = revealDisclosureContent(reveal);
     if (!element) return;
-    // Fetched details, syntax highlighting, and row measurement can grow the content
-    // after the settle frames. Keep revealing briefly; the header still caps the scroll,
-    // and navigating away disconnects the header, which ends the follow.
+    // Fetched details, images, syntax highlighting, and row measurement can grow the
+    // content after the settle frames, with no deadline. Keep revealing on each resize;
+    // the header caps the scroll, and takeover, collapse, or navigation ends the follow.
     const observed = [...element.children];
     if (reveal.trigger.isConnected) observed.push(reveal.trigger);
-    const unobserve = observeResize(observed, () => {
+    stopDisclosureRevealRef.current = observeResize(observed, () => {
       if (!revealDisclosureContent(reveal)) stopDisclosureReveal();
     });
-    const timeout = window.setTimeout(stopDisclosureReveal, DISCLOSURE_REVEAL_FOLLOW_MS);
-    stopDisclosureRevealRef.current = () => {
-      unobserve();
-      window.clearTimeout(timeout);
-    };
   };
 
   const scheduleDisclosureSettle = () => {
