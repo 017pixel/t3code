@@ -3808,6 +3808,32 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("refuses to fork a stopped session OpenCode still runs", () =>
+    Effect.gen(function* () {
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+        promptAccepted,
+        event("session.execution.started", { sessionID: SESSION }),
+        out("session.interrupt", { sessionID: SESSION }),
+        reply("session.interrupt", { interrupted: true }),
+        out("session.active"),
+        reply("session.active", { data: { [SESSION]: { type: "running" } } }),
+      ]);
+      yield* runtime.startTurn(turnInput(thread));
+      yield* runtime.interruptTurn({
+        providerThread: thread,
+        providerTurnId: yield* providerTurnId,
+      });
+      const refused = yield* runtime
+        .forkThread({
+          sourceProviderThread: thread,
+          targetThreadId: ThreadId.make("thread:opencode2-adapter:fork"),
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused._tag, "ProviderAdapterProtocolError");
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("moves a fork into its target thread's worktree before the first prompt", () =>
     Effect.gen(function* () {
       const FORK = "ses_f1484db83ffeLGtrRCFimo1H0e";
