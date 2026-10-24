@@ -13,6 +13,7 @@ import {
   type RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -335,7 +336,8 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => null),
     );
     let thread: OrchestrationV2AppThread = projection.thread;
-    let roots = guestPathRoots([thread.worktreePath, projectRoot]);
+    const home = yield* HostProcess.HomeDirectory;
+    let roots = guestPathRoots([thread.worktreePath, projectRoot], home);
     const guestSnapshot = projectSnapshotForGuest(projection, share.historyStartRunOrdinal, roots);
     const visibleRunIds = new Set<RunId>(guestSnapshot.runs.map((run) => run.id));
     const initialView = guestShareView(thread);
@@ -367,7 +369,7 @@ const make = Effect.gen(function* () {
             case "thread.metadata-updated": {
               thread = event.payload;
               if (thread.guestShare?.id !== share.id) return [ended];
-              roots = guestPathRoots([thread.worktreePath, projectRoot]);
+              roots = guestPathRoots([thread.worktreePath, projectRoot], home);
               const next = guestShareView(thread);
               return next === null ? [ended] : [{ type: "view", view: next }];
             }

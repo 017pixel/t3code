@@ -321,7 +321,6 @@ const NO_TURN_DIFFS: ReadonlyArray<never> = [];
 const NO_HANDOFF_RUNS: ReadonlyArray<never> = [];
 const NO_OPTIMISTIC_MESSAGES: ReadonlyArray<never> = [];
 const ignore = () => {};
-const ignoreAsync = async () => {};
 
 /**
  * The owner's timeline, read-only: every action that would reach the owner's machine (fork,
@@ -391,7 +390,6 @@ function GuestThread({
           runs={NO_HANDOFF_RUNS}
           routeThreadKey={threadKey}
           onOpenThread={ignore}
-          onForkFromRun={ignoreAsync}
           onRollbackCheckpoint={ignore}
           supportsConversationRollback={false}
           onRevertToTurnCount={ignore}

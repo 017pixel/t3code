@@ -16,8 +16,9 @@ import {
   projectTurnItemForGuest,
 } from "./guestProjection.ts";
 
-const ROOT = "/Users/owner/code/secret-project";
-const roots = guestPathRoots([`${ROOT}/`, null]);
+const HOME = "/Users/owner";
+const ROOT = `${HOME}/code/secret-project`;
+const roots = guestPathRoots([`${ROOT}/`, null], HOME);
 const updatedAt = DateTime.makeUnsafe(0);
 
 const domainBase = {
@@ -197,13 +198,13 @@ const SHOWN: ReadonlyArray<readonly [string, Record<string, unknown>, Record<str
     "a command and how it ended, without its output",
     {
       type: "command_execution",
-      input: `cd ${ROOT} && cat ${ROOT}/.env && cd "${ROOT}/" && ls ${ROOT}/`,
+      input: `cd ${ROOT} && cat ${ROOT}/.env && cd "${ROOT}/" && ls ${ROOT}/ ${HOME}/.config/app.json`,
       output: "TOKEN=1",
       exitCode: 1,
     },
     {
       type: "command_execution",
-      input: 'cd . && cat .env && cd "." && ls .',
+      input: 'cd . && cat .env && cd "." && ls . ~/.config/app.json',
       outputIndicatesFailure: true,
       exitCode: 1,
     },
@@ -225,12 +226,12 @@ const SHOWN: ReadonlyArray<readonly [string, Record<string, unknown>, Record<str
     "a web search as its queries, titles, and links, without snippets",
     {
       type: "web_search",
-      patterns: ["effect schema"],
+      patterns: ["effect schema", `error in ${ROOT}/src`],
       results: [{ title: "Effect", url: "https://effect.website", snippet: "text" }],
     },
     {
       type: "web_search",
-      patterns: ["effect schema"],
+      patterns: ["effect schema", "error in src"],
       results: [{ title: "Effect", url: "https://effect.website" }],
     },
   ],
@@ -378,15 +379,20 @@ describe("projectTurnItemForGuest", () => {
         : [JSON.stringify(encodeEvent({ type: "item", item: projected }))];
     });
     expect(sent).toHaveLength(SHOWN.length);
-    for (const json of sent) expect(json).not.toContain(ROOT);
+    for (const json of sent) expect(json).not.toContain(HOME);
   });
 
-  it("keeps a sibling of the workspace as an outside path", () => {
-    const projected = projectTurnItemForGuest(
+  it("shows a sibling of the workspace under ~, and other absolute paths by base name", () => {
+    const sibling = projectTurnItemForGuest(
       item({ type: "file_change", fileName: `${ROOT}-old/src/a.ts` }),
       roots,
     );
-    expect(projected).toMatchObject({ fileName: "a.ts" });
+    expect(sibling).toMatchObject({ fileName: "~/code/secret-project-old/src/a.ts" });
+    const outside = projectTurnItemForGuest(
+      item({ type: "file_change", fileName: "/etc/ssl/key.pem" }),
+      roots,
+    );
+    expect(outside).toMatchObject({ fileName: "key.pem" });
   });
 });
 
@@ -402,7 +408,7 @@ describe("guest stream encoding", () => {
       item: { ...projected, output: "TOKEN=1", title: null, worktreePath: ROOT },
     });
     expect(JSON.stringify(encoded)).not.toContain("TOKEN=1");
-    expect(JSON.stringify(encoded)).not.toContain(ROOT);
+    expect(JSON.stringify(encoded)).not.toContain(HOME);
   });
 
   it("refuses a field the projector should have blanked", () => {

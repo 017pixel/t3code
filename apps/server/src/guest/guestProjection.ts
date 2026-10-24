@@ -21,27 +21,41 @@ import { projectTurnItemForWire } from "../orchestration-v2/WireProjection.ts";
  * adds it here. The guest stream schema backs this up when it encodes.
  */
 
-/** Absolute directories whose paths a guest sees relative to them, longest first. */
-export type GuestPathRoots = ReadonlyArray<string>;
+/**
+ * Absolute directories a guest never sees spelled out, longest first: a workspace becomes `.`
+ * and the owner's home folder becomes `~`.
+ */
+export type GuestPathRoots = ReadonlyArray<{ readonly dir: string; readonly as: "." | "~" }>;
 
-export function guestPathRoots(roots: ReadonlyArray<string | null | undefined>): GuestPathRoots {
-  return roots
-    .flatMap((root) => {
-      const trimmed = root?.replace(/[\\/]+$/u, "");
-      // A filesystem root would turn every path relative, so it is not a workspace.
-      return trimmed && /[^\\/:]/u.test(trimmed.replace(/^[A-Za-z]:/u, "")) ? [trimmed] : [];
-    })
-    .toSorted((left, right) => right.length - left.length);
+export function guestPathRoots(
+  workspaces: ReadonlyArray<string | null | undefined>,
+  home?: string | null,
+): GuestPathRoots {
+  const dir = (root: string | null | undefined) => {
+    const trimmed = root?.replace(/[\\/]+$/u, "");
+    // A filesystem root would turn every path relative, so it is never a root here.
+    return trimmed && /[^\\/:]/u.test(trimmed.replace(/^[A-Za-z]:/u, "")) ? trimmed : null;
+  };
+  return [
+    ...workspaces.flatMap((root) => {
+      const trimmed = dir(root);
+      return trimmed === null ? [] : [{ dir: trimmed, as: "." as const }];
+    }),
+    ...[dir(home)].flatMap((trimmed) =>
+      trimmed === null ? [] : [{ dir: trimmed, as: "~" as const }],
+    ),
+  ].toSorted((left, right) => right.dir.length - left.dir.length);
 }
 
 const isAbsolutePath = (path: string) => /^(?:[\\/]|[A-Za-z]:[\\/])/u.test(path);
 
-/** A path inside a root becomes relative to it; any other absolute path keeps its base name. */
+/** A path inside a root loses it; any other absolute path keeps only its base name. */
 function guestPath(path: string, roots: GuestPathRoots): string {
-  for (const root of roots) {
-    if (path === root) return ".";
-    if (path.startsWith(`${root}/`) || path.startsWith(`${root}\\`)) {
-      return path.slice(root.length + 1) || ".";
+  for (const { dir, as } of roots) {
+    if (path === dir) return as;
+    if (path.startsWith(`${dir}/`) || path.startsWith(`${dir}\\`)) {
+      const rest = path.slice(dir.length + 1);
+      return as === "." ? rest || "." : `~/${rest}`;
     }
   }
   return isAbsolutePath(path) ? (path.split(/[\\/]/u).findLast(Boolean) ?? ".") : path;
@@ -49,18 +63,20 @@ function guestPath(path: string, roots: GuestPathRoots): string {
 
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 
-/** Rewrites the workspace roots inside free text, such as a command, to relative paths. */
+/** Rewrites the roots inside free text, such as a command or a search query. */
 function guestText(text: string, roots: GuestPathRoots): string {
   let result = text;
-  for (const root of roots) {
-    if (!result.includes(root)) continue;
+  for (const { dir, as } of roots) {
+    if (!result.includes(dir)) continue;
     // The root itself, or the root plus a separator, but not a sibling such as `<root>-old`.
     result = result.replace(
-      new RegExp(`${escapeRegExp(root)}(?:[\\\\/]|(?![\\w.-]))`, "gu"),
-      // `<root>/src` becomes `src`; the root alone, or with only a trailing separator, is `.`.
+      new RegExp(`${escapeRegExp(dir)}(?:[\\\\/]|(?![\\w.-]))`, "gu"),
+      // `<root>/src` becomes `src` (or `~/src`); the root alone, or with only a trailing
+      // separator, is `.` (or `~`).
       (match, offset: number, source: string) => {
         const rest = source.slice(offset + match.length);
-        return match.length > root.length && rest !== "" && !/^[\s"'`]/u.test(rest) ? "" : ".";
+        const continues = match.length > dir.length && rest !== "" && !/^[\s"'`]/u.test(rest);
+        return continues ? (as === "." ? "" : "~/") : as;
       },
     );
   }
@@ -203,10 +219,12 @@ const GUEST_PROJECTORS: { readonly [T in OrchestrationV2TurnItem["type"]]: Proje
           })),
         }),
   }),
-  web_search: (item, base) => ({
+  web_search: (item, base, roots) => ({
     ...base,
     type: "web_search",
-    ...(item.patterns === undefined ? {} : { patterns: item.patterns }),
+    ...(item.patterns === undefined
+      ? {}
+      : { patterns: item.patterns.map((pattern) => guestText(pattern, roots)) }),
     ...(item.results === undefined
       ? {}
       : {

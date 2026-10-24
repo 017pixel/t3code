@@ -143,6 +143,8 @@ describe("GuestPage", () => {
         "src",
         expect.stringContaining(`${GUEST_RENDER_ROUTE}?share=${SHARE_ID}&item=visual`),
       );
+    // Guests cannot act on the thread, so no control offers to.
+    expect(screen.container.querySelector('[aria-label="Fork from this response"]')).toBeNull();
     expect(socket).not.toHaveBeenCalled();
   });
 });
