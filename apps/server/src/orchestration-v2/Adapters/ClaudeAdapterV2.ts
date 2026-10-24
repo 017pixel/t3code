@@ -7761,13 +7761,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 context.assistant.snapshotBlockIndex.set(message.message.id, index + 1);
                 const itemId = `${message.message.id}:text:${index}`;
                 if (context.assistant.streamItems.has(itemId)) {
-                  streamedText = true;
-                  yield* assistantDeltas.complete({
+                  const completedText = yield* assistantDeltas.complete({
                     turnId: context.nativeTurnId,
                     itemId,
                     ...(block.text ? { finalText: block.text } : {}),
                     emitEmpty: false,
                   });
+                  // An empty streamed block delivered nothing, so the result fallback still applies.
+                  if (completedText.length > 0) streamedText = true;
                 } else {
                   unstreamedText.push(block.text);
                 }
