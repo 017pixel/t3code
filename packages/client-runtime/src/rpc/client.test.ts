@@ -6,6 +6,7 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -347,6 +348,77 @@ describe("environment RPC", () => {
       expect(observedDefects).toHaveLength(1);
       expect(Schema.isSchemaError(observedDefects[0])).toBe(true);
     }),
+  );
+
+  it.effect(
+    "backs off a same-session stream that keeps failing to decode after its first value",
+    () =>
+      Effect.gen(function* () {
+        // Like the shell stream: a valid value (metadata) arrives, then a chunk fails to decode.
+        const value = { source: "metadata" } as unknown as ServerLifecycleStreamEvent;
+        const decodeDefect = decodeNumber("not a number").pipe(Effect.orDie);
+        const subscriptions = yield* Queue.unbounded<{
+          readonly session: "first" | "second";
+          readonly at: number;
+        }>();
+        let secondSubscriptions = 0;
+        const failingClient = (name: "first" | "second") =>
+          ({
+            [WS_METHODS.subscribeServerLifecycle]: () =>
+              Stream.unwrap(
+                Effect.gen(function* () {
+                  yield* Queue.offer(subscriptions, {
+                    session: name,
+                    at: yield* Clock.currentTimeMillis,
+                  });
+                  if (name === "second" && ++secondSubscriptions > 2) return Stream.never;
+                  return Stream.make(value).pipe(
+                    Stream.concat(Stream.fromEffect(decodeDefect).pipe(Stream.drain)),
+                  );
+                }),
+              ),
+          }) as unknown as WsRpcProtocolClient;
+        const { activeSession, retryCount, supervisor } = yield* makeHarness();
+
+        yield* SubscriptionRef.set(activeSession, Option.some(session(failingClient("first"))));
+        const subscriptionFiber = yield* subscribe(
+          WS_METHODS.subscribeServerLifecycle,
+          {},
+          {
+            onExpectedFailure: () => Effect.void,
+            retryExpectedFailureAfter: "250 millis",
+          },
+        ).pipe(
+          Stream.runDrain,
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.forkChild,
+        );
+
+        const expectedFirstSessionDelays = [250, 500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
+        const firstSessionDelays: number[] = [];
+        let previous = yield* Queue.take(subscriptions);
+        for (const delay of expectedFirstSessionDelays) {
+          yield* TestClock.adjust(delay);
+          const next = yield* Queue.take(subscriptions);
+          firstSessionDelays.push(next.at - previous.at);
+          previous = next;
+        }
+
+        // A replacement session starts a fresh backoff.
+        yield* SubscriptionRef.set(activeSession, Option.some(session(failingClient("second"))));
+        const replaced = yield* Queue.take(subscriptions);
+        yield* TestClock.adjust(250);
+        const retried = yield* Queue.take(subscriptions);
+        yield* Fiber.interrupt(subscriptionFiber);
+
+        expect(
+          firstSessionDelays,
+          "same-session decode retries reset to the base delay after every first value",
+        ).toEqual(expectedFirstSessionDelays);
+        expect([replaced.session, retried.session]).toEqual(["second", "second"]);
+        expect(retried.at - replaced.at).toBe(250);
+        expect(yield* Ref.get(retryCount)).toBe(0);
+      }),
   );
 
   it.effect("surfaces domain subscription failures without reconnecting", () =>
