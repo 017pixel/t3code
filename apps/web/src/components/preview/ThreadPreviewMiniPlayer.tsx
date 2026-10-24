@@ -174,16 +174,14 @@ function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly 
     }
   };
 
-  const retry = () => {
-    if (serverTab) serverSurfaceRef.current?.reload();
-    else if (previewBridge) void previewBridge.refresh(runtimeTabId);
-  };
-
   if (!snapshot) return null;
   const failure =
     snapshot.navStatus._tag === "LoadFailed" && !snapshot.navStatus.download
       ? snapshot.navStatus
       : null;
+  const failureMessage = failure
+    ? `Couldn’t load ${failure.url}. ${describePreviewError(failure.description)}.`
+    : null;
   const pdfUrl =
     snapshot.navStatus._tag === "Success"
       ? previewPdfAssetUrl(snapshot.navStatus.url, httpBaseUrl)
@@ -202,10 +200,10 @@ function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly 
       recording={recording}
       onOpenInPanel={openInPanel}
       failure={
-        failure
+        failureMessage && !serverTab
           ? {
-              message: `Couldn’t load ${failure.url}. ${describePreviewError(failure.description)}.`,
-              onRetry: retry,
+              message: failureMessage,
+              onRetry: () => void previewBridge?.refresh(runtimeTabId),
             }
           : null
       }
@@ -247,6 +245,14 @@ function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly 
               threadId={threadRef.threadId}
               tabId={tabId}
               pdfUrl={pdfUrl}
+              failure={
+                failureMessage
+                  ? {
+                      message: failureMessage,
+                      onClose: () => usePreviewMiniPlayerStore.getState().close(threadRef),
+                    }
+                  : null
+              }
               visible
               followSize={false}
               controlPosition="bottom"
