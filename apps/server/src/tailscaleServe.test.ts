@@ -1,8 +1,10 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import * as Sink from "effect/Sink";
@@ -18,8 +20,13 @@ const encoder = new TextEncoder();
 
 // Stands in for the tailscale CLI: `serve --bg` is refused until the daemon
 // accepts it (operator permission granted, or Tailscale.app finished starting).
-// With `hangs`, the attempt after the refusals never answers.
-const makeFakeTailscale = (refusedServeAttempts: number, hangs = false) => {
+// With `hangs`, the attempt after the refusals never answers. With `ackDelay`,
+// the daemon applies the mapping at once but the CLI exits only after the delay.
+const makeFakeTailscale = (
+  refusedServeAttempts: number,
+  hangs = false,
+  ackDelay?: Duration.Input,
+) => {
   const state = { serveAttempts: 0, configured: false, disables: 0 };
   const handle = (args: ReadonlyArray<string>) => {
     if (args[0] === "serve" && args[1] === "--bg") {
@@ -31,7 +38,7 @@ const makeFakeTailscale = (refusedServeAttempts: number, hangs = false) => {
         return undefined;
       }
       state.configured = true;
-      return { code: 0 };
+      return { code: 0, ackDelay };
     }
     if (args[0] === "serve" && args.at(-1) === "off") {
       state.disables += 1;
@@ -49,7 +56,9 @@ const makeFakeTailscale = (refusedServeAttempts: number, hangs = false) => {
         exitCode:
           result === undefined
             ? Effect.never
-            : Effect.succeed(ChildProcessSpawner.ExitCode(result.code)),
+            : Effect.succeed(ChildProcessSpawner.ExitCode(result.code)).pipe(
+                Effect.delay("ackDelay" in result && result.ackDelay ? result.ackDelay : 0),
+              ),
         isRunning: Effect.succeed(false),
         kill: () => Effect.void,
         unref: Effect.succeed(Effect.void),
@@ -65,8 +74,12 @@ const makeFakeTailscale = (refusedServeAttempts: number, hangs = false) => {
   return { state, spawner };
 };
 
-const startTailscaleServe = Effect.fn(function* (refusedServeAttempts: number, hangs = false) {
-  const fake = makeFakeTailscale(refusedServeAttempts, hangs);
+const startTailscaleServe = Effect.fn(function* (
+  refusedServeAttempts: number,
+  hangs = false,
+  ackDelay?: Duration.Input,
+) {
+  const fake = makeFakeTailscale(refusedServeAttempts, hangs, ackDelay);
   const parked = yield* Deferred.make<void>();
   const scope = yield* Scope.make();
   yield* Layer.buildWithScope(
@@ -133,6 +146,21 @@ describe("TailscaleServe", () => {
 
       assert.equal(state.disables, 1);
       assert.isFalse(state.configured);
+    }),
+  );
+
+  it.effect("disables Serve on shutdown while the CLI has yet to acknowledge it", () =>
+    Effect.gen(function* () {
+      const { state, scope } = yield* startTailscaleServe(0, false, "2 seconds");
+      yield* Effect.yieldNow;
+      assert.equal(state.serveAttempts, 1);
+      assert.isTrue(state.configured, "the daemon never received the mapping");
+
+      const shutdown = yield* Scope.close(scope, Exit.void).pipe(Effect.forkChild);
+      yield* TestClock.adjust("2 seconds");
+      yield* Fiber.join(shutdown);
+
+      assert.equal(state.disables, 1, "a mapping the daemon applied outlived shutdown");
     }),
   );
 
