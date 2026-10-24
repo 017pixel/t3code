@@ -5,11 +5,16 @@ import {
   type GrepOptions,
   type GrepResult,
 } from "@ff-labs/fff-node";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { afterEach, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import { vi } from "vite-plus/test";
 
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspaceSearchIndex from "./WorkspaceSearchIndex.ts";
+
+const vcsProcessLayer = VcsProcess.layer.pipe(Layer.provide(NodeServices.layer));
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -60,7 +65,7 @@ it.effect("filters image searches before applying the result limit", () =>
       expect(fileSearch).toHaveBeenCalledTimes(2);
       expect(fileSearch).toHaveBeenCalledWith("", { pageSize: 25_002 });
     }),
-  ),
+  ).pipe(Effect.provide(vcsProcessLayer)),
 );
 
 it.effect("continues whole-word searches after a filtered grep page", () =>
@@ -137,5 +142,5 @@ it.effect("continues whole-word searches after a filtered grep page", () =>
       expect(grep).toHaveBeenCalledTimes(2);
       expect(grep.mock.calls[1]?.[1]?.cursor).toBe(nextCursor);
     }),
-  ),
+  ).pipe(Effect.provide(vcsProcessLayer)),
 );

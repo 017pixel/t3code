@@ -397,6 +397,29 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         }
       }),
     );
+    it.effect("skips ignored symlinks and symlinks that leave the workspace", () =>
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) === "win32") return;
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-symlinks-", git: true });
+        const outside = yield* makeTempDir({ prefix: "t3code-workspace-symlinks-outside-" });
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* writeTextFile(cwd, ".gitignore", "ignored-link\n");
+        yield* writeTextFile(cwd, "src/index.ts", "export {};");
+        yield* fileSystem.symlink("src", path.join(cwd, "ignored-link"));
+        yield* fileSystem.symlink(outside, path.join(cwd, "outside-link"));
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const searched = yield* searchWorkspaceEntries({ cwd, query: "link", limit: 100 });
+        const listed = yield* workspaceEntries.list({ cwd });
+
+        for (const entries of [searched.entries, listed.entries]) {
+          const paths = entries.map((entry) => entry.path);
+          expect(paths).not.toContain("ignored-link");
+          expect(paths).not.toContain("outside-link");
+        }
+      }),
+    );
   });
 
   describe("searchContents", () => {
