@@ -13,7 +13,11 @@ const mocks = vi.hoisted(() => ({
     isPending: false,
     refresh: vi.fn<() => void>(),
   },
-  otherQuery: { data: null, isPending: false, refresh: vi.fn<() => void>() },
+  otherQuery: {
+    data: null as { run: { _tag: "Running" | "Completed" } } | null,
+    isPending: false,
+    refresh: vi.fn<() => void>(),
+  },
 }));
 
 vi.mock("@react-navigation/native", async () => {
@@ -36,7 +40,8 @@ vi.mock("../../../state/server", () => ({
 }));
 vi.mock("../../../state/pull-requests", () => ({
   composerPullRequests: {
-    reviewGuide: (target: { number: number }) => target.number,
+    reviewGuide: (target: { number: number; environmentId: string }) =>
+      target.environmentId === "environment" && target.number === 1 ? 1 : 2,
     generateReviewGuide: { permissionAtom: () => "permission" },
   },
 }));
@@ -83,16 +88,16 @@ function setup() {
     repository: "repo",
     number: 1,
   };
-  function Probe({ number }: { number: number }) {
-    useReviewGuide({ ...params, number });
+  function Probe({ number, environmentId }: { number: number; environmentId: string }) {
+    useReviewGuide({ ...params, number, environmentId });
     return null;
   }
   return {
-    render(number = 1) {
+    render(number = 1, environmentId = params.environmentId) {
       act(() =>
         root.render(
           <NavigationContext.Provider value={navigation.value}>
-            <Probe number={number} />
+            <Probe number={number} environmentId={environmentId} />
           </NavigationContext.Provider>,
         ),
       );
@@ -156,4 +161,30 @@ it("preserves the polling deadline across rerenders and stops polling on blur or
   const refreshesOnCompletion = mocks.query.refresh.mock.calls.length;
   act(() => vi.advanceTimersByTime(10_000));
   expect(mocks.query.refresh).toHaveBeenCalledTimes(refreshesOnCompletion);
+});
+
+it("retires the old environment's polling on target change and clears polling on unmount", () => {
+  vi.useFakeTimers();
+  using _timers = { [Symbol.dispose]: () => vi.useRealTimers() };
+  {
+    using screen = setup();
+    mocks.query.data = { run: { _tag: "Running" } };
+    mocks.otherQuery.data = { run: { _tag: "Running" } };
+    screen.render();
+    act(() => vi.advanceTimersByTime(4_000));
+
+    screen.render(1, "other-environment");
+    expect(mocks.query.refresh).toHaveBeenCalledTimes(1);
+    expect(mocks.otherQuery.refresh).toHaveBeenCalledTimes(1);
+    act(() => vi.advanceTimersByTime(1_000));
+    expect(mocks.query.refresh).toHaveBeenCalledTimes(1);
+    expect(mocks.otherQuery.refresh).toHaveBeenCalledTimes(1);
+    act(() => vi.advanceTimersByTime(4_000));
+    expect(mocks.query.refresh).toHaveBeenCalledTimes(1);
+    expect(mocks.otherQuery.refresh).toHaveBeenCalledTimes(2);
+  }
+  act(() => vi.advanceTimersByTime(10_000));
+  expect(mocks.query.refresh).toHaveBeenCalledTimes(1);
+  expect(mocks.otherQuery.refresh).toHaveBeenCalledTimes(2);
+  expect(vi.getTimerCount()).toBe(0);
 });
