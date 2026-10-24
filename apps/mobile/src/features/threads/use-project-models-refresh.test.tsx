@@ -59,7 +59,7 @@ afterEach(() => {
 });
 
 describe("useProjectModelsRefresh", () => {
-  it("asks again after a failed request once the environment reconnects", async () => {
+  it("asks again whenever the environment reconnects", async () => {
     harness.respond = () => AsyncResult.failure(Cause.fail(new Error("socket closed")));
     await render({ ...project, connected: true });
     await render({ ...project, connected: false });
@@ -69,8 +69,13 @@ describe("useProjectModelsRefresh", () => {
     await render({ ...project, connected: true });
     expect(harness.calls).toHaveLength(2);
 
-    await render({ ...project, connected: false });
     await render({ ...project, connected: true });
     expect(harness.calls).toHaveLength(2);
+
+    // A restarted server has dropped the project's catalog, so a successful
+    // request does not outlive the connection.
+    await render({ ...project, connected: false });
+    await render({ ...project, connected: true });
+    expect(harness.calls).toHaveLength(3);
   });
 });

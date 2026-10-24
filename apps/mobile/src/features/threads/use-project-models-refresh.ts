@@ -8,8 +8,8 @@ import { useAtomCommand } from "../../state/use-atom-command";
 /**
  * The composer scans its project once a thread exists; a new task needs the
  * project's catalog before that. Each project is requested once per
- * environment, since the server reuses scans inside its TTL. A failed request
- * is forgotten, so the next connection asks again.
+ * connection: the server reuses scans inside its TTL, but a restarted server
+ * has none. A failed request is forgotten, so a later render asks again.
  */
 export function useProjectModelsRefresh(input: {
   readonly environmentId: EnvironmentId | null;
@@ -23,7 +23,11 @@ export function useProjectModelsRefresh(input: {
   });
   const requestedKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!connected || !environmentId || !cwd || !instanceId) return;
+    if (!connected) {
+      requestedKeyRef.current = null;
+      return;
+    }
+    if (!environmentId || !cwd || !instanceId) return;
     const key = JSON.stringify([environmentId, cwd]);
     if (requestedKeyRef.current === key) return;
     requestedKeyRef.current = key;
