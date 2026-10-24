@@ -25,7 +25,9 @@ const makeInstance = Effect.all({
   pullRequests: BitbucketPullRequestProvider.make,
 });
 
-const isResponseError = Schema.is(BitbucketApi.BitbucketResponseError);
+const isResponseError = Schema.is(
+  Schema.Union([BitbucketApi.BitbucketResponseError, BitbucketApi.BitbucketResponseBodyReadError]),
+);
 
 export const driver = defineSourceControlDriver({
   kind: definition.kind,

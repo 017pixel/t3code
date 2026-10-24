@@ -21,6 +21,7 @@ import * as Logger from "effect/Logger";
 import * as References from "effect/References";
 import { PullRequestProviderError } from "@t3tools/source-control-core/server/PullRequestProvider";
 import { SourceControlRateLimitPausedError } from "@t3tools/source-control-core/server/SourceControlRateLimit";
+import { BitbucketResponseBodyReadError } from "../../../../packages/source-control-bitbucket/src/server/BitbucketApi.ts";
 import { GitCafeApiError } from "../../../../packages/source-control-gitcafe/src/server/GitCafeApi.ts";
 import { GitHubApiRateLimitError } from "../../../../packages/source-control-github/src/server/GitHubRequestPolicy.ts";
 import * as Option from "effect/Option";
@@ -456,6 +457,18 @@ describe("ThreadPullRequestServiceV2 reads", () => {
             detail: "Too Many Requests",
           }),
         until: "",
+      },
+      {
+        // A 429 whose body was cut off still reports the quota refusal.
+        name: "Bitbucket",
+        refusal: () =>
+          new BitbucketResponseBodyReadError({
+            operation: "listPullRequests",
+            status: 429,
+            retryAt: RETRY_AT,
+            cause: new Error("response body truncated"),
+          }),
+        until: ` until ${DateTime.formatIso(DateTime.makeUnsafe(RETRY_AT))}`,
       },
     ])("logs a $name rate limit refusal as one info line", ({ name, refusal, until }) =>
       Effect.gen(function* () {
