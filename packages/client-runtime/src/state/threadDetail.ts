@@ -379,8 +379,9 @@ export function createEnvironmentThreadDetailAtoms<E>(
         value = null;
         return value;
       }
+      // Settled questions stay in so queue positions hold while the user answers.
       const runtimeRequests = projection.runtimeRequests.filter(
-        (request) => request.status === "pending",
+        (request) => request.status === "pending" || request.kind === "user_input",
       );
       const ids = new Set(runtimeRequests.map((request) => request.id));
       const turnItems =

@@ -241,9 +241,17 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
             run to continue.
           </Text>
         ) : null}
-        {props.pendingUserInput.questions.map((question) => {
+        {props.pendingUserInput.questions.map((question, questionIndex) => {
           const draft = props.drafts[question.id];
-          const showHeader = !isGenericUserInputQuestionHeader(question.header);
+          const eyebrow = [
+            isGenericUserInputQuestionHeader(question.header) ? null : question.header,
+            questionCount > 1
+              ? `${(props.pendingUserInput.queueQuestionIndex ?? 0) + questionIndex + 1}/${questionCount}`
+              : null,
+            question.multiSelect ? "Select any" : null,
+          ]
+            .filter((part) => part !== null)
+            .join(" · ");
           const selectableOptions = question.options.filter(
             (option) => option.customAnswer !== true,
           );
@@ -253,15 +261,10 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
           return (
             <View key={question.id} className="gap-2 pt-1">
               <View className="-mx-4 gap-1.5 bg-foreground/3 px-4 py-2">
-                {showHeader ? (
-                  <Text className="font-t3-medium text-2xs text-foreground-muted">
-                    {question.multiSelect ? `${question.header} · Select any` : question.header}
-                  </Text>
+                {eyebrow ? (
+                  <Text className="font-t3-medium text-2xs text-foreground-muted">{eyebrow}</Text>
                 ) : null}
                 <QuestionText markdown={question.question} />
-                {!showHeader && question.multiSelect ? (
-                  <Text className="font-sans text-2xs text-foreground-muted">Select any</Text>
-                ) : null}
               </View>
               <View className="gap-0.5">
                 {selectableOptions.map((option) => {
