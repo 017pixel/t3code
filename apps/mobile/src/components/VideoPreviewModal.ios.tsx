@@ -1,6 +1,7 @@
 import * as Dialog from "./ui/Dialog";
 import { useIsFocused } from "@react-navigation/native";
 import { requireNativeModule } from "expo";
+import { MISSING_FILE_ACCESS_MESSAGE } from "@t3tools/client-runtime/state/assets";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { AsyncResult } from "effect/reactivity";
 import { useEffect, useEffectEvent, useId, useState } from "react";
@@ -49,9 +50,11 @@ function NativeVideoPreview(props: {
     resource !== null && playbackUrl === null
       ? preparedConnection._tag === "None"
         ? "Reconnect to this environment and open the video again."
-        : assetUrl._tag === "Failure"
-          ? "Could not load this video. Check the connection and try again."
-          : null
+        : assetUrl._tag === "Failure" && assetUrl.reason === "missing-file-access"
+          ? MISSING_FILE_ACCESS_MESSAGE
+          : assetUrl._tag === "Failure"
+            ? "Could not load this video. Check the connection and try again."
+            : null
       : null;
 
   useEffect(() => Keyboard.dismiss(), []);
