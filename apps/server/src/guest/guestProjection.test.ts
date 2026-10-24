@@ -1,21 +1,26 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   RunAttemptId,
+  GuestItemDetail,
   GuestStreamEvent,
   type GuestTurnItem,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2Run,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
+import { appendTerminalOutput, EMPTY_TERMINAL_OUTPUT } from "@t3tools/shared/terminalOutput";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
 import {
   coalesceGuestEvents,
+  guestCommandOutputFrames,
   guestPathRoots,
   guestRunTurnEnded,
+  guestThreadModel,
   projectSnapshotForGuest,
   projectTurnItemForGuest,
+  projectTurnItemForGuestDetail,
 } from "./guestProjection.ts";
 
 const HOME = "/Users/owner";
@@ -192,7 +197,7 @@ const SHOWN: ReadonlyArray<readonly [string, Record<string, unknown>, Record<str
     },
   ],
   [
-    "a command and how it ended, without its output",
+    "a command and how it ended, with its output left for the expanded row",
     {
       type: "command_execution",
       input: `cd ${ROOT} && cat ${ROOT}/.env && cd "${ROOT}/" && ls ${ROOT}/ ${HOME}/.config/app.json`,
@@ -203,6 +208,7 @@ const SHOWN: ReadonlyArray<readonly [string, Record<string, unknown>, Record<str
       type: "command_execution",
       input: 'cd . && cat .env && cd "." && ls . ~/.config/app.json',
       outputIndicatesFailure: true,
+      outputOmitted: true,
       exitCode: 1,
     },
   ],
@@ -391,6 +397,131 @@ describe("projectTurnItemForGuest", () => {
       roots,
     );
     expect(outside).toMatchObject({ fileName: "key.pem" });
+  });
+});
+
+describe("projectTurnItemForGuestDetail", () => {
+  const encodeDetail = Schema.encodeUnknownSync(GuestItemDetail);
+
+  it("adds a command's output, with paths as in its command text", () => {
+    const detail = projectTurnItemForGuestDetail(
+      item({
+        type: "command_execution",
+        input: `ls ${ROOT}/src`,
+        output: `${ROOT}/src/auth.ts\n${HOME}/.config/app.json\n`,
+        exitCode: 0,
+      }),
+      roots,
+    );
+    expect(detail).toEqual(
+      guest({
+        type: "command_execution",
+        input: "ls src",
+        outputOmitted: true,
+        exitCode: 0,
+        output: "src/auth.ts\n~/.config/app.json\n",
+      }),
+    );
+    expect(JSON.stringify(encodeDetail({ item: detail }))).not.toContain(HOME);
+  });
+
+  it("adds nothing to other items the owner's detail would fill in", () => {
+    const search = item({
+      type: "file_search",
+      pattern: "TOKEN",
+      results: [{ fileName: `${ROOT}/.env`, preview: "TOKEN=1" }],
+    });
+    expect(projectTurnItemForGuestDetail(search, roots)).toEqual(
+      projectTurnItemForGuest(search, roots),
+    );
+    const tool = item({
+      type: "dynamic_tool",
+      toolName: "fetch",
+      input: { url: "x" },
+      output: "y",
+    });
+    expect(projectTurnItemForGuestDetail(tool, roots)).toMatchObject({ input: null });
+    expect(
+      projectTurnItemForGuestDetail(item({ type: "reasoning", text: "TOKEN=1" }), roots),
+    ).toBeNull();
+  });
+});
+
+describe("guestCommandOutputFrames", () => {
+  const frame = (kind: "replace" | "append", text: string, running = true) => ({
+    kind,
+    text,
+    truncated: false,
+    running,
+  });
+  /** The text a client holds after applying the frames, as it does for the owner's. */
+  const shown = (frames: ReadonlyArray<ReturnType<typeof frame> | null>) =>
+    frames.reduce(
+      (state, next) =>
+        next === null
+          ? state
+          : appendTerminalOutput(
+              next.kind === "replace" ? EMPTY_TERMINAL_OUTPUT : state,
+              next.text,
+            ),
+      EMPTY_TERMINAL_OUTPUT,
+    ).text;
+
+  it("rewrites a root split across frames whole", () => {
+    const rewrite = guestCommandOutputFrames(roots);
+    const frames = [
+      rewrite(frame("replace", "")),
+      rewrite(frame("append", `built ${ROOT.slice(0, 9)}`)),
+      rewrite(frame("append", `${ROOT.slice(9)}`)),
+      rewrite(frame("append", "/dist/app.js\n")),
+    ];
+    expect(frames.map((next) => next?.text)).toEqual(["", "built ", undefined, "dist/app.js\n"]);
+    expect(shown(frames)).toBe("built dist/app.js\n");
+  });
+
+  it("tells a sibling of the root apart once the next frame shows it", () => {
+    const rewrite = guestCommandOutputFrames(roots);
+    const frames = [rewrite(frame("append", `cp ${ROOT}`)), rewrite(frame("append", "-old/a .\n"))];
+    expect(shown(frames)).toBe("cp ~/code/secret-project-old/a .\n");
+  });
+
+  it("holds nothing back once the command settles", () => {
+    const rewrite = guestCommandOutputFrames(roots);
+    rewrite(frame("append", `cd ${ROOT}`));
+    const final = rewrite(frame("replace", `cd ${ROOT}`, false));
+    expect(final).toEqual(frame("replace", "cd .", false));
+  });
+});
+
+describe("guestThreadModel", () => {
+  const providers = [
+    {
+      instanceId: "claude-work",
+      driver: "claudeAgent",
+      models: [
+        {
+          slug: "claude-opus",
+          name: "Claude Opus",
+          shortName: "Opus",
+          isCustom: false,
+          capabilities: null,
+        },
+      ],
+    },
+  ] as unknown as Parameters<typeof guestThreadModel>[1];
+
+  it("names the model as the owner's picker does, or by its id when it is not listed", () => {
+    const selection = (instanceId: string, model: string) =>
+      ({ instanceId, model }) as Parameters<typeof guestThreadModel>[0];
+    expect(guestThreadModel(selection("claude-work", "claude-opus"), providers)).toEqual({
+      driver: "claudeAgent",
+      name: "Claude Opus",
+      shortName: "Opus",
+    });
+    expect(guestThreadModel(selection("removed", "gpt-5"), providers)).toEqual({
+      driver: null,
+      name: "gpt-5",
+    });
   });
 });
 

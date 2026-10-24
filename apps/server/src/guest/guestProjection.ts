@@ -2,23 +2,31 @@ import {
   type GuestRun,
   type GuestShareView,
   type GuestStreamEvent,
+  type GuestThreadModel,
   type GuestTurnItem,
+  type GuestTurnItemDetail,
   type OrchestrationV2AppThread,
+  type OrchestrationV2CommandOutputFrame,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
   orchestrationV2RunWorkStartedAt,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
 import * as DateTime from "effect/DateTime";
 
-import { projectTurnItemForWire } from "../orchestration-v2/WireProjection.ts";
+import {
+  projectTurnItemForDetail,
+  projectTurnItemForWire,
+} from "../orchestration-v2/WireProjection.ts";
 
 /**
- * The guest sees the thread as the owner sees it with every row collapsed: what ran and how it
- * ended, never output, diffs, or anything that points at another thread. Every guest object is
- * built by picking fields, so a field added to a domain type stays on the server until someone
- * adds it here. The guest stream schema backs this up when it encodes.
+ * The guest sees the thread as the owner sees it: what ran and how it ended, and a command's
+ * output once its row is expanded. Never diffs, reasoning, tool payloads, or anything that points
+ * at another thread. Every guest object is built by picking fields, so a field added to a domain
+ * type stays on the server until someone adds it here. The guest schemas back this up when they
+ * encode.
  */
 
 /**
@@ -198,6 +206,7 @@ const GUEST_PROJECTORS: { readonly [T in OrchestrationV2TurnItem["type"]]: Proje
           })),
         }),
   }),
+  // Output stays off the stream; an expanded row fetches it, as the owner's does.
   command_execution: (item, base, roots) => ({
     ...base,
     type: "command_execution",
@@ -205,6 +214,7 @@ const GUEST_PROJECTORS: { readonly [T in OrchestrationV2TurnItem["type"]]: Proje
     ...(item.outputIndicatesFailure === undefined
       ? {}
       : { outputIndicatesFailure: item.outputIndicatesFailure }),
+    ...(item.outputOmitted === undefined ? {} : { outputOmitted: item.outputOmitted }),
     ...(item.exitCode === undefined ? {} : { exitCode: item.exitCode }),
   }),
   file_search: (item, base, roots) => ({
@@ -347,6 +357,58 @@ export function projectTurnItemForGuest(
   return project(wire, guestBase(wire, runId), roots);
 }
 
+/**
+ * What a guest's expanded row shows of one item: the stream's item, plus a command's output, as
+ * the owner's detail fetch adds it. Every other type has nothing more for a guest.
+ */
+export function projectTurnItemForGuestDetail(
+  item: OrchestrationV2TurnItem,
+  roots: GuestPathRoots,
+): GuestTurnItemDetail | null {
+  const guest = projectTurnItemForGuest(item, roots);
+  if (guest?.type !== "command_execution" || item.type !== "command_execution") return guest;
+  const detail = projectTurnItemForDetail(item);
+  return detail.type !== "command_execution" || detail.output === undefined
+    ? guest
+    : { ...guest, output: guestText(detail.output, roots) };
+}
+
+/**
+ * The length of the end of `text` that could still grow into a root and what follows it, so it is
+ * rewritten whole: the root alone could be a sibling such as `<root>-old`.
+ */
+function rootPrefixAtEnd(text: string, roots: GuestPathRoots): number {
+  let longest = 0;
+  for (const { dir } of roots) {
+    for (const candidate of [`${dir}/`, `${dir}\\`]) {
+      for (let length = Math.min(candidate.length, text.length); length > longest; length -= 1) {
+        if (text.endsWith(candidate.slice(0, length))) {
+          longest = length;
+          break;
+        }
+      }
+    }
+  }
+  return longest;
+}
+
+/**
+ * Rewrites live command output frames for a guest, with paths as in its command text. A frame can
+ * end partway through a root, so text that could still become one waits for the next frame; the
+ * client receives the same bytes in the same order, only later. A settled frame holds nothing back.
+ */
+export function guestCommandOutputFrames(roots: GuestPathRoots) {
+  let held = "";
+  return (frame: OrchestrationV2CommandOutputFrame): OrchestrationV2CommandOutputFrame | null => {
+    const text = (frame.kind === "replace" ? "" : held) + frame.text;
+    const cut = text.length - (frame.running ? rootPrefixAtEnd(text, roots) : 0);
+    held = text.slice(cut);
+    const shown = guestText(text.slice(0, cut), roots);
+    if (frame.kind === "append" && shown === "") return null;
+    return { kind: frame.kind, text: shown, truncated: frame.truncated, running: frame.running };
+  };
+}
+
 type GuestProviderTurn = Pick<
   OrchestrationV2ThreadProjection["providerTurns"][number],
   "runAttemptId" | "ordinal" | "status"
@@ -424,7 +486,25 @@ export function projectSnapshotForGuest(
   };
 }
 
-export function guestShareView(thread: OrchestrationV2AppThread): GuestShareView | null {
+/** The thread's model as the owner's composer labels it, from the configured providers. */
+export function guestThreadModel(
+  selection: OrchestrationV2AppThread["modelSelection"],
+  providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "driver" | "models">>,
+): GuestThreadModel {
+  const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);
+  const model = provider?.models.find((candidate) => candidate.slug === selection.model);
+  return {
+    driver: provider?.driver ?? null,
+    name: model?.name ?? selection.model,
+    ...(model?.shortName === undefined ? {} : { shortName: model.shortName }),
+    ...(model?.subProvider === undefined ? {} : { subProvider: model.subProvider }),
+  };
+}
+
+export function guestShareView(
+  thread: OrchestrationV2AppThread,
+  model: GuestThreadModel,
+): GuestShareView | null {
   const share = thread.guestShare;
   if (!share || share.guestName === null) return null;
   return {
@@ -433,6 +513,7 @@ export function guestShareView(thread: OrchestrationV2AppThread): GuestShareView
     guestName: share.guestName,
     expiresAt: share.expiresAt,
     messages: share.messages,
+    model,
   };
 }
 

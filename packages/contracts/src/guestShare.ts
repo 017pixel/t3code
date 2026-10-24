@@ -120,3 +120,7 @@ export const GUEST_SHARE_PARAM = "share";
 export const guestSessionCookieName = (shareId: string) => `t3_guest_${shareId}`;
 /** Serves one HTML render the guest can see: `?share=<share id>&item=<turn item id>`. */
 export const GUEST_RENDER_ROUTE = `${GUEST_ROUTE_PREFIX}/render`;
+/** One item the guest can see, as its expanded row shows it: `?share=<share id>&item=<id>`. */
+export const GUEST_ITEM_ROUTE = `${GUEST_ROUTE_PREFIX}/item`;
+/** Server-sent output frames of one command the guest can see: `?share=<share id>&item=<id>`. */
+export const GUEST_COMMAND_OUTPUT_ROUTE = `${GUEST_ROUTE_PREFIX}/command-output`;

@@ -31,6 +31,7 @@ const view: GuestShareView = {
   guestName: "Sam",
   expiresAt: "2026-10-24T00:00:00.000Z",
   messages: [],
+  model: { driver: null, name: "gpt-5.4" },
 };
 
 const base = {

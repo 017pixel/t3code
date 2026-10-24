@@ -8,6 +8,7 @@ import {
   type GuestRedeemRequest,
   type GuestShareView,
   type GuestSubmitRequest,
+  type GuestThreadModel,
   type ThreadGuestMessage,
   type ThreadGuestMessageStatus,
 } from "@t3tools/contracts";
@@ -31,12 +32,16 @@ import { useStableCallback } from "~/hooks/useStableCallback";
 import { useTheme } from "~/hooks/useTheme";
 import { cn } from "~/lib/utils";
 import type { ChatComposerHandle } from "../chat/ChatComposer";
+import { ComposerControl } from "../chat/ComposerControl";
 import { GuestMessageName, guestBubbleClassName } from "../chat/guestMessageStyle";
 import { MessagesTimeline } from "../chat/MessagesTimeline";
+import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
+import { getTriggerDisplayModelName } from "../chat/providerIconUtils";
 import { ScrollToEndButton } from "../chat/TimelineOverlays";
 import type { TimelineRow } from "../chat/timelineRowContext";
 import { useTimelineFollow } from "../chat/useTimelineFollow";
 import { GuestHtmlRender } from "./GuestHtmlRender";
+import { guestTurnItemSource } from "./guestTurnItemSource";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import {
@@ -327,7 +332,7 @@ const ignore = () => {};
  * revert, diffs, files, other threads, shell) is left out, so its control does not render.
  */
 function GuestThread({
-  view: { shareId, title, expiresAt, messages },
+  view: { shareId, title, expiresAt, messages, model },
   runs,
   items,
   awaitingRowIds,
@@ -396,6 +401,7 @@ function GuestThread({
           isRevertingCheckpoint={false}
           onImageExpand={ignore}
           renderHtmlRender={renderHtmlRender}
+          turnItemSource={guestTurnItemSource(shareId)}
           activeThreadEnvironmentId={GUEST_ENVIRONMENT_ID}
           markdownCwd={undefined}
           resolvedTheme={resolvedTheme}
@@ -427,7 +433,7 @@ function GuestThread({
         ) : null}
       </div>
       <div className={cn(LANE, "shrink-0 pb-4")}>
-        <GuestComposer shareId={shareId} />
+        <GuestComposer shareId={shareId} model={model} />
       </div>
     </>
   );
@@ -464,7 +470,37 @@ function UnplacedGuestMessage({ message }: { readonly message: ThreadGuestMessag
   );
 }
 
-function GuestComposer({ shareId }: { readonly shareId: GuestShareView["shareId"] }) {
+/** The thread's model, labeled as the owner's composer labels it, with no way to change it. */
+function GuestModelLabel({ model }: { readonly model: GuestThreadModel }) {
+  const label = getTriggerDisplayModelName({ slug: model.name, ...model });
+  return (
+    <ComposerControl
+      render={<span />}
+      aria-label={`Model: ${label}`}
+      className="pointer-events-none min-w-0 shrink"
+    >
+      {model.driver === null ? null : (
+        <ProviderInstanceIcon
+          driverKind={model.driver}
+          displayName={label}
+          className="size-4"
+          iconClassName="size-4"
+        />
+      )}
+      <span className="min-w-0 truncate" data-chat-provider-model-picker-label="true">
+        {label}
+      </span>
+    </ComposerControl>
+  );
+}
+
+function GuestComposer({
+  shareId,
+  model,
+}: {
+  readonly shareId: GuestShareView["shareId"];
+  readonly model: GuestThreadModel;
+}) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -504,6 +540,7 @@ function GuestComposer({ shareId }: { readonly shareId: GuestShareView["shareId"
         className="max-h-60 min-h-12 w-full resize-none bg-transparent text-sm outline-none field-sizing-content placeholder:text-placeholder"
       />
       <div className="flex items-center gap-3">
+        <GuestModelLabel model={model} />
         {error !== null ? (
           <p role="alert" className="min-w-0 flex-1 text-xs text-destructive">
             {error}

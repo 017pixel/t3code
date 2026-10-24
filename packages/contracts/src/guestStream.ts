@@ -65,7 +65,21 @@ const GuestHtmlRenderOutput = Schema.Struct({
   }),
 });
 
-export const GuestTurnItem = Schema.Union([
+/**
+ * The command and how it ended. Output never rides the stream: like the owner's timeline, a row
+ * fetches it when expanded (`GUEST_ITEM_ROUTE`, `GUEST_COMMAND_OUTPUT_ROUTE`), so `outputOmitted`
+ * says there is some.
+ */
+const GuestCommandExecutionFields = {
+  ...GuestTurnItemBaseFields,
+  type: Schema.Literal("command_execution"),
+  input: Schema.String,
+  outputIndicatesFailure: Schema.optional(Schema.Boolean),
+  outputOmitted: Schema.optional(Schema.Boolean),
+  exitCode: Schema.optional(Schema.Int),
+} as const;
+
+const GuestTurnItemMembers = [
   Schema.Struct({
     ...GuestTurnItemBaseFields,
     type: Schema.Literal("user_message"),
@@ -130,14 +144,6 @@ export const GuestTurnItem = Schema.Union([
         }),
       ),
     ),
-  }),
-  /** The command and how it ended. Output is where secrets live, so it never reaches a guest. */
-  Schema.Struct({
-    ...GuestTurnItemBaseFields,
-    type: Schema.Literal("command_execution"),
-    input: Schema.String,
-    outputIndicatesFailure: Schema.optional(Schema.Boolean),
-    exitCode: Schema.optional(Schema.Int),
   }),
   /** Matching file names; previews are file content. */
   Schema.Struct({
@@ -212,8 +218,26 @@ export const GuestTurnItem = Schema.Union([
     input: Schema.Null,
     output: Schema.optional(GuestHtmlRenderOutput),
   }),
+] as const;
+
+export const GuestTurnItem = Schema.Union([
+  ...GuestTurnItemMembers,
+  Schema.Struct(GuestCommandExecutionFields),
 ]);
 export type GuestTurnItem = typeof GuestTurnItem.Type;
+
+/**
+ * One item as an expanded row shows it: the stream's item, plus a command's output with paths
+ * rewritten as in its command text.
+ */
+export const GuestTurnItemDetail = Schema.Union([
+  ...GuestTurnItemMembers,
+  Schema.Struct({ ...GuestCommandExecutionFields, output: Schema.optional(Schema.String) }),
+]);
+export type GuestTurnItemDetail = typeof GuestTurnItemDetail.Type;
+
+export const GuestItemDetail = Schema.Struct({ item: GuestTurnItemDetail });
+export type GuestItemDetail = typeof GuestItemDetail.Type;
 
 /** A run the guest can see, trimmed to what the timeline needs for progress and folding. */
 export const GuestRun = Schema.Struct({
@@ -230,12 +254,25 @@ export const GuestRun = Schema.Struct({
 });
 export type GuestRun = typeof GuestRun.Type;
 
+/**
+ * What the composer's model label shows; nothing else from the owner's provider settings. The
+ * driver is null when the thread's provider is no longer configured.
+ */
+export const GuestThreadModel = Schema.Struct({
+  driver: Schema.NullOr(ProviderDriverKind),
+  name: TrimmedNonEmptyString,
+  shortName: Schema.optional(TrimmedNonEmptyString),
+  subProvider: Schema.optional(TrimmedNonEmptyString),
+});
+export type GuestThreadModel = typeof GuestThreadModel.Type;
+
 export const GuestShareView = Schema.Struct({
   shareId: GuestShareId,
   title: Schema.String,
   guestName: TrimmedNonEmptyString,
   expiresAt: IsoDateTime,
   messages: Schema.Array(ThreadGuestMessage),
+  model: GuestThreadModel,
 });
 export type GuestShareView = typeof GuestShareView.Type;
 

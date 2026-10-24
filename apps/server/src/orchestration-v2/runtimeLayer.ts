@@ -369,7 +369,9 @@ export const layerProduction = Layer.mergeAll(
   layerScheduledTaskProvided,
   layerSecretRequestsProvided,
   GuestShareService.layer.pipe(
-    Layer.provide(Layer.merge(layerOrchestratorProvided, ProjectStore.layer)),
+    Layer.provide(
+      Layer.mergeAll(layerOrchestratorProvided, ProjectStore.layer, layerCommandOutputHubProvided),
+    ),
   ),
   UsageLimitRecoveryWorker.layer.pipe(
     Layer.provide(

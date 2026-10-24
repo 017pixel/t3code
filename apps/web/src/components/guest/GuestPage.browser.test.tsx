@@ -1,8 +1,10 @@
 import {
+  GUEST_COMMAND_OUTPUT_ROUTE,
   GUEST_RENDER_ROUTE,
   GuestShareId,
   GuestStreamEvent,
   MessageId,
+  ProviderDriverKind,
   RunId,
   ThreadId,
   TurnItemId,
@@ -55,6 +57,7 @@ const items: ReadonlyArray<GuestTurnItem> = [
     ordinal: 1,
     type: "command_execution",
     input: "vp run check:changed",
+    outputOmitted: true,
     exitCode: 0,
   },
   {
@@ -85,6 +88,7 @@ const snapshot = encodeEvent({
     guestName: "Sam",
     expiresAt: "2026-10-24T10:00:00.000Z",
     messages: [],
+    model: { driver: ProviderDriverKind.make("codex"), name: "GPT-5.4", shortName: "5.4" },
   },
   runs: [
     {
@@ -101,13 +105,21 @@ const snapshot = encodeEvent({
   items,
 });
 
-/** Delivers the snapshot as soon as the page subscribes. */
+const finalOutput = JSON.stringify({
+  kind: "replace",
+  text: "4 files checked\n",
+  truncated: false,
+  running: false,
+});
+
+/** Delivers the snapshot, or a command's final output, as soon as the page subscribes. */
 class FakeEventSource extends EventTarget {
   static readonly CLOSED = 2;
   readyState = 1;
   constructor(readonly url: string) {
     super();
-    queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: snapshot })));
+    const data = url.startsWith(GUEST_COMMAND_OUTPUT_ROUTE) ? finalOutput : snapshot;
+    queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data })));
   }
   close() {
     this.readyState = FakeEventSource.CLOSED;
@@ -138,6 +150,9 @@ describe("GuestPage", () => {
     // A finished turn folds its work, as it does for the owner; the command is inside.
     await userEvent.click(screen.getByRole("button", { name: /Worked for/ }));
     await expect.element(screen.getByText("vp run check:changed")).toBeVisible();
+    // Expanding the command shows its output, read through the guest route.
+    await userEvent.click(screen.getByText("vp run check:changed"));
+    await expect.element(screen.getByText("4 files checked")).toBeVisible();
     await expect
       .element(screen.getByTitle("Chart"))
       .toHaveAttribute(
@@ -147,5 +162,7 @@ describe("GuestPage", () => {
     // Guests cannot act on the thread, so no control offers to.
     expect(screen.container.querySelector('[aria-label="Fork from this response"]')).toBeNull();
     expect(socket).not.toHaveBeenCalled();
+    // The composer names the thread's model, as the owner's does, with nothing to pick.
+    await expect.element(screen.getByLabelText("Model: 5.4")).toBeVisible();
   });
 });
