@@ -721,7 +721,13 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
                     ? "cancelled"
                     : "failed",
             });
-          if (wasRunning !== observedChildren.has(item.itemId)) yield* syncBackground();
+          // A later revision can add childSessionId, which changes the row's native id.
+          const rosterStale =
+            status === "running" &&
+            item.kind === "subagent" &&
+            !thread?.pendingBackgroundTasks?.some((task) => task.taskId === subagentNativeId(item));
+          if (wasRunning !== observedChildren.has(item.itemId) || rosterStale)
+            yield* syncBackground();
         }
         const streaming = status === "running";
         const base = {
