@@ -68,7 +68,13 @@ const cursorSdkMock = vi.hoisted(() => {
   const listRuns = vi.fn(async (_agentId: string, options?: ListRunsOptions) => {
     runOperations.push("agent.listRuns");
     const runs = staleRunActive ? storedRuns : [];
-    return { items: options?.limit === undefined ? runs : runs.slice(0, options.limit) };
+    // Mirrors the SDK's opaque cursor pagination with its default page size of 50.
+    const offset = options?.cursor === undefined ? 0 : Number(options.cursor);
+    const end = offset + (options?.limit ?? 50);
+    return {
+      items: runs.slice(offset, end),
+      ...(end < runs.length ? { nextCursor: String(end) } : {}),
+    };
   });
   const cancelRun = vi.fn(async (runId: string) => {
     runOperations.push("agent.cancelRun");
@@ -183,12 +189,16 @@ describe("CursorAgentSdkRunner", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
-  it.effect("cancels the abandoned run when an older cancelled run precedes it", () =>
+  it.effect("cancels the abandoned run on a later page behind older terminal runs", () =>
     Effect.gen(function* () {
       cursorSdkMock.runOperations.length = 0;
+      cursorSdkMock.listRuns.mockClear();
       cursorSdkMock.cancelRun.mockClear();
       cursorSdkMock.setStoredRuns([
-        { id: "run-cancelled-on-first-restart", status: "cancelled" },
+        ...Array.from({ length: 50 }, (_, index) => ({
+          id: `run-terminal-${index}`,
+          status: index === 0 ? "cancelled" : "finished",
+        })),
         { id: "run-abandoned-on-second-restart", status: "running" },
       ]);
 
@@ -205,6 +215,7 @@ describe("CursorAgentSdkRunner", () => {
       const run = yield* session.send({ message: "continue" });
       yield* run.wait;
 
+      assert.deepStrictEqual(cursorSdkMock.listRuns.mock.calls.length, 2);
       assert.deepStrictEqual(
         cursorSdkMock.cancelRun.mock.calls[0]?.[0],
         "run-abandoned-on-second-restart",
