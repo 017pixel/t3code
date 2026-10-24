@@ -3661,6 +3661,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       emptySnapshot: false,
       expected: ["Only the result."],
     },
+    {
+      response: "empty-snapshot result",
+      result: "Only the result.",
+      emptySnapshot: true,
+      expected: ["Only the result."],
+    },
     { response: "empty", result: "", emptySnapshot: true, expected: [] },
   ])(
     "projects a $response Claude response without phantom text",
