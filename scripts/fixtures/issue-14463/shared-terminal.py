@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Deterministic real PTY fixture: --mode tui|normal|burst; q exits TUI."""
 import argparse
-import curses
+import select
+import termios
+import tty
 import os
 import signal
 import sys
@@ -25,28 +27,41 @@ def normal():
         sys.stdout.flush()
 
 
-def tui(screen):
-    curses.start_color()
-    curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)
-    screen.bkgd(' ', curses.color_pair(1))
-    curses.curs_set(1)
-    while True:
-        rows, cols = screen.getmaxyx()
-        screen.erase()
-        if rows > 2 and cols > 2:
-            screen.border('|', '|', '-', '-', '+', '+', '+', '+')
-            lines = [f'{args.label} {cols} columns x {rows} rows',
-                     'Every border must be visible', 'Resize either client; q exits',
-                     '0123456789' * 40]
-            for row, line in enumerate(lines, 1):
-                if row < rows - 1:
-                    screen.addnstr(row, 1, line, cols - 2)
-            if rows > 6:
-                screen.addnstr(rows - 2, 1, 'BOTTOM EDGE', cols - 2)
-            screen.move(min(5, rows - 2), min(3, cols - 2))
-        screen.refresh()
-        if screen.getch() in (ord('q'), 3):
-            break
+def tui():
+    old = termios.tcgetattr(sys.stdin)
+    pending = True
+    def redraw(*_):
+        nonlocal pending
+        pending = True
+    signal.signal(signal.SIGWINCH, redraw)
+    try:
+        tty.setraw(sys.stdin)
+        sys.stdout.write('\x1b[?1049h\x1b[?12l')
+        while True:
+            if pending:
+                pending = False
+                cols, rows = os.get_terminal_size()
+                out = '\x1b[38;2;255;255;255m\x1b[48;2;0;45;100m\x1b[2J\x1b[H'
+                lines = [f'{args.label} {cols} columns x {rows} rows',
+                         'Every border must be visible', 'Resize either client; q exits',
+                         '0123456789' * 40]
+                for row in range(rows):
+                    edge = row == 0 or row == rows - 1
+                    content = '-' * max(0, cols - 2) if edge else (
+                        'BOTTOM EDGE' if row == rows - 2 else
+                        lines[row - 1] if 1 <= row <= len(lines) else '')
+                    content = content[:max(0, cols-2)].ljust(max(0, cols-2))
+                    out += f'\x1b[{row+1};1H' + ('+' if edge else '|') + content + ('+' if edge else '|')
+                out += f'\x1b[{min(6,rows-1)};{min(4,cols-1)}H\x1b[?25h'
+                sys.stdout.write(out)
+                sys.stdout.flush()
+            if select.select([sys.stdin], [], [], 0.1)[0]:
+                if os.read(sys.stdin.fileno(), 1) in (b'q', b'\x03'):
+                    break
+    finally:
+        sys.stdout.write('\x1b[0m\x1b[?1049l\x1b[?25h')
+        sys.stdout.flush()
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
 
 
 if args.mode == 'normal':
@@ -55,6 +70,6 @@ elif args.mode == 'burst':
     for row in range(20000):
         print(f'BURST {row:05d} ' + '0123456789' * 20)
     sys.stdout.flush()
-    curses.wrapper(tui)
+    tui()
 else:
-    curses.wrapper(tui)
+    tui()
