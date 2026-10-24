@@ -271,18 +271,36 @@ export type ClaudeCapabilitiesProbe = {
   readonly usageCheckedAt?: string;
   /** settings.json `maxEffortLevel`; Claude Code clamps every higher effort to it. */
   readonly maxEffortLevel?: ClaudeEffortLevel;
+  /** settings.json `modelSettings.<model>.maxEffortLevel`, which replaces the top-level cap. */
+  readonly modelMaxEffortLevels?: ReadonlyMap<string, ClaudeEffortLevel>;
 };
 
 // `getSettings` exists at runtime but is missing from the SDK's `Query` type, and older CLIs
 // reject the control request.
 type ClaudeSettingsQuery = {
   readonly getSettings?: () => Promise<{
-    readonly effective?: { readonly maxEffortLevel?: unknown };
+    readonly effective?: { readonly maxEffortLevel?: unknown; readonly modelSettings?: unknown };
   }>;
 };
 
 function parseClaudeMaxEffortLevel(value: unknown): ClaudeEffortLevel | undefined {
   return CLAUDE_EFFORT_LEVELS.find((level) => level === value);
+}
+
+function parseClaudeModelMaxEffortLevels(
+  modelSettings: unknown,
+): ReadonlyMap<string, ClaudeEffortLevel> | undefined {
+  if (!modelSettings || typeof modelSettings !== "object") return undefined;
+  const levels = new Map<string, ClaudeEffortLevel>();
+  for (const [model, settings] of Object.entries(modelSettings)) {
+    const level = parseClaudeMaxEffortLevel(
+      settings && typeof settings === "object"
+        ? (settings as { readonly maxEffortLevel?: unknown }).maxEffortLevel
+        : undefined,
+    );
+    if (level) levels.set(model, level);
+  }
+  return levels.size > 0 ? levels : undefined;
 }
 
 function parseClaudeInitializationCommands(
@@ -433,10 +451,14 @@ const probeClaudeCapabilities = (
                 rate_limits: usageResult.success.rate_limits,
               }
             : undefined;
-        const maxEffortLevel =
+        const effectiveSettings =
           settingsResult && Result.isSuccess(settingsResult)
-            ? parseClaudeMaxEffortLevel(settingsResult.success.effective?.maxEffortLevel)
+            ? settingsResult.success.effective
             : undefined;
+        const maxEffortLevel = parseClaudeMaxEffortLevel(effectiveSettings?.maxEffortLevel);
+        const modelMaxEffortLevels = parseClaudeModelMaxEffortLevels(
+          effectiveSettings?.modelSettings,
+        );
         const account = init.account as
           | {
               readonly email?: string;
@@ -455,6 +477,7 @@ const probeClaudeCapabilities = (
           slashCommands: parseClaudeInitializationCommands(init.commands),
           ...(usage ? { usage, usageCheckedAt } : {}),
           ...(maxEffortLevel ? { maxEffortLevel } : {}),
+          ...(modelMaxEffortLevels ? { modelMaxEffortLevels } : {}),
         } satisfies ClaudeCapabilitiesProbe;
       }),
     ),
@@ -639,6 +662,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       DEFAULT_CLAUDE_MODEL_CAPABILITIES,
     ),
     capabilities?.maxEffortLevel,
+    capabilities?.modelMaxEffortLevels,
   );
   const skills = yield* discoverClaudeSkills(claudeSettings, cwd, resolvedEnvironment);
   const slashCommands = [COMPACT_SLASH_COMMAND, ...(capabilities?.slashCommands ?? [])];

@@ -220,18 +220,22 @@ function claudeEffortRank(level: string | undefined): number {
  * would fall back to the descriptor default and run below the cap. An option counts as above the
  * cap only when both the level it reads as and the level the CLI is sent are, so an `effortMap`
  * that already sends Max as High keeps its label, and values that map to no level (prompt-injected
- * Ultrathink) are never capped.
+ * Ultrathink) are never capped. A model's `modelSettings.<model>.maxEffortLevel` replaces the
+ * top-level cap for that model, and `max` exempts it.
  */
 export function capClaudeCatalogEffort(
   catalog: ClaudeModelCatalog,
   models: ReadonlyArray<ServerProviderModel>,
   maxEffortLevel: ClaudeEffortLevel | undefined,
+  modelMaxEffortLevels?: ReadonlyMap<string, ClaudeEffortLevel>,
 ): ReadonlyArray<ServerProviderModel> {
-  if (!maxEffortLevel) return models;
-  const capRank = claudeEffortRank(maxEffortLevel);
+  if (!maxEffortLevel && !modelMaxEffortLevels) return models;
   return models.map((model) => {
     // Custom model labels are user-authored, so they are left alone.
     if (model.isCustom || !model.capabilities?.optionDescriptors) return model;
+    const modelMaxEffortLevel = modelMaxEffortLevels?.get(model.slug) ?? maxEffortLevel;
+    if (!modelMaxEffortLevel) return model;
+    const capRank = claudeEffortRank(modelMaxEffortLevel);
     return {
       ...model,
       capabilities: {

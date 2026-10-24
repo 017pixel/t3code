@@ -89,9 +89,14 @@ lines.on("line", (line) => {
           subtype: "success",
           request_id: message.request_id,
           response: {
-            effective: process.env.T3_CLAUDE_MAX_EFFORT_LEVEL
-              ? { maxEffortLevel: process.env.T3_CLAUDE_MAX_EFFORT_LEVEL }
-              : {},
+            effective: {
+              ...(process.env.T3_CLAUDE_MAX_EFFORT_LEVEL
+                ? { maxEffortLevel: process.env.T3_CLAUDE_MAX_EFFORT_LEVEL }
+                : {}),
+              ...(process.env.T3_CLAUDE_MODEL_SETTINGS
+                ? { modelSettings: JSON.parse(process.env.T3_CLAUDE_MODEL_SETTINGS) }
+                : {}),
+            },
             sources: [],
           },
         },

@@ -297,6 +297,27 @@ describe("Claude model catalog", () => {
       ],
     );
 
+    // A per-model cap applies without a top-level one and leaves other models uncapped.
+    assert.deepStrictEqual(
+      capClaudeCatalogEffort(catalog, models, undefined, new Map([["claude-plain", "high"]])).map(
+        (model) => {
+          const effort = model.capabilities?.optionDescriptors?.[0];
+          return effort?.type === "select" ? effort.options.map((option) => option.label) : [];
+        },
+      ),
+      [
+        [
+          "Medium",
+          "High",
+          "Extra High (capped to High)",
+          "Max (capped to High)",
+          "Ultracode (capped to High)",
+          "Ultrathink",
+        ],
+        ["Medium", "High", "Extra High", "Max", "Ultracode", "Ultrathink"],
+      ],
+    );
+
     // Without an Extra High option (Opus 4.6), the CLI clamps an xhigh cap down to High.
     const noXhigh = {
       slug: "claude-no-xhigh",
