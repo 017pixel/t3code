@@ -2,19 +2,14 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
-  EventId,
   GuestShareId,
   MessageId,
-  type OrchestrationV2TurnItem,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
-  type RunId,
   ThreadId,
-  TurnItemId,
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
-import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -28,9 +23,7 @@ import { CloudManagedEndpointRuntime } from "../cloud/ManagedEndpointRuntime.ts"
 import * as ServerConfig from "../config.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
-import * as CommandOutputHub from "../orchestration-v2/CommandOutputHub.ts";
 import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
-import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -72,7 +65,7 @@ const layerProviders = Layer.mock(ProviderRegistry.ProviderRegistry)({
   getProviders: Effect.succeed([]),
 });
 const layerTest = GuestShareService.layer.pipe(
-  Layer.provideMerge(CommandOutputHub.layer.pipe(Layer.provideMerge(layerOrchestration))),
+  Layer.provideMerge(layerOrchestration),
   Layer.provide(layerProviders),
   Layer.provide(ProjectStore.layer.pipe(Layer.provide(layerDatabase))),
   Layer.provide(layerConnect),
@@ -82,7 +75,6 @@ const layerTest = GuestShareService.layer.pipe(
 );
 
 const threadId = ThreadId.make("thread:guest-share-service");
-const WORKTREE = "/work/guest-share-service";
 
 const shareThread = Effect.gen(function* () {
   yield* Ref.set(hostname, "env.t3.test");
@@ -97,7 +89,7 @@ const shareThread = Effect.gen(function* () {
     runtimeMode: "full-access",
     interactionMode: "default",
     branch: null,
-    worktreePath: WORKTREE,
+    worktreePath: null,
     createdBy: "user",
     creationSource: "web",
   });
@@ -268,118 +260,5 @@ it.effect("serves no render for an item the guest's transcript does not show", (
     assert.isTrue(
       Exit.isFailure(yield* Effect.exit(guestShares.render(credential, "item:missing"))),
     );
-  }).pipe(Effect.provide(layerTest)),
-);
-
-/** A message from the owner, which opens the run the guest's window starts at. */
-const ownerRun = Effect.gen(function* () {
-  const orchestrator = yield* Orchestrator.OrchestratorV2;
-  yield* orchestrator.dispatch({
-    type: "message.dispatch",
-    commandId: CommandId.make("owner-message-for-command"),
-    threadId,
-    messageId: MessageId.make("message:command"),
-    text: "Build it",
-    attachments: [],
-    dispatchMode: { type: "defer_start" },
-    createdBy: "user",
-    creationSource: "web",
-  });
-  const { runs } = (yield* orchestrator.getThreadSnapshotWindow(threadId, { rowLimit: 10 }))
-    .projection;
-  return runs[0]!.id;
-});
-
-const writeCommand = (
-  runId: RunId | null,
-  id: string,
-  fields: Pick<
-    Extract<OrchestrationV2TurnItem, { type: "command_execution" }>,
-    "status" | "output"
-  >,
-) =>
-  Effect.gen(function* () {
-    const eventSink = yield* EventSink.EventSinkV2;
-    const now = yield* DateTime.now;
-    yield* eventSink.write({
-      events: [
-        {
-          id: EventId.make(`event:${id}`),
-          type: "turn-item.updated",
-          threadId,
-          driver: ProviderDriverKind.make("codex"),
-          providerInstanceId: instanceId,
-          occurredAt: now,
-          payload: {
-            id: TurnItemId.make(id),
-            threadId,
-            runId,
-            nodeId: null,
-            providerThreadId: null,
-            providerTurnId: null,
-            nativeItemRef: null,
-            parentItemId: null,
-            ordinal: 1,
-            title: null,
-            startedAt: now,
-            completedAt: fields.status === "running" ? null : now,
-            updatedAt: now,
-            type: "command_execution",
-            input: `ls ${WORKTREE}/src`,
-            ...fields,
-          },
-        },
-      ],
-    });
-    return TurnItemId.make(id);
-  });
-
-it.effect("gives the guest a visible command's output with paths rewritten, and nothing else", () =>
-  Effect.gen(function* () {
-    const { guestShares, credential } = yield* shareThread;
-    const { token: session } = yield* guestShares.redeem({ credential, name: "Sam" });
-    const runId = yield* ownerRun;
-    const output = `${WORKTREE}/src/auth.ts\n`;
-    const command = yield* writeCommand(runId, "item:command", { status: "completed", output });
-    const outsideRun = yield* writeCommand(null, "item:no-run", { status: "completed", output });
-
-    const detail = yield* guestShares.item(session, command);
-    assert.deepInclude(detail, { input: "ls src", output: "src/auth.ts\n", outputOmitted: true });
-    const frames = Array.from(
-      yield* Stream.runCollect(yield* guestShares.commandOutput(session, command)),
-    );
-    assert.deepEqual(frames, [
-      { kind: "replace", text: "src/auth.ts\n", truncated: false, running: false },
-    ]);
-
-    const denied: ReadonlyArray<Effect.Effect<unknown, GuestShareService.GuestShareAccessError>> = [
-      guestShares.item(session, outsideRun),
-      guestShares.commandOutput(session, outsideRun),
-      guestShares.item(credential, command),
-      guestShares.commandOutput(credential, command),
-    ];
-    for (const request of denied) {
-      assert.isTrue(Exit.isFailure(yield* Effect.exit(request)));
-    }
-  }).pipe(Effect.provide(layerTest)),
-);
-
-it.effect("ends a running command's output when the owner stops sharing", () =>
-  Effect.gen(function* () {
-    const { orchestrator, guestShares, credential } = yield* shareThread;
-    const { token: session } = yield* guestShares.redeem({ credential, name: "Sam" });
-    const runId = yield* ownerRun;
-    const command = yield* writeCommand(runId, "item:running", { status: "running" });
-    const collecting = yield* Stream.runCollect(
-      yield* guestShares.commandOutput(session, command),
-    ).pipe(Effect.forkChild);
-    yield* orchestrator.dispatch({
-      type: "thread.guest-share.close",
-      commandId: CommandId.make("close-during-command"),
-      threadId,
-    });
-    const frames = Array.from(yield* Fiber.join(collecting));
-    assert.isTrue(frames.every((frame) => frame.running));
-    assert.isTrue(Exit.isFailure(yield* Effect.exit(guestShares.commandOutput(session, command))));
   }).pipe(Effect.provide(layerTest)),
 );

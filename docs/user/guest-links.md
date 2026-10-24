@@ -23,12 +23,12 @@ unlinking the machine from T3 Connect also ends it. You can send or dismiss gues
 
 The guest sees the last three turns before you shared the thread and everything after, in the same
 timeline you see, as it streams. They see messages, plans, the agent's questions, and its work:
-commands and their output, file names, searches, and tool names. Their composer shows the thread's
-model, but they cannot change it. They do not see diffs, the agent's reasoning, tool results other
-than command output, or what you answer in approval prompts.
+commands, file names, searches, and tool names. Their composer shows the thread's model, but they
+cannot change it. They do not see command output, diffs, file contents, the agent's reasoning, or
+what you answer in approval prompts.
 
-Command output and the agent's replies can show something it read, such as a value from a file.
-Share only threads you are comfortable showing.
+The agent's replies can still repeat something it read, such as a value from a file. Share only
+threads you are comfortable showing.
 
 The guest's text runs with the thread's current permission mode once you send it. Read it before you
 choose **Send**, as you would read anything pasted from a chat.

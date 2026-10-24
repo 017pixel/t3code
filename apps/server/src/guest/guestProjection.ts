@@ -4,35 +4,23 @@ import {
   type GuestStreamEvent,
   type GuestThreadModel,
   type GuestTurnItem,
-  type GuestTurnItemDetail,
   type OrchestrationV2AppThread,
-  type OrchestrationV2CommandOutputFrame,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
   orchestrationV2RunWorkStartedAt,
   type ServerProvider,
 } from "@t3tools/contracts";
-import {
-  appendTerminalOutput,
-  EMPTY_TERMINAL_OUTPUT,
-  LIVE_LINES,
-  type TerminalOutputState,
-} from "@t3tools/shared/terminalOutput";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
 import * as DateTime from "effect/DateTime";
 
-import {
-  projectTurnItemForDetail,
-  projectTurnItemForWire,
-} from "../orchestration-v2/WireProjection.ts";
+import { projectTurnItemForWire } from "../orchestration-v2/WireProjection.ts";
 
 /**
- * The guest sees the thread as the owner sees it: what ran and how it ended, and a command's
- * output once its row is expanded. Never diffs, reasoning, tool payloads, or anything that points
- * at another thread. Every guest object is built by picking fields, so a field added to a domain
- * type stays on the server until someone adds it here. The guest schemas back this up when they
- * encode.
+ * The guest sees the thread as the owner sees it with every row collapsed: what ran and how it
+ * ended, never output, diffs, or anything that points at another thread. Every guest object is
+ * built by picking fields, so a field added to a domain type stays on the server until someone
+ * adds it here. The guest stream schema backs this up when it encodes.
  */
 
 /**
@@ -212,7 +200,6 @@ const GUEST_PROJECTORS: { readonly [T in OrchestrationV2TurnItem["type"]]: Proje
           })),
         }),
   }),
-  // Output stays off the stream; an expanded row fetches it, as the owner's does.
   command_execution: (item, base, roots) => ({
     ...base,
     type: "command_execution",
@@ -220,7 +207,6 @@ const GUEST_PROJECTORS: { readonly [T in OrchestrationV2TurnItem["type"]]: Proje
     ...(item.outputIndicatesFailure === undefined
       ? {}
       : { outputIndicatesFailure: item.outputIndicatesFailure }),
-    ...(item.outputOmitted === undefined ? {} : { outputOmitted: item.outputOmitted }),
     ...(item.exitCode === undefined ? {} : { exitCode: item.exitCode }),
   }),
   file_search: (item, base, roots) => ({
@@ -361,138 +347,6 @@ export function projectTurnItemForGuest(
   if (runId === null || project === undefined) return null;
   const wire = projectTurnItemForWire(item);
   return project(wire, guestBase(wire, runId), roots);
-}
-
-/**
- * What a guest's expanded row shows of one item: the stream's item, plus a command's output, as
- * the owner's detail fetch adds it. Every other type has nothing more for a guest.
- */
-export function projectTurnItemForGuestDetail(
-  item: OrchestrationV2TurnItem,
-  roots: GuestPathRoots,
-): GuestTurnItemDetail | null {
-  const guest = projectTurnItemForGuest(item, roots);
-  if (guest?.type !== "command_execution" || item.type !== "command_execution") return guest;
-  const detail = projectTurnItemForDetail(item);
-  return detail.type !== "command_execution" || detail.output === undefined
-    ? guest
-    : {
-        ...guest,
-        output: guestText(
-          displayedOutput(
-            // The detail is already bounded; the tail must not cut it again.
-            appendTerminalOutput(EMPTY_TERMINAL_OUTPUT, detail.output, Number.MAX_SAFE_INTEGER),
-          ),
-          roots,
-        ),
-      };
-}
-
-// The shared terminal model leaves only canonical SGR (colour) codes in its text.
-const SGR = /\u001b\[[0-9;]*m/gu;
-
-/**
- * Command output as a guest's timeline would display it: run through the same terminal model the
- * owner's client uses, so backspaces, carriage returns, cursor moves, and escapes are already
- * applied, then plain text. A path rewrite on raw bytes could be undone by any of those.
- */
-function displayedOutput(state: TerminalOutputState): string {
-  return state.text.replace(SGR, "");
-}
-
-/**
- * The length of the end of `text` that could still grow into a root and what follows it, so it is
- * rewritten whole: the root alone could be a sibling such as `<root>-old`.
- */
-function rootPrefixAtEnd(text: string, roots: GuestPathRoots): number {
-  let longest = 0;
-  for (const { dir } of roots) {
-    for (const candidate of [`${dir}/`, `${dir}\\`]) {
-      for (let length = Math.min(candidate.length, text.length); length > longest; length -= 1) {
-        if (text.endsWith(candidate.slice(0, length))) {
-          longest = length;
-          break;
-        }
-      }
-    }
-  }
-  return longest;
-}
-
-const commonPrefixLength = (left: string, right: string) => {
-  const limit = Math.min(left.length, right.length);
-  let index = 0;
-  while (index < limit && left.charCodeAt(index) === right.charCodeAt(index)) index += 1;
-  return index;
-};
-
-const countLines = (text: string) => {
-  let count = 0;
-  for (let index = text.indexOf("\n"); index !== -1; index = text.indexOf("\n", index + 1)) {
-    count += 1;
-  }
-  return count;
-};
-
-/**
- * The text that turns what the guest's client shows (`previous`) into `shown` through the same
- * terminal model, or null when only a replace can. Plain growth is appended as is. A change in
- * the last lines, such as a progress bar, moves the cursor up to the first changed line, erases
- * from there, and writes the rest. Anything else, such as a tail that dropped lines from the front
- * or a cleared screen, is a replace: guessing which lines the client may keep is how stale text
- * survived an erase.
- */
-function guestOutputDelta(previous: string, shown: string): string | null {
-  const common = commonPrefixLength(previous, shown);
-  if (common === previous.length) return shown.slice(common);
-  if (common === 0) return null;
-  const lineStart = previous.lastIndexOf("\n", common - 1) + 1;
-  const below = countLines(previous.slice(lineStart));
-  return below < LIVE_LINES
-    ? `${below > 0 ? `\u001b[${below}A` : ""}\r\u001b[J${shown.slice(lineStart)}`
-    : null;
-}
-
-/**
- * Rewrites live command output frames for a guest. The server keeps the terminal state the
- * guest's client would build from the owner's frames, rewrites paths in what it displays, and
- * sends the smallest frame that brings the guest's client to exactly that text. Text at the end
- * that could still grow into a root waits for the next frame. A settled frame holds nothing back.
- * A long log's tail drops lines on nearly every frame, which needs a replace; the guest's route
- * caps the bytes per second, and the owner's stream coalesces while it waits.
- */
-export function guestCommandOutputFrames(roots: GuestPathRoots) {
-  let terminal = EMPTY_TERMINAL_OUTPUT;
-  // The guest's client, built the way it builds itself from frames. A candidate frame is sent
-  // only if this mirror then shows exactly what the server shows; the terminal model has state
-  // (its live window, fixed lines) that the text alone does not reveal.
-  let client: TerminalOutputState | null = null;
-  const applied = (base: TerminalOutputState, truncated: boolean, text: string) =>
-    appendTerminalOutput({ ...base, truncated: base.truncated || truncated }, text);
-  return (frame: OrchestrationV2CommandOutputFrame): OrchestrationV2CommandOutputFrame | null => {
-    terminal = appendTerminalOutput(
-      frame.kind === "replace" ? EMPTY_TERMINAL_OUTPUT : terminal,
-      frame.text,
-    );
-    const plain = displayedOutput(terminal);
-    const shown = guestText(
-      plain.slice(0, plain.length - (frame.running ? rootPrefixAtEnd(plain, roots) : 0)),
-      roots,
-    );
-    const truncated = terminal.truncated || frame.truncated;
-    const delta = client === null ? null : guestOutputDelta(client.text, shown);
-    const next = delta === null || client === null ? null : applied(client, truncated, delta);
-    if (next === null || next.text !== shown) {
-      client = applied(EMPTY_TERMINAL_OUTPUT, truncated, shown);
-      return { kind: "replace", text: shown, truncated, running: frame.running };
-    }
-    const unchanged = delta === "" && next.truncated === client!.truncated;
-    client = next;
-    // Nothing new to show still reports output that scrolled out, or the command settling.
-    return unchanged && frame.running
-      ? null
-      : { kind: "append", text: delta!, truncated, running: frame.running };
-  };
 }
 
 type GuestProviderTurn = Pick<

@@ -1,5 +1,4 @@
 import {
-  GUEST_COMMAND_OUTPUT_ROUTE,
   GUEST_RENDER_ROUTE,
   GuestShareId,
   GuestStreamEvent,
@@ -57,7 +56,6 @@ const items: ReadonlyArray<GuestTurnItem> = [
     ordinal: 1,
     type: "command_execution",
     input: "vp run check:changed",
-    outputOmitted: true,
     exitCode: 0,
   },
   {
@@ -105,21 +103,13 @@ const snapshot = encodeEvent({
   items,
 });
 
-const finalOutput = JSON.stringify({
-  kind: "replace",
-  text: "4 files checked\n",
-  truncated: false,
-  running: false,
-});
-
-/** Delivers the snapshot, or a command's final output, as soon as the page subscribes. */
+/** Delivers the snapshot as soon as the page subscribes. */
 class FakeEventSource extends EventTarget {
   static readonly CLOSED = 2;
   readyState = 1;
   constructor(readonly url: string) {
     super();
-    const data = url.startsWith(GUEST_COMMAND_OUTPUT_ROUTE) ? finalOutput : snapshot;
-    queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data })));
+    queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: snapshot })));
   }
   close() {
     this.readyState = FakeEventSource.CLOSED;
@@ -150,9 +140,6 @@ describe("GuestPage", () => {
     // A finished turn folds its work, as it does for the owner; the command is inside.
     await userEvent.click(screen.getByRole("button", { name: /Worked for/ }));
     await expect.element(screen.getByText("vp run check:changed")).toBeVisible();
-    // Expanding the command shows its output, read through the guest route.
-    await userEvent.click(screen.getByText("vp run check:changed"));
-    await expect.element(screen.getByText("4 files checked")).toBeVisible();
     await expect
       .element(screen.getByTitle("Chart"))
       .toHaveAttribute(

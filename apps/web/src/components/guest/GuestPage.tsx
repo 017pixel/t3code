@@ -41,7 +41,6 @@ import { ScrollToEndButton } from "../chat/TimelineOverlays";
 import type { TimelineRow } from "../chat/timelineRowContext";
 import { useTimelineFollow } from "../chat/useTimelineFollow";
 import { GuestHtmlRender } from "./GuestHtmlRender";
-import { guestTurnItemSource } from "./guestTurnItemSource";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import {
@@ -401,7 +400,6 @@ function GuestThread({
           isRevertingCheckpoint={false}
           onImageExpand={ignore}
           renderHtmlRender={renderHtmlRender}
-          turnItemSource={guestTurnItemSource(shareId)}
           activeThreadEnvironmentId={GUEST_ENVIRONMENT_ID}
           markdownCwd={undefined}
           resolvedTheme={resolvedTheme}

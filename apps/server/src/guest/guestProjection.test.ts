@@ -1,27 +1,22 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   RunAttemptId,
-  GuestItemDetail,
   GuestStreamEvent,
   type GuestTurnItem,
-  type OrchestrationV2CommandOutputFrame,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2Run,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
-import { appendTerminalOutput, EMPTY_TERMINAL_OUTPUT } from "@t3tools/shared/terminalOutput";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
 import {
   coalesceGuestEvents,
-  guestCommandOutputFrames,
   guestPathRoots,
   guestRunTurnEnded,
   guestThreadModel,
   projectSnapshotForGuest,
   projectTurnItemForGuest,
-  projectTurnItemForGuestDetail,
 } from "./guestProjection.ts";
 
 const HOME = "/Users/owner";
@@ -198,7 +193,7 @@ const SHOWN: ReadonlyArray<readonly [string, Record<string, unknown>, Record<str
     },
   ],
   [
-    "a command and how it ended, with its output left for the expanded row",
+    "a command and how it ended, without its output",
     {
       type: "command_execution",
       input: `cd ${ROOT} && cat ${ROOT}/.env && cd "${ROOT}/" && ls ${ROOT}/ ${HOME}/.config/app.json`,
@@ -209,7 +204,6 @@ const SHOWN: ReadonlyArray<readonly [string, Record<string, unknown>, Record<str
       type: "command_execution",
       input: 'cd . && cat .env && cd "." && ls . ~/.config/app.json',
       outputIndicatesFailure: true,
-      outputOmitted: true,
       exitCode: 1,
     },
   ],
@@ -398,255 +392,6 @@ describe("projectTurnItemForGuest", () => {
       roots,
     );
     expect(outside).toMatchObject({ fileName: "key.pem" });
-  });
-});
-
-describe("projectTurnItemForGuestDetail", () => {
-  const encodeDetail = Schema.encodeUnknownSync(GuestItemDetail);
-
-  it("adds a command's output, with paths as in its command text", () => {
-    const detail = projectTurnItemForGuestDetail(
-      item({
-        type: "command_execution",
-        input: `ls ${ROOT}/src`,
-        output: `${ROOT}/src/auth.ts\n\u001b[32m${HOME}\u001b[0m/.config/app.json\n`,
-        exitCode: 0,
-      }),
-      roots,
-    );
-    expect(detail).toEqual(
-      guest({
-        type: "command_execution",
-        input: "ls src",
-        outputOmitted: true,
-        exitCode: 0,
-        output: "src/auth.ts\n~/.config/app.json\n",
-      }),
-    );
-    expect(JSON.stringify(encodeDetail({ item: detail }))).not.toContain(HOME);
-  });
-
-  it("adds nothing to other items the owner's detail would fill in", () => {
-    const search = item({
-      type: "file_search",
-      pattern: "TOKEN",
-      results: [{ fileName: `${ROOT}/.env`, preview: "TOKEN=1" }],
-    });
-    expect(projectTurnItemForGuestDetail(search, roots)).toEqual(
-      projectTurnItemForGuest(search, roots),
-    );
-    const tool = item({
-      type: "dynamic_tool",
-      toolName: "fetch",
-      input: { url: "x" },
-      output: "y",
-    });
-    expect(projectTurnItemForGuestDetail(tool, roots)).toMatchObject({ input: null });
-    expect(
-      projectTurnItemForGuestDetail(item({ type: "reasoning", text: "TOKEN=1" }), roots),
-    ).toBeNull();
-  });
-});
-
-describe("guestCommandOutputFrames", () => {
-  const frame = (kind: "replace" | "append", text: string, running = true) => ({
-    kind,
-    text,
-    truncated: false,
-    running,
-  });
-  /** The text a client holds after applying the frames, as it does for the owner's. */
-  const shown = (frames: ReadonlyArray<ReturnType<typeof frame> | null>) =>
-    frames.reduce(
-      (state, next) =>
-        next === null
-          ? state
-          : appendTerminalOutput(
-              next.kind === "replace" ? EMPTY_TERMINAL_OUTPUT : state,
-              next.text,
-            ),
-      EMPTY_TERMINAL_OUTPUT,
-    ).text;
-
-  it("rewrites a root split across frames whole", () => {
-    const rewrite = guestCommandOutputFrames(roots);
-    const frames = [
-      rewrite(frame("replace", "")),
-      rewrite(frame("append", `built ${ROOT.slice(0, 9)}`)),
-      rewrite(frame("append", `${ROOT.slice(9)}`)),
-      rewrite(frame("append", "/dist/app.js\n")),
-    ];
-    expect(frames.map((next) => next?.text)).toEqual(["", "built ", undefined, "dist/app.js\n"]);
-    expect(shown(frames)).toBe("built dist/app.js\n");
-  });
-
-  it("tells a sibling of the root apart once the next frame shows it", () => {
-    const rewrite = guestCommandOutputFrames(roots);
-    const frames = [rewrite(frame("append", `cp ${ROOT}`)), rewrite(frame("append", "-old/a .\n"))];
-    expect(shown(frames)).toBe("cp ~/code/secret-project-old/a .\n");
-  });
-
-  it("sends plain text, so colors inside a path cannot hide it", () => {
-    const color = (text: string) => `\u001b[01;31m\u001b[K${text}\u001b[m\u001b[K`;
-    const colored = `${ROOT.slice(0, 7)}${color("owner")}${ROOT.slice(12)}/private.txt\n`;
-    expect(ROOT.slice(7, 12)).toBe("owner");
-    const rewrite = guestCommandOutputFrames(roots);
-    const frames = [
-      rewrite(frame("replace", "")),
-      // The frame boundary falls inside an escape sequence.
-      rewrite(frame("append", colored.slice(0, 10))),
-      rewrite(frame("append", colored.slice(10))),
-    ];
-    expect(shown(frames)).toBe("private.txt\n");
-    const link = `\u001b]8;;file://${ROOT}/a.ts\u0007a.ts\u001b]8;;\u0007\n`;
-    expect(shown([rewrite(frame("replace", link, false))])).toBe("a.ts\n");
-  });
-
-  it("rewrites what the terminal displays, so backspaces and overstrikes cannot rebuild a path", () => {
-    const backspace = guestCommandOutputFrames(roots);
-    expect(
-      shown([backspace(frame("replace", `${ROOT.slice(0, 9)}X\b${ROOT.slice(9)}/a.txt\n`))]),
-    ).toBe("a.txt\n");
-    const overstrike = guestCommandOutputFrames(roots);
-    const frames = [
-      overstrike(frame("replace", `${"X".repeat(9)}${ROOT.slice(9)}/a.txt`)),
-      overstrike(frame("append", `\r${ROOT.slice(0, 9)}`)),
-      overstrike(frame("append", "\n")),
-    ];
-    expect(shown(frames)).toBe("a.txt\n");
-    for (const next of frames) expect(next?.text ?? "").not.toContain("owner");
-  });
-
-  it("keeps sending output after escapes it does not show", () => {
-    const rewrite = guestCommandOutputFrames(roots);
-    const frames = [
-      rewrite(frame("replace", "\u001b7ready\n")),
-      rewrite(frame("append", "\u001b(Bnext line\n")),
-    ];
-    expect(shown(frames)).toBe("ready\nnext line\n");
-  });
-
-  /** The guest's client after the frames, as `applyCommandOutputFrame` builds it. */
-  const client = (frames: ReadonlyArray<OrchestrationV2CommandOutputFrame | null>) =>
-    frames.reduce(
-      (state, next) =>
-        next === null
-          ? state
-          : appendTerminalOutput(
-              {
-                ...(next.kind === "replace" ? EMPTY_TERMINAL_OUTPUT : state),
-                truncated: (next.kind === "replace" ? false : state.truncated) || next.truncated,
-              },
-              next.text,
-            ),
-      EMPTY_TERMINAL_OUTPUT,
-    );
-
-  it("keeps a long log exact once its tail starts dropping lines", () => {
-    const rewrite = guestCommandOutputFrames(roots);
-    const line = (index: number) => `line ${String(index).padStart(6, "0")} ${"x".repeat(1009)}\n`;
-    const frames = Array.from({ length: 200 }, (_, index) =>
-      rewrite(frame(index === 0 ? "replace" : "append", line(index))),
-    );
-    // Before the tail fills, growth is appended.
-    expect(frames.slice(1, 30).every((next) => next?.kind === "append")).toBe(true);
-    const owner = frames.reduce(
-      (state, _next, index) => appendTerminalOutput(state, line(index)),
-      EMPTY_TERMINAL_OUTPUT,
-    );
-    const state = client(frames);
-    expect(state.truncated).toBe(true);
-    expect(state.text).toBe(owner.text);
-  });
-
-  it("redraws only the lines a progress bar or a multi-line reporter changed", () => {
-    const rewrite = guestCommandOutputFrames(roots);
-    const frames = [rewrite(frame("replace", "start\n".repeat(500)))];
-    for (let percent = 1; percent <= 100; percent += 1) {
-      frames.push(rewrite(frame("append", `\rDownloading ${percent}%`)));
-    }
-    frames.push(rewrite(frame("append", "\ntest a ...\ntest b ...")));
-    frames.push(rewrite(frame("append", "\u001b[1A\rtest a ok\u001b[K\ntest b ok\u001b[K")));
-    for (const next of frames.slice(1)) expect(next!.text.length).toBeLessThan(64);
-    expect(client(frames).text.endsWith("Downloading 100%\ntest a ok\ntest b ok")).toBe(true);
-  });
-
-  it("replaces what a cleared screen erased instead of keeping it above the new output", () => {
-    const cleared = guestCommandOutputFrames(roots);
-    const frames = [cleared(frame("replace", "old\n")), cleared(frame("append", "\u001b[2Jnew\n"))];
-    expect(client(frames).text).toBe("new\n");
-    const emptied = guestCommandOutputFrames(roots);
-    const empty = [emptied(frame("replace", "old\n")), emptied(frame("append", "\u001b[2J"))];
-    expect(client(empty).text).toBe("");
-  });
-
-  it("clears what the terminal cleared from its scrollback, even on a long tail", () => {
-    const rewrite = guestCommandOutputFrames(roots);
-    const suffix = `${"x".repeat(1023)}\n`.repeat(40);
-    const frames = [
-      rewrite(frame("replace", `${"discard\n".repeat(8192)}OLD\n${suffix}`)),
-      // The escape is split across frames.
-      rewrite(frame("append", "\u001b[3")),
-      rewrite(frame("append", `J\u001b[2J${suffix}`)),
-    ];
-    expect(client(frames).text).toBe(suffix);
-    frames.push(rewrite(frame("replace", suffix, false)));
-    expect(client(frames).text).toBe(suffix);
-  });
-
-  it("never keeps a line a screen erase removed from a full tail", () => {
-    const line = `${"x".repeat(1600)}\n`;
-    const rewrite = guestCommandOutputFrames(roots);
-    const frames = [
-      rewrite(frame("replace", `${line.repeat(90)}OLD\n${line.repeat(40)}`)),
-      rewrite(frame("append", "\u001b[2J", false)),
-    ];
-    expect(client(frames).text).not.toContain("OLD");
-    const split = guestCommandOutputFrames(roots);
-    const suffix = `${"x".repeat(1023)}\n`.repeat(40);
-    const cleared = [
-      split(frame("replace", `${"discard\n".repeat(8192)}OLD\n${suffix}`)),
-      split(frame("append", "\u001b[3")),
-      split(frame("append", `;1J\u001b[2J${suffix}`, false)),
-    ];
-    expect(client(cleared).text).toBe(suffix);
-  });
-
-  it("does not redraw past a live window an erase made shorter", () => {
-    const rewrite = guestCommandOutputFrames(roots);
-    const frames = [
-      rewrite(frame("replace", `${"a\n".repeat(70)}old`)),
-      rewrite(frame("append", "\u001b[2J")),
-      rewrite(frame("append", "\u001b[3Jab\n")),
-    ];
-    expect(client(frames).text).toBe("ab\n");
-    frames.push(rewrite(frame("replace", "ab\n", false)));
-    expect(client(frames).text).toBe("ab\n");
-  });
-
-  it("falls back to a replace when repeated lines make the overlap ambiguous", () => {
-    const rewrite = guestCommandOutputFrames(roots);
-    const frames = [
-      rewrite(frame("replace", "a\n".repeat(32_768))),
-      rewrite(frame("append", "b\n".repeat(4096))),
-    ];
-    expect(client(frames).text.endsWith(`a\n${"b\n".repeat(4096)}`)).toBe(true);
-  });
-
-  it("reports output that scrolled out even when the visible text did not change", () => {
-    const rewrite = guestCommandOutputFrames(roots);
-    const first = rewrite(frame("replace", "ready"));
-    const next = rewrite({ kind: "append", text: "", truncated: true, running: true });
-    expect(next).toMatchObject({ kind: "append", text: "", truncated: true });
-    expect(client([first, next]).truncated).toBe(true);
-  });
-
-  it("holds nothing back once the command settles", () => {
-    const rewrite = guestCommandOutputFrames(roots);
-    const frames = [rewrite(frame("append", `cd ${ROOT}`))];
-    frames.push(rewrite(frame("replace", `cd ${ROOT}`, false)));
-    expect(frames.at(-1)?.running).toBe(false);
-    expect(shown(frames)).toBe("cd .");
   });
 });
 
