@@ -420,6 +420,51 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         }
       }),
     );
+    it.effect("honors .ignore files, ignored tracked links, and submodule rules for symlinks", () =>
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) === "win32") return;
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-symlinks-", git: true });
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* writeTextFile(cwd, "src/index.ts", "export {};");
+        yield* writeTextFile(cwd, ".ignore", "custom-link\n");
+        yield* fileSystem.symlink("src", path.join(cwd, "custom-link"));
+        yield* fileSystem.symlink("src/index.ts", path.join(cwd, "tracked-link.ts"));
+        yield* fileSystem.symlink("src", path.join(cwd, "ignored-link"));
+        yield* fileSystem.symlink("src", path.join(cwd, "kept-link"));
+        yield* git(cwd, ["add", "tracked-link.ts"]);
+        yield* writeTextFile(cwd, ".gitignore", "tracked-link.ts\nignored-link\n");
+        // A submodule path makes `git check-ignore` refuse the whole batch without --no-index.
+        const submodule = path.join(cwd, "vendor/sub");
+        yield* writeTextFile(submodule, "a.ts", "export {};");
+        yield* git(submodule, ["init"]);
+        yield* git(submodule, ["add", "a.ts"]);
+        yield* git(submodule, [
+          "-c",
+          "user.name=t",
+          "-c",
+          "user.email=t@t",
+          "commit",
+          "-m",
+          "init",
+        ]);
+        yield* git(cwd, ["add", "vendor/sub"]);
+        yield* fileSystem.symlink("a.ts", path.join(submodule, "sublink.ts"));
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const searched = yield* searchWorkspaceEntries({ cwd, query: "link", limit: 100 });
+        const listed = yield* workspaceEntries.list({ cwd });
+
+        for (const entries of [searched.entries, listed.entries]) {
+          const paths = entries.map((entry) => entry.path);
+          expect(paths).toContain("kept-link");
+          expect(paths).toContain("vendor/sub/sublink.ts");
+          expect(paths).not.toContain("custom-link");
+          expect(paths).not.toContain("tracked-link.ts");
+          expect(paths).not.toContain("ignored-link");
+        }
+      }),
+    );
   });
 
   describe("searchContents", () => {

@@ -1,7 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFSP from "node:fs/promises";
 import * as NodeModule from "node:module";
-import * as NodePath from "node:path";
 
 import type {
   DirItem,
@@ -15,9 +14,12 @@ import type {
   SearchResult,
 } from "@ff-labs/fff-node";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as LayerMap from "effect/LayerMap";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import type {
@@ -29,6 +31,7 @@ import type {
   ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
 import { isProjectFaviconPath } from "@t3tools/shared/projectFavicon";
+import createIgnore, { type Ignore } from "ignore";
 import { scoreSubsequenceMatch } from "@t3tools/shared/searchRanking";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -301,6 +304,17 @@ function withDirectoryAncestors(entries: ReadonlyArray<ProjectEntry>): ProjectEn
   return [...entryByPath.values()];
 }
 
+interface ScannedDirectory {
+  readonly directory: string;
+  readonly links: ReadonlyArray<ProjectEntry>;
+  /** A nested repository (or the workspace's own), whose ignore rules own what is below it. */
+  readonly isRepository: boolean;
+  readonly ignoreFile: string | undefined;
+}
+
+const joinEntryPath = (directory: string, name: string) =>
+  directory ? `${directory}/${name}` : name;
+
 /**
  * fff skips symlinks, and its `followSymlinks` is no substitute: it still drops file links,
  * dedupes directory links against their targets, and walks links out of the workspace and into
@@ -308,45 +322,65 @@ function withDirectoryAncestors(entries: ReadonlyArray<ProjectEntry>): ProjectEn
  * (which ignore rules have filtered), without descending into them, and kept only when they
  * resolve inside the workspace.
  */
-const scanSymlinkEntries = async (
+const scanDirectory = Effect.fn("WorkspaceSearchIndex.scanDirectory")(function* (
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
   cwd: string,
-  directories: ReadonlyArray<string>,
-): Promise<ProjectEntry[]> => {
-  const root = await NodeFSP.realpath(cwd);
-  const entries: ProjectEntry[] = [];
-  let nextDirectory = 0;
-  const worker = async () => {
-    while (nextDirectory < directories.length) {
-      const directory = directories[nextDirectory++]!;
-      const children = await NodeFSP.readdir(NodePath.join(cwd, directory), {
-        withFileTypes: true,
-      }).catch(() => []);
-      for (const child of children) {
-        if (!child.isSymbolicLink()) continue;
-        const entryPath = directory ? `${directory}/${child.name}` : child.name;
-        const absolutePath = NodePath.join(cwd, entryPath);
-        const target = await Promise.all([
-          NodeFSP.realpath(absolutePath),
-          NodeFSP.stat(absolutePath),
-        ]).catch(() => null);
-        if (!target) continue;
-        const relative = NodePath.relative(root, target[0]);
-        if (
-          relative === ".." ||
-          relative.startsWith(`..${NodePath.sep}`) ||
-          NodePath.isAbsolute(relative) ||
-          relative.split(NodePath.sep).includes(".git") ||
-          (!target[1].isDirectory() && !target[1].isFile())
-        ) {
-          continue;
-        }
-        entries.push({ path: entryPath, kind: target[1].isDirectory() ? "directory" : "file" });
-      }
+  root: string,
+  directory: string,
+) {
+  // Effect's readDirectory returns bare names; one lstat per child would cost far more.
+  const children = yield* Effect.promise(() =>
+    NodeFSP.readdir(path.join(cwd, directory), { withFileTypes: true }).catch(() => []),
+  );
+  const links: ProjectEntry[] = [];
+  let isRepository = false;
+  let ignoreFile: string | undefined;
+  for (const child of children) {
+    if (child.name === ".git") isRepository = true;
+    if (child.name === ".ignore" && child.isFile()) {
+      ignoreFile = yield* fileSystem
+        .readFileString(path.join(cwd, directory, child.name))
+        .pipe(Effect.orElseSucceed(() => undefined));
     }
-  };
-  await Promise.all(Array.from({ length: SYMLINK_SCAN_CONCURRENCY }, worker));
-  return entries;
-};
+    if (!child.isSymbolicLink()) continue;
+    const entryPath = joinEntryPath(directory, child.name);
+    const absolutePath = path.join(cwd, entryPath);
+    const target = yield* Effect.all([
+      fileSystem.realPath(absolutePath),
+      fileSystem.stat(absolutePath),
+    ]).pipe(Effect.orElseSucceed(() => undefined));
+    if (!target) continue;
+    const relative = path.relative(root, target[0]);
+    if (
+      relative === ".." ||
+      relative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relative) ||
+      relative.split(path.sep).includes(".git") ||
+      (target[1].type !== "Directory" && target[1].type !== "File")
+    ) {
+      continue;
+    }
+    links.push({ path: entryPath, kind: target[1].type === "Directory" ? "directory" : "file" });
+  }
+  return { directory, links, isRepository, ignoreFile } satisfies ScannedDirectory;
+});
+
+/** Whether `entryPath` is `directory` itself or below it. */
+const isWithin = (entryPath: string, directory: string) =>
+  directory === "" || entryPath.startsWith(`${directory}/`);
+
+/** fff reads `.ignore` files alongside git's rules, so links named by one are dropped too. */
+function isIgnoredByIgnoreFiles(
+  entry: ProjectEntry,
+  matchers: ReadonlyArray<{ readonly directory: string; readonly matcher: Ignore }>,
+): boolean {
+  return matchers.some(({ directory, matcher }) => {
+    if (!isWithin(entry.path, directory) || entry.path === directory) return false;
+    const relative = directory ? entry.path.slice(directory.length + 1) : entry.path;
+    return matcher.ignores(entry.kind === "directory" ? `${relative}/` : relative);
+  });
+}
 
 /** Places each symlink before the first index result that matches the query less closely. */
 function mergeSymlinkMatches(
@@ -440,6 +474,8 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
   variant: WorkspaceSearchIndexVariant = "paths",
 ) {
   const vcsProcess = yield* VcsProcess.VcsProcess;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const finder = yield* Effect.acquireRelease(createFinder(cwd, variant), (finder) =>
     Effect.try({
       try: () => finder.destroy(),
@@ -497,46 +533,134 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
     return result.value;
   });
 
-  let symlinkEntries: ReadonlyArray<ProjectEntry> | undefined;
-  const listSymlinkEntries = Effect.fn("WorkspaceSearchIndex.listSymlinkEntries")(function* () {
-    if (symlinkEntries) return symlinkEntries;
-    const directories = yield* Effect.try(() =>
-      finder.directorySearch("", { pageSize: WORKSPACE_INDEX_PAGE_SIZE }),
-    ).pipe(
-      Effect.map((result) =>
-        result.ok
-          ? result.value.items.flatMap((item) => {
-              const directory = trimDirectorySeparator(toPosixPath(item.relativePath));
-              return directory ? [directory] : [];
-            })
-          : [],
-      ),
-      Effect.orElseSucceed((): string[] => []),
-    );
-    const candidates = yield* Effect.promise(() =>
-      scanSymlinkEntries(cwd, ["", ...directories]).catch((): ProjectEntry[] => []),
-    );
-    // Ignore rules can name a link itself; outside git there is nothing to ask.
-    const ignored = new Set<string>();
-    if (candidates.length > 0) {
-      const result = yield* vcsProcess
-        .run({
-          operation: "WorkspaceSearchIndex.listSymlinkEntries",
-          command: "git",
-          args: ["-c", "core.fsmonitor=false", "check-ignore", "-z", "--stdin"],
-          cwd,
-          stdin: `${candidates.map((entry) => entry.path).join("\0")}\0`,
-          allowNonZeroExit: true,
-          timeoutMs: 10_000,
-          maxOutputBytes: 16 * 1024 * 1024,
-        })
-        .pipe(Effect.orElseSucceed(() => undefined));
-      if (result?.exitCode === 0) {
-        for (const ignoredPath of result.stdout.split("\0")) ignored.add(ignoredPath);
+  const listIndexedDirectories = Effect.fn("WorkspaceSearchIndex.listIndexedDirectories")(
+    function* () {
+      const directories: string[] = [];
+      for (let pageIndex = 0; ; pageIndex += 1) {
+        const result = yield* Effect.try(() =>
+          finder.directorySearch("", { pageIndex, pageSize: WORKSPACE_INDEX_PAGE_SIZE }),
+        ).pipe(Effect.orElseSucceed(() => undefined));
+        if (!result?.ok) return directories;
+        for (const item of result.value.items) {
+          const directory = trimDirectorySeparator(toPosixPath(item.relativePath));
+          if (directory) directories.push(directory);
+        }
+        if (result.value.items.length < WORKSPACE_INDEX_PAGE_SIZE) return directories;
+        yield* Effect.yieldNow;
       }
+    },
+  );
+
+  /** Ignore rules belong to the repository that owns a path, so each one answers for its own. */
+  const listGitIgnored = Effect.fn("WorkspaceSearchIndex.listGitIgnored")(function* (
+    repository: string,
+    entries: ReadonlyArray<ProjectEntry>,
+  ) {
+    const relativePaths = entries.map((entry) =>
+      repository ? entry.path.slice(repository.length + 1) : entry.path,
+    );
+    const repositoryCwd = path.join(cwd, repository);
+    const result = yield* vcsProcess
+      .run({
+        operation: "WorkspaceSearchIndex.listGitIgnored",
+        command: "git",
+        // fff applies ignore rules to tracked paths too, so the index is not consulted.
+        args: ["-c", "core.fsmonitor=false", "check-ignore", "--no-index", "-z", "--stdin"],
+        cwd: repositoryCwd,
+        stdin: `${relativePaths.join("\0")}\0`,
+        allowNonZeroExit: true,
+        timeoutMs: 10_000,
+        maxOutputBytes: 16 * 1024 * 1024,
+      })
+      .pipe(Effect.orElseSucceed(() => undefined));
+    // Exit 1 means nothing matched.
+    if (result?.exitCode === 1) return [];
+    if (result?.exitCode !== 0) {
+      // Outside git no rules apply (git exits before reading stdin, so the cause is lost).
+      // Any other failure hides the repository's links rather than leaking ones it ignores.
+      const insideRepository = yield* vcsProcess
+        .run({
+          operation: "WorkspaceSearchIndex.listGitIgnored",
+          command: "git",
+          args: ["rev-parse", "--git-dir"],
+          cwd: repositoryCwd,
+          timeoutMs: 10_000,
+        })
+        .pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        );
+      return insideRepository ? entries.map((entry) => entry.path) : [];
     }
-    symlinkEntries = candidates.filter((entry) => !ignored.has(entry.path));
-    return symlinkEntries;
+    return result.stdout
+      .split("\0")
+      .filter(Boolean)
+      .map((relativePath) => (repository ? `${repository}/${relativePath}` : relativePath));
+  });
+
+  const scanSymlinkEntries = Effect.fn("WorkspaceSearchIndex.scanSymlinkEntries")(function* () {
+    const indexComplete = !finder.isScanning();
+    const root = yield* fileSystem.realPath(cwd).pipe(Effect.orElseSucceed(() => cwd));
+    const directories = yield* listIndexedDirectories();
+    const scanned = yield* Effect.forEach(
+      ["", ...directories],
+      (directory) => scanDirectory(fileSystem, path, cwd, root, directory),
+      { concurrency: SYMLINK_SCAN_CONCURRENCY },
+    );
+    const candidates = scanned.flatMap((directory) => directory.links);
+    if (candidates.length === 0) return { entries: candidates, indexComplete };
+
+    const ignoreMatchers = scanned.flatMap(({ directory, ignoreFile }) =>
+      ignoreFile === undefined ? [] : [{ directory, matcher: createIgnore().add(ignoreFile) }],
+    );
+    const repositories = [
+      "",
+      ...scanned.flatMap(({ directory, isRepository }) =>
+        isRepository && directory ? [directory] : [],
+      ),
+    ].toSorted((left, right) => right.length - left.length);
+    const entriesByRepository = Map.groupBy(
+      candidates.filter((entry) => !isIgnoredByIgnoreFiles(entry, ignoreMatchers)),
+      (entry) =>
+        repositories.find(
+          (repository) => isWithin(entry.path, repository) && entry.path !== repository,
+        ) ?? "",
+    );
+    const ignored = new Set(
+      (yield* Effect.forEach(
+        entriesByRepository,
+        ([repository, entries]) => listGitIgnored(repository, entries),
+        { concurrency: 4 },
+      )).flat(),
+    );
+    return {
+      entries: [...entriesByRepository.values()].flat().filter((entry) => !ignored.has(entry.path)),
+      indexComplete,
+    };
+  });
+
+  // Concurrent callers share one scan, and it stops once all of them are interrupted. The
+  // watcher reports link changes too, so any batch drops the scan; a scan still in flight then
+  // only answers the callers already waiting on it.
+  let symlinkScan: Effect.Effect<Effect.Success<ReturnType<typeof scanSymlinkEntries>>> | undefined;
+  const invalidateSymlinkScan = () => {
+    symlinkScan = undefined;
+  };
+  const watching = yield* Effect.acquireRelease(
+    Effect.try(() => finder.watch(invalidateSymlinkScan)).pipe(
+      Effect.map((result) => (result.ok ? result.value : undefined)),
+      Effect.orElseSucceed(() => undefined),
+    ),
+    (unwatch) => Effect.sync(() => unwatch?.()),
+  );
+  const listSymlinkEntries = Effect.fn("WorkspaceSearchIndex.listSymlinkEntries")(function* () {
+    const scan =
+      symlinkScan ?? (yield* Effect.cachedWithTTL(scanSymlinkEntries(), Duration.infinity));
+    symlinkScan = scan;
+    const result = yield* scan;
+    // Without a watcher, or before fff has seen every folder, the result cannot be kept.
+    if ((!watching || !result.indexComplete) && symlinkScan === scan) invalidateSymlinkScan();
+    return result.entries;
   });
 
   const refresh: WorkspaceSearchIndex["Service"]["refresh"] = Effect.fn(
@@ -567,7 +691,7 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
           cause,
         }),
     );
-    symlinkEntries = undefined;
+    invalidateSymlinkScan();
   });
 
   const list: WorkspaceSearchIndex["Service"]["list"] = Effect.fn("WorkspaceSearchIndex.list")(
