@@ -884,7 +884,7 @@ async function wordExpansion(
 
 // Stream each entry before handing it to an engine. A tiny compressed archive
 // must not turn into an unbounded allocation on the UI thread.
-async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open" }>) {
+export async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open" }>) {
   const { bytes } = input;
   const spreadsheet = input.kind === "xlsx";
   if (bytes.byteLength > OFFICE_PREVIEW_MAX_BYTES)

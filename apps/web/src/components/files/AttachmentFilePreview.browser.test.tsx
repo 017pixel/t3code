@@ -1991,3 +1991,91 @@ it("toggles a Mermaid attachment between diagram and source through the lazy pre
   );
   expect(screen.container.querySelector('[role="alert"]')).toBeNull();
 });
+
+it.each(["rtf", "epub", "ods"] as const)(
+  "preserves %s document text through the worker and attachment viewer",
+  async (kind) => {
+    const archive = new JSZip();
+    if (kind === "epub") {
+      archive.file(
+        "META-INF/container.xml",
+        '<container><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>',
+      );
+      archive.file(
+        "book.opf",
+        '<package><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>',
+      );
+      archive.file(
+        "chapter.xhtml",
+        "<html><head><title>Handbook</title></head><body><p>first<br/>second<br/>third</p><hr/></body></html>",
+      );
+    } else if (kind === "ods") {
+      archive.file(
+        "content.xml",
+        '<office:document><table:table table:name="Forecast"><table:table-row><table:table-cell><text:p>North<office:annotation><text:p>nested note</text:p></office:annotation></text:p><office:annotation><text:p>private note</text:p></office:annotation></table:table-cell><table:table-cell office:value="150"><office:annotation><text:p>revised from 120</text:p></office:annotation></table:table-cell></table:table-row></table:table></office:document>',
+      );
+    }
+    const file =
+      kind === "rtf"
+        ? new Blob([
+            String.raw`{\rtf1\ansi 10\endash 20 \emdash \bullet \lquote a\rquote \ldblquote b\rdblquote\par Name\cell Value\cell\row 12\cell 34\cell\row{\*\private hidden\endash\cell\row}Unicode:\u8211\endash end}`,
+          ])
+        : await archive.generateAsync({ type: "blob" });
+    const bytes = await file.arrayBuffer();
+    const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
+      type: "module",
+    });
+    try {
+      const result = await new Promise<OfficeWorkerResult>((resolve) => {
+        worker.addEventListener(
+          "message",
+          (event: MessageEvent<OfficeWorkerResult>) => resolve(event.data),
+          { once: true },
+        );
+        worker.postMessage({ type: "open", kind, bytes }, [bytes]);
+      });
+      if (kind === "ods") {
+        expect(result.type).toBe("ods");
+        if (result.type !== "ods") throw new Error("Expected spreadsheet");
+        expect(result.sheets[0]!.rows).toEqual([["North", "150"]]);
+      } else {
+        expect(result.type).toBe("document");
+        if (result.type !== "document") throw new Error("Expected document");
+        const body = new DOMParser().parseFromString(result.pages[0]!.html, "text/html").body;
+        if (kind === "epub") {
+          expect(body.querySelectorAll("br")).toHaveLength(2);
+          expect(body.querySelectorAll("hr")).toHaveLength(1);
+        } else {
+          expect(body.textContent).toContain("10–20 —•‘a’“b”");
+          expect(body.textContent).toContain("Name\tValue\t12\t34\t");
+          expect(body.textContent).toContain("Unicode:–end");
+          expect(body.textContent).not.toContain("hidden");
+          expect(body.querySelectorAll("br")).toHaveLength(3);
+        }
+      }
+    } finally {
+      worker.terminate();
+    }
+    await using screen = await render(
+      <div style={{ display: "flex", height: 400, width: 600 }}>
+        <AttachmentFilePreview
+          name={`report.${kind}`}
+          mimeType="application/octet-stream"
+          sizeBytes={file.size}
+          file={file}
+        />
+      </div>,
+    );
+    await vi.waitFor(() => {
+      if (kind === "ods") {
+        expect(screen.container.textContent).toContain("North");
+        expect(screen.container.textContent).toContain("150");
+        expect(screen.container.textContent).not.toContain("private note");
+      } else {
+        const frame = screen.container.querySelector("iframe");
+        expect(frame?.srcdoc).toContain(kind === "rtf" ? "10–20" : "first<br>second<br>third");
+      }
+    });
+    expect(screen.container.querySelector('[role="alert"]')).toBeNull();
+  },
+);

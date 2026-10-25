@@ -97,14 +97,17 @@ function parseXml(source: string): XmlNode {
     text: "",
   };
 }
-function find(node: XmlNode, name: string): XmlNode[] {
+function find(node: XmlNode, name: string, skip?: string): XmlNode[] {
   return node.children.flatMap((child) =>
-    child.name === name || (!name.includes(":") && child.name.endsWith(`:${name}`))
-      ? [child]
-      : find(child, name),
+    child.name === skip
+      ? []
+      : child.name === name || (!name.includes(":") && child.name.endsWith(`:${name}`))
+        ? [child]
+        : find(child, name, skip),
   );
 }
 function text(node: XmlNode): string {
+  if (node.name === "office:annotation") return "";
   if (node.name === "text:s") return " ".repeat(repeat(node.attrs["text:c"], 100));
   if (node.name === "text:tab") return "\t";
   if (node.name === "text:line-break") return "\n";
@@ -193,6 +196,7 @@ async function epubHtml(node: XmlNode, archive: JSZip, base: string): Promise<st
   const tag = node.name.split(":").at(-1) ?? "";
   if (["head", "script", "style", "iframe", "object", "embed", "svg", "math", "form"].includes(tag))
     return "";
+  if (tag === "br" || tag === "hr") return boundedMarkup(`<${tag}>`);
   if (tag === "img") {
     const src = await imageData(archive, archivePath(base, node.attrs.src ?? ""));
     return src ? `<img src="${src}" alt="${boundedMarkup(escape(node.attrs.alt ?? ""))}">` : "";
@@ -276,7 +280,7 @@ export async function openDocument(
             ["table:table-cell", "table:covered-table-cell"].includes(child.name),
           )) {
             const value =
-              find(cell, "text:p").map(text).join("\n") ||
+              find(cell, "text:p", "office:annotation").map(text).join("\n") ||
               cell.attrs["office:value"] ||
               cell.attrs["office:date-value"] ||
               cell.attrs["office:boolean-value"] ||
@@ -562,8 +566,15 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
         emit(String.fromCharCode(arg < 0 ? arg + 65536 : arg));
         fallback = state.uc;
       } else if (!state.skip && word === "page") finishPage();
-      else if (!state.skip && (word === "par" || word === "line")) html += "<br>";
-      else if (word === "tab") emit("\t");
+      else if (!state.skip && (word === "par" || word === "line" || word === "row")) html += "<br>";
+      else if (word === "tab" || word === "cell") emit("\t");
+      else if (word === "endash") emit("–");
+      else if (word === "emdash") emit("—");
+      else if (word === "bullet") emit("•");
+      else if (word === "lquote") emit("‘");
+      else if (word === "rquote") emit("’");
+      else if (word === "ldblquote") emit("“");
+      else if (word === "rdblquote") emit("”");
     } else if (char !== "\r" && char !== "\n" && char) emitByte(char.charCodeAt(0));
   }
   if (stack.length) throw new Error("This rich text document is damaged.");
