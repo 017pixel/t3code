@@ -793,6 +793,7 @@ async function wordExpansion(
   }
   const used = new Set<string>();
   const memo = new Map<string, Cost>();
+  let expandedXmlBytes = 0;
   const scan = (xml: string, path: string, chain: Set<string>, pages = 1, expand = true): Cost => {
     const cost = empty();
     const refs = new Map<string, number>();
@@ -829,6 +830,11 @@ async function wordExpansion(
       }
       let expanded = memo.get(key);
       if (!expanded) {
+        expandedXmlBytes += node.xml.length * 2;
+        if (expandedXmlBytes > 3 * 1024 * 1024) {
+          cost.bytes = Infinity;
+          break;
+        }
         const own = wordXmlCost(node.xml, undefined);
         expanded = scan(node.xml, node.path, new Set([...chain, key]));
         expanded.bytes += own.bytes;
