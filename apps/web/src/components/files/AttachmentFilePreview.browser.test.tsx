@@ -67,7 +67,7 @@ describe("large text preview recovery", () => {
   });
 
   it("scrolls every tall row in the final virtual viewport", async () => {
-    await using screen = await render(
+    const view = (loaded: boolean) => (
       <div style={{ display: "flex", height: 400, width: 600 }}>
         <VirtualTablePreview
           name="tail.txt"
@@ -76,17 +76,36 @@ describe("large text preview recovery", () => {
           source
           wrap
           getRows={(page) =>
-            Array.from({ length: 32 }, (_, i) => [
-              "line-" + (page * 32 + i + 1) + " wrapped source text".repeat(500),
-            ])
+            !loaded && page > 0
+              ? undefined
+              : Array.from({ length: 32 }, (_, i) => [
+                  "line-" + (page * 32 + i + 1) + " wrapped source text".repeat(500),
+                ])
           }
         />
-      </div>,
+      </div>
     );
+    await using screen = await render(view(false));
     const viewport = () => screen.container.querySelector<HTMLElement>('[tabindex="0"]')!;
     const row = (index: number) =>
       screen.container.querySelector<HTMLElement>('[data-preview-row="' + index + '"]')!;
     await vi.waitFor(() => expect(row(0)?.offsetHeight).toBeGreaterThan(1000));
+    await act(() =>
+      viewport().dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true })),
+    );
+    await vi.waitFor(() => expect(row(99)).not.toBeNull());
+    await screen.rerender(view(true));
+    await vi.waitFor(() =>
+      expect(
+        Math.abs(
+          row(99).getBoundingClientRect().bottom - viewport().getBoundingClientRect().bottom,
+        ),
+      ).toBeLessThan(2),
+    );
+    await act(() =>
+      viewport().dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true })),
+    );
+    await vi.waitFor(() => expect(row(0)).not.toBeNull());
     await act(() => {
       viewport().scrollTop = 100 * 29 - viewport().clientHeight;
       viewport().dispatchEvent(new Event("scroll", { bubbles: true }));

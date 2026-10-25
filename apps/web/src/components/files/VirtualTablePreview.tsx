@@ -263,6 +263,7 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
   const [top, setTop] = useState(0);
   const handledReveal = useRef<string | null>(null);
   const pendingReveal = useRef<{ row: number; attempts: number } | null>(null);
+  const pendingEnd = useRef(false);
   const position = { top, height: props.viewportHeight };
   const scrollHeight = Math.min(8_000_000, props.count * 29);
   // Chromium caps a scroll surface at 33 million pixels. Scale the track for
@@ -300,6 +301,7 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
     const row = Math.min(props.count, Math.max(1, props.revealLine)) - 1;
     node.scrollTop = Math.max(0, (row - headerRows) * 29) * scale;
     setTop(node.scrollTop);
+    pendingEnd.current = false;
     pendingReveal.current = { row, attempts: 0 };
     handledReveal.current = key;
   }, [props.revealLine, props.revealRequestId, props.count, headerRows, scale]);
@@ -314,6 +316,7 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
       event.deltaY * (event.deltaMode === 1 ? 29 : event.deltaMode === 2 ? node.clientHeight : 1);
     if (!delta) return;
     event.preventDefault();
+    pendingEnd.current = false;
     node.scrollTop += delta * (nativeTail ? 1 : (scale * 29) / rowHeight());
   });
   useEffect(() => {
@@ -384,6 +387,29 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
     node.scrollTop += delta * (nativeTail ? 1 : (scale * 29) / Math.max(29, bounds.height));
     setTop(node.scrollTop);
   });
+  useLayoutEffect(() => {
+    const node = ref.current;
+    const content = contentRef.current;
+    if (!pendingEnd.current || !nativeTail || !node || !content || !props.count) return;
+    const last = props.count - 1;
+    if (!props.getRows(Math.floor(last / PREVIEW_PAGE_ROWS))?.[last % PREVIEW_PAGE_ROWS]) return;
+    const row = content.querySelector<HTMLElement>(`[data-preview-row="${last}"]`);
+    const firstRow = content.querySelector<HTMLElement>(`[data-preview-row="${first}"]`);
+    if (
+      !row ||
+      (!atStart &&
+        (layout.height !== content.clientHeight ||
+          layout.offset !==
+            (firstRow
+              ? firstRow.getBoundingClientRect().top - content.getBoundingClientRect().top
+              : 0)))
+    )
+      return;
+    node.scrollTop = node.scrollHeight;
+    setTop(node.scrollTop);
+    if (Math.abs(row.getBoundingClientRect().bottom - node.getBoundingClientRect().bottom) < 1)
+      pendingEnd.current = false;
+  });
   return (
     <div
       ref={ref}
@@ -402,11 +428,15 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
                   ? -node.clientHeight
                   : null;
         if (delta !== null) {
+          pendingEnd.current = false;
           event.preventDefault();
           node.scrollTop += delta * (nativeTail ? 1 : (scale * 29) / rowHeight());
         } else if (event.key === "Home" || event.key === "End") {
           event.preventDefault();
+          pendingEnd.current = event.key === "End";
+          pendingReveal.current = null;
           node.scrollTop = event.key === "Home" ? 0 : node.scrollHeight;
+          setTop(node.scrollTop);
         }
       }}
       onScroll={(event) => setTop(event.currentTarget.scrollTop)}
