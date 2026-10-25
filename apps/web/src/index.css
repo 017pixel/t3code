@@ -103,7 +103,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --sidebar-control-gap: 0.5rem;
   --sidebar-icon-color: color-mix(
     in srgb,
-    var(--contrast-sidebar-muted-foreground) 60%,
+    var(--contrast-sidebar-muted-foreground) 85%,
     var(--sidebar)
   );
   --sidebar-row-content-inset: 0.625rem;
@@ -193,7 +193,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
   /* The composer's elevation: a soft drop pulled in under the surface, shared
      by the composer, its context strip and attached banners. */
-  --shadow-composer: 0 12px 28px -18px rgb(0 0 0 / 40%);
+  --shadow-composer: 0 4px 16px -8px rgb(0 0 0 / 16%);
   --shadow-composer-dark: 0 14px 32px -18px rgb(0 0 0 / 75%);
   /* Overlap the lower toolbar backdrop by one pixel to cover the composer seam. */
   --spacing-composer-seam: calc(var(--spacing) * 4 - 1px);
@@ -1659,9 +1659,9 @@ body {
   padding: 0;
 }
 
-/* Lighter default icon stroke. Lucide always writes stroke-width="2" unless a
-   caller passes its own, so explicit weights still win. */
-svg.lucide[stroke-width="2"] {
+/* Lighter default icon stroke. Zero specificity, so stroke-* classes still win
+   over it while it still beats lucide's stroke-width="2" attribute. */
+:where(svg.lucide[stroke-width="2"]) {
   stroke-width: 1.75;
 }
 
@@ -2059,7 +2059,7 @@ code {
   border-radius: 0.25rem;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
-  background: color-mix(in srgb, var(--contrast-foreground) 7%, transparent);
+  background: color-mix(in srgb, var(--contrast-foreground) 10%, transparent);
   padding: 0.1em 0.35em;
   color: var(--contrast-foreground);
   font-size: 0.85em;

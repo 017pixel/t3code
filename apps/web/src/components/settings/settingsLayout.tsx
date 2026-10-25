@@ -183,7 +183,9 @@ export function SettingsSearchTarget({
   );
 }
 
-export const SETTINGS_PICKER_TRIGGER_CLASSNAME = "min-w-0 max-w-none shrink-0";
+// Settings pickers reuse composer controls but match the bordered selects beside them.
+export const SETTINGS_PICKER_TRIGGER_CLASSNAME =
+  "min-w-0 max-w-none shrink-0 border-input bg-background font-normal text-foreground shadow-xs/5 hover:bg-accent/50 dark:bg-input/32";
 
 export function PolicyTooltip({ children }: { readonly children: string }) {
   return (
@@ -246,7 +248,7 @@ export function SettingsSection({
           className="flex min-h-7 items-start justify-between gap-4 px-3 sm:px-4"
         >
           <div className="flex min-w-0 items-center gap-1">
-            <h2 className="flex min-h-7 items-center gap-2 text-sm font-semibold text-foreground">
+            <h2 className="flex min-h-7 items-center gap-2 text-base font-semibold text-foreground">
               {icon}
               {title}
             </h2>
