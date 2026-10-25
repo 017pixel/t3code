@@ -4,6 +4,7 @@ import type {
   EnvironmentId,
   PullRequestDetailView,
   PullRequestDiffSide,
+  PullRequestDiffResult,
   PullRequestOmittedFileStat,
   PullRequestRef,
   PullRequestReviewPosition,
@@ -126,6 +127,7 @@ const COMMIT_PAGE_SIZE = 10;
 const PULL_REQUEST_FILE_TREE_STORAGE_KEY = "t3code.pullRequestFileTreeOpen";
 
 interface DiffSlice {
+  readonly source: PullRequestDiffResult;
   readonly cursor: string | null;
   readonly patch: string;
   readonly truncated: boolean;
@@ -146,15 +148,15 @@ const REPLACE_FILE_COUNTS_CSS = `
 
 const NO_SLICES: ReadonlyArray<DiffSlice> = [];
 
-// Each slice is parsed once per cache key and the parse lives as long as the slice does, so a
-// slice arriving costs one parse rather than one per slice already on screen.
-const sliceParses = new WeakMap<DiffSlice, Map<string, RenderablePatch | null>>();
+// Query results outlive the panel's slices, so their parses survive closing and reopening
+// without retaining anything beyond the query cache's lifetime.
+const sliceParses = new WeakMap<PullRequestDiffResult, Map<string, RenderablePatch | null>>();
 
 function parseSlice(slice: DiffSlice, cacheKey: string, ignoreWhitespace: boolean) {
-  let parses = sliceParses.get(slice);
+  let parses = sliceParses.get(slice.source);
   if (parses === undefined) {
     parses = new Map();
-    sliceParses.set(slice, parses);
+    sliceParses.set(slice.source, parses);
   }
   if (parses.has(cacheKey)) return parses.get(cacheKey) ?? null;
   const parsed = getRenderablePatch(slice.patch, cacheKey, {
@@ -358,6 +360,7 @@ function PullRequestCodeTab({
     setSliceState((previous) => {
       const slices = previous.key === scopeKey ? previous.slices : NO_SLICES;
       const next = {
+        source: data,
         cursor,
         patch: data.patch,
         truncated: data.truncated,
