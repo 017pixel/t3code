@@ -174,6 +174,22 @@ describe("document preview contents", () => {
     expect(html).not.toContain("https:");
   });
 
+  it("preserves rich text page breaks and formatting without splitting hidden destinations", () => {
+    const result = openRtf(
+      bytes(String.raw`{\rtf1\b First\page Second\b0{\*\unknown \page hidden}\page Third\page}`),
+    );
+    if (result.type !== "document") throw new Error("Expected document");
+    expect(result.navigation).toBe("page");
+    expect(result.pages.map((page) => page.html)).toEqual([
+      "<p><strong>First</strong></p>",
+      "<p><strong>Second</strong></p>",
+      "<p>Third</p>",
+    ]);
+    expect(() => openRtf(bytes(String.raw`{\rtf1 ` + String.raw`\page`.repeat(501) + "}"))).toThrow(
+      "500 pages",
+    );
+  });
+
   it("decodes declared rich text code pages for raw bytes and escaped byte runs", () => {
     const input = new TextEncoder().encode(
       String.raw`{\rtf1\ansi\ansicpg1251 A \'c0\par\ansicpg932\'82\'a0}`,
@@ -191,7 +207,7 @@ describe("document preview contents", () => {
       '<o:document-content xmlns:o="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:t="urn:oasis:names:tc:opendocument:xmlns:table:1.0"><o:body><o:spreadsheet><t:table t:name="Accounts &amp; names"><t:table-row><t:table-cell><p xmlns="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:x="urn:oasis:names:tc:opendocument:xmlns:text:1.0">Account<s/>Name<s x:c="3"/>A<tab/>B<line-break/>C</p></t:table-cell></t:table-row></t:table></o:spreadsheet></o:body></o:document-content>',
     );
     const result = await openDocument(archive, "ods");
-    if (result.type !== "xlsx") throw new Error("Expected workbook");
+    if (result.type !== "ods") throw new Error("Expected workbook");
     expect(result.sheets[0]!.name).toBe("Accounts & names");
     expect(result.sheets[0]!.rows[0]).toEqual(["Account Name   A\tB\nC"]);
   });
@@ -270,8 +286,8 @@ describe("document preview contents", () => {
       '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:spreadsheet><table:table table:name="Budget"><table:table-row table:number-rows-repeated="999999999"><table:table-cell table:number-columns-repeated="999999999"><text:p>Research &amp; design</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>',
     );
     const result = await openDocument(archive, "ods");
-    expect(result.type).toBe("xlsx");
-    if (result.type !== "xlsx") throw new Error("Expected workbook");
+    expect(result.type).toBe("ods");
+    if (result.type !== "ods") throw new Error("Expected workbook");
     expect(result.sheets[0]!.name).toBe("Budget");
     expect(result.sheets[0]!.truncated).toBe(true);
     expect(result.sheets[0]!.rows).toHaveLength(500);

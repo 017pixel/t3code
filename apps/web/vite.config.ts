@@ -99,15 +99,20 @@ const browserTestProject = {
     include: [
       "vite-plus/test/browser",
       "@base-ui/react/autocomplete",
+      "saxes",
+      "@betteroffice/docx/editor",
+      "@betteroffice/docx/layout",
+      "@betteroffice/docx/layout/render",
+      "@betteroffice/docx/yrs",
+      "@betteroffice/fonts",
       "@betteroffice/pptx",
-      "docx-preview",
+      "@betteroffice/xlsx",
+      "@betteroffice/xlsx/headless",
       "fast-xml-parser",
       "entities",
       "dompurify",
       "heic-to/next",
       "jszip",
-      "saxes",
-      "read-excel-file/universal",
       "sql.js",
       "tiff",
     ],
@@ -252,6 +257,12 @@ export default defineConfig(() => {
     },
     resolve: {
       tsconfigPaths: true,
+      alias: {
+        "@betteroffice/fonts-cjk": new URL(
+          "./src/components/files/office/fonts-cjk.ts",
+          import.meta.url,
+        ).pathname,
+      },
       dedupe: ["react", "react-dom"],
     },
     experimental: {

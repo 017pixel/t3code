@@ -139,7 +139,7 @@ export function DocumentAttachmentThumbnail(props: {
             />
             <span
               className={cn(
-                "pointer-events-none absolute inset-x-0 bottom-0 flex min-w-0 items-center gap-1.5 bg-linear-to-t from-black/85 via-black/55 to-transparent px-2.5 pb-2 pt-6 text-left",
+                "pointer-events-none absolute inset-x-0 bottom-0 flex min-w-0 items-center gap-1.5 bg-linear-to-t from-black from-65% to-transparent px-2.5 pb-2 pt-6 text-left",
                 props.detailClassName,
               )}
             >

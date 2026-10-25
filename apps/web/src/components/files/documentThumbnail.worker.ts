@@ -1,6 +1,10 @@
 import { parseDelimitedPreview } from "@t3tools/shared/delimitedPreview";
 import { XMLParser } from "fast-xml-parser";
 import { boundedZip } from "./boundedZip";
+import { createWorkerClient } from "./office/worker-rpc";
+import type { WordMethods } from "./office/word-protocol";
+import type { SheetMethods } from "./office/sheet-protocol";
+import type { SlideMethods } from "./office/slide-protocol";
 import {
   DOCUMENT_THUMBNAIL_MAX_BYTES,
   type DocumentThumbnailKind,
@@ -15,7 +19,78 @@ async function render(bytes: ArrayBuffer, kind: DocumentThumbnailKind, ratio: nu
   context.fillStyle = "white";
   context.fillRect(0, 0, canvas.width, canvas.height);
   let label: string;
-  if (kind === "pdf") {
+  if (kind === "docx" || kind === "xlsx" || kind === "pptx") {
+    const { prepareOffice } = await import("./officeArchive");
+    const prepared = await prepareOffice(bytes, kind);
+    const input = { bytes: prepared.bytes };
+    const options = { transfer: [prepared.bytes] };
+    let bitmap: ImageBitmap | undefined;
+    if (kind === "docx") {
+      const client = createWorkerClient<WordMethods>(
+        new Worker(new URL("./office/document.worker.ts", import.meta.url), { type: "module" }),
+      );
+      try {
+        const document = await client.call("open", input, options);
+        const first = document.pages[0];
+        if (!first) throw new Error("Empty document.");
+        bitmap = await client.call("paint", { index: 0, scale: 208 / first.width, ratio });
+        if (!bitmap) throw new Error("Page unavailable.");
+        context.drawImage(bitmap, 0, 0);
+        label = "DOCX · Page 1";
+      } finally {
+        bitmap?.close();
+        client.close();
+      }
+    } else if (kind === "xlsx") {
+      const client = createWorkerClient<SheetMethods>(
+        new Worker(new URL("./office/spreadsheet.worker.ts", import.meta.url), { type: "module" }),
+      );
+      try {
+        const workbook = await client.call("open", input, options);
+        const first = workbook?.tabs[0];
+        if (!first) throw new Error("Empty workbook.");
+        await client.call("show", { sheet: first.index });
+        // A fixed top-left viewport keeps wide sheets from shrinking into unreadable strips.
+        const frame = await client.call("frame", {
+          sheet: first.index,
+          x: 0,
+          y: 0,
+          width: 832,
+          height: 448,
+          ratio: ratio / 4,
+          offset: { x: 0, y: 0 },
+          wider: undefined,
+        });
+        bitmap = frame?.bitmap;
+        if (!bitmap) throw new Error("Sheet unavailable.");
+        context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        label = `XLSX · ${first.name}`;
+      } finally {
+        bitmap?.close();
+        client.close();
+      }
+    } else {
+      const client = createWorkerClient<SlideMethods>(
+        new Worker(new URL("./office/presentation.worker.ts", import.meta.url), { type: "module" }),
+      );
+      try {
+        const slides = await client.call("open", input, options);
+        const first = slides[0];
+        if (!first) throw new Error("Empty presentation.");
+        const painted = await client.call("paint", {
+          index: 0,
+          density: canvas.width / first.width,
+        });
+        if (painted.kind !== "painted") throw new Error("Slide unavailable.");
+        bitmap = painted.bitmap;
+        context.drawImage(bitmap, 0, 0, canvas.width, (canvas.width * first.height) / first.width);
+        label = `PPTX · ${slides.length} ${slides.length === 1 ? "slide" : "slides"}`;
+      } finally {
+        bitmap?.close();
+        client.close();
+      }
+    }
+  } else if (kind === "pdf") {
     const { openPdf } = await import("./pdfDocument");
     const task = openPdf(bytes);
     try {

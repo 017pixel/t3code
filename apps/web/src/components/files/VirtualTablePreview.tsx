@@ -1,6 +1,7 @@
 /* oxlint-disable react/no-array-index-key -- Positions identify source rows and columns. */
 import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
 import { observeResize } from "~/lib/observeResize";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { PREVIEW_PAGE_ROWS } from "./largeTextProtocol";
 
 export default function VirtualTablePreview(props: {
@@ -46,8 +47,8 @@ export default function VirtualTablePreview(props: {
   }, [measured, width, props.header]);
   const columnWidth = props.source
     ? 0
-    : Math.max(96, Math.min(320, width / Math.min(props.columns, 6)));
-  const rowHeader = props.header ? 0 : 56;
+    : Math.max(128, Math.min(320, (width - 56) / Math.min(props.columns, 6)));
+  const rowHeader = 56;
   const sizes = Array.from(
     { length: props.columns },
     (_, column) => measured?.[column] ?? columnWidth,
@@ -87,14 +88,14 @@ export default function VirtualTablePreview(props: {
           ref={measureRef}
           aria-hidden="true"
           className="invisible absolute top-0 border-separate border-spacing-0 text-xs"
-          style={{ width }}
+          style={{ width: Math.max(width - rowHeader, props.columns * 128) }}
         >
           <thead>
             <tr>
               {props.header.map((cell, i) => (
                 <th
                   key={i}
-                  className="max-w-80 border-b px-3 py-1.5 text-left font-medium whitespace-pre-wrap break-words"
+                  className="min-w-32 max-w-80 border-b px-3 py-1.5 text-left font-medium whitespace-nowrap"
                 >
                   {cell}
                 </th>
@@ -134,23 +135,27 @@ export default function VirtualTablePreview(props: {
               role="row"
               className="relative z-10 flex min-h-[29px] shrink-0 border-b border-border bg-muted/60 font-medium backdrop-blur"
             >
-              {!props.header ? (
-                <div
-                  className="sticky left-0 z-10 shrink-0 bg-muted"
-                  style={{ width: rowHeader }}
-                />
-              ) : null}
+              <div
+                className="sticky left-0 z-10 shrink-0 border-r border-border bg-background"
+                style={{ width: rowHeader }}
+              />
               <div style={{ width: offset(firstColumn), flexShrink: 0 }} />
               {columns.map((column) => (
-                <div
-                  key={column}
-                  role="columnheader"
-                  aria-colindex={column + 1}
-                  className="shrink-0 overflow-hidden px-3 py-1.5 whitespace-pre"
-                  style={{ width: sizes[column] }}
-                >
-                  {props.header?.[column] ?? columnLabel(column)}
-                </div>
+                <Tooltip key={column}>
+                  <TooltipTrigger
+                    render={
+                      <div
+                        role="columnheader"
+                        aria-colindex={column + 1}
+                        className="shrink-0 overflow-hidden border-r border-border/40 px-3 py-1.5 text-ellipsis whitespace-pre"
+                        style={{ width: sizes[column] }}
+                      >
+                        {props.header?.[column] ?? columnLabel(column)}
+                      </div>
+                    }
+                  />
+                  <TooltipPopup>{props.header?.[column] ?? columnLabel(column)}</TooltipPopup>
+                </Tooltip>
               ))}
             </div>
           ) : null}
@@ -211,20 +216,16 @@ function RowPage(
                 : undefined
             }
           >
-            {!props.header ? (
-              <div
-                role={props.source ? undefined : "rowheader"}
-                className={`${props.source ? "sticky left-0" : "relative"} z-1 shrink-0 bg-muted px-2 py-1.5 text-right font-normal text-muted-foreground tabular-nums select-none`}
-                style={{
-                  width: props.rowHeader,
-                  transform: props.source
-                    ? undefined
-                    : "translateX(var(--preview-scroll-left, 0px))",
-                }}
-              >
-                <span className="sticky top-0 block">{index + 1}</span>
-              </div>
-            ) : null}
+            <div
+              role={props.source ? undefined : "rowheader"}
+              className={`${props.source ? "sticky left-0" : "relative"} z-1 shrink-0 border-r border-border bg-background px-2 py-1.5 text-right font-normal text-muted-foreground tabular-nums select-none`}
+              style={{
+                width: props.rowHeader,
+                transform: props.source ? undefined : "translateX(var(--preview-scroll-left, 0px))",
+              }}
+            >
+              <span className="sticky top-0 block">{index + (props.header ? 0 : 1)}</span>
+            </div>
             {!props.source ? (
               <div
                 style={{
@@ -241,7 +242,7 @@ function RowPage(
                 className={
                   props.source
                     ? `min-w-0 flex-1 px-3 py-1 ${props.wrap ? "whitespace-pre-wrap break-words" : "whitespace-pre"}`
-                    : "shrink-0 px-3 py-1.5 whitespace-pre-wrap break-words tabular-nums"
+                    : "shrink-0 border-r border-border/40 px-3 py-1.5 whitespace-pre-wrap break-words tabular-nums"
                 }
                 style={props.source ? undefined : { width: props.sizes[column] }}
               >

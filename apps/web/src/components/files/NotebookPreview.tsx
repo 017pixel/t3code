@@ -1,4 +1,5 @@
 /* oxlint-disable react/no-array-index-key -- Notebook cells and outputs retain their saved source order. */
+import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import { useState } from "react";
 import type { Root, RootContent } from "mdast";
 import ChatMarkdown from "~/components/ChatMarkdown";
@@ -42,10 +43,20 @@ function NotebookSource(props: { readonly name: string; readonly text: string })
 
 export default function NotebookPreview(props: {
   readonly notebook: Extract<OfficeWorkerResult, { type: "notebook" }>;
+  readonly sizeBytes?: number | undefined;
 }) {
   const [visible, setVisible] = useState(20);
   return (
     <>
+      <div
+        className="border-b border-border/60 px-3 py-2 text-xs text-muted-foreground tabular-nums"
+        role="status"
+      >
+        {props.notebook.cells.length.toLocaleString()} cells · {props.notebook.language}
+        {props.sizeBytes !== undefined
+          ? ` · ${props.sizeBytes === 0 ? "0 bytes" : formatAttachmentSize(props.sizeBytes)}`
+          : ""}
+      </div>
       <FileSurfaceNotice>Saved outputs only. Code is never executed.</FileSurfaceNotice>
       <div className="scrollbar-gutter-both min-h-0 flex-1 overflow-auto">
         <div className="mx-auto max-w-4xl space-y-5 px-5 py-6">

@@ -262,7 +262,7 @@ export async function openDocument(
       throw new Error("This workbook has no sheets or too many sheets to preview.");
     let cellBytes = 0;
     return {
-      type: "xlsx",
+      type: "ods",
       sheets: tables.map((table, index) => {
         const rows: string[][] = [];
         let truncated = false;
@@ -426,6 +426,14 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
   };
   const stack: (typeof state)[] = [];
   let html = "";
+  const pages: { title: string; html: string }[] = [];
+  let completedLength = 0;
+  const finishPage = () => {
+    if (pages.length >= 500) throw new Error("Rich text preview limited to 500 pages.");
+    pages.push({ title: `Page ${pages.length + 1}`, html: `<p>${html}</p>` });
+    completedLength += html.length;
+    html = "";
+  };
   let run = "";
   let fallback = 0;
   const encoded = new Uint8Array(bytes.byteLength);
@@ -435,7 +443,7 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
       run += escape(state.decoder.decode(encoded.subarray(0, encodedLength)));
       encodedLength = 0;
     }
-    if (html.length + run.length > 8 * 1024 * 1024)
+    if (completedLength + html.length + run.length > 8 * 1024 * 1024)
       throw new Error("This rich text document has too much content to preview.");
     if (!run) return;
     let span = run;
@@ -452,7 +460,7 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
     }
     if (state.skip) return;
     run += escape(value);
-    if (html.length + run.length > 8 * 1024 * 1024)
+    if (completedLength + html.length + run.length > 8 * 1024 * 1024)
       throw new Error("This rich text document has too much content to preview.");
   };
   const emitByte = (value: number) => {
@@ -553,15 +561,13 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
         fallback = 0;
         emit(String.fromCharCode(arg < 0 ? arg + 65536 : arg));
         fallback = state.uc;
-      } else if (!state.skip && (word === "par" || word === "line")) html += "<br>";
+      } else if (!state.skip && word === "page") finishPage();
+      else if (!state.skip && (word === "par" || word === "line")) html += "<br>";
       else if (word === "tab") emit("\t");
     } else if (char !== "\r" && char !== "\n" && char) emitByte(char.charCodeAt(0));
   }
   if (stack.length) throw new Error("This rich text document is damaged.");
   flush();
-  return {
-    type: "document",
-    navigation: "page",
-    pages: [{ title: "Rich text", html: `<p>${html}</p>` }],
-  };
+  if (html || !pages.length) finishPage();
+  return { type: "document", navigation: "page", pages };
 }

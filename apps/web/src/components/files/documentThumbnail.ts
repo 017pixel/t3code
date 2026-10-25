@@ -1,7 +1,6 @@
 import type { DocumentThumbnail, DocumentThumbnailKind } from "./documentThumbnailProtocol";
 import { DOCUMENT_THUMBNAIL_MAX_BYTES } from "./documentThumbnailProtocol";
 import { readBoundedDocument } from "./readBoundedDocument";
-import type { OfficeWorkerResult } from "./officePreviewProtocol";
 
 const cache = new Map<string, DocumentThumbnail | null>();
 const pending = new Map<string, Promise<DocumentThumbnail | null>>();
@@ -56,10 +55,9 @@ async function render(
   if ((input.file?.size ?? 0) > DOCUMENT_THUMBNAIL_MAX_BYTES)
     throw new Error("Thumbnail input too large.");
   const controller = new AbortController();
-  const worker =
-    input.kind === "pptx"
-      ? new Worker(new URL("./officePreview.worker.ts", import.meta.url), { type: "module" })
-      : new Worker(new URL("./documentThumbnail.worker.ts", import.meta.url), { type: "module" });
+  const worker = new Worker(new URL("./documentThumbnail.worker.ts", import.meta.url), {
+    type: "module",
+  });
   const timeout = setTimeout(() => controller.abort(), 20_000);
   try {
     const result = new Promise<DocumentThumbnail>((resolve, reject) => {
@@ -69,12 +67,10 @@ async function render(
       worker.addEventListener("error", () => reject(new Error("Thumbnail unavailable.")));
       worker.addEventListener(
         "message",
-        (event: MessageEvent<DocumentThumbnail | OfficeWorkerResult>) => {
+        (event: MessageEvent<DocumentThumbnail | { type: "error"; message: string }>) => {
           const data = event.data;
           if ("blob" in data) resolve(data);
           else if (data.type === "error") reject(new Error(data.message));
-          else if (data.type === "pptx")
-            worker.postMessage({ type: "slide", index: 0, thumbnailRatio: input.ratio }, []);
         },
       );
     });

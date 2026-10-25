@@ -100,7 +100,8 @@ export default function PdfViewer(props: { src: string; title: string }) {
   const [error, setError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const [ratios, setRatios] = useState<number[]>([]);
-  const [zoom, setZoom] = useState(1);
+  const [zoom, setZoom] = useState<number | null>(null);
+  const [pageWidth, setPageWidth] = useState(612);
   const [viewport, setViewport] = useState({ width: 600, height: 800 });
   const [scrollTop, setScrollTop] = useState(0);
   const [query, setQuery] = useState("");
@@ -132,6 +133,7 @@ export default function PdfViewer(props: { src: string; title: string }) {
           throw new Error("Preview limited to 2,000 pages. Save this PDF to read it in full.");
         const first = (await document.getPage(1)).getViewport({ scale: 1 });
         if (controller.signal.aborted) return;
+        setPageWidth(first.width);
         setRatios(Array.from({ length: document.numPages }, () => first.height / first.width));
         setPdf(document);
       })
@@ -154,7 +156,9 @@ export default function PdfViewer(props: { src: string; title: string }) {
     update();
     return observeResize(node, update);
   }, []);
-  const width = Math.max(100, viewport.width - 32) * zoom;
+  const fitWidth = Math.max(1, viewport.width - 32);
+  const scale = zoom ?? fitWidth / pageWidth;
+  const width = zoom === null ? fitWidth : pageWidth * zoom;
   const offsets = (() => {
     const result = [16];
     for (const ratio of ratios) result.push(result[result.length - 1]! + width * ratio + 16);
@@ -221,7 +225,7 @@ export default function PdfViewer(props: { src: string; title: string }) {
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Search follows the query, not viewport geometry.
   }, [pdf, query]);
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-1 border-b border-border/60 px-2 py-1 text-xs">
         <span className="mr-auto px-1 tabular-nums" aria-live="polite">
           {pdf ? `${current + 1} / ${pdf.numPages} pages` : "PDF"}
@@ -242,20 +246,28 @@ export default function PdfViewer(props: { src: string; title: string }) {
         </FileSurfaceAction>
         <FileSurfaceAction
           label="Zoom out"
-          disabled={zoom <= 0.5}
-          onPress={() => setZoom((value) => Math.max(0.5, value - 0.25))}
+          disabled={scale <= 0.25}
+          onPress={() => setZoom(Math.max(0.25, scale - 0.25))}
         >
           <MinusIcon className="size-3.5" />
         </FileSurfaceAction>
-        <span className="w-10 text-center tabular-nums">{Math.round(zoom * 100)}%</span>
+        <span className="min-w-14 text-center tabular-nums">
+          {zoom === null ? "Fit width" : `${Math.round(scale * 100)}%`}
+        </span>
         <FileSurfaceAction
           label="Zoom in"
-          disabled={zoom >= 3}
-          onPress={() => setZoom((value) => Math.min(3, value + 0.25))}
+          disabled={scale >= 3}
+          onPress={() => setZoom(Math.min(3, scale + 0.25))}
         >
           <PlusIcon className="size-3.5" />
         </FileSurfaceAction>
-        <FileSurfaceAction label="Fit width" onPress={() => setZoom(1)}>
+        <FileSurfaceAction
+          label="Fit width"
+          onPress={() => {
+            setZoom(null);
+            scroll.current?.scrollTo({ left: 0 });
+          }}
+        >
           <ScanIcon className="size-3.5" />
         </FileSurfaceAction>
         <div className="w-28">
@@ -296,7 +308,7 @@ export default function PdfViewer(props: { src: string; title: string }) {
         role="region"
         aria-label={props.title}
         tabIndex={0}
-        className="relative min-h-0 flex-1 overflow-auto bg-muted/40"
+        className="relative min-h-0 min-w-0 w-full flex-1 overflow-auto bg-muted/40"
         onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
         onKeyDown={(event) => {
           if ((event.ctrlKey || event.metaKey) && event.key === "f") {
