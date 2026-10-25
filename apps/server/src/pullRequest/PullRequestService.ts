@@ -3013,6 +3013,18 @@ export const make = Effect.gen(function* () {
       return detailUncached(refOfCacheKey(key)).pipe(
         Effect.tap(
           Effect.fn("PullRequestService.recordDetailStats")(function* (value: PullRequestDetail) {
+            // GitHub detail includes the same checks; seed only fresh reads at their shorter TTL.
+            if (
+              value.provider === "github" &&
+              value.observedAt !== undefined &&
+              !(yield* Cache.has(checksCache, key))
+            ) {
+              yield* Cache.set(checksCache, key, {
+                state: value.state,
+                checks: value.checks,
+                observedAt: value.observedAt,
+              });
+            }
             recordStats(
               statsKey,
               {
