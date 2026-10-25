@@ -1,6 +1,6 @@
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import type { UsageProviderKind } from "@t3tools/contracts";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 import type { DailyTotals, HourlyTotals } from "@t3tools/shared/usageMerge";
 import {
@@ -331,16 +331,17 @@ function UsageChartPlot({
     plot.style.setProperty("--usage-tooltip-top", `${top}px`);
   };
 
-  useLayoutEffect(() => {
-    if (hoverIndex === null) return;
+  const attachTooltip = (tooltip: HTMLDivElement | null) => {
+    if (!tooltip) return;
+    tooltipRef.current = tooltip;
     positionTooltip();
-
     const plot = plotRef.current;
-    const tooltip = tooltipRef.current;
-    if (plot === null || tooltip === null) return;
-
-    return observeResize([plot, tooltip], positionTooltip);
-  }, [hoverIndex, positionTooltip]);
+    const stopObserving = plot === null ? null : observeResize([plot, tooltip], positionTooltip);
+    return () => {
+      stopObserving?.();
+      tooltipRef.current = null;
+    };
+  };
 
   const handleMove = (event: React.MouseEvent<HTMLDivElement>) => {
     const plot = plotRef.current;
@@ -392,7 +393,7 @@ function UsageChartPlot({
 
       {hoverIndex === null || hoveredPeriod === undefined ? null : (
         <UsageChartTooltip
-          tooltipRef={tooltipRef}
+          tooltipRef={attachTooltip}
           label={formatTooltipPeriod(hoveredPeriod)}
           column={columns[hoverIndex]}
           providers={providers}

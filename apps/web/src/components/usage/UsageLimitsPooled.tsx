@@ -16,16 +16,7 @@ import {
 } from "@t3tools/shared/usageLimits";
 import type { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { AlertTriangleIcon, ExternalLinkIcon, TicketIcon } from "lucide-react";
-import {
-  createContext,
-  Fragment,
-  type ReactNode,
-  type RefObject,
-  use,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
+import { createContext, Fragment, type ReactNode, type RefObject, use, useState } from "react";
 
 import { ensureLocalApi } from "../../localApi";
 import { usePrimarySettings } from "../../hooks/useSettings";
@@ -221,42 +212,47 @@ function SegmentPopover({
  * it currently describes.
  */
 type SegmentPayload = Omit<Parameters<typeof SegmentPopover>[0], "now" | "onRedeem">;
-const SegmentPopoverContext = createContext<ReturnType<
-  typeof PopoverCreateHandle<SegmentPayload>
-> | null>(null);
+
+function createSegmentPopover() {
+  const handle = PopoverCreateHandle<SegmentPayload>();
+  const actions: RefObject<PopoverPrimitive.Root.Actions | null> = { current: null };
+  // The trigger the popup last opened from. It stays set while the popup plays its exit
+  // transition, which is still anchored to that trigger.
+  let anchor: Element | null = null;
+  return {
+    handle,
+    actions,
+    onOpenChange: (open: boolean, details: PopoverPrimitive.Root.ChangeEventDetails) => {
+      if (open) anchor = details.trigger ?? null;
+    },
+    /**
+     * When the anchoring trigger unmounts, an exit transition would slide the popup to the
+     * viewport origin. Unmount it outright, which also clears Base UI's active-trigger
+     * bookkeeping so the segment can open again when it comes back.
+     */
+    triggerRef: (node: Element | null) => {
+      if (node === null) return;
+      return () => {
+        if (anchor !== node) return;
+        anchor = null;
+        handle.close();
+        actions.current?.unmount();
+      };
+    },
+  };
+}
+
+const SegmentPopoverContext = createContext<ReturnType<typeof createSegmentPopover> | null>(null);
 
 function ActiveSegmentPopover({
   handle,
-  actions,
   payload,
-  pools,
   now,
 }: {
   readonly handle: ReturnType<typeof PopoverCreateHandle<SegmentPayload>>;
-  readonly actions: RefObject<PopoverPrimitive.Root.Actions | null>;
   readonly payload: SegmentPayload;
-  readonly pools: readonly LimitPool[];
   readonly now: number;
 }) {
-  const available = pools.some((pool) =>
-    displayLimitWindows(pool).some((window) =>
-      window.members.some(
-        (member) =>
-          member.account.key === payload.account.key &&
-          member.window.id === payload.window.id &&
-          member.window.kind === payload.window.kind &&
-          Boolean(member.account.redeem) === Boolean(payload.redeem),
-      ),
-    ),
-  );
-  // The trigger is gone, so the popup has nothing to anchor to: an exit transition would
-  // slide it to the viewport origin. Unmount it outright, which also clears Base UI's
-  // active-trigger bookkeeping so the segment can open again when it comes back.
-  useLayoutEffect(() => {
-    if (available) return;
-    handle.close();
-    actions.current?.unmount();
-  }, [available, handle, actions]);
   return (
     <PopoverPopup side="top" sideOffset={6}>
       <SegmentPopover
@@ -339,7 +335,7 @@ function SegmentTriggers({
   readonly index: number;
   readonly showAccountName: boolean;
 }) {
-  const popover = use(SegmentPopoverContext) ?? undefined;
+  const popover = use(SegmentPopoverContext);
   const payload: SegmentPayload = { account, window, reset, redeem };
   const remaining = remainingPercent(window);
   const timeLeft = paceRemainingPercent(window, now);
@@ -349,7 +345,8 @@ function SegmentTriggers({
   return (
     <>
       <PopoverTrigger
-        handle={popover}
+        handle={popover?.handle}
+        ref={popover?.triggerRef}
         payload={payload}
         openOnHover
         render={
@@ -439,14 +436,15 @@ function LegendRow({
   readonly now: number;
   readonly index: number;
 }) {
-  const popover = use(SegmentPopoverContext) ?? undefined;
+  const popover = use(SegmentPopoverContext);
   const { account, window } = payload;
   const remaining = remainingPercent(window);
   const resetsIn = formatResetsIn(window, now);
   const credits = account.limits.resetCredits?.availableCount ?? 0;
   return (
     <PopoverTrigger
-      handle={popover}
+      handle={popover?.handle}
+      ref={popover?.triggerRef}
       payload={payload}
       style={{ gridColumn: "1 / -1", gridRow: index + 1 }}
       render={<Button variant="ghost" size="compact" />}
@@ -604,8 +602,7 @@ export function UsageLimitsPooled({
   readonly now: number;
   readonly cursorPrompt?: ReactNode;
 }) {
-  const [segmentPopover] = useState(() => PopoverCreateHandle<SegmentPayload>());
-  const segmentPopoverActions = useRef<PopoverPrimitive.Root.Actions | null>(null);
+  const [segmentPopover] = useState(createSegmentPopover);
   const pools = collectLimitPools(collectLimitAccounts(presentations), now);
   const notices = collectLimitNotices(presentations);
   const externalLinks = collectExternalUsageLinks(presentations);
@@ -629,16 +626,14 @@ export function UsageLimitsPooled({
           </Fragment>
         ))}
       </SegmentPopoverContext>
-      <Popover handle={segmentPopover} actionsRef={segmentPopoverActions}>
+      <Popover
+        handle={segmentPopover.handle}
+        actionsRef={segmentPopover.actions}
+        onOpenChange={segmentPopover.onOpenChange}
+      >
         {({ payload }) =>
           payload ? (
-            <ActiveSegmentPopover
-              handle={segmentPopover}
-              actions={segmentPopoverActions}
-              payload={payload}
-              pools={pools}
-              now={now}
-            />
+            <ActiveSegmentPopover handle={segmentPopover.handle} payload={payload} now={now} />
           ) : null
         }
       </Popover>

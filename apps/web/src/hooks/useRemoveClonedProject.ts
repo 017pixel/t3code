@@ -1,5 +1,5 @@
-import { useRouter } from "@tanstack/react-router";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import { type AnyRouter, useRouter } from "@tanstack/react-router";
+import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { ScopedProjectRef } from "@t3tools/contracts";
 
 import { useComposerDraftStore } from "../composerDraftStore";
@@ -7,20 +7,26 @@ import { resolveThreadRouteTarget } from "../threadRoutes";
 import { releaseProjectDraftUploads } from "../lib/composerDraftUploads";
 import { waitForProjectRemoval } from "../state/entities";
 import { projectEnvironment } from "../state/projects";
-import { useAtomCommand } from "../state/use-atom-command";
+import { appAtomRegistry } from "../rpc/atomRegistry";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 
 export function useRemoveClonedProject() {
-  const router = useRouter();
-  const deleteProject = useAtomCommand(projectEnvironment.delete, { reportFailure: false });
+  return createRemoveClonedProject(useRouter());
+}
 
+export function createRemoveClonedProject(router: AnyRouter) {
   return async (projectRef: ScopedProjectRef) => {
     const draftStore = useComposerDraftStore.getState();
-    const result = await deleteProject({
-      environmentId: projectRef.environmentId,
-      // Leave deletion unforced so a thread created since the failed clone cannot be silently deleted.
-      input: { projectId: projectRef.projectId },
-    });
+    const result = await runAtomCommand(
+      appAtomRegistry,
+      projectEnvironment.delete,
+      {
+        environmentId: projectRef.environmentId,
+        // Leave deletion unforced so a thread created since the failed clone cannot be silently deleted.
+        input: { projectId: projectRef.projectId },
+      },
+      { reportFailure: false },
+    );
     if (result._tag === "Failure") {
       const error = squashAtomCommandFailure(result);
       toastManager.add(

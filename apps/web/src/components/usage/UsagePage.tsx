@@ -1,8 +1,8 @@
 import { ChatGptUsageButton } from "../settings/ChatGptUsageButton";
 import { usesChatGptSharing } from "@t3tools/shared/usageLimits";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
-import { useAtomValue } from "@effect/atom-react";
-import { Atom } from "effect/reactivity";
+import { useAtomMount, useAtomValue } from "@effect/atom-react";
+import { Atom, type AtomRegistry } from "effect/reactivity";
 import {
   ProviderDriverKind,
   USAGE_CONTRACT_VERSION,
@@ -11,8 +11,9 @@ import {
   type UsageSummaryInput,
 } from "@t3tools/contracts";
 import { CircleAlertIcon, ChevronDownIcon, InfoIcon, SlidersHorizontalIcon } from "lucide-react";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
-import { settlePromise } from "@t3tools/client-runtime/state/runtime";
+import { useRef, useState } from "react";
+import { commandScopeRef } from "../../shortcuts/dispatcher";
+import { runAtomCommand, settlePromise } from "@t3tools/client-runtime/state/runtime";
 import * as AsyncResult from "effect/reactivity/AsyncResult";
 import * as Cause from "effect/Cause";
 import {
@@ -138,10 +139,58 @@ function usageLoading(
 }
 
 /** Keep dialog selection outside UsagePage so opening/closing rerenders only its host. */
+// Not kept alive: the host is its only reader, so unmounting the host closes the dialog.
 const selectedUsageModelKeyAtom = Atom.make<string | null>(null).pipe(
-  Atom.keepAlive,
   Atom.withLabel("usage:selected-model-key"),
 );
+
+/**
+ * The time limits are rendered against. It advances when limits refresh rather
+ * than ticking; see UsageLimitsSection. Not kept alive: it starts over with the page.
+ */
+const limitsNowAtom = Atom.writable(
+  () => Date.now(),
+  (ctx, now: number) => ctx.setSelf(now),
+).pipe(Atom.withLabel("usage:limits-now"));
+
+function refreshEnvironmentLimits(
+  registry: AtomRegistry.AtomRegistry,
+  environmentId: EnvironmentId,
+  automatic: boolean,
+  afterPending: boolean,
+) {
+  return refreshUsageLimits(
+    environmentId,
+    () =>
+      runAtomCommand(
+        registry,
+        serverEnvironment.refreshProviders,
+        { environmentId, input: {} },
+        { reportFailure: false },
+      ),
+    automatic,
+    afterPending,
+  );
+}
+
+/**
+ * Mounted while the limits view shows a connected environment, so opening the
+ * view or an environment (re)connecting refreshes its limits, subject to the
+ * refresh throttle in refreshUsageLimits.
+ */
+const limitsAutoRefreshAtom = Atom.family((environmentId: EnvironmentId) =>
+  Atom.make((get) => {
+    const registry = get.registry;
+    void settlePromise(() => refreshEnvironmentLimits(registry, environmentId, true, false)).then(
+      () => registry.set(limitsNowAtom, Date.now()),
+    );
+  }).pipe(Atom.withLabel(`usage:limits-auto-refresh:${environmentId}`)),
+);
+
+function LimitsAutoRefresh({ environmentId }: { readonly environmentId: EnvironmentId }) {
+  useAtomMount(limitsAutoRefreshAtom(environmentId));
+  return null;
+}
 
 function selectUsageModel(key: string | null): void {
   appAtomRegistry.set(selectedUsageModelKeyAtom, key);
@@ -156,7 +205,6 @@ function UsageModelDialogHost({
   readonly onSetPrice: (model: string) => void;
 }) {
   const selectedKey = useAtomValue(selectedUsageModelKeyAtom);
-  useEffect(() => () => selectUsageModel(null), []);
   const model =
     selectedKey === null
       ? undefined
@@ -177,7 +225,7 @@ function UsageModelDialogHost({
 
 export function UsagePage() {
   const [preferences, setPreferences] = useState(readUsagePagePreferences);
-  useEscapeToGoBack();
+  const escapeToGoBackRef = useEscapeToGoBack();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const hour12 = usePrimarySettings((settings) => resolveHour12(settings.timestampFormat));
   const shortcutTitle = (
@@ -199,7 +247,7 @@ export function UsagePage() {
   const metric = preferences.metric;
   const showingLimits = metric === "limits";
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [limitsNow, setLimitsNow] = useState(() => Date.now());
+  const limitsNow = useAtomValue(limitsNowAtom);
   const refreshingRef = useRef(false);
   const [priceDialog, setPriceDialog] = useState<{ readonly model?: string } | null>(null);
   const [selectedEnvironmentIds, setSelectedEnvironmentIds] =
@@ -227,9 +275,6 @@ export function UsagePage() {
   const cursorAccessEnvironments = hiddenProviders.has("cursor")
     ? []
     : cursorKeychainAccessEnvironments(selectedEnvironments);
-  const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
-    reportFailure: false,
-  });
 
   const canReadDiagnostics = selectedEnvironments.some(
     (environment) => environment.canReadDiagnostics,
@@ -249,54 +294,54 @@ export function UsagePage() {
     });
   };
   const selectMetric = (nextMetric: UsageMetric) => {
-    if (nextMetric === "limits") setLimitsNow(Date.now());
+    if (nextMetric === "limits") appAtomRegistry.set(limitsNowAtom, Date.now());
     updatePreferences({ metric: nextMetric });
   };
-  const refreshLimits = (automatic = false, afterPending = false) =>
+  const connectedLimitsEnvironments = [...presentations]
+    .filter(
+      ([environmentId, presentation]) =>
+        presentation.connection.phase === "connected" &&
+        presentation.serverConfig !== null &&
+        (selectedEnvironmentIds === null || selectedEnvironmentIds.has(environmentId)),
+    )
+    .map(([environmentId]) => environmentId);
+  const refreshLimits = (afterPending = false) =>
     // Settled so the timestamp still advances when a refresh throws.
     settlePromise(() =>
       Promise.all(
-        Array.from(presentations, ([environmentId, presentation]) => {
-          if (selectedEnvironmentIds !== null && !selectedEnvironmentIds.has(environmentId)) return;
-          if (presentation.connection.phase === "connected" && presentation.serverConfig !== null) {
-            return refreshUsageLimits(
-              environmentId,
-              () => refreshProviders({ environmentId, input: {} }),
-              automatic,
-              afterPending,
-            );
-          }
-        }),
+        connectedLimitsEnvironments.map((environmentId) =>
+          refreshEnvironmentLimits(appAtomRegistry, environmentId, false, afterPending),
+        ),
       ),
     ).then((result) => {
-      setLimitsNow(Date.now());
+      appAtomRegistry.set(limitsNowAtom, Date.now());
       if (!AsyncResult.isSuccess(result)) throw Cause.squash(result.cause);
     });
-  const onUsageKeyDown = useEffectEvent((event: KeyboardEvent) => {
-    if (
-      event.defaultPrevented ||
-      event.repeat ||
-      event.isComposing ||
-      isCommandPaletteOpen() ||
-      isModelPickerOpen()
-    )
-      return;
+  const usageShortcutScope = commandScopeRef(
+    {},
+    {
+      onKeyDown: (event) => {
+        if (
+          event.defaultPrevented ||
+          event.repeat ||
+          event.isComposing ||
+          isCommandPaletteOpen() ||
+          isModelPickerOpen()
+        )
+          return false;
 
-    const command = resolveUsageShortcut(event, keybindings);
-    const metricOption = METRIC_OPTIONS.find((option) => option.command === command);
-    const periodOption = WINDOW_OPTIONS.find((option) => option.command === command);
-    if (!metricOption && !periodOption) return;
+        const command = resolveUsageShortcut(event, keybindings);
+        const metricOption = METRIC_OPTIONS.find((option) => option.command === command);
+        const periodOption = WINDOW_OPTIONS.find((option) => option.command === command);
+        if (!metricOption && !periodOption) return false;
 
-    event.preventDefault();
-    event.stopPropagation();
-    if (metricOption) selectMetric(metricOption.value);
-    if (periodOption && !showingLimits) selectWindow(periodOption.days);
-  });
-
-  useEffect(() => {
-    globalThis.window.addEventListener("keydown", onUsageKeyDown, true);
-    return () => globalThis.window.removeEventListener("keydown", onUsageKeyDown, true);
-  }, []);
+        event.preventDefault();
+        event.stopPropagation();
+        if (metricOption) selectMetric(metricOption.value);
+        if (periodOption && !showingLimits) selectWindow(periodOption.days);
+      },
+    },
+  );
 
   const refreshWindow = () => {
     if (refreshingRef.current) return;
@@ -326,22 +371,6 @@ export function UsagePage() {
       setIsRefreshing(false);
     });
   };
-  const connectedLimitsEnvironments = [...presentations]
-    .filter(
-      ([environmentId, presentation]) =>
-        presentation.connection.phase === "connected" &&
-        presentation.serverConfig !== null &&
-        (selectedEnvironmentIds === null || selectedEnvironmentIds.has(environmentId)),
-    )
-    .map(([environmentId]) => environmentId)
-    .sort()
-    .join(",");
-  const autoRefreshLimits = useEffectEvent(() => {
-    void refreshLimits(true);
-  });
-  useEffect(() => {
-    if (showingLimits && connectedLimitsEnvironments) autoRefreshLimits();
-  }, [showingLimits, connectedLimitsEnvironments]);
 
   const days = enumerateDays(shownWindow.sinceDay, shownWindow.untilDay);
   const hours =
@@ -504,8 +533,14 @@ export function UsagePage() {
   );
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none isolate">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground">
+    <SidebarInset
+      ref={escapeToGoBackRef}
+      className="h-dvh min-h-0 overflow-hidden overscroll-y-none isolate"
+    >
+      <div
+        ref={usageShortcutScope}
+        className="flex min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground"
+      >
         <WorkspacePageHeader electron={isElectron} className="@container/usage-header">
           {topbarContent}
         </WorkspacePageHeader>
@@ -529,7 +564,7 @@ export function UsagePage() {
                       environments={cursorAccessEnvironments}
                       onEnabled={() => {
                         void refresh();
-                        void refreshLimits(false, true);
+                        void refreshLimits(true);
                       }}
                     />
                   ) : null
@@ -562,7 +597,7 @@ export function UsagePage() {
                 showChatGptSharing={showChatGptSharing}
                 onCursorEnabled={() => {
                   void refresh();
-                  void refreshLimits(false, true);
+                  void refreshLimits(true);
                 }}
                 onSelectModel={selectUsageModel}
               />
@@ -570,6 +605,11 @@ export function UsagePage() {
           </WorkspacePageContainer>
         </ScrollArea>
       </div>
+      {showingLimits
+        ? connectedLimitsEnvironments.map((environmentId) => (
+            <LimitsAutoRefresh key={environmentId} environmentId={environmentId} />
+          ))
+        : null}
       {showingLimits ? null : (
         <UsageModelDialogHost
           models={merged.models}

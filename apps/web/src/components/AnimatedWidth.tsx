@@ -1,4 +1,4 @@
-import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
+import { type ReactNode, useState } from "react";
 
 import { observeResize } from "~/lib/observeResize";
 import { cn } from "~/lib/utils";
@@ -10,17 +10,15 @@ export function AnimatedWidth({
   readonly children: ReactNode;
   readonly className?: string;
 }) {
-  const contentRef = useRef<HTMLSpanElement>(null);
   const [width, setWidth] = useState<number | null>(null);
 
-  useLayoutEffect(() => {
-    const element = contentRef.current;
+  const observeContent = (element: HTMLSpanElement | null) => {
     if (!element) return;
     return observeResize(element, (entries) => {
       const nextWidth = Math.ceil(entries.at(-1)?.contentRect.width ?? 0);
       if (nextWidth > 0) setWidth(nextWidth);
     });
-  }, []);
+  };
 
   return (
     <span
@@ -31,7 +29,7 @@ export function AnimatedWidth({
       )}
       style={width === null ? undefined : { width }}
     >
-      <span ref={contentRef} className="block w-max whitespace-nowrap">
+      <span ref={observeContent} className="block w-max whitespace-nowrap">
         {children}
       </span>
     </span>

@@ -1,6 +1,6 @@
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
-import { useNavigate } from "@tanstack/react-router";
+import { type AnyRouter, useRouter } from "@tanstack/react-router";
 import { type MouseEvent } from "react";
 
 import {
@@ -9,14 +9,14 @@ import {
 } from "@t3tools/client-runtime/change-request-links";
 
 import { useOpenLink } from "../browser/useOpenLink";
-import { useClientSettings } from "../hooks/useSettings";
+import { getClientSettings } from "../hooks/useSettings";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { useRightPanelStore } from "../rightPanelStore";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { readProjects, useProjects } from "../state/entities";
 import { environmentServerConfigsAtom, serverEnvironment } from "../state/server";
-import { usePrimaryEnvironmentId } from "../state/environments";
+import { primaryEnvironmentIdAtom } from "../state/primaryEnvironment";
 
 export function usePullRequestPreviewTarget(environmentId: EnvironmentId | null, url: string) {
   const projects = useProjects();
@@ -36,10 +36,7 @@ function shouldOpenPullRequestExternally(
   return event.metaKey || event.ctrlKey || event.button === 1;
 }
 
-export function useOpenChangeRequestLink(
-  threadRef?: ScopedThreadRef,
-  panelRef?: ScopedThreadRef,
-): (
+type OpenChangeRequestLink = (
   event: Pick<
     MouseEvent<HTMLElement>,
     "preventDefault" | "stopPropagation" | "metaKey" | "ctrlKey"
@@ -47,12 +44,26 @@ export function useOpenChangeRequestLink(
   targetUrl: string,
   targetThreadRef?: ScopedThreadRef,
   targetEnvironmentId?: EnvironmentId,
-) => boolean {
-  const navigate = useNavigate();
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const openInApp = useClientSettings((settings) => settings.pullRequestLinksOpenInApp);
+) => boolean;
+
+export function useOpenChangeRequestLink(
+  threadRef?: ScopedThreadRef,
+  panelRef?: ScopedThreadRef,
+): OpenChangeRequestLink {
+  return createOpenChangeRequestLink(useRouter(), threadRef, panelRef);
+}
+
+/** Settings, configs and projects are all read when a link is opened, not when it is built. */
+export function createOpenChangeRequestLink(
+  router: AnyRouter,
+  threadRef?: ScopedThreadRef,
+  panelRef?: ScopedThreadRef,
+): OpenChangeRequestLink {
   return (event, targetUrl, targetThreadRef, targetEnvironmentId) => {
-    if (!openInApp || shouldOpenPullRequestExternally(event)) return false;
+    if (!getClientSettings().pullRequestLinksOpenInApp || shouldOpenPullRequestExternally(event)) {
+      return false;
+    }
+    const primaryEnvironmentId = appAtomRegistry.get(primaryEnvironmentIdAtom);
     // Read at click time: every provider status push replaces the config map, and
     // subscribing would hand every rendered link a new handler. Projects likewise, so a
     // link can resolve against a snapshot that arrived after this handler was built.
@@ -91,7 +102,7 @@ export function useOpenChangeRequestLink(
         number,
       });
       if (!resolvedThreadRef) {
-        void navigate({
+        void router.navigate({
           to: "/pull-requests",
           search: (previous) => ({
             ...previous,
@@ -104,7 +115,7 @@ export function useOpenChangeRequestLink(
       }
       return true;
     }
-    void navigate({
+    void router.navigate({
       to: "/pull-requests",
       search: { involvement: "all", state: "all", ...pullRequestsSearch },
     });

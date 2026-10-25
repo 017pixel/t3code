@@ -57,7 +57,8 @@ describe("SidebarProviderUpdatePill exit", () => {
     expect(screen.container.textContent).toContain("Claude updated: v2.1.303");
     expect(screen.container.querySelector('[role="status"]')).toBeNull();
 
-    await advance(3_000);
+    // No transitionend arrives, so the fallback dismisses one exit duration late.
+    await advance(3_180);
     await advance(180);
     expect(screen.container.textContent).toBe("");
   });

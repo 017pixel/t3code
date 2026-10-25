@@ -18,7 +18,7 @@ import {
   remainingPercent,
 } from "@t3tools/shared/usageLimits";
 import { GaugeIcon, TrendingDownIcon, TrendingUpIcon } from "lucide-react";
-import { Fragment, type ReactNode, useLayoutEffect, useState } from "react";
+import { Fragment, type ReactNode, useState } from "react";
 
 import { usePrimarySettings } from "../../hooks/useSettings";
 import { observeResize } from "../../lib/observeResize";
@@ -100,15 +100,14 @@ function paceMarkStyles(timeLeft: number | null) {
  * and tick, so the bar draws neither, as the mobile bars do.
  */
 export function usePaceMark(timeLeft: number | null) {
-  const [bar, setBar] = useState<HTMLElement | null>(null);
   const [roomy, setRoomy] = useState(false);
-  useLayoutEffect(() => {
+  const measureBar = (bar: HTMLElement | null) => {
     if (!bar) return;
     const measure = () => setRoomy(bar.getBoundingClientRect().width >= 6);
     measure();
     return observeResize(bar, measure);
-  }, [bar]);
-  return [setBar, roomy ? paceMarkStyles(timeLeft) : null] as const;
+  };
+  return [measureBar, roomy ? paceMarkStyles(timeLeft) : null] as const;
 }
 
 function WindowBar({

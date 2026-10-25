@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type ReactNode, useState } from "react";
 import { observeResize } from "../lib/observeResize";
 
 const HEIGHT_TRANSITION_FALLBACK_MS = 250;
@@ -10,35 +10,27 @@ export function AnimatedHeight({
   readonly children: ReactNode;
   readonly holdHeight?: boolean;
 }) {
-  const contentRef = useRef<HTMLDivElement>(null);
   const [heightState, setHeightState] = useState<{
     readonly height: number | null;
     readonly isClipping: boolean;
   }>({ height: null, isClipping: false });
 
-  useEffect(() => {
-    if (!heightState.isClipping) return;
-    const timeoutId = window.setTimeout(() => {
-      setHeightState((currentState) =>
-        currentState.isClipping ? { ...currentState, isClipping: false } : currentState,
-      );
-    }, HEIGHT_TRANSITION_FALLBACK_MS);
-    return () => window.clearTimeout(timeoutId);
-  }, [
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A height change mid-transition starts a new transition, so the fallback timer restarts.
-    heightState.height,
-    heightState.isClipping,
-  ]);
+  const stopClipping = () =>
+    setHeightState((currentState) =>
+      currentState.isClipping ? { ...currentState, isClipping: false } : currentState,
+    );
 
-  useLayoutEffect(() => {
-    if (holdHeight) return;
-    const element = contentRef.current;
-    if (!element) return;
+  const measureContent = (element: HTMLDivElement | null) => {
+    if (holdHeight || !element) return;
     let firstFrameId: number | null = null;
     let secondFrameId: number | null = null;
+    let fallbackTimeoutId: number | null = null;
+    let lastMeasuredHeight: number | null = null;
 
     const updateHeight = () => {
       const nextHeight = Math.ceil(element.scrollHeight || element.getBoundingClientRect().height);
+      if (nextHeight === lastMeasuredHeight) return;
+      lastMeasuredHeight = nextHeight;
       setHeightState((currentState) => {
         if (currentState.height === nextHeight) return currentState;
         return {
@@ -46,6 +38,13 @@ export function AnimatedHeight({
           isClipping: currentState.height !== null,
         };
       });
+      // transitionend never fires when motion is reduced or the transition is
+      // interrupted; a height change mid-transition restarts the fallback.
+      if (fallbackTimeoutId !== null) window.clearTimeout(fallbackTimeoutId);
+      fallbackTimeoutId = window.setTimeout(() => {
+        fallbackTimeoutId = null;
+        stopClipping();
+      }, HEIGHT_TRANSITION_FALLBACK_MS);
     };
     const cancelPendingFrames = () => {
       if (firstFrameId !== null) {
@@ -75,8 +74,13 @@ export function AnimatedHeight({
     return () => {
       stopObserving();
       cancelPendingFrames();
+      if (fallbackTimeoutId !== null) {
+        window.clearTimeout(fallbackTimeoutId);
+        // Held height clips on its own, and no pending transition can end it.
+        stopClipping();
+      }
     };
-  }, [holdHeight]);
+  };
 
   return (
     <div
@@ -92,12 +96,10 @@ export function AnimatedHeight({
       }
       onTransitionEnd={(event) => {
         if (event.target !== event.currentTarget || event.propertyName !== "height") return;
-        setHeightState((currentState) =>
-          currentState.isClipping ? { ...currentState, isClipping: false } : currentState,
-        );
+        stopClipping();
       }}
     >
-      <div ref={contentRef} style={holdHeight ? { height: "100%" } : undefined}>
+      <div ref={measureContent} style={holdHeight ? { height: "100%" } : undefined}>
         {children}
       </div>
     </div>

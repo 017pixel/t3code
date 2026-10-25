@@ -37,6 +37,8 @@ const state = vi.hoisted(() => ({
   sessionLookupFails: false,
 }));
 
+// Unit tests run without a DOM; the live region is a browser concern.
+vi.mock("../lib/announce", () => ({ announce: vi.fn(), cancelAnnouncement: vi.fn() }));
 vi.mock("react", () => ({
   useCallback: (callback: unknown) => callback,
   useMemo: (factory: () => unknown) => factory(),

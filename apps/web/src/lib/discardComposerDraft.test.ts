@@ -8,6 +8,8 @@ import { useThreadUndoNotice } from "../hooks/showThreadUndoNotice";
 import { releaseDraftAttachments } from "./attachmentUploadQueue";
 import { discardComposerDraft } from "./discardComposerDraft";
 
+// Unit tests run without a DOM; the live region is a browser concern.
+vi.mock("./announce", () => ({ announce: vi.fn(), cancelAnnouncement: vi.fn() }));
 vi.mock("./attachmentUploadQueue", () => ({ releaseDraftAttachments: vi.fn() }));
 
 const environmentId = EnvironmentId.make("environment-local");

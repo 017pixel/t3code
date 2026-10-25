@@ -11,7 +11,7 @@ import { EyeIcon, type LucideIcon } from "lucide-react";
 import type * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, Suspense, use, useState } from "react";
 
 import { PrimaryEnvironmentHttpClient } from "~/environments/primary/httpClient";
 import { runPrimaryHttp } from "~/lib/runtime";
@@ -41,9 +41,13 @@ function redirectsToThisComputer(redirectHost: string): boolean {
 }
 
 type Loaded =
-  | { readonly status: "loading" }
   | { readonly status: "invalid"; readonly message: string }
   | { readonly status: "ready"; readonly details: AuthMcpApprovalDetails };
+
+export interface ConnectAgentEntry {
+  readonly authorization: AuthMcpAuthorizationRequest;
+  readonly loaded: Promise<Loaded>;
+}
 
 const UNREACHABLE = "Could not reach this environment. Try again.";
 const isApprovalError = Schema.is(AuthMcpApprovalError);
@@ -76,8 +80,23 @@ function runApproval<A>(
   ).catch((): Answer<A> => ({ kind: "error", message: UNREACHABLE }));
 }
 
-function readAuthorizationRequest(): AuthMcpAuthorizationRequest {
-  return Object.fromEntries(new URL(window.location.href).searchParams);
+/** Loads the agent's approval request; never settles when the server sends the browser on. */
+export function loadConnectAgentEntry(searchStr: string): ConnectAgentEntry {
+  const authorization: AuthMcpAuthorizationRequest = Object.fromEntries(
+    new URLSearchParams(searchStr),
+  );
+  const loaded = runApproval((client) => client.mcpOAuth.approval({ payload: authorization })).then(
+    (answer): Loaded | Promise<never> => {
+      if (answer.kind === "redirect") {
+        window.location.replace(answer.url);
+        return new Promise<never>(() => {});
+      }
+      return answer.kind === "error"
+        ? { status: "invalid", message: answer.message }
+        : { status: "ready", details: answer.value };
+    },
+  );
+  return { authorization, loaded };
 }
 
 /** Sessions can grant only scopes they hold. */
@@ -85,34 +104,31 @@ function oneClickApproves(details: AuthMcpApprovalDetails, access: AuthMcpClient
   return details.csrfToken !== undefined && (details.oneClickAccess ?? []).includes(access);
 }
 
-export function ConnectAgentSurface() {
-  const [authorization] = useState(readAuthorizationRequest);
-  const [loaded, setLoaded] = useState<Loaded>({ status: "loading" });
+export function ConnectAgentSurface({ entry }: { readonly entry: ConnectAgentEntry }) {
+  return (
+    <Suspense
+      fallback={
+        <AuthSurfaceShell>
+          <ConnectAgentHeading
+            title="Checking the sign-in request"
+            description="One moment while this environment verifies the agent's request."
+          />
+          <Spinner className="mt-6" size="lg" tone="muted" />
+        </AuthSurfaceShell>
+      }
+    >
+      <ConnectAgentApproval entry={entry} />
+    </Suspense>
+  );
+}
+
+function ConnectAgentApproval({ entry }: { readonly entry: ConnectAgentEntry }) {
+  const { authorization } = entry;
+  const loaded = use(entry.loaded);
   const [access, setAccess] = useState<AuthMcpClientAccess>("read-only");
   const [pairingCode, setPairingCode] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [pending, setPending] = useState<"approve" | "deny" | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    void runApproval((client) => client.mcpOAuth.approval({ payload: authorization })).then(
-      (answer) => {
-        if (cancelled) return;
-        if (answer.kind === "redirect") {
-          window.location.replace(answer.url);
-          return;
-        }
-        setLoaded(
-          answer.kind === "error"
-            ? { status: "invalid", message: answer.message }
-            : { status: "ready", details: answer.value },
-        );
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [authorization]);
 
   const decide = async (choice: "approve" | "deny") => {
     if (loaded.status !== "ready") return;
@@ -135,18 +151,6 @@ export function ConnectAgentSurface() {
     setPending(null);
     setErrorMessage(answer.kind === "error" ? answer.message : "The sign-in could not continue.");
   };
-
-  if (loaded.status === "loading") {
-    return (
-      <AuthSurfaceShell>
-        <ConnectAgentHeading
-          title="Checking the sign-in request"
-          description="One moment while this environment verifies the agent's request."
-        />
-        <Spinner className="mt-6" size="lg" tone="muted" />
-      </AuthSurfaceShell>
-    );
-  }
 
   if (loaded.status === "invalid") {
     return (

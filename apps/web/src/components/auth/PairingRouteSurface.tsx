@@ -1,20 +1,21 @@
-import { Alert, AlertDescription } from "../ui/alert";
 import type { AuthSessionState } from "@t3tools/contracts";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import React, { startTransition, useEffect, useEffectEvent, useRef, useState } from "react";
+import { Suspense, use, useState } from "react";
 
 import { APP_DISPLAY_NAME } from "../../branding";
-import { connectPairing } from "../../connection/onboarding";
-import {
-  peekPairingTokenFromUrl,
-  stripPairingTokenFromUrl,
-  submitServerAuthCredential,
-} from "../../environments/primary";
-import { readHostedPairingRequest } from "../../hostedPairing";
+import { submitServerAuthCredential } from "../../environments/primary";
+import type { HostedPairingRequest } from "../../hostedPairing";
+import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { StandalonePage, StandalonePageHeader } from "../ui/standalone-page";
-import { useAtomCommand } from "../../state/use-atom-command";
+import {
+  type AutoPairing,
+  connectHostedPairing,
+  enterAppAfterPairing,
+  type HostedPairingAttempt,
+  type HostedPairingOutcome,
+  pairingErrorMessage,
+} from "./pairingRouteEntry";
 
 export function PairingPendingSurface() {
   return (
@@ -30,59 +31,109 @@ export function PairingPendingSurface() {
 
 export function PairingRouteSurface({
   auth,
+  autoPairing,
   initialErrorMessage,
-  onAuthenticated,
 }: {
   auth: AuthSessionState["auth"];
+  autoPairing: AutoPairing | null;
   initialErrorMessage?: string;
-  onAuthenticated: () => void;
 }) {
-  const [autoPairToken] = useState(peekPairingTokenFromUrl);
-  const [credential, setCredential] = useState(autoPairToken ?? "");
-  const [errorMessage, setErrorMessage] = useState(initialErrorMessage ?? "");
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const autoSubmitAttemptedRef = useRef(false);
+  if (!autoPairing) {
+    return <PairingForm auth={auth} initialErrorMessage={initialErrorMessage ?? ""} />;
+  }
 
-  const submitCredential = async (nextCredential: string) => {
+  return (
+    <Suspense
+      fallback={
+        <PairingFormView
+          auth={auth}
+          credential={autoPairing.credential}
+          errorMessage=""
+          isSubmitting
+          onCredentialChange={() => {}}
+          onSubmit={() => {}}
+        />
+      }
+    >
+      <AutoPairingFailure auth={auth} autoPairing={autoPairing} />
+    </Suspense>
+  );
+}
+
+function AutoPairingFailure({
+  auth,
+  autoPairing,
+}: {
+  auth: AuthSessionState["auth"];
+  autoPairing: AutoPairing;
+}) {
+  return (
+    <PairingForm
+      auth={auth}
+      initialCredential={autoPairing.credential}
+      initialErrorMessage={use(autoPairing.failure)}
+    />
+  );
+}
+
+function PairingForm({
+  auth,
+  initialCredential = "",
+  initialErrorMessage,
+}: {
+  auth: AuthSessionState["auth"];
+  initialCredential?: string;
+  initialErrorMessage: string;
+}) {
+  const [credential, setCredential] = useState(initialCredential);
+  const [errorMessage, setErrorMessage] = useState(initialErrorMessage);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const submitCredential = async () => {
     setIsSubmitting(true);
     setErrorMessage("");
 
-    const submitError = await submitServerAuthCredential(nextCredential).then(
+    const submitError = await submitServerAuthCredential(credential).then(
       () => null,
-      (error) => errorMessageFromUnknown(error),
+      pairingErrorMessage,
     );
 
+    if (submitError === null) {
+      enterAppAfterPairing();
+      return;
+    }
+
     setIsSubmitting(false);
-
-    if (submitError) {
-      setErrorMessage(submitError);
-      return;
-    }
-
-    startTransition(() => {
-      onAuthenticated();
-    });
+    setErrorMessage(submitError);
   };
 
-  const handleSubmit = async (event?: React.SubmitEvent<HTMLFormElement>) => {
-    event?.preventDefault();
-    await submitCredential(credential);
-  };
+  return (
+    <PairingFormView
+      auth={auth}
+      credential={credential}
+      errorMessage={errorMessage}
+      isSubmitting={isSubmitting}
+      onCredentialChange={setCredential}
+      onSubmit={() => void submitCredential()}
+    />
+  );
+}
 
-  const autoSubmit = useEffectEvent((token: string) => {
-    void submitCredential(token);
-  });
-
-  useEffect(() => {
-    if (!autoPairToken || autoSubmitAttemptedRef.current) {
-      return;
-    }
-
-    autoSubmitAttemptedRef.current = true;
-    stripPairingTokenFromUrl();
-    autoSubmit(autoPairToken);
-  }, [autoPairToken]);
-
+function PairingFormView({
+  auth,
+  credential,
+  errorMessage,
+  isSubmitting,
+  onCredentialChange,
+  onSubmit,
+}: {
+  auth: AuthSessionState["auth"];
+  credential: string;
+  errorMessage: string;
+  isSubmitting: boolean;
+  onCredentialChange: (credential: string) => void;
+  onSubmit: () => void;
+}) {
   return (
     <StandalonePage tone="pairing">
       <StandalonePageHeader
@@ -91,7 +142,13 @@ export function PairingRouteSurface({
         description={describeAuthGate(auth.bootstrapMethods)}
       />
 
-      <form className="mt-6 space-y-4" onSubmit={(event) => void handleSubmit(event)}>
+      <form
+        className="mt-6 space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSubmit();
+        }}
+      >
         <div className="space-y-2">
           <label className="text-sm font-medium" htmlFor="pairing-token">
             Pairing token
@@ -103,7 +160,7 @@ export function PairingRouteSurface({
             autoCorrect="off"
             disabled={isSubmitting}
             nativeInput
-            onChange={(event) => setCredential(event.currentTarget.value)}
+            onChange={(event) => onCredentialChange(event.currentTarget.value)}
             placeholder="Paste a one-time token or pairing secret"
             spellCheck={false}
             value={credential}
@@ -138,75 +195,75 @@ export function PairingRouteSurface({
   );
 }
 
-export function HostedPairingRouteSurface() {
-  const connectPairingEnvironment = useAtomCommand(connectPairing, {
-    reportFailure: false,
-  });
-  const [request] = useState(readHostedPairingRequest);
-  const [status, setStatus] = useState<"pairing" | "paired" | "error">(
-    request ? "pairing" : "error",
+const MISSING_HOSTED_REQUEST = "This pairing link is missing its backend host or token.";
+
+export function HostedPairingRouteSurface({ attempt }: { attempt: HostedPairingAttempt | null }) {
+  const [outcome, setOutcome] = useState(attempt?.outcome ?? null);
+
+  if (!attempt || !outcome) {
+    return <HostedPairingView status="error" message={MISSING_HOSTED_REQUEST} />;
+  }
+
+  const { request } = attempt;
+  return (
+    <Suspense
+      fallback={
+        <HostedPairingView
+          status="pairing"
+          message="Connecting to this backend."
+          host={request.host}
+        />
+      }
+    >
+      <HostedPairingResult
+        outcome={outcome}
+        request={request}
+        onRetry={() => setOutcome(connectHostedPairing(request))}
+      />
+    </Suspense>
   );
-  const [message, setMessage] = useState(
-    request
-      ? "Connecting to this backend."
-      : "This pairing link is missing its backend host or token.",
-  );
-  const [canRetry, setCanRetry] = useState(false);
-  const submitAttemptedRef = useRef(false);
-  const tokenSubmittedRef = useRef(false);
+}
 
-  const submitHostedPairingRequest = async () => {
-    if (!request) {
-      setStatus("error");
-      setMessage("This pairing link is missing its backend host or token.");
-      setCanRetry(false);
-      return;
-    }
-
-    if (tokenSubmittedRef.current) {
-      setStatus("error");
-      setMessage("This one-time pairing token was already submitted. Request a new pairing link.");
-      setCanRetry(false);
-      return;
-    }
-
-    setStatus("pairing");
-    setMessage("Connecting to this backend.");
-    setCanRetry(false);
-    tokenSubmittedRef.current = true;
-
-    const result = await connectPairingEnvironment({
-      host: request.host,
-      pairingCode: request.token,
-    });
-    if (result._tag === "Success") {
-      setStatus("paired");
-      setMessage(`${request.label || "The environment"} is saved in this browser.`);
-      return;
-    }
-
-    tokenSubmittedRef.current = false;
-    setStatus("error");
-    setCanRetry(true);
-    setMessage(
-      `${errorMessageFromUnknown(squashAtomCommandFailure(result))} If the backend accepted this one-time token, request a new pairing link before retrying.`,
+function HostedPairingResult({
+  outcome,
+  request,
+  onRetry,
+}: {
+  outcome: Promise<HostedPairingOutcome>;
+  request: HostedPairingRequest;
+  onRetry: () => void;
+}) {
+  const result = use(outcome);
+  if (result.status === "paired") {
+    return (
+      <HostedPairingView
+        status="paired"
+        message={`${request.label || "The environment"} is saved in this browser.`}
+        host={request.host}
+      />
     );
-  };
+  }
+  return (
+    <HostedPairingView
+      status="error"
+      message={result.message}
+      host={request.host}
+      onRetry={onRetry}
+    />
+  );
+}
 
-  const submitOnMount = useEffectEvent(() => {
-    void submitHostedPairingRequest();
-  });
-
-  useEffect(() => {
-    if (submitAttemptedRef.current) {
-      return;
-    }
-    submitAttemptedRef.current = true;
-
-    stripPairingTokenFromUrl();
-    submitOnMount();
-  }, []);
-
+function HostedPairingView({
+  status,
+  message,
+  host,
+  onRetry,
+}: {
+  status: "pairing" | "paired" | "error";
+  message: string;
+  host?: string;
+  onRetry?: () => void;
+}) {
   return (
     <StandalonePage tone="pairing">
       <StandalonePageHeader
@@ -221,9 +278,9 @@ export function HostedPairingRouteSurface() {
         description={message}
       />
 
-      {request ? (
+      {host ? (
         <div className="mt-5 rounded-lg border border-border/70 bg-background/55 px-3 py-3 text-xs leading-relaxed text-muted-foreground">
-          Host: <span className="font-mono text-foreground/80">{request.host}</span>
+          Host: <span className="font-mono text-foreground/80">{host}</span>
         </div>
       ) : null}
 
@@ -241,8 +298,8 @@ export function HostedPairingRouteSurface() {
           <Button disabled size="sm">
             Pairing...
           </Button>
-        ) : canRetry ? (
-          <Button size="sm" onClick={() => void submitHostedPairingRequest()}>
+        ) : onRetry ? (
+          <Button size="sm" onClick={onRetry}>
             Try again
           </Button>
         ) : null}
@@ -254,18 +311,6 @@ export function HostedPairingRouteSurface() {
       </div>
     </StandalonePage>
   );
-}
-
-function errorMessageFromUnknown(error: unknown): string {
-  if (error instanceof Error && error.message.trim().length > 0) {
-    return error.message;
-  }
-
-  if (typeof error === "string" && error.trim().length > 0) {
-    return error;
-  }
-
-  return "Authentication failed.";
 }
 
 function describeAuthGate(bootstrapMethods: ReadonlyArray<string>): string {

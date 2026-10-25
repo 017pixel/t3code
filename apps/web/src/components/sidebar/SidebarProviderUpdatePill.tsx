@@ -3,8 +3,9 @@ import { useNavigate } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
 import type { ServerProvider } from "@t3tools/contracts";
 import { CircleCheckIcon, DownloadIcon, TriangleAlertIcon, XIcon } from "lucide-react";
-import { useEffect, useEffectEvent, useState, type CSSProperties } from "react";
+import { useState, type CSSProperties } from "react";
 
+import { useDeadlinePassed } from "../../hooks/useDeadline";
 import { primaryServerProvidersAtom } from "../../state/server";
 import {
   getProviderUpdateSidebarPillView,
@@ -47,9 +48,13 @@ export function SidebarProviderUpdatePill() {
   const providers = useAtomValue(primaryServerProvidersAtom);
   const [dismissedKeys, setDismissedKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [renderedView, setRenderedView] = useState<ProviderUpdateSidebarPillView | null>(null);
-  const [pendingView, setPendingView] = useState<ProviderUpdateSidebarPillView | null>(null);
-  const [exitingKey, setExitingKey] = useState<string | null>(null);
-  const [dismissAfterExitKey, setDismissAfterExitKey] = useState<string | null>(null);
+  const [exit, setExit] = useState<{
+    readonly key: string;
+    readonly startedAt: number;
+    readonly nextView: ProviderUpdateSidebarPillView | null;
+    readonly dismissKey: string | null;
+  } | null>(null);
+  const exitingKey = exit?.key ?? null;
   const [visibleAfterIso, setVisibleAfterIso] = useState<string | undefined>();
   const effectiveVisibleAfterIso = visibleAfterIso ?? latestProviderCheckedAt(providers);
   const view = getProviderUpdateSidebarPillView(providers, {
@@ -74,6 +79,8 @@ export function SidebarProviderUpdatePill() {
     displayedView?.tone !== "loading" &&
     exitingKey !== viewKey;
 
+  // The countdown is the progress bar's transition, started when the bar mounts.
+  const [dismissClock, setDismissClock] = useState<{ key: string; at: number } | null>(null);
   const startExit = (
     key: string,
     nextView: ProviderUpdateSidebarPillView | null,
@@ -82,9 +89,8 @@ export function SidebarProviderUpdatePill() {
     if (exitingKey === key) {
       return;
     }
-    setPendingView(nextView);
-    setExitingKey(key);
-    setDismissAfterExitKey(dismissKey ?? null);
+    setDismissClock(null);
+    setExit({ key, startedAt: Date.now(), nextView, dismissKey: dismissKey ?? null });
   };
 
   if (exitingKey === null) {
@@ -99,38 +105,32 @@ export function SidebarProviderUpdatePill() {
     }
   }
 
-  const exitAfterVisible = useEffectEvent((key: string) => startExit(key, null, key));
+  const countingDown =
+    dismissAfterVisibleMs !== undefined &&
+    dismissAfterVisibleMs > 0 &&
+    viewKey !== null &&
+    exitingKey !== viewKey;
+  const dismissAt = dismissClock?.key === viewKey ? dismissClock.at : null;
+  // The bar's transitionend dismisses; this deadline only covers a transition
+  // that was cancelled or skipped and so never ends.
+  const dismissOverdue = useDeadlinePassed(
+    countingDown && dismissAt !== null ? dismissAt + PROVIDER_UPDATE_PILL_EXIT_MS : null,
+  );
+  if (countingDown && dismissOverdue) startExit(viewKey, null, viewKey);
 
-  const finishExit = useEffectEvent(() => {
-    if (dismissAfterExitKey !== null) {
-      setDismissedKeys((previous) => new Set(previous).add(dismissAfterExitKey));
+  // The exit is timed rather than ended by transitionend: a cancelled or skipped
+  // CSS transition must not keep a hidden spinner mounted.
+  const exitFinished = useDeadlinePassed(
+    exit === null ? null : exit.startedAt + PROVIDER_UPDATE_PILL_EXIT_MS,
+  );
+  if (exit !== null && exitFinished) {
+    const { dismissKey, nextView } = exit;
+    if (dismissKey !== null) {
+      setDismissedKeys((previous) => new Set(previous).add(dismissKey));
     }
-    setRenderedView(pendingView);
-    setPendingView(null);
-    setExitingKey(null);
-    setDismissAfterExitKey(null);
-  });
-
-  useEffect(() => {
-    if (exitingKey === null) return;
-    // A cancelled or skipped CSS transition must not keep a hidden spinner mounted.
-    const timeoutId = window.setTimeout(finishExit, PROVIDER_UPDATE_PILL_EXIT_MS);
-    return () => window.clearTimeout(timeoutId);
-  }, [exitingKey]);
-
-  useEffect(() => {
-    if (!dismissAfterVisibleMs || !viewKey) {
-      return;
-    }
-    if (exitingKey === viewKey) {
-      return;
-    }
-    const timeoutId = window.setTimeout(() => {
-      exitAfterVisible(viewKey);
-    }, dismissAfterVisibleMs);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [dismissAfterVisibleMs, exitingKey, viewKey]);
+    setRenderedView(nextView);
+    setExit(null);
+  }
 
   if (!displayedView) {
     return null;
@@ -149,6 +149,19 @@ export function SidebarProviderUpdatePill() {
       {showDismissProgress ? (
         <div
           key={displayedView.key}
+          ref={(node) => {
+            if (node === null || !countingDown) return;
+            setDismissClock((clock) =>
+              clock?.key === viewKey
+                ? clock
+                : { key: viewKey, at: Date.now() + dismissAfterVisibleMs },
+            );
+          }}
+          onTransitionEnd={(event) => {
+            if (countingDown && event.target === event.currentTarget) {
+              startExit(viewKey, null, viewKey);
+            }
+          }}
           aria-hidden="true"
           className={`pointer-events-none absolute inset-y-0 left-0 w-full origin-left scale-x-0 transition-transform duration-(--provider-update-pill-dismiss-ms) ease-linear starting:scale-x-100 border-r border-current/15 inset-shadow-2xs inset-shadow-white/8 ${
             PROVIDER_UPDATE_PILL_PROGRESS_STYLES[displayedView.tone]

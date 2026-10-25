@@ -1,13 +1,5 @@
 import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip";
-import {
-  createContext,
-  use,
-  useEffect,
-  useRef,
-  useState,
-  type ComponentProps,
-  type RefObject,
-} from "react";
+import { createContext, use, useRef, useState, type ComponentProps, type RefObject } from "react";
 
 import { cn } from "~/lib/utils";
 import { useNativeTitlebarHeight } from "~/lib/windowControlsOverlay";
@@ -64,7 +56,6 @@ function Tooltip<Payload>(props: TooltipPrimitive.Root.Props<Payload>) {
   const tracker = use(TooltipScrollContext);
   const localActionsRef = useRef<TooltipPrimitive.Root.Actions | null>(null);
   const actionsRef = props.actionsRef ?? localActionsRef;
-  useEffect(() => () => tracker?.release(actionsRef), [actionsRef, tracker]);
 
   if (!tracker) return <TooltipPrimitive.Root {...props} />;
   return (
@@ -87,10 +78,21 @@ function TooltipTrigger(props: TooltipPrimitive.Trigger.Props) {
   if (!tracker || !actionsRef) {
     return <TooltipPrimitive.Trigger data-slot="tooltip-trigger" {...props} />;
   }
+  const { ref } = props;
   return (
     <TooltipPrimitive.Trigger
       data-slot="tooltip-trigger"
       {...props}
+      ref={(node: HTMLButtonElement | null) => {
+        if (typeof ref === "function") ref(node);
+        else if (ref) ref.current = node;
+        return () => {
+          // The tracker records this trigger, so an unmounted trigger must not stay hovered.
+          tracker.release(actionsRef);
+          if (typeof ref === "function") ref(null);
+          else if (ref) ref.current = null;
+        };
+      }}
       onMouseEnter={(event) => {
         props.onMouseEnter?.(event);
         tracker.hover(event.currentTarget, actionsRef);

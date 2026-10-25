@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { type PanelAnimationDurationMs } from "@t3tools/contracts/settings";
 
+import { useDeadlinePassed } from "./hooks/useDeadline";
 import { useMediaQuery } from "./hooks/useMediaQuery";
 import { useClientSettings } from "./hooks/useSettings";
 
@@ -44,7 +45,6 @@ export function usePanelPresence<T>(
   scopeKey: string | null,
   durationMs: PanelAnimationDurationMs,
 ): { present: boolean; value: T | null } {
-  const [present, setPresent] = useState(open);
   const [retained, setRetained] = useState<{ scopeKey: string | null; value: T | null } | null>(
     open ? { scopeKey, value } : null,
   );
@@ -52,14 +52,18 @@ export function usePanelPresence<T>(
     setRetained({ scopeKey, value });
   }
 
-  if (open && !present) setPresent(true);
-  if (!open && !animated && present) setPresent(false);
-
-  useEffect(() => {
-    if (open || !animated) return;
-    const timeout = window.setTimeout(() => setPresent(false), durationMs);
-    return () => window.clearTimeout(timeout);
-  }, [animated, durationMs, open]);
+  // A closed panel stays present until its exit animation has had time to run.
+  const [exit, setExit] = useState<{ open: boolean; deadlineMs: number | null }>({
+    open,
+    deadlineMs: null,
+  });
+  if (exit.open !== open) {
+    setExit({ open, deadlineMs: open || !animated ? null : Date.now() + durationMs });
+  } else if (!animated && exit.deadlineMs !== null) {
+    setExit({ open, deadlineMs: null });
+  }
+  const exitDone = useDeadlinePassed(exit.deadlineMs);
+  const present = open || (animated && exit.deadlineMs !== null && !exitDone);
 
   const retainedValue = retained?.scopeKey === scopeKey ? retained.value : null;
   const visible = open || (animated && present && retained?.scopeKey === scopeKey);
