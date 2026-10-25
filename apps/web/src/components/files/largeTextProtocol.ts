@@ -7,7 +7,7 @@ export type TextPreviewRequest =
   | { type: "page"; index: number }
   | { type: "copy" };
 export type TextPreviewResult =
-  | { type: "meta"; count: number; columns: number; complete: boolean }
+  | { type: "meta"; count: number; columns: number; complete: boolean; sizeBytes?: number }
   | { type: "page"; index: number; rows: string[][] }
   | { type: "copy"; text: string }
   | { type: "error"; message: string };
