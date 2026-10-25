@@ -1,6 +1,14 @@
 import { useAtomValue } from "@effect/atom-react";
-import type { OtlpEndpointCheckResult, OtlpSignal, ServerObservability } from "@t3tools/contracts";
-import { useEffect, useEffectEvent, useState } from "react";
+import type {
+  EnvironmentId,
+  OtlpEndpointCheckResult,
+  OtlpSignal,
+  ServerObservability,
+} from "@t3tools/contracts";
+import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
+import * as Option from "effect/Option";
+import { Atom } from "effect/reactivity";
+import { useState } from "react";
 
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -52,13 +60,48 @@ function runningOverride(
   return { url, label: OVERRIDE_LABELS[source], variable: running?.[variableKey] };
 }
 
-type EndpointCheck = { readonly url: string; readonly result: OtlpEndpointCheckResult | null };
+// `null` while the check runs; "failed" when the request itself failed, so a failed manual test
+// keeps hiding the opening check for that signal.
+type EndpointCheck = {
+  readonly url: string;
+  readonly result: OtlpEndpointCheckResult | null | "failed";
+};
 
 const isHttpUrl = (url: string) => /^https?:\/\/./i.test(url);
 
+type EndpointChecks = Partial<Record<SignalKey, EndpointCheck>>;
+type OpeningCheckTarget = { readonly environmentId: EnvironmentId } & Record<SignalKey, string>;
+
+// Plain-object keys compare structurally (Effect `Equal`/`Hash`).
+// The endpoints a form opens with are checked once it may check them. The atom lives while the
+// form reads it, so reopening the settings checks again.
+const openingEndpointChecksAtom = Atom.family((target: OpeningCheckTarget) =>
+  Atom.make((get): EndpointChecks => {
+    const pending: EndpointChecks = {};
+    for (const { key, signal } of SIGNALS) {
+      const url = target[key];
+      if (!isHttpUrl(url)) continue;
+      pending[key] = { url, result: null };
+      void runAtomCommand(get.registry, serverEnvironment.checkOtlpEndpoint, {
+        environmentId: target.environmentId,
+        input: { signal, url },
+      }).then((response) => {
+        const current = Option.getOrElse(get.self<EndpointChecks>(), () => pending);
+        const next = { ...current };
+        next[key] = { url, result: response._tag === "Success" ? response.value : "failed" };
+        get.setSelf(next);
+      });
+    }
+    return pending;
+  }),
+);
+const NO_OPENING_CHECKS_ATOM = Atom.make<EndpointChecks>({});
+
 function endpointStatus(url: string, check: EndpointCheck | undefined) {
   if (url === "") return { label: "Off", dot: "bg-muted-foreground/40" };
-  if (check?.url !== url) return { label: "Not checked", dot: "bg-muted-foreground/40" };
+  if (check?.url !== url || check.result === "failed") {
+    return { label: "Not checked", dot: "bg-muted-foreground/40" };
+  }
   const { result } = check;
   if (result === null) return { label: "Checking…", dot: "bg-warning" };
   switch (result._tag) {
@@ -98,14 +141,26 @@ function TelemetryExportForm() {
   const canCheck =
     canEdit && environment?.serverConfig?.environment.capabilities.otlpEndpointCheck === true;
   const running = environment?.serverConfig?.observability;
-  const [checks, setChecks] = useState<Partial<Record<SignalKey, EndpointCheck>>>(() =>
-    Object.fromEntries(
-      SIGNALS.flatMap((descriptor) => {
-        const url = runningOverride(running, descriptor)?.url ?? saved[descriptor.key];
-        return isHttpUrl(url) ? [[descriptor.key, { url, result: null }]] : [];
-      }),
-    ),
+  const openingUrl = (descriptor: SignalDescriptor) =>
+    runningOverride(running, descriptor)?.url ?? saved[descriptor.key];
+  const [openingCheckTarget] = useState<OpeningCheckTarget | null>(() =>
+    environmentId === undefined
+      ? null
+      : {
+          environmentId,
+          otlpTracesUrl: openingUrl(SIGNALS[0]),
+          otlpMetricsUrl: openingUrl(SIGNALS[1]),
+          otlpLogsUrl: openingUrl(SIGNALS[2]),
+        },
   );
+  const openingChecks = useAtomValue(
+    canCheck && openingCheckTarget !== null
+      ? openingEndpointChecksAtom(openingCheckTarget)
+      : NO_OPENING_CHECKS_ATOM,
+  );
+  // A manual test replaces the opening check for that signal.
+  const [manualChecks, setChecks] = useState<EndpointChecks>({});
+  const checks: EndpointChecks = { ...openingChecks, ...manualChecks };
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, { reportFailure: true });
   const checkOtlpEndpoint = useAtomCommand(serverEnvironment.checkOtlpEndpoint);
   const values = { ...saved, ...draft };
@@ -117,10 +172,10 @@ function TelemetryExportForm() {
     const response = await checkOtlpEndpoint({ environmentId, input: { signal, url } });
     setChecks((previous) => {
       if (previous[key]?.url !== url || previous[key].result !== null) return previous;
-      const next = { ...previous };
-      if (response._tag === "Success") next[key] = { url, result: response.value };
-      else delete next[key];
-      return next;
+      return {
+        ...previous,
+        [key]: { url, result: response._tag === "Success" ? response.value : "failed" },
+      };
     });
   };
 
@@ -129,17 +184,6 @@ function TelemetryExportForm() {
     setChecks((previous) => ({ ...previous, [key]: { url, result: null } }));
     void sendCheck(key, signal, url);
   };
-
-  const sendPendingChecks = useEffectEvent(() => {
-    for (const { key, signal } of SIGNALS) {
-      const check = checks[key];
-      if (check?.result === null) void sendCheck(key, signal, check.url);
-    }
-  });
-  useEffect(() => {
-    // oxlint-disable-next-line react/set-state-in-effect -- State changes only after the response arrives.
-    if (canCheck) sendPendingChecks();
-  }, [canCheck]);
 
   return (
     <SettingsSection title="OpenTelemetry export" id="telemetry-export">
@@ -261,7 +305,9 @@ function TelemetryExportForm() {
                 for (const descriptor of SIGNALS) {
                   const { key, signal } = descriptor;
                   if (runningOverride(running, descriptor)) continue;
-                  if (checks[key]?.url !== saved[key]) checkEndpoint(key, signal, saved[key]);
+                  const check = checks[key];
+                  if (check?.url !== saved[key] || check.result === "failed")
+                    checkEndpoint(key, signal, saved[key]);
                 }
               }}
             >

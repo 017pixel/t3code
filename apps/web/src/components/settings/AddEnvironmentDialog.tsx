@@ -1,6 +1,6 @@
 import { ChevronsLeftRightEllipsisIcon, PlusIcon, TerminalIcon } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
-import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, type ReactNode, useRef, useState } from "react";
 import {
   type DesktopDiscoveredSshHost,
   type DesktopSshEnvironmentTarget,
@@ -121,12 +121,6 @@ export function AddEnvironmentDialog({
   const desktopSshHosts = useEnvironmentQuery(
     isSshDiscoveryActive ? desktopSshHostsStateAtom : null,
   );
-  // The discovery atom is kept alive across dialog opens, so re-read SSH config
-  // each time the SSH tab is shown; stale hosts stay visible while it refreshes.
-  const refreshDesktopSshHosts = desktopSshHosts.refresh;
-  useEffect(() => {
-    if (isSshDiscoveryActive) refreshDesktopSshHosts();
-  }, [isSshDiscoveryActive, refreshDesktopSshHosts]);
   const discoveredSshHosts = desktopSshHosts.data ?? EMPTY_DISCOVERED_SSH_HOSTS;
   const unsavedDiscoveredSshHosts = discoveredSshHosts.filter((target) => {
     const address = formatDesktopSshTarget(target);
@@ -485,7 +479,13 @@ export function AddEnvironmentDialog({
             mode="none"
             openOnInputClick
             open={sshHostSuggestionsOpen}
-            onOpenChange={setSshHostSuggestionsOpen}
+            onOpenChange={(nextOpen) => {
+              // The discovery atom is kept alive across dialog opens, so re-read SSH
+              // config whenever the host list is shown; stale hosts stay visible
+              // while it refreshes.
+              if (nextOpen && !sshHostSuggestionsOpen) desktopSshHosts.refresh();
+              setSshHostSuggestionsOpen(nextOpen);
+            }}
             onItemHighlighted={(target) => {
               highlightedSshHostRef.current = target;
             }}

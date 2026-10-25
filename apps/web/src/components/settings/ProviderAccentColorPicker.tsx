@@ -1,5 +1,5 @@
 import { PlusIcon, XIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState, type PointerEvent } from "react";
 
 import { hexToHsv, hsvToHex, type HsvColor } from "../../lib/color";
 import { ColorHueSlider, ColorSaturationValuePlane } from "../ui/color-picker";
@@ -12,32 +12,58 @@ const FALLBACK_ACCENT_COLOR = "#2563eb";
 
 function ProviderCustomColorPanel(props: {
   readonly value: string;
+  readonly onPreview: (value: string) => void;
   readonly onCommit: (value: string) => void;
 }) {
-  const { onCommit } = props;
+  const { onCommit, onPreview } = props;
   const [hsv, setHsv] = useState(() => hexToHsv(props.value));
   const currentColor = hsvToHex(hsv.h, hsv.s, hsv.v);
   const [hexDraft, setHexDraft] = useState<string | null>(null);
+  // Pointer drags only preview and commit once on release, so a drag writes
+  // settings once instead of on every pointer move. Keyboard steps commit
+  // immediately because they have no release to wait for. Holds the latest
+  // dragged color, or null when no drag is in progress.
+  const drag = useRef<string | null>(null);
+  const startDrag = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button === 0) drag.current = currentColor;
+  };
 
-  const commitHsv = (nextHsv: HsvColor) => {
+  const changeHsv = (nextHsv: HsvColor) => {
     setHsv(nextHsv);
-    onCommit(hsvToHex(nextHsv.h, nextHsv.s, nextHsv.v));
+    const color = hsvToHex(nextHsv.h, nextHsv.s, nextHsv.v);
+    if (drag.current === null) {
+      onCommit(color);
+      return;
+    }
+    drag.current = color;
+    onPreview(color);
+  };
+  const endDrag = () => {
+    const color = drag.current;
+    drag.current = null;
+    if (color !== null) onCommit(color);
   };
 
   return (
     <div className="w-56 bg-popover">
-      <ColorSaturationValuePlane
-        label="Accent color"
-        value={hsv}
-        onChange={commitHsv}
-        variant="edge"
-      />
-      <div className="grid gap-3 p-3">
-        <ColorHueSlider
-          label="Accent color hue"
-          value={hsv.h}
-          onChange={(h) => commitHsv({ ...hsv, h })}
+      <div onPointerDownCapture={startDrag}>
+        <ColorSaturationValuePlane
+          label="Accent color"
+          value={hsv}
+          onChange={changeHsv}
+          onInteractionEnd={endDrag}
+          variant="edge"
         />
+      </div>
+      <div className="grid gap-3 p-3">
+        <div onPointerDownCapture={startDrag}>
+          <ColorHueSlider
+            label="Accent color hue"
+            value={hsv.h}
+            onChange={(h) => changeHsv({ ...hsv, h })}
+            onInteractionEnd={endDrag}
+          />
+        </div>
         <Input
           nativeInput
           size="compact"
@@ -47,7 +73,7 @@ function ProviderCustomColorPanel(props: {
             setHexDraft(nextColor);
             if (!/^#[\da-f]{6}$/i.test(nextColor)) return;
             setHsv(hexToHsv(nextColor));
-            props.onCommit(nextColor);
+            onCommit(nextColor);
           }}
           onBlur={() => setHexDraft(null)}
           font="mono"
@@ -62,6 +88,7 @@ function ProviderCustomColorPanel(props: {
 function ProviderCustomColorPicker(props: {
   readonly displayName: string;
   readonly value: string | undefined;
+  readonly onPreview: (value: string) => void;
   readonly onCommit: (value: string) => void;
   readonly onClear: () => void;
 }) {
@@ -89,6 +116,7 @@ function ProviderCustomColorPicker(props: {
       <PopoverPopup side="bottom" align="start" sideOffset={6} padding="none">
         <ProviderCustomColorPanel
           value={normalized ?? FALLBACK_ACCENT_COLOR}
+          onPreview={props.onPreview}
           onCommit={props.onCommit}
         />
         {normalized ? (
@@ -119,78 +147,32 @@ export function ProviderAccentColorPicker(props: {
   readonly value: string | undefined;
   readonly onCommit: (value: string) => void;
   readonly description?: string;
-  readonly commitDelayMs?: number;
   readonly layout?: "stacked" | "inline";
 }) {
-  const {
-    commitDelayMs = 0,
-    description,
-    displayName,
-    layout = "stacked",
-    onCommit,
-    value,
-  } = props;
-  const [optimisticValue, setOptimisticValue] = useState(() => value ?? "");
-  const commitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingCommitRef = useRef<string | null>(null);
-  const onCommitRef = useRef(onCommit);
-
-  useEffect(() => {
-    onCommitRef.current = onCommit;
-  }, [onCommit]);
-
-  useEffect(() => {
-    if (pendingCommitRef.current !== null) return;
-    setOptimisticValue(value ?? "");
-  }, [value]);
-
-  useEffect(() => {
-    return () => {
-      if (commitTimeoutRef.current !== null) {
-        clearTimeout(commitTimeoutRef.current);
-      }
-      const pendingCommit = pendingCommitRef.current;
-      if (pendingCommit !== null) {
-        onCommitRef.current(pendingCommit);
-      }
-    };
-  }, []);
-
-  const commitAccentColor = (value: string) => {
-    const normalizedValue = normalizeProviderAccentColor(value) ?? "";
-    setOptimisticValue(normalizedValue);
-
-    if (commitDelayMs <= 0) {
-      pendingCommitRef.current = null;
-      if (commitTimeoutRef.current !== null) {
-        clearTimeout(commitTimeoutRef.current);
-        commitTimeoutRef.current = null;
-      }
-      onCommit(normalizedValue);
-      return;
-    }
-
-    pendingCommitRef.current = normalizedValue;
-    if (commitTimeoutRef.current !== null) {
-      clearTimeout(commitTimeoutRef.current);
-    }
-    commitTimeoutRef.current = setTimeout(() => {
-      commitTimeoutRef.current = null;
-      const pendingCommit = pendingCommitRef.current;
-      pendingCommitRef.current = null;
-      if (pendingCommit !== null) {
-        onCommitRef.current(pendingCommit);
-      }
-    }, commitDelayMs);
+  const { description, displayName, layout = "stacked", onCommit } = props;
+  const value = props.value ?? "";
+  // The draft shows a dragged or just-committed color only while `value` is
+  // still the one it was picked against, so the persisted value (or any outside
+  // change) takes over as soon as it lands.
+  const [draft, setDraft] = useState<{ readonly color: string; readonly base: string } | null>(
+    null,
+  );
+  const shownValue = draft !== null && draft.base === value ? draft.color : value;
+  const commit = (color: string) => {
+    const normalized = normalizeProviderAccentColor(color) ?? "";
+    setDraft({ color: normalized, base: value });
+    if (normalized !== value) onCommit(normalized);
   };
 
-  const normalized = normalizeProviderAccentColor(optimisticValue);
   const picker = (
     <ProviderCustomColorPicker
       displayName={displayName}
-      value={normalized}
-      onCommit={commitAccentColor}
-      onClear={() => commitAccentColor("")}
+      value={normalizeProviderAccentColor(shownValue)}
+      onPreview={(color) =>
+        setDraft({ color: normalizeProviderAccentColor(color) ?? "", base: value })
+      }
+      onCommit={commit}
+      onClear={() => commit("")}
     />
   );
 

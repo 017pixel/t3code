@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useEffectEvent, useRef, useState } from "react";
 import {
   DEFAULT_UNIFIED_SETTINGS,
   MAX_CODE_FONT_SIZE,
@@ -36,7 +36,7 @@ import {
   SettingsSection,
   useSettingsSearchTargetId,
 } from "./settingsLayout";
-import { searchableSetting } from "./settingsSearch";
+import { isAdvancedTypographyTarget, searchableSetting } from "./settingsSearch";
 
 function useFontDefaultFamilies() {
   const settings = useScopedSettings();
@@ -292,30 +292,25 @@ function SimpleFontRows() {
   );
 }
 
-// Font smoothing only renders on macOS, so a search jump to it elsewhere
-// must not flip the section - the target would never mount to be scrolled to.
-const ADVANCED_TYPOGRAPHY_TARGET_IDS: ReadonlySet<string> = new Set([
-  "prompt-font",
-  "terminal-font",
-  ...(typeof navigator !== "undefined" && isMacPlatform(navigator.platform)
-    ? ["font-smoothing"]
-    : []),
-]);
-
 export function TypographySection() {
   const [advanced, setAdvanced] = useLocalStorage(
     TYPOGRAPHY_ADVANCED_STORAGE_KEY,
     false,
     Schema.Boolean,
   );
+  // Search entry points persist the flag in their handlers; a deep link or
+  // history step to an advanced row only reaches us as a new target, so it
+  // shows the advanced rows for this visit so the row mounts to scroll to.
   const searchTargetId = useSettingsSearchTargetId();
-  const lastExpandedTargetRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (searchTargetId === null || !ADVANCED_TYPOGRAPHY_TARGET_IDS.has(searchTargetId)) return;
-    if (lastExpandedTargetRef.current === searchTargetId) return;
-    lastExpandedTargetRef.current = searchTargetId;
-    setAdvanced(true);
-  }, [searchTargetId, setAdvanced]);
+  const [seenSearchTargetId, setSeenSearchTargetId] = useState<string | null>(null);
+  const [revealedForTarget, setRevealedForTarget] = useState(false);
+  if (seenSearchTargetId !== searchTargetId) {
+    setSeenSearchTargetId(searchTargetId);
+    if (searchTargetId !== null && isAdvancedTypographyTarget(searchTargetId)) {
+      setRevealedForTarget(true);
+    }
+  }
+  const showAdvanced = advanced || revealedForTarget;
   return (
     <SettingsSection
       id="typography"
@@ -324,14 +319,17 @@ export function TypographySection() {
         <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-muted-foreground">
           Advanced
           <Switch
-            checked={advanced}
-            onCheckedChange={(checked) => setAdvanced(Boolean(checked))}
+            checked={showAdvanced}
+            onCheckedChange={(checked) => {
+              setAdvanced(Boolean(checked));
+              if (!checked) setRevealedForTarget(false);
+            }}
             aria-label="Show advanced typography settings"
           />
         </label>
       }
     >
-      {advanced ? <FontSettingsGroup /> : <SimpleFontRows />}
+      {showAdvanced ? <FontSettingsGroup /> : <SimpleFontRows />}
       <WordWrapRow />
     </SettingsSection>
   );
@@ -388,12 +386,6 @@ function FontFamilySettingsRow({
     setDraftSettled(true);
   }
   const readAdoptedGeneration = useEffectEvent(() => adopted.generation);
-  useEffect(
-    () => () => {
-      if (commitTimerRef.current !== null) window.clearTimeout(commitTimerRef.current.id);
-    },
-    [],
-  );
   const acceptsFamily = (candidate: string) =>
     isFontFamilyAvailable(candidate) && (!requireMonospace || isMonospaceFamily(candidate));
   const commitDraft = (next: string) => {

@@ -5,8 +5,8 @@ import {
   EllipsisIcon,
   RouteIcon,
 } from "lucide-react";
-import { useAtomValue } from "@effect/atom-react";
-import { useEffect, useEffectEvent, useState } from "react";
+import { useAtomMount, useAtomValue } from "@effect/atom-react";
+import { useState } from "react";
 import {
   AuthRelayWriteScope,
   type EnvironmentId,
@@ -48,6 +48,7 @@ import {
   supportsServerUpdateThreadContinuation,
 } from "~/versionSkew";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
+import { primaryCloudLinkPollAtom } from "~/cloud/primaryCloudLinkState";
 import { isElectron } from "~/env";
 import { useCloudLinkController } from "~/cloud/useCloudLinkController";
 import { environmentCatalog } from "~/connection/catalog";
@@ -501,13 +502,7 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
       Sign in
     </Button>
   );
-  const refreshLinkState = useEffectEvent(primaryCloudLinkState.refresh);
-  // The server rechecks reachability when the tunnel's 30 s readiness poll changes.
-  // Poll while mounted, so a failed read does not stop later ones.
-  useEffect(() => {
-    const interval = window.setInterval(() => refreshLinkState(), 30_000);
-    return () => window.clearInterval(interval);
-  }, []);
+  useAtomMount(primaryCloudLinkPollAtom(primaryCloudLinkState.target));
   const reachability = managedTunnelActive ? primaryCloudLinkState.data?.reachability : undefined;
   const reachabilityStatus =
     reachability?.status === "reachable" ? (

@@ -1,9 +1,10 @@
 import { render } from "../../../test/render";
 import { DEFAULT_SERVER_SETTINGS, type ServerObservability } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 
-const { state, updateSettings, checkOtlpEndpoint, checkOtlpEndpointCommand } = vi.hoisted(() => ({
+const { state, updateSettings, checkOtlpEndpoint } = vi.hoisted(() => ({
   state: {
     observability: {} as typeof DEFAULT_SERVER_SETTINGS.observability,
     serverConfig: { environment: { capabilities: {} } } as {
@@ -16,30 +17,33 @@ const { state, updateSettings, checkOtlpEndpoint, checkOtlpEndpointCommand } = v
     _tag: "Success" as const,
     value: { _tag: "Accepted" as const, latencyMs: 12 },
   })),
-  checkOtlpEndpointCommand: { permissionAtom: () => null },
 }));
 
-vi.mock(import("@effect/atom-react"), async (original) => ({
-  ...(await original()),
-  useAtomValue: (() => true) as never,
-}));
-vi.mock(import("../../state/use-atom-command"), async (original) => ({
-  ...(await original()),
-  useAtomCommand: ((command: unknown) =>
-    command === "updateSettings"
-      ? updateSettings
-      : command === checkOtlpEndpointCommand
-        ? checkOtlpEndpoint
-        : vi.fn()) as never,
-}));
+vi.mock(import("../../state/use-atom-command"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    useAtomCommand: ((command: never, options: never) =>
+      (command as unknown) === "updateSettings"
+        ? updateSettings
+        : actual.useAtomCommand(command, options)) as never,
+  };
+});
 vi.mock(import("../../state/server"), async (original) => {
   const actual = await original();
+  const { Atom } = await import("effect/reactivity");
+  const allowed = Atom.make(true);
   return {
     ...actual,
     serverEnvironment: {
       ...actual.serverEnvironment,
       updateSettings: "updateSettings",
-      checkOtlpEndpoint: checkOtlpEndpointCommand,
+      // The opening check atom and the Test button both go through the command's `run`.
+      checkOtlpEndpoint: {
+        label: "checkOtlpEndpoint",
+        run: (_registry: unknown, request: unknown) => checkOtlpEndpoint(request),
+        permissionAtom: () => allowed,
+      },
     } as unknown as typeof actual.serverEnvironment,
   };
 });
@@ -138,5 +142,25 @@ describe("TelemetryExportSettings", () => {
       environmentId: "env",
       input: { signal: "traces", url: "http://collector/v1/traces" },
     });
+  });
+
+  it("does not fall back to the opening result when a manual test fails", async () => {
+    setup();
+    state.observability = {
+      ...DEFAULT_SERVER_SETTINGS.observability,
+      otlpTracesUrl: "http://collector/v1/traces",
+    };
+    state.serverConfig = { environment: { capabilities: { otlpEndpointCheck: true } } };
+    await using screen = await render(<TelemetryExportSettings />);
+    await expect.element(screen.getByText("Connected · 12 ms")).toBeInTheDocument();
+
+    checkOtlpEndpoint.mockResolvedValueOnce({
+      _tag: "Failure",
+      cause: Cause.fail("offline"),
+    } as never);
+    await userEvent.click(screen.getByRole("button", { name: "Test" }).first());
+
+    await expect.element(screen.getByText("Not checked")).toBeInTheDocument();
+    expect(screen.container.textContent).not.toContain("Connected");
   });
 });

@@ -56,6 +56,29 @@ function refreshPrimaryCloudLinkState(target: CloudLinkTarget | null): void {
   }
 }
 
+const NO_PRIMARY_CLOUD_LINK_POLL_ATOM = Atom.make<void>(undefined).pipe(
+  Atom.withLabel("primary-cloud-link:poll:none"),
+);
+
+const primaryCloudLinkPollAtomFamily = Atom.family((key: string) =>
+  Atom.make((get) => {
+    const target = JSON.parse(key) as CloudLinkTarget;
+    const interval = setInterval(() => refreshPrimaryCloudLinkState(target), 30_000);
+    get.addFinalizer(() => clearInterval(interval));
+  }).pipe(Atom.withLabel(`primary-cloud-link:poll:${key}`)),
+);
+
+/**
+ * Re-reads the link state every 30 s while mounted. The server rechecks tunnel
+ * reachability on its own readiness poll, and a failed read must not stop
+ * later ones.
+ */
+export function primaryCloudLinkPollAtom(target: CloudLinkTarget | null): Atom.Atom<void> {
+  return target
+    ? primaryCloudLinkPollAtomFamily(targetKey(target))
+    : NO_PRIMARY_CLOUD_LINK_POLL_ATOM;
+}
+
 export function readCachedPrimaryCloudLinkState(target: CloudLinkTarget) {
   if (!readEnvironmentScope(EnvironmentId.make(target.environmentId), AuthRelayReadScope))
     return null;

@@ -1,5 +1,5 @@
 import { ArrowDownIcon, ArrowUpIcon, PencilIcon, PlusIcon, StarIcon, XIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { type RefObject, useRef, useState } from "react";
 import {
   ProviderDriverKind,
   type ProviderInstanceId,
@@ -131,7 +131,7 @@ export function ProviderModelsSection({
   const [filter, setFilter] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [editingSlug, setEditingSlug] = useState<string | null>(null);
-  const listRef = useRef<HTMLDivElement>(null);
+  // Set by the add handler and consumed by the new row's ref when it mounts.
   const scrollToSlugRef = useRef<string | null>(null);
   const hiddenModelSet = new Set(hiddenModels);
   const favoriteModelSet = new Set(favoriteModels);
@@ -155,19 +155,8 @@ export function ProviderModelsSection({
       )
     : displayModels;
 
-  // A model added or moved lands in a later commit, so each commit looks for the pending row.
-  useEffect(() => {
-    const slug = scrollToSlugRef.current;
-    if (slug === null) return;
-    const row = listRef.current?.querySelector<HTMLElement>(
-      `[data-model-slug="${CSS.escape(slug)}"]`,
-    );
-    if (!row) return;
-    scrollToSlugRef.current = null;
-    row.scrollIntoView({ block: "nearest" });
-  });
-
-  // Derive after the effect and use hiddenModels directly to preserve the editor's option-array cache.
+  // CustomModelEditor keys its option list on this array. Checked against
+  // `hiddenModels` rather than the set built above it, so it stays cached.
   const builtInModels = models.filter((model) => !model.isCustom);
   const allBuiltInModelsHidden =
     builtInModels.length > 0 && builtInModels.every((model) => hiddenModels.includes(model.slug));
@@ -279,6 +268,7 @@ export function ProviderModelsSection({
         isFiltering={isFiltering}
         canWritePreferences={canWritePreferences}
         canManageCustomModels={canManageCustomModels}
+        scrollToSlugRef={scrollToSlugRef}
         {...rowHandlers}
       />
     );
@@ -341,10 +331,7 @@ export function ProviderModelsSection({
           </Button>
         ) : null}
       </div>
-      <div
-        ref={listRef}
-        className="mt-2 -mx-2 max-h-64 overflow-y-auto lg:max-h-none lg:min-h-0 lg:flex-1"
-      >
+      <div className="mt-2 -mx-2 max-h-64 overflow-y-auto lg:max-h-none lg:min-h-0 lg:flex-1">
         {visibleModels.length === 0 ? (
           <p className="px-2 py-2 text-xs text-muted-foreground">
             {isFiltering ? "No models match." : "No models reported for this provider yet."}
@@ -437,6 +424,7 @@ function ProviderModelRow({
   isFiltering,
   canWritePreferences,
   canManageCustomModels,
+  scrollToSlugRef,
   onToggleFavorite,
   onMove,
   onSetHidden,
@@ -451,6 +439,7 @@ function ProviderModelRow({
   readonly isFiltering: boolean;
   readonly canWritePreferences: boolean;
   readonly canManageCustomModels: boolean;
+  readonly scrollToSlugRef: RefObject<string | null>;
   readonly onToggleFavorite: (slug: string) => void;
   readonly onMove: (slug: string, direction: -1 | 1) => void;
   readonly onSetHidden: (slug: string, hidden: boolean) => void;
@@ -467,6 +456,11 @@ function ProviderModelRow({
 
   return (
     <div
+      ref={(node) => {
+        if (node === null || scrollToSlugRef.current !== model.slug) return;
+        scrollToSlugRef.current = null;
+        node.scrollIntoView({ block: "nearest" });
+      }}
       data-model-slug={model.slug}
       className={cn(
         "grid h-7 grid-cols-[1.5rem_minmax(0,1fr)_auto_minmax(5.5rem,auto)_auto] items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted/30",
