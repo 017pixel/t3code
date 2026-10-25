@@ -1,3 +1,4 @@
+import { NativeScrollView } from "../../native/NativeScrollViewMarker";
 import { SearchField } from "../../components/ui/SearchField";
 import { Button } from "../../components/ui/Button";
 import { Toolbar } from "../../components/ui/Toolbar";
@@ -451,6 +452,7 @@ export function BranchPickerScreen(props: {
       </ScrollView>
     ) : (
       <LegendList
+        renderScrollComponent={Platform.OS === "ios" ? NativeScrollView : undefined}
         alwaysBounceVertical={false}
         automaticallyAdjustsScrollIndicatorInsets
         automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
