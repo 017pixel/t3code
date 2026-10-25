@@ -67,6 +67,8 @@ interface Entry<A, M> {
   display: M | null;
   /** Observing a thread that does not exist yet would park its state as deleted. */
   unborn: boolean;
+  /** The shell showed the launch's thread, which proves the create but not the first message. */
+  replayBlocked: boolean;
   state: "sending" | "waiting" | "delivered";
   cancelRequested: boolean;
   /** The thread, or for an unborn one the shell, left live sync since the last dispatch. */
@@ -171,7 +173,7 @@ export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, 
     entry.state = "delivered";
     publish();
     if (entry.unborn) {
-      // Acknowledged or held by the shell, so the thread exists now.
+      // Acknowledged, so the thread exists now.
       entry.unborn = false;
       observeThread(entry);
       return;
@@ -194,8 +196,10 @@ export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, 
     if (entry.unborn) {
       if (!entry.resynced || entry.shell?.status !== "live") return;
       if (shellHoldsThread(entry.shell, entry.input.threadId)) {
-        // The launch committed; its pending uploads may have expired, so reconcile, never replay.
-        finish(entry, { type: "delivered", value: null });
+        // Its pending uploads may have expired, so wait for the message instead of replaying.
+        entry.unborn = false;
+        entry.replayBlocked = true;
+        observeThread(entry);
         return;
       }
     } else {
@@ -211,6 +215,7 @@ export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, 
         finish(entry, { type: "delivered", value: null });
         return;
       }
+      if (entry.replayBlocked) return;
     }
     void dispatch(entry).then((end) => {
       if (end !== null) finish(entry, end);
@@ -252,6 +257,7 @@ export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, 
       createDisplay,
       display: null,
       unborn: input.bootstrap?.createThread !== undefined,
+      replayBlocked: false,
       state: "sending",
       cancelRequested: false,
       resynced: false,

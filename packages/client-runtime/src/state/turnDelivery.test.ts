@@ -334,24 +334,60 @@ describe("turn deliveries", () => {
     expect(harness.deliveries.getSnapshot()).toEqual([]);
   });
 
-  it("never replays a committed launch whose live thread does not show the message yet", async () => {
+  it("waits without replaying a launch the shell holds until its thread shows the message", async () => {
     const harness = setup([LOST_ACK, ACCEPTED], thread("live"));
     const { settled } = await deliverUntilWaiting(harness, LAUNCH);
 
     harness.emitShell(shell("synchronizing"));
     harness.emitShell(shell("live", [THREAD_ID]));
-
-    expect(await settled).toEqual({ type: "delivered", value: null });
-    expect(harness.sent).toEqual([LAUNCH]);
+    // The shell proves only the thread.create; the first message may still be missing.
     expect(harness.deliveries.getSnapshot()).toEqual([
-      expect.objectContaining({ state: "delivered", display: "optimistic row" }),
+      expect.objectContaining({ state: "waiting", display: "optimistic row" }),
     ]);
     harness.emitThread(thread("synchronizing"));
     harness.emitThread(thread("live"));
+    harness.emitShell(shell("synchronizing", [THREAD_ID]));
+    harness.emitShell(shell("live", [THREAD_ID]));
     expect(harness.sent).toEqual([LAUNCH]);
+    expect(harness.threadObservations()).toBe(1);
+    expect(harness.deliveries.getSnapshot()).toEqual([
+      expect.objectContaining({ state: "waiting" }),
+    ]);
+
     harness.emitThread(HELD);
+    expect(await settled).toEqual({ type: "delivered", value: null });
     expect(harness.deliveries.getSnapshot()).toEqual([]);
     expect(harness.released).toEqual(["optimistic row"]);
+    expect(harness.activeObservers()).toBe(0);
+  });
+
+  it("cancels a launch the shell holds while its thread lacks the message", async () => {
+    const harness = setup([LOST_ACK], thread("live"));
+    const { settled } = await deliverUntilWaiting(harness, LAUNCH);
+
+    harness.emitShell(shell("synchronizing"));
+    harness.emitShell(shell("live", [THREAD_ID]));
+    const [pending] = harness.deliveries.getSnapshot();
+    harness.deliveries.cancel(pending!.key);
+
+    expect(await settled).toEqual({ type: "cancelled" });
+    expect(harness.sent).toEqual([LAUNCH]);
+    expect(harness.deliveries.getSnapshot()).toEqual([]);
+    expect(harness.released).toEqual(["optimistic row"]);
+    expect(harness.activeObservers()).toBe(0);
+  });
+
+  it("rejects a launch the shell held once its thread is deleted", async () => {
+    const harness = setup([LOST_ACK], thread("live"));
+    const { settled } = await deliverUntilWaiting(harness, LAUNCH);
+
+    harness.emitShell(shell("synchronizing"));
+    harness.emitShell(shell("live", [THREAD_ID]));
+    harness.emitThread(thread("deleted"));
+
+    expect((await settled).type).toBe("rejected");
+    expect(harness.sent).toEqual([LAUNCH]);
+    expect(harness.deliveries.getSnapshot()).toEqual([]);
     expect(harness.activeObservers()).toBe(0);
   });
 
