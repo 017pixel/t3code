@@ -1,4 +1,5 @@
 import JSZip from "jszip";
+import { checkZipDirectory } from "./zipDirectory";
 import { SaxesParser } from "saxes";
 import { externalUrl } from "./office/links";
 
@@ -938,12 +939,14 @@ async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open"
   const spreadsheet = input.kind === "xlsx";
   if (bytes.byteLength > OFFICE_PREVIEW_MAX_BYTES)
     throw new Error("Preview limited to files under 50 MB.");
+  checkZipDirectory(bytes);
   const source = await JSZip.loadAsync(bytes).catch(() => {
     throw new Error("This file is damaged, encrypted, or not a valid Office document.");
   });
-  const entries = Object.values(source.files).filter((entry) => !entry.dir);
-  if (entries.length > 2048)
+  const allEntries = Object.values(source.files);
+  if (allEntries.length > 2048)
     throw new Error("This file contains too many archive entries to preview.");
+  const entries = allEntries.filter((entry) => !entry.dir);
   if (
     input.kind === "docx" &&
     entries.some((entry) => entry.name.includes("\\") || entry.name.startsWith("/"))
