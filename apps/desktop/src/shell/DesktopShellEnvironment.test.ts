@@ -283,73 +283,61 @@ describe("DesktopShellEnvironment", () => {
     }),
   );
 
-  // The inherited PATH already holds the platform's absolute fallback dirs, so the
-  // result does not depend on what this host has installed: only the fixture HOME's
-  // ~/.local/bin can be added.
+  // The inherited PATH already holds the platform's absolute fallback dirs, so each
+  // case only depends on whether the fixture HOME has ~/.local/bin, not on this host.
   it.effect.each([
-    { platform: "darwin", brewBin: "/opt/homebrew/bin" },
     { platform: "linux", brewBin: "/home/linuxbrew/.linuxbrew/bin" },
+    { platform: "darwin", brewBin: "/opt/homebrew/bin" },
   ] as const)(
-    "appends existing user CLI dirs after the inherited PATH when probes return none on $platform",
+    "falls back to existing CLI dirs when probes return no PATH on $platform",
     ({ platform, brewBin }) =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
-        const home = yield* fileSystem.makeTempDirectoryScoped();
-        yield* fileSystem.makeDirectory(`${home}/.local/bin`, { recursive: true });
-        const inherited = `${home}/.nvm/bin:/usr/local/bin:/usr/bin:${brewBin}:/usr/bin`;
-        const env: NodeJS.ProcessEnv = { HOME: home, SHELL: "/bin/zsh", PATH: inherited };
+        const cases = [
+          {
+            localBin: true,
+            inherited: (home: string) =>
+              `${home}/.nvm/bin:/usr/local/bin:/usr/bin:${brewBin}:/usr/bin`,
+            probe: "",
+            expected: (home: string) =>
+              `${home}/.nvm/bin:/usr/local/bin:/usr/bin:${brewBin}:${home}/.local/bin`,
+          },
+          {
+            localBin: true,
+            inherited: (home: string) => `${home}/.local/bin:/usr/local/bin:${brewBin}:/usr/bin`,
+            probe: "",
+            expected: (home: string) => `${home}/.local/bin:/usr/local/bin:${brewBin}:/usr/bin`,
+          },
+          {
+            localBin: false,
+            inherited: () => `/usr/local/bin:${brewBin}:/usr/bin`,
+            probe: "",
+            expected: () => `/usr/local/bin:${brewBin}:/usr/bin`,
+          },
+          {
+            localBin: true,
+            inherited: () => "/usr/bin",
+            probe: envOutput({ PATH: "/opt/tools/bin:/usr/bin" }),
+            expected: () => "/opt/tools/bin:/usr/bin",
+          },
+        ];
 
-        yield* runShellEnvironment({ env, platform, handler: () => "" });
+        for (const testCase of cases) {
+          const home = yield* fileSystem.makeTempDirectoryScoped();
+          if (testCase.localBin) {
+            yield* fileSystem.makeDirectory(`${home}/.local/bin`, { recursive: true });
+          }
+          const env: NodeJS.ProcessEnv = {
+            HOME: home,
+            SHELL: "/bin/zsh",
+            PATH: testCase.inherited(home),
+          };
 
-        assert.equal(
-          env.PATH,
-          `${home}/.nvm/bin:/usr/local/bin:/usr/bin:${brewBin}:${home}/.local/bin`,
-        );
+          yield* runShellEnvironment({ env, platform, handler: () => testCase.probe });
+
+          assert.equal(env.PATH, testCase.expected(home));
+        }
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("keeps a user CLI dir at its inherited position when probes return none", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const home = yield* fileSystem.makeTempDirectoryScoped();
-      yield* fileSystem.makeDirectory(`${home}/.local/bin`, { recursive: true });
-      const inherited = `${home}/.local/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:/usr/bin`;
-      const env: NodeJS.ProcessEnv = { HOME: home, SHELL: "/bin/bash", PATH: inherited };
-
-      yield* runShellEnvironment({ env, platform: "linux", handler: () => "" });
-
-      assert.equal(env.PATH, inherited);
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("does not add user CLI dirs that do not exist when probes return none", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const home = yield* fileSystem.makeTempDirectoryScoped();
-      const inherited = "/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:/usr/bin";
-      const env: NodeJS.ProcessEnv = { HOME: home, SHELL: "/bin/bash", PATH: inherited };
-
-      yield* runShellEnvironment({ env, platform: "linux", handler: () => "" });
-
-      assert.equal(env.PATH, inherited);
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("does not add user CLI dirs when the login shell returns a PATH", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const home = yield* fileSystem.makeTempDirectoryScoped();
-      yield* fileSystem.makeDirectory(`${home}/.local/bin`, { recursive: true });
-      const env: NodeJS.ProcessEnv = { HOME: home, SHELL: "/bin/bash", PATH: "/usr/bin" };
-
-      yield* runShellEnvironment({
-        env,
-        platform: "linux",
-        handler: () => envOutput({ PATH: "/opt/tools/bin:/usr/bin" }),
-      });
-
-      assert.equal(env.PATH, "/opt/tools/bin:/usr/bin");
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
   it.effect("loads PowerShell profile environment on Windows", () =>

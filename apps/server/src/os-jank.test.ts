@@ -65,61 +65,60 @@ effectIt.effect("hydrates PATH when the desktop handoff is absent", () =>
   ),
 );
 
-// The inherited PATH already holds the absolute fallback dirs, so only the fixture
-// HOME's ~/.local/bin depends on the fallback, whatever this host has installed.
-effectIt.effect(
-  "appends existing user CLI dirs after the inherited PATH when probes return none",
-  () =>
-    Effect.acquireUseRelease(
-      Effect.sync(() => vi.spyOn(NodeChildProcess, "execFileSync").mockReturnValue("")),
-      () =>
-        Effect.gen(function* () {
-          const fileSystem = yield* FileSystem.FileSystem;
-          const home = yield* fileSystem.makeTempDirectoryScoped();
-          yield* fileSystem.makeDirectory(`${home}/.local/bin`, { recursive: true });
-          const env: NodeJS.ProcessEnv = {
-            HOME: home,
-            SHELL: "/bin/zsh",
-            PATH: `${home}/.nvm/bin:/usr/local/bin:/usr/bin:/opt/homebrew/bin:/usr/bin`,
-          };
+// The inherited PATH already holds the absolute fallback dirs, so each case only
+// depends on whether the fixture HOME has ~/.local/bin, not on this host.
+effectIt.effect("falls back to existing CLI dirs when probes return no PATH", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const cases = [
+      {
+        localBin: true,
+        inherited: (home: string) =>
+          `${home}/.nvm/bin:/usr/local/bin:/usr/bin:/opt/homebrew/bin:/usr/bin`,
+        probe: "",
+        expected: (home: string) =>
+          `${home}/.nvm/bin:/usr/local/bin:/usr/bin:/opt/homebrew/bin:${home}/.local/bin`,
+      },
+      {
+        localBin: false,
+        inherited: () => "/usr/local/bin:/opt/homebrew/bin:/usr/bin",
+        probe: "",
+        expected: () => "/usr/local/bin:/opt/homebrew/bin:/usr/bin",
+      },
+      {
+        localBin: true,
+        inherited: () => "/usr/bin",
+        probe: "__T3CODE_ENV_PATH_START__\n/opt/tools/bin\n__T3CODE_ENV_PATH_END__\n",
+        expected: () => "/opt/tools/bin:/usr/bin",
+      },
+    ];
 
-          yield* fixPath().pipe(
+    for (const testCase of cases) {
+      const home = yield* fileSystem.makeTempDirectoryScoped();
+      if (testCase.localBin) {
+        yield* fileSystem.makeDirectory(`${home}/.local/bin`, { recursive: true });
+      }
+      const env: NodeJS.ProcessEnv = {
+        HOME: home,
+        SHELL: "/bin/zsh",
+        PATH: testCase.inherited(home),
+      };
+
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          vi.spyOn(NodeChildProcess, "execFileSync").mockReturnValue(testCase.probe),
+        ),
+        () =>
+          fixPath().pipe(
             Effect.provideService(HostProcess.Platform, "darwin"),
             Effect.provideService(HostProcess.Environment, env),
-          );
+          ),
+        (probe) => Effect.sync(() => probe.mockRestore()),
+      );
 
-          assert.equal(
-            env.PATH,
-            `${home}/.nvm/bin:/usr/local/bin:/usr/bin:/opt/homebrew/bin:${home}/.local/bin`,
-          );
-        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-      (probe) => Effect.sync(() => probe.mockRestore()),
-    ),
-);
-
-effectIt.effect("does not add user CLI dirs when the login shell returns a PATH", () =>
-  Effect.acquireUseRelease(
-    Effect.sync(() =>
-      vi
-        .spyOn(NodeChildProcess, "execFileSync")
-        .mockReturnValue("__T3CODE_ENV_PATH_START__\n/opt/tools/bin\n__T3CODE_ENV_PATH_END__\n"),
-    ),
-    () =>
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const home = yield* fileSystem.makeTempDirectoryScoped();
-        yield* fileSystem.makeDirectory(`${home}/.local/bin`, { recursive: true });
-        const env: NodeJS.ProcessEnv = { HOME: home, SHELL: "/bin/bash", PATH: "/usr/bin" };
-
-        yield* fixPath().pipe(
-          Effect.provideService(HostProcess.Platform, "linux"),
-          Effect.provideService(HostProcess.Environment, env),
-        );
-
-        assert.equal(env.PATH, "/opt/tools/bin:/usr/bin");
-      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-    (probe) => Effect.sync(() => probe.mockRestore()),
-  ),
+      assert.equal(env.PATH, testCase.expected(home));
+    }
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 effectIt.effect("keeps mise's PATH record with the login shell PATH", () =>
