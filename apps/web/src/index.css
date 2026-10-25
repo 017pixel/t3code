@@ -340,6 +340,26 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   }
 }
 
+/* Tinted current rows: muted text steps toward the foreground to keep 4.5:1
+   on the light accent fill. Mixing the theme's own colors keeps theme hues. */
+@utility sidebar-row-tinted-text {
+  --contrast-secondary-label: color-mix(
+    in oklab,
+    var(--secondary-label),
+    var(--sidebar-foreground) 30%
+  );
+  --contrast-muted-foreground: color-mix(
+    in oklab,
+    var(--muted-foreground),
+    var(--sidebar-foreground) 30%
+  );
+  --contrast-sidebar-muted-foreground: color-mix(
+    in oklab,
+    var(--sidebar-muted-foreground),
+    var(--sidebar-foreground) 30%
+  );
+}
+
 @utility surface-glass {
   background: color-mix(in srgb, var(--background) var(--glass-opacity), transparent);
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
