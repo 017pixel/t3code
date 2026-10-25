@@ -163,21 +163,10 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      type ProjectedCheckpoint = (typeof projection.checkpoints)[number];
-      const parentOf = (child: ProjectedCheckpoint | undefined) =>
-        child === undefined
-          ? undefined
-          : projection.checkpoints.find(
-              (checkpoint) =>
-                checkpoint.status === "ready" &&
-                checkpoint.scopeId === child.scopeId &&
-                checkpoint.ordinalWithinScope === child.ordinalWithinScope - 1,
-            );
-      // Capture compares against the preceding scope ordinal, even when that
-      // checkpoint belongs to a stopped run or has no run. A wider range starts
-      // the same way from its first included checkpoint: at the `from` turn
-      // when that is in the same scope (even if its run stopped), otherwise at
-      // that checkpoint's parent, since run ordinals skip (queued runs, rewinds).
+      // Capture compares against the preceding scope ordinal, even for a stopped
+      // or runless checkpoint. A wider range starts from its first checkpoint:
+      // at `from` in the same scope, else that checkpoint's parent, since run
+      // ordinals skip (queued runs, rewinds).
       const firstIncludedCheckpoint =
         input.fromTurnCount === input.toTurnCount - 1
           ? toCheckpoint

@@ -4,15 +4,10 @@ import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import type { ThreadCheckpointSummary } from "./threadCheckpoints.ts";
 
 /**
- * A response group is everything from one prompt to the next: the prompt's own
- * run plus every wake run (background results, restart notices) after it. The
- * timeline folds a whole group behind one row, so a long `/goal` thread reads
- * as prompt -> fold -> latest answer.
- *
- * Every prompt starts a group, including prompts another agent sent. A steer
- * starts one only once its run has output (back-to-back steers start one).
- * Wakes arrive as notification items, not user messages, so they join the
- * current group. Idle `/compact` is T3 Code's own housekeeping and joins it too.
+ * A response group is one prompt plus every background wake after it, folded
+ * behind one row. Any prompt starts one, even an agent's; a steer does once its
+ * run has output. Wakes are notifications and idle `/compact` is housekeeping,
+ * so both join the current group.
  */
 export function messageStartsResponseGroup(
   message: Parameters<typeof idleCompactionOf>[0],
@@ -58,12 +53,9 @@ export function responseGroupFoldLabel(input: ResponseGroupLabelInput): string {
 }
 
 /**
- * One changed-files summary for a whole group. Checkpoint stats are per-run
- * deltas, so summing them counts lines touched; a file added and then removed
- * inside the group still shows its churn while the range diff shows nothing.
- * `rangeFromTurnCount` makes "Open diff" span the group instead of one run.
- * The server diffs only to a completed run's checkpoint, so the range ends at
- * the last run not in `unfinishedRunIds` (stopped or failed).
+ * Per-run stats are deltas, so the sum counts lines touched, not the net diff.
+ * `rangeFromTurnCount` makes "Open diff" span the group. The server diffs only
+ * to a completed run's checkpoint, so the range ends at the last finished run.
  */
 export function mergeResponseGroupCheckpoints(
   summaries: ReadonlyArray<ThreadCheckpointSummary>,

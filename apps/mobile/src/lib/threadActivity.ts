@@ -1674,11 +1674,9 @@ function isResponseStartEntry(entry: ThreadFeedEntry | undefined): boolean {
 }
 
 /**
- * A prompt starts every response group and is never hidden or grouped, so the
- * rows before it depend only on the entries before it, their runs, and the
- * shared inputs. Idle `/compact` joins the group before it, so it is no
- * restart. Returns the prompt entry to restart from, or null to present the
- * whole feed.
+ * A prompt starts every response group and never hides, so rows before it
+ * depend only on earlier entries. Idle `/compact` joins the group before it, so
+ * it is no restart. Returns the prompt to restart from, or null for all.
  */
 function presentationRestart(
   previous: ThreadFeedPresentationBuild | null,
