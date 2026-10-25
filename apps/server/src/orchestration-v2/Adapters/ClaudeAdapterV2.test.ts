@@ -3251,6 +3251,116 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
+  // regression: #23948 Claude holds a steer behind a running foreground tool
+  // call and goes silent, so the turn shows each steer waiting until Claude
+  // starts it, and says so when the turn ends before Claude reads one.
+  it.effect("shows a steer as waiting until Claude starts it", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const attemptId = RunAttemptId.make("attempt-steer-waiting");
+      const input = makeClaudeTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now: yield* DateTime.now,
+        attemptId,
+        text: "Run the slow build.",
+        attachments: [],
+      });
+      yield* harness.runtime.startTurn(input);
+      const steer = (id: string) =>
+        harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: input.runId,
+          providerThread: harness.providerThread,
+          providerTurnId: idAllocator.derive.providerTurn({
+            driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+            nativeTurnId: `turn:${attemptId}`,
+          }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make(id),
+            text: `Steer ${id}`,
+            attachments: [],
+          },
+        });
+      yield* steer("message-steer-read");
+      yield* steer("message-steer-unread");
+      const notices = () => {
+        const latest = new Map<string, { status: string; title: string }>();
+        for (const event of harness.events) {
+          if (event.type !== "turn_item.updated" || event.turnItem.type !== "system_notice") {
+            continue;
+          }
+          latest.set(event.turnItem.nativeItemRef?.nativeId ?? "", {
+            status: event.turnItem.status,
+            title: event.turnItem.title ?? "",
+          });
+        }
+        return [...latest.values()];
+      };
+      const expectNotices = (expected: ReadonlyArray<{ status: string; title: string }>) =>
+        harness
+          .until(() => JSON.stringify(notices()) === JSON.stringify(expected))
+          .pipe(Effect.andThen(Effect.sync(() => assert.deepEqual(notices(), [...expected]))));
+
+      // Claude keeps streaming the foreground tool's turn; once its text is
+      // recorded, anything the steers emitted before it is recorded too.
+      yield* harness.offerAndWait(
+        makeAssistantTextFrame({
+          uuid: "00000000-0000-4000-8000-000000002392",
+          text: "Still building.",
+        }),
+      );
+      yield* harness.until(() =>
+        harness.events.some(
+          (event) => event.type === "message.updated" && event.message.text === "Still building.",
+        ),
+      );
+      assert.deepEqual(notices(), [
+        { status: "waiting", title: "Waiting for Claude to read your steer" },
+        { status: "waiting", title: "Waiting for Claude to read your steer" },
+      ]);
+
+      const lifecycle = (index: number, state: string, uuid: string) =>
+        harness.offerAndWait(
+          claudeSdkFrame({
+            type: "command_lifecycle",
+            command_uuid: harness.promptUuid(index),
+            state,
+            uuid,
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+      // Claude completes prompts it never started, so completed alone is not
+      // proof it read one.
+      yield* lifecycle(2, "completed", "00000000-0000-4000-8000-000000002393");
+      yield* lifecycle(1, "started", "00000000-0000-4000-8000-000000002394");
+      yield* expectNotices([
+        { status: "completed", title: "Claude read your steer" },
+        { status: "waiting", title: "Waiting for Claude to read your steer" },
+      ]);
+
+      yield* harness.offerAndWait(
+        claudeSdkFrame({
+          ...makeResultFrame({ uuid: "00000000-0000-4000-8000-000000002395", result: "Built." }),
+          user_message_uuid: harness.promptUuid(0),
+        }),
+      );
+      yield* harness.awaitTerminal(1);
+      yield* expectNotices([
+        { status: "completed", title: "Claude read your steer" },
+        { status: "completed", title: "Steer not confirmed" },
+      ]);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
   // regression: #15475 MCP title arriving after the tool starts must survive to completion
   it.effect.each([
     { isError: false, title: "Check weather" },
