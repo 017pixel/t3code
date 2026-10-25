@@ -3014,9 +3014,11 @@ export const make = Effect.gen(function* () {
         Effect.tap(
           Effect.fn("PullRequestService.recordDetailStats")(function* (value: PullRequestDetail) {
             // GitHub detail includes the same checks; seed only fresh reads at their shorter TTL.
+            const now = yield* Clock.currentTimeMillis;
             if (
               value.provider === "github" &&
               value.observedAt !== undefined &&
+              now - value.observedAt < Duration.toMillis(CHECKS_CACHE_TTL) &&
               !(yield* Cache.has(checksCache, key))
             ) {
               yield* Cache.set(checksCache, key, {
@@ -3034,7 +3036,7 @@ export const make = Effect.gen(function* () {
                 additions: value.additions,
                 deletions: value.deletions,
               },
-              yield* Clock.currentTimeMillis,
+              now,
             );
           }),
         ),
