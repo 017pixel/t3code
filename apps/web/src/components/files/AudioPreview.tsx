@@ -22,7 +22,7 @@ type AudioPreviewProps = {
 
 export function AudioPreview(props: AudioPreviewProps) {
   return props.compact ? (
-    <AudioChip key={`${props.src}:${!!props.failed}`} {...props} />
+    <AudioChip key={`${props.revision ?? props.src}:${!!props.failed}`} {...props} />
   ) : (
     <StandardAudioPreview {...props} />
   );
@@ -73,6 +73,8 @@ function audioTime(seconds: number) {
 function AudioChip(props: AudioPreviewProps) {
   const audio = useRef<HTMLAudioElement | null>(null);
   const onUnmount = useContext(AudioPreviewUnmountContext);
+  const [loadedSource, setLoadedSource] = useState<string | null>(null);
+  const src = loadedSource ?? props.src;
   const [playing, setPlaying] = useState(false);
   const [ready, setReady] = useState(false);
   const [duration, setDuration] = useState(0);
@@ -168,9 +170,10 @@ function AudioChip(props: AudioPreviewProps) {
           ref={audioRef}
           hidden
           preload="metadata"
-          src={props.src}
+          src={src}
           aria-label={props.name}
           onLoadedMetadata={(event) => {
+            setLoadedSource(src);
             setReady(true);
             const value = event.currentTarget.duration;
             setDuration(Number.isFinite(value) ? value : 0);
@@ -185,7 +188,14 @@ function AudioChip(props: AudioPreviewProps) {
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onEnded={() => setPlaying(false)}
-          onError={props.onError}
+          onError={() => {
+            if (src === props.src) props.onError?.();
+            else {
+              setPlaying(false);
+              setReady(false);
+              setLoadedSource(null);
+            }
+          }}
         />
       ) : null}
     </ContextChip>
