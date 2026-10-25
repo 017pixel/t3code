@@ -7708,6 +7708,59 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  // regression: #24690 a PermissionRequest hook that answers first withdraws the approval card
+  it.effect("cancels a pending approval when Claude withdraws its permission request", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const bashToolUseId = "toolu_01WithdrawnApprovalBash";
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-claude-withdrawn-approval"),
+            text: "Clean up.",
+            attachments: [],
+            runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          }),
+        );
+        const controller = new AbortController();
+        const permission = yield* Effect.promise(() =>
+          harness.getOpenedOptions()!.canUseTool!(
+            "Bash",
+            { command: "rm -f $F/*" },
+            {
+              signal: controller.signal,
+              toolUseID: bashToolUseId,
+              requestId: "request-withdrawn-approval",
+            },
+          ),
+        ).pipe(Effect.forkScoped);
+        const pending = yield* Queue.take(harness.runtimeRequestReceipts);
+        assert.equal(pending.runtimeRequest.status, "pending");
+
+        // The CLI sends control_cancel_request, which the SDK turns into this abort.
+        controller.abort();
+        assert.notEqual((yield* Fiber.join(permission))?.behavior, "allow");
+
+        const latest = harness.events.findLast(
+          (event) =>
+            event.type === "runtime_request.updated" &&
+            event.runtimeRequest.id === pending.runtimeRequest.id,
+        );
+        assert.equal(
+          latest?.type === "runtime_request.updated" ? latest.runtimeRequest.status : undefined,
+          "cancelled",
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect("releases output held for a prompt echo when the stream ends", () =>
     Effect.scoped(
       Effect.gen(function* () {
