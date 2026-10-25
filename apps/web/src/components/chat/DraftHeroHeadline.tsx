@@ -40,7 +40,7 @@ import {
   useComboboxFilter,
 } from "../ui/combobox";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { Button, InlineButton } from "../ui/button";
+import { InlineButton } from "../ui/button";
 import { DraftProjectName } from "./DraftProjectName";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 
@@ -305,11 +305,12 @@ export function DraftHeroHeadline({
           }}
         </ComboboxList>
         {activeProjectGroup && !activeProjectGroup.isScratch ? (
-          <div className="grid shrink-0 border-t border-border/70 p-1">
-            <Button
-              variant="ghost-muted"
-              size="sm"
+          // Matches ComboboxList + ComboboxItem insets so the icon and label line up with the rows above.
+          <div className="shrink-0 border-t border-border/70 p-1">
+            <button
+              type="button"
               aria-label={`Project settings for ${activeProjectGroup.displayName}`}
+              className="flex min-h-8 w-full cursor-pointer items-center gap-2 rounded-sm px-2 py-1 text-left text-base text-muted-foreground outline-none hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground sm:min-h-7 sm:text-sm"
               onClick={() => {
                 setPickerOpen(false);
                 void navigate({
@@ -318,11 +319,9 @@ export function DraftHeroHeadline({
                 });
               }}
             >
-              <SettingsIcon aria-hidden="true" />
-              <span className="min-w-0 truncate">
-                Settings for {activeProjectGroup.displayName}
-              </span>
-            </Button>
+              <SettingsIcon aria-hidden="true" className="size-4 shrink-0" />
+              <span className="min-w-0 truncate">for {activeProjectGroup.displayName}</span>
+            </button>
           </div>
         ) : null}
       </ComboboxPopup>
