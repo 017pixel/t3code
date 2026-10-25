@@ -13,6 +13,7 @@ import {
   useFaviconProjectRefForThread,
 } from "~/browserFaviconStore";
 import { useBrowserPointerStore } from "~/browser/browserPointerStore";
+import { acquireBrowserSurfaceActivity } from "~/browser/browserSurfaceStore";
 import { applyPreviewDesktopState, type DesktopPreviewOverlay } from "~/previewStateStore";
 import { previewEnvironment } from "~/state/preview";
 import { usePreparedConnection } from "~/state/session";
@@ -26,6 +27,22 @@ function originOf(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Keeps a hidden guest painting behind the app while the desktop host captures it; Electron
+ * composites no offscreen guest, so its screenshot or stream would otherwise never finish.
+ */
+export function createCaptureActivity(tabId: string) {
+  let release: (() => void) | null = null;
+  const update = (capturing: boolean) => {
+    if (capturing && !release) release = acquireBrowserSurfaceActivity(tabId);
+    else if (!capturing && release) {
+      release();
+      release = null;
+    }
+  };
+  return { update, release: () => update(false) };
 }
 
 /** ElectronBrowserHost owns webview lifetime. */
@@ -49,6 +66,7 @@ export function usePreviewBridge(input: {
   const lastReportedUrl = useRef<string | null>(null);
   const lastReportedKind = useRef<DesktopPreviewTabState["navStatus"]["kind"] | null>(null);
   const lastDesktopNavStatus = useRef<DesktopPreviewTabState["navStatus"] | null>(null);
+  const captureActivity = useRef<ReturnType<typeof createCaptureActivity> | null>(null);
   const handleStateChange = useEffectEvent(
     (changedTabId: string, state: DesktopPreviewTabState): void => {
       if (changedTabId !== runtimeTabId) return;
@@ -56,6 +74,7 @@ export function usePreviewBridge(input: {
         clearBrowserPointer(runtimeTabId);
       }
       lastDesktopNavStatus.current = state.navStatus;
+      captureActivity.current?.update(state.capturing);
       applyPreviewDesktopState(stableThreadRef, tabId, projectDesktopState(state));
       if (state.favicon) {
         recordFaviconForThread(stableThreadRef, state.favicon, projectRef, environmentHostname);
@@ -81,10 +100,17 @@ export function usePreviewBridge(input: {
     lastReportedUrl.current = null;
     lastReportedKind.current = null;
     lastDesktopNavStatus.current = null;
-    return previewBridge.onStateChange(handleStateChange);
+    const activity = createCaptureActivity(runtimeTabId);
+    captureActivity.current = activity;
+    const unsubscribe = previewBridge.onStateChange(handleStateChange);
+    return () => {
+      unsubscribe();
+      activity.release();
+      if (captureActivity.current === activity) captureActivity.current = null;
+    };
   }, [
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A different tab or thread starts its status reports and pointer tracking from scratch.
     runtimeTabId,
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A different tab or thread starts its status reports and pointer tracking from scratch.
     stableThreadRef,
     tabId,
   ]);
