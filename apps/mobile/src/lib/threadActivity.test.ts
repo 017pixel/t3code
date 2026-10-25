@@ -27,7 +27,7 @@ import {
   threadFeedCompactionLabels,
   createThreadFeedCache,
   deriveThreadFeedPresentation,
-  messageFoldRunId,
+  messageFoldRunIds,
   type ThreadFeedCache,
   type ThreadFeedEntry,
   type ThreadFeedLatestRun,
@@ -678,16 +678,77 @@ describe("buildThreadFeed", () => {
           projected(runless ? { ...item, runId: null } : item, position),
         ),
       );
-      const foldRunId = messageFoldRunId(feed, "message-middle");
-      expect(foldRunId, String(runless)).toBe(runless ? "runless:message-user" : runId);
+      const foldRunIds = messageFoldRunIds(feed, "message-middle");
+      expect(foldRunIds, String(runless)).toEqual([
+        runless ? "runless:message-user" : runId,
+        "group:message-user",
+      ]);
       const ids = (expanded: ReadonlySet<RunId>) =>
         deriveThreadFeedPresentation(feed, null, expanded).map((entry) => entry.id);
       expect(ids(new Set())).not.toContain("message-middle");
-      expect(ids(new Set([foldRunId!]))).toContain("message-middle");
+      expect(ids(new Set([foldRunIds[0]!]))).toContain("message-middle");
     }
-    expect(messageFoldRunId(buildThreadFeed([projected(userMessage(), 0)]), "message-user")).toBe(
-      null,
+    expect(
+      messageFoldRunIds(buildThreadFeed([projected(userMessage(), 0)]), "message-user"),
+    ).toEqual([]);
+  });
+
+  it("folds every background wake since the prompt behind one row", () => {
+    const at = (second: number) => `2026-06-20T00:00:${String(second).padStart(2, "0")}.000Z`;
+    const inRun = (run: string, item: OrchestrationV2TurnItem): OrchestrationV2TurnItem => ({
+      ...item,
+      runId: RunId.make(run),
+    });
+    const step = (run: string, id: string, second: number) =>
+      inRun(run, { ...command(at(second)), id: TurnItemId.make(id) });
+    const answer = (run: string, id: string, second: number) =>
+      inRun(run, {
+        ...assistantMessage(at(second)),
+        id: TurnItemId.make(id),
+        messageId: MessageId.make(id),
+      });
+    const wake = (run: string, id: string, second: number) =>
+      inRun(run, {
+        ...base(id, at(second), 0),
+        type: "notification",
+        source: { kind: "background_task" },
+        outcome: "completed",
+        summary: "Background task finished",
+      });
+    const feed = buildThreadFeed(
+      [
+        inRun("initial", userMessage(at(0))),
+        step("initial", "launch", 1),
+        answer("initial", "launched", 5),
+        wake("wake-a", "wake-a-notice", 20),
+        step("wake-a", "read-a", 21),
+        answer("wake-a", "ack-a", 25),
+        wake("wake-b", "wake-b-notice", 40),
+        step("wake-b", "read-b", 41),
+        answer("wake-b", "ack-b", 45),
+      ].map((item, position) => projected(item, position)),
     );
+    const latestRun = {
+      runId: RunId.make("wake-b"),
+      status: "completed" as const,
+      startedAt: at(40),
+      completedAt: at(45),
+    };
+    const present = (expanded: ReadonlySet<RunId>) =>
+      deriveThreadFeedPresentation(feed, latestRun, expanded);
+    const groupKey = RunId.make("group:message-user");
+
+    const collapsed = present(new Set());
+    expect(collapsed.map((entry) => entry.id)).toEqual([
+      "message-user",
+      `run-fold:${groupKey}`,
+      "ack-b",
+    ]);
+    expect(collapsed[1]).toMatchObject({ label: "Worked for 45s · 2 updates" });
+
+    const expanded = present(new Set([groupKey])).map((entry) => entry.type);
+    expect(expanded.filter((type) => type === "run-fold")).toHaveLength(4);
+    expect(messageFoldRunIds(feed, "ack-a")).toEqual(["wake-a", groupKey]);
   });
 
   it("folds progress messages while keeping the final assistant answer visible", () => {

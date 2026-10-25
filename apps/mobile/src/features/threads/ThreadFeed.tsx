@@ -209,7 +209,7 @@ import {
   isSecretRequestActivityGroup,
   type ThreadFeedEntry,
   type ThreadFeedLatestRun,
-  messageFoldRunId,
+  messageFoldRunIds,
 } from "../../lib/threadActivity";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
 import {
@@ -1257,7 +1257,7 @@ function renderFeedEntry(
     readonly onCopyWorkRow: (rowId: string, value: string) => void;
     readonly onToggleWorkGroup: (groupId: string, anchorKey?: string) => void;
     readonly onToggleWorkRow: (rowId: string, anchorKey?: string, groupId?: string) => void;
-    readonly onToggleTurnFold: (runId: RunId) => void;
+    readonly onToggleTurnFold: (row: Extract<ThreadFeedEntry, { type: "run-fold" }>) => void;
     readonly onOpenTurnDiff: (checkpoint: ThreadCheckpointSummary) => void;
     readonly onPressPreview: (source: FilePreviewSource) => void;
     readonly onPressVideo: (attachment: ChatFileAttachment, sourceIdentifier: string) => void;
@@ -1308,7 +1308,7 @@ function renderFeedEntry(
         <Pressable
           accessibilityRole="button"
           accessibilityState={{ expanded: entry.expanded }}
-          onPress={() => props.onToggleTurnFold(entry.runId)}
+          onPress={() => props.onToggleTurnFold(entry)}
           hitSlop={4}
           className="min-h-11 min-w-0 flex-1 flex-row items-center gap-2"
           style={{
@@ -2710,11 +2710,11 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       (entry) => entry.type === "message" && entry.id === jumpToMessageId,
     );
     if (index === -1) {
-      const runId = messageFoldRunId(props.feed, jumpToMessageId);
-      if (runId && !expandedTurnIds.has(runId)) {
+      const foldKeys = messageFoldRunIds(props.feed, jumpToMessageId);
+      if (foldKeys.some((key) => !expandedTurnIds.has(key))) {
         setInteractionState((current) => ({
           ...current,
-          expandedTurnIds: new Set(current.expandedTurnIds).add(runId),
+          expandedTurnIds: new Set([...current.expandedTurnIds, ...foldKeys]),
         }));
       } else {
         finishJump();
@@ -2964,17 +2964,21 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     });
   };
 
-  const onToggleTurnFold = (runId: RunId) => {
-    suspendEndScrollMaintenanceForDisclosure(`run-fold:${runId}`);
-    if (autoExpandedTurnIdRef.current === runId) {
+  // A response's only run answers to both its own key and its group's, so a
+  // fold opened before the first background wake stays open after it.
+  const onToggleTurnFold = (row: Extract<ThreadFeedEntry, { type: "run-fold" }>) => {
+    suspendEndScrollMaintenanceForDisclosure(row.id);
+    if (
+      autoExpandedTurnIdRef.current !== null &&
+      row.foldKeys.includes(autoExpandedTurnIdRef.current)
+    ) {
       autoExpandedTurnIdRef.current = null;
     }
     setInteractionState((current) => {
       const next = new Set(current.expandedTurnIds);
-      if (next.has(runId)) {
-        next.delete(runId);
-      } else {
-        next.add(runId);
+      for (const key of row.foldKeys) {
+        if (row.expanded) next.delete(key);
+        else next.add(key);
       }
       return { ...current, expandedTurnIds: next };
     });

@@ -7,6 +7,7 @@ import {
   deriveThreadCheckpointSummaries,
   type ThreadCheckpointSummary,
 } from "@t3tools/client-runtime/state/thread-checkpoints";
+import { mergeResponseGroupCheckpoints } from "@t3tools/client-runtime/state/response-groups";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 
 import { useCheckpointDiff } from "../../state/queries";
@@ -20,6 +21,7 @@ import {
   getDefaultReviewSectionId,
   getReadyReviewCheckpoints,
   getReviewSectionIdForCheckpoint,
+  parseReviewRangeSectionId,
 } from "./reviewModel";
 import {
   setReviewAsyncError,
@@ -67,13 +69,30 @@ export function useReviewSections(input: {
     }
   }, [diffPreview.data, reviewCache.threadKey]);
 
-  const readyCheckpoints = useMemo(
-    () =>
-      getReadyReviewCheckpoints(
-        selectedThread === null ? [] : deriveThreadCheckpointSummaries(selectedThread.projection),
+  // A response group's stat opens one section spanning its turns; it exists
+  // only while selected.
+  const selectedRange = parseReviewRangeSectionId(reviewCache.selectedSectionId);
+  const rangeFromTurnCount = selectedRange?.fromTurnCount;
+  const rangeToTurnCount = selectedRange?.toTurnCount;
+  const readyCheckpoints = useMemo(() => {
+    const checkpoints =
+      selectedThread === null ? [] : deriveThreadCheckpointSummaries(selectedThread.projection);
+    if (rangeFromTurnCount === undefined || rangeToTurnCount === undefined) {
+      return getReadyReviewCheckpoints(checkpoints);
+    }
+    const range = mergeResponseGroupCheckpoints(
+      checkpoints.filter(
+        (checkpoint) =>
+          checkpoint.checkpointTurnCount > rangeFromTurnCount &&
+          checkpoint.checkpointTurnCount <= rangeToTurnCount,
       ),
-    [selectedThread],
-  );
+    );
+    return getReadyReviewCheckpoints(
+      range?.rangeFromTurnCount === undefined
+        ? checkpoints
+        : [...checkpoints, { ...range, rangeFromTurnCount }],
+    );
+  }, [rangeFromTurnCount, rangeToTurnCount, selectedThread]);
   const checkpointBySectionId = useMemo(
     () =>
       Object.fromEntries(
@@ -157,7 +176,10 @@ export function useReviewSections(input: {
     environmentId: enabled ? (environmentId ?? null) : null,
     threadId: enabled ? (threadId ?? null) : null,
     fromTurnCount:
-      enabled && activeCheckpoint ? Math.max(0, activeCheckpoint.checkpointTurnCount - 1) : null,
+      enabled && activeCheckpoint
+        ? (activeCheckpoint.rangeFromTurnCount ??
+          Math.max(0, activeCheckpoint.checkpointTurnCount - 1))
+        : null,
     toTurnCount: enabled ? (activeCheckpoint?.checkpointTurnCount ?? null) : null,
     ignoreWhitespace: false,
   });

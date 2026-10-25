@@ -103,7 +103,9 @@ export type ReviewParsedDiff =
     };
 
 function checkpointTitle(checkpoint: ThreadCheckpointSummary): string {
-  return `Turn ${checkpoint.checkpointTurnCount}`;
+  return checkpoint.rangeFromTurnCount === undefined
+    ? `Turn ${checkpoint.checkpointTurnCount}`
+    : `Turns ${checkpoint.rangeFromTurnCount + 1}–${checkpoint.checkpointTurnCount}`;
 }
 
 function checkpointSubtitle(checkpoint: ThreadCheckpointSummary): string {
@@ -484,9 +486,19 @@ function mapRenderableFile(
 }
 
 export function getReviewSectionIdForCheckpoint(
-  checkpoint: Pick<ThreadCheckpointSummary, "checkpointTurnCount">,
+  checkpoint: Pick<ThreadCheckpointSummary, "checkpointTurnCount" | "rangeFromTurnCount">,
 ): string {
-  return `turn:${checkpoint.checkpointTurnCount}`;
+  return checkpoint.rangeFromTurnCount === undefined
+    ? `turn:${checkpoint.checkpointTurnCount}`
+    : `turns:${checkpoint.rangeFromTurnCount}:${checkpoint.checkpointTurnCount}`;
+}
+
+/** The turn range a response group's diff section covers, from its section id. */
+export function parseReviewRangeSectionId(
+  sectionId: string | null,
+): { readonly fromTurnCount: number; readonly toTurnCount: number } | null {
+  const match = sectionId === null ? null : /^turns:(\d+):(\d+)$/.exec(sectionId);
+  return match ? { fromTurnCount: Number(match[1]), toTurnCount: Number(match[2]) } : null;
 }
 
 export function getReadyReviewCheckpoints(

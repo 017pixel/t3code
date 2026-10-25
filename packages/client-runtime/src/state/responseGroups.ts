@@ -68,7 +68,7 @@ export function mergeResponseGroupCheckpoints(
 ): ThreadCheckpointSummary | null {
   const ready = summaries
     .filter((summary) => summary.status === "ready")
-    .toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount);
+    .sort((left, right) => left.checkpointTurnCount - right.checkpointTurnCount);
   const first = ready[0];
   const last = ready.at(-1);
   if (first === undefined || last === undefined) return null;
