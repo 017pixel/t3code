@@ -49,6 +49,31 @@ it.each(["<w:body/>", "<w:body></w:body>"])(
   },
 );
 
+it.each([false, true])(
+  "rejects excessive archive entries before JSZip (directories: %s)",
+  async (directories) => {
+    const { default: JSZip } = await import("jszip");
+    const { prepareOffice } = await import("./officeArchive");
+    const archive = new JSZip();
+    for (let i = 0; i < 4096; i++)
+      archive.file(`entry-${i}${directories ? "/" : ".txt"}`, "", { dir: directories });
+    const bytes = await archive.generateAsync({ type: "arraybuffer" });
+    const load = vi.spyOn(JSZip, "loadAsync");
+    try {
+      await expect(prepareOffice(bytes, "docx")).rejects.toThrow("2,048 entries");
+      expect(load).not.toHaveBeenCalled();
+      // The actual central-directory records must also be bounded if EOCD lies.
+      const view = new DataView(bytes);
+      view.setUint16(bytes.byteLength - 22 + 8, 1, true);
+      view.setUint16(bytes.byteLength - 22 + 10, 1, true);
+      await expect(prepareOffice(bytes, "docx")).rejects.toThrow("2,048 entries");
+      expect(load).not.toHaveBeenCalled();
+    } finally {
+      load.mockRestore();
+    }
+  },
+);
+
 it("rejects oversized embedded images before decoding pixels and retains ordinary images", async () => {
   const { officeImageBitmap } = await import("./office/image-bitmap");
   const canvas = new OffscreenCanvas(2, 3);
@@ -1044,7 +1069,7 @@ it("clears an Office metadata error when the same URL becomes previewable", asyn
   );
   expect(screen.container.textContent).not.toContain("under 50 MB");
   resolveResponse(new Response("invalid-office-file"));
-  await vi.waitFor(() => expect(screen.container.textContent).toContain("not a valid Office"), {
+  await vi.waitFor(() => expect(screen.container.textContent).toContain("not a readable ZIP"), {
     timeout: 10_000,
   });
 });
