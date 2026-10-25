@@ -1,4 +1,5 @@
 import { ChevronDownIcon, PaperclipIcon } from "lucide-react";
+import type { Ref } from "react";
 
 import { Button } from "../ui/button";
 
@@ -20,12 +21,17 @@ export function WorkspaceFileDropOverlay() {
 }
 
 /** Sits `bottom` pixels up, clear of the composer and its attached banners. */
-export function ScrollToEndButton(props: {
+export function ScrollToEndButton({
+  ref,
+  ...props
+}: {
+  readonly ref?: Ref<HTMLDivElement>;
   readonly bottom: number;
   readonly onScrollToEnd: () => void;
 }) {
   return (
     <div
+      ref={ref}
       className="chat-scroll-to-bottom pointer-events-none absolute z-30 flex justify-center py-1.5"
       style={{ bottom: props.bottom }}
     >

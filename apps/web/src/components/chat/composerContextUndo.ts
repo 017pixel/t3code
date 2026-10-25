@@ -1,5 +1,5 @@
 import type { PreviewAnnotationPayload, ThreadContextRecord } from "@t3tools/contracts";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import type { ComposerFileAttachment, ComposerImageAttachment } from "../../composerDraftStore";
 import { fileContextReference, previewAnnotationContextId } from "../../lib/composerContextRecords";
@@ -32,7 +32,8 @@ function createRetainedContextPayloads(): RetainedContextPayloads {
   };
 }
 
-// Deleted chips keep their payloads until their draft's undo history ends.
+// Deleted chips keep their payloads until their draft's undo history ends. Switching drafts
+// swaps in fresh maps; the dropped ones are unreachable and collected with that history.
 export function useRetainedContextPayloads(draftTargetKey: string): RetainedContextPayloads {
   const [draft, setDraft] = useState(() => ({
     targetKey: draftTargetKey,
@@ -41,14 +42,7 @@ export function useRetainedContextPayloads(draftTargetKey: string): RetainedCont
   if (draft.targetKey !== draftTargetKey) {
     setDraft({ targetKey: draftTargetKey, payloads: createRetainedContextPayloads() });
   }
-  const retained = draft.payloads;
-  useEffect(
-    () => () => {
-      for (const payloads of Object.values(retained)) payloads.clear();
-    },
-    [retained],
-  );
-  return retained;
+  return draft.payloads;
 }
 
 export function reconcileAttachmentContextReferences(input: {

@@ -333,7 +333,7 @@ describe("composer context undo lifetime", () => {
     });
   }
 
-  it("restores a deleted chip and its file bytes on same-draft undo, then releases them on unmount", async () => {
+  it("restores a deleted chip and its file bytes on same-draft undo", async () => {
     await using composer = await mountComposer();
     await composer.deleteDraft();
     expect(composer.draft()).toEqual({ value: "", files: [] });
@@ -345,14 +345,10 @@ describe("composer context undo lifetime", () => {
     expect(serializeEditorDoc(composer.editor().state.doc).value).toBe(composer.initialValue);
     expect(composer.draft()).toEqual({ value: composer.initialValue, files: [file] });
     expect(composer.draft().files[0]?.file).toBe(file.file);
-
-    await composer.deleteDraft();
-    await composer.unmount();
-    expect(retained.files.size).toBe(0);
   });
 
   it.each(["", "Draft B"])(
-    "releases deleted payloads and prevents undo into the previous draft when switching to %j",
+    "drops deleted payloads and prevents undo into the previous draft when switching to %j",
     async (destinationValue) => {
       await using composer = await mountComposer(destinationValue);
       await composer.deleteDraft();
@@ -361,7 +357,8 @@ describe("composer context undo lifetime", () => {
       expect(retained.files.get(fileContextReference(file).contextId)?.file).toBe(file.file);
 
       await composer.show("b");
-      expect(retained.files.size).toBe(0);
+      expect(composer.retained()).not.toBe(retained);
+      expect(composer.retained().files.size).toBe(0);
       await composer.undo();
       expect(serializeEditorDoc(composer.editor().state.doc).value).toBe(destinationValue);
       expect(composer.draft()).toEqual({ value: destinationValue, files: [] });

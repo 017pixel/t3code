@@ -1,5 +1,5 @@
 import { BookmarkIcon, FileIcon, FileTextIcon } from "lucide-react";
-import { memo, useEffect, useRef, useState, type RefObject } from "react";
+import { memo, useState, type RefObject } from "react";
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
 
 import { RelativeTime } from "../RelativeTime";
@@ -38,16 +38,15 @@ export const ComposerStashMenu = memo(function ComposerStashMenu(props: {
   onClose: () => void;
 }) {
   const { entries, stashShortcutLabel, composerFormRef, onRestore, onDelete, onClose } = props;
-  const drawerRef = useRef<HTMLDivElement>(null);
   const [highlightedId, setHighlightedId] = useState<string | null>(entries[0]?.id ?? null);
 
   const highlightedEntry = entries.find((entry) => entry.id === highlightedId) ?? entries[0];
 
-  useEffect(() => {
+  const attachDrawer = (drawer: HTMLDivElement | null) => {
+    if (!drawer) return;
     const closeOnOutsidePointer = (event: PointerEvent) => {
-      const drawer = drawerRef.current;
       if (
-        (drawer && event.composedPath().includes(drawer)) ||
+        event.composedPath().includes(drawer) ||
         (event.target instanceof Element &&
           event.target.closest('[data-prompt-stash-badge="true"]'))
       ) {
@@ -55,18 +54,14 @@ export const ComposerStashMenu = memo(function ComposerStashMenu(props: {
       }
       onClose();
     };
-    document.addEventListener("pointerdown", closeOnOutsidePointer, true);
-    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
-  }, [onClose]);
 
-  useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const target = event.target;
       if (
         !(target instanceof Node) ||
         (target !== document.body &&
           !(target instanceof Element && target.closest('[data-prompt-stash-badge="true"]')) &&
-          !drawerRef.current?.contains(target) &&
+          !drawer.contains(target) &&
           !composerFormRef.current?.querySelector('textarea, [role="textbox"]')?.contains(target))
       ) {
         return;
@@ -87,9 +82,9 @@ export const ComposerStashMenu = memo(function ComposerStashMenu(props: {
         const nextIndex = (normalizedIndex + offset + entries.length) % entries.length;
         setHighlightedId(entries[nextIndex]?.id ?? null);
         const nextButton =
-          drawerRef.current?.querySelectorAll<HTMLButtonElement>("[data-stash-restore]")[nextIndex];
+          drawer.querySelectorAll<HTMLButtonElement>("[data-stash-restore]")[nextIndex];
         nextButton?.scrollIntoView({ block: "nearest" });
-        if (drawerRef.current?.contains(document.activeElement)) {
+        if (drawer.contains(document.activeElement)) {
           nextButton?.focus({ preventScroll: true });
         }
         return;
@@ -112,12 +107,16 @@ export const ComposerStashMenu = memo(function ComposerStashMenu(props: {
         onDelete(highlightedEntry);
       }
     };
+    document.addEventListener("pointerdown", closeOnOutsidePointer, true);
     window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [composerFormRef, entries, highlightedEntry, onClose, onDelete, onRestore]);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+      window.removeEventListener("keydown", handler, true);
+    };
+  };
 
   return (
-    <ComposerBanner.Root ref={drawerRef} data-composer-stash-drawer="true">
+    <ComposerBanner.Root ref={attachDrawer} data-composer-stash-drawer="true">
       <ComposerBanner.Row
         render={<button type="button" />}
         aria-label="Close stash"

@@ -1,6 +1,6 @@
 import { Toolbar } from "@base-ui/react/toolbar";
 import { type ProviderInstanceId } from "@t3tools/contracts";
-import { memo, useLayoutEffect, useRef, useState } from "react";
+import { memo, useState } from "react";
 import { SparklesIcon, StarIcon } from "lucide-react";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -50,27 +50,21 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
   };
   const showFavorites = props.showFavorites ?? true;
   const [hoveredInstanceId, setHoveredInstanceId] = useState<ProviderInstanceId | null>(null);
-  const sidebarContentRef = useRef<HTMLDivElement>(null);
   const [selectedIndicatorTop, setSelectedIndicatorTop] = useState<number | null>(null);
-  useLayoutEffect(() => {
-    const content = sidebarContentRef.current;
-    if (!content) {
-      return;
-    }
-    const selectedItem = Array.from(
-      content.querySelectorAll<HTMLElement>("[data-model-picker-provider]"),
-    ).find((item) => item.dataset.modelPickerProvider === props.selectedInstanceId);
-    if (!selectedItem) {
-      setSelectedIndicatorTop(null);
-      return;
-    }
-    setSelectedIndicatorTop(selectedItem.offsetTop + selectedItem.offsetHeight / 2 - 10);
-  }, [
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Adding, removing or reordering providers moves the selected item, so the indicator re-measures.
-    props.instanceEntries,
-    props.selectedInstanceId,
-    showFavorites,
-  ]);
+  // Rows added, removed or reordered above the selected one move it without changing its key, so
+  // the selected row's measuring marker is keyed on the row order and remounts to re-measure.
+  const rowOrder = `${showFavorites ? "favorites," : ""}${props.instanceEntries
+    .map((entry) => entry.instanceId)
+    .join(",")}`;
+  const measureSelectedRow = (marker: HTMLSpanElement | null) => {
+    const row = marker?.parentElement;
+    if (row) setSelectedIndicatorTop(row.offsetTop + row.offsetHeight / 2 - 10);
+  };
+  const selectedRowMarker = <span key={rowOrder} ref={measureSelectedRow} hidden />;
+  const hasSelectedItem =
+    props.selectedInstanceId === "favorites"
+      ? showFavorites
+      : props.instanceEntries.some((entry) => entry.instanceId === props.selectedInstanceId);
 
   return (
     <Toolbar.Root
@@ -88,8 +82,8 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
       }}
     >
       <div className="h-full overflow-y-auto overscroll-contain [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <div ref={sidebarContentRef} className="relative flex min-h-full flex-col gap-1 p-1">
-          {selectedIndicatorTop !== null ? (
+        <div className="relative flex min-h-full flex-col gap-1 p-1">
+          {hasSelectedItem && selectedIndicatorTop !== null ? (
             <div
               data-model-picker-selected-indicator="true"
               className={cn(
@@ -102,6 +96,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
           {showFavorites ? (
             <>
               <div className="relative w-full" data-model-picker-provider="favorites">
+                {props.selectedInstanceId === "favorites" ? selectedRowMarker : null}
                 <Tooltip>
                   <TooltipTrigger
                     render={
@@ -217,6 +212,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                 className="relative w-full"
                 data-model-picker-provider={entry.instanceId}
               >
+                {isSelected ? selectedRowMarker : null}
                 <Tooltip>
                   <TooltipTrigger render={trigger} />
                   <TooltipPopup
