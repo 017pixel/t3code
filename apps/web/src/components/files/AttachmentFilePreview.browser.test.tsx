@@ -706,7 +706,7 @@ describe("large text preview recovery", () => {
               viewport().getBoundingClientRect().top -
               offset,
           ),
-          ).toBeLessThan(Math.max(5, visibleRow().offsetHeight / 29 + 1));
+        ).toBeLessThan(Math.max(5, visibleRow().offsetHeight / 29 + 1));
       });
     },
   );
