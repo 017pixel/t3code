@@ -19,6 +19,7 @@ import {
   type VectorRequest,
 } from "./slide-protocol";
 import { deckText } from "./slide-text";
+import { officeImageBitmap } from "./image-bitmap";
 import { serveWorker, Transfer } from "./worker-rpc";
 
 // One worker holds one open PowerPoint deck: its engine, fonts, laid-out slides, decoded pictures and painting. The
@@ -148,7 +149,7 @@ function createDeck(
     // SVG decodes through an image element, which a worker lacks.
     if (needsElementDecode(blob)) return { kind: "vector", blob, bitmap: undefined, failed: false };
 
-    const source = await createImageBitmap(blob).catch(() => undefined);
+    const source = await officeImageBitmap(blob).catch(() => undefined);
 
     if (!source) return { kind: "missing" };
     const size = { width: source.width, height: source.height };

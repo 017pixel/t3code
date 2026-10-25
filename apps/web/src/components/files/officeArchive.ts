@@ -1,5 +1,6 @@
 import JSZip from "jszip";
 import { SaxesParser } from "saxes";
+import { externalUrl } from "./office/links";
 
 import {
   OFFICE_PREVIEW_MAX_BYTES,
@@ -14,6 +15,22 @@ function xmlParser() {
     throw new Error("This document contains unsupported XML declarations.");
   });
   return parser;
+}
+
+function officeXmlDecoder(bytes: Uint8Array) {
+  if ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0x3c && bytes[1] === 0))
+    return new TextDecoder("utf-16le");
+  if ((bytes[0] === 0xfe && bytes[1] === 0xff) || (bytes[0] === 0 && bytes[1] === 0x3c))
+    return new TextDecoder("utf-16be");
+  const declaration = new TextDecoder().decode(bytes.subarray(0, 256));
+  return new TextDecoder(/^<\?xml\s[^?]*\bencoding\s*=\s*["']([^"']+)["']/i.exec(declaration)?.[1]);
+}
+
+function officeXml(bytes: Uint8Array) {
+  // Repacked XML is UTF-8, regardless of the source part's encoding.
+  return officeXmlDecoder(bytes)
+    .decode(bytes)
+    .replace(/^(<\?xml\s[^?]*\bencoding\s*=\s*)["'][^"']+["']/i, '$1"UTF-8"');
 }
 
 // Section properties terminate the section they describe, so the kept prefix
@@ -576,7 +593,10 @@ function wordPartTypes() {
               "Preview limited: this Word document has an unsupported document relationship.",
             );
         }
-        if (external || WORD_DISABLED_PARTS.has(role)) {
+        if (
+          (external && !(role === "hyperlink" && externalUrl(attr("Target")))) ||
+          WORD_DISABLED_PARTS.has(role)
+        ) {
           start = xml.lastIndexOf("<", parser.position - 1);
         }
       });
@@ -947,7 +967,7 @@ export async function boundedArchive(input: Extract<OfficeWorkerRequest, { type:
     const media = input.kind === "docx" && partTypes.binary(entry.name);
     const chunks: Uint8Array[] = [];
     const sections = document ? wordSections() : null;
-    const decoder = new TextDecoder();
+    let decoder: TextDecoder | undefined;
     let length = 0;
     await new Promise<void>((resolve, reject) => {
       // JSZip exposes this streaming API at runtime but omits it from its types.
@@ -966,7 +986,10 @@ export async function boundedArchive(input: Extract<OfficeWorkerRequest, { type:
             return;
           }
           try {
-            sections?.write(decoder.decode(chunk, { stream: true }));
+            if (sections) {
+              decoder ??= officeXmlDecoder(chunk);
+              sections.write(decoder.decode(chunk, { stream: true }));
+            }
           } catch (cause) {
             stream.pause();
             reject(cause);
@@ -1012,15 +1035,11 @@ export async function boundedArchive(input: Extract<OfficeWorkerRequest, { type:
       offset += chunk.length;
     }
     if (document) {
-      sections!.write(decoder.decode());
-      word = wordDocuments(
-        new TextDecoder().decode(content),
-        wordInputTruncated,
-        sections!.finish(),
-      );
+      sections!.write(decoder?.decode() ?? "");
+      word = wordDocuments(officeXml(content), wordInputTruncated, sections!.finish());
       archive.file(entry.name, word.documents[0]!);
     } else if (input.kind === "docx" && !media) {
-      let xml = new TextDecoder().decode(content);
+      let xml = officeXml(content);
       if (entry.name === "[Content_Types].xml" || entry.name.endsWith(".rels"))
         xml = partTypes.metadata(entry.name, xml);
       const roles = partTypes.roles.get(entry.name);
@@ -1043,7 +1062,7 @@ export async function boundedArchive(input: Extract<OfficeWorkerRequest, { type:
         continue;
       }
       if (media) mediaSizes.set(entry.name, Math.ceil((content.length * 4) / 3));
-      archive.file(entry.name, content);
+      archive.file(entry.name, /\.(?:xml|rels)$/i.test(entry.name) ? officeXml(content) : content);
     }
   }
   if (word) {
