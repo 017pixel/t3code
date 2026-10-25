@@ -262,7 +262,7 @@ export async function openDocument(
       throw new Error("This workbook has no sheets or too many sheets to preview.");
     let cellBytes = 0;
     return {
-      type: "xlsx",
+      type: "ods",
       sheets: tables.map((table, index) => {
         const rows: string[][] = [];
         let truncated = false;
