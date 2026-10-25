@@ -24,6 +24,7 @@ import { OFFICE_PREVIEW_MAX_COLUMNS, type OfficeWorkerResult } from "./officePre
 it("rejects oversized embedded images before decoding pixels and retains ordinary images", async () => {
   const { officeImageBitmap } = await import("./office/image-bitmap");
   const canvas = new OffscreenCanvas(2, 3);
+  canvas.getContext("2d");
   const blob = await canvas.convertToBlob({ type: "image/png" });
   const bytes = await blob.arrayBuffer();
   new DataView(bytes).setUint32(16, 12000);
