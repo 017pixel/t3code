@@ -195,6 +195,10 @@ function boundedWorksheet(
   const parser = xmlParser();
   const rows = new Map<number, Map<number, string>>();
   const rowTags = new Map<number, string>();
+  const metadataAttributes = new Map<
+    string,
+    { ref: string | undefined; min: string | undefined; max: string | undefined }
+  >();
   let dataStart = 0;
   let dataEnd = 0;
   let emptyData = false;
@@ -236,6 +240,15 @@ function boundedWorksheet(
     )
       throw new Error("This workbook contains invalid worksheet structure.");
     const attribute = (name: string) => tag.attributes[name]?.value;
+    if (["dimension", "mergeCell", "col"].includes(tag.local))
+      metadataAttributes.set(
+        xml.slice(xml.lastIndexOf("<", parser.position - 1), parser.position),
+        {
+          ref: attribute("ref"),
+          min: attribute("min"),
+          max: attribute("max"),
+        },
+      );
     if (depth === 2 && tag.local === "sheetData") {
       dataStart = parser.position;
       emptyData = tag.isSelfClosing;
@@ -315,7 +328,9 @@ function boundedWorksheet(
           s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
         cells.set(
           column,
-          cell.opening.replace(/\s+t=(?:"[^"]*"|'[^']*')/, "").replace(/>$/, ' t="inlineStr">') +
+          cell.opening
+            .replace(/\s+t\s*=\s*(?:"[^"]*"|'[^']*')/, "")
+            .replace(/>$/, ' t="inlineStr">') +
             `<${cell.prefix}is><${cell.prefix}t>` +
             escape(kept) +
             `</${cell.prefix}t></${cell.prefix}is></${cell.name}>`,
@@ -348,26 +363,35 @@ function boundedWorksheet(
     return a + ":" + letters + Math.min(OFFICE_PREVIEW_MAX_ROWS, last.line);
   };
   const metadata = (part: string) =>
-    part
-      .replace(
-        /<((?:\w+:)?(?:dimension|mergeCell))\b[^>]*\bref="([^"]*)"[^>]*>(?:\s*<\/\1\s*>)?/g,
-        (tag, _name: string, ref: string) => {
-          const bounded = boundRange(ref);
-          return bounded ? tag.replace('ref="' + ref + '"', 'ref="' + bounded + '"') : "";
-        },
-      )
-      .replace(/<((?:\w+:)?col)\b[^>]*>(?:\s*<\/\1\s*>)?/g, (tag) => {
-        const min = Math.max(1, Number(/\bmin="(\d+)"/.exec(tag)?.[1] ?? 1));
-        const max = Math.min(
-          OFFICE_PREVIEW_MAX_COLUMNS,
-          Number(/\bmax="(\d+)"/.exec(tag)?.[1] ?? 16384),
-        );
-        if (min > max) return "";
-        return tag.replace(/\bmin="\d+"/, `min="${min}"`).replace(/\bmax="\d+"/, `max="${max}"`);
-      });
+    part.replace(
+      /(<((?:\w+:)?(?:dimension|mergeCell|col))\b(?:[^"'<>]|"[^"]*"|'[^']*')*>)(?:\s*<\/\2\s*>)?/g,
+      (tag: string, opening: string) => {
+        const attributes = metadataAttributes.get(opening);
+        if (!attributes) return tag;
+        const replace = (name: string, value: string) => {
+          const pattern = new RegExp(`\\s${name}\\s*=\\s*(?:"[^"]*"|'[^']*')`);
+          tag = pattern.test(tag)
+            ? tag.replace(pattern, ` ${name}="${value}"`)
+            : tag.replace(/\/?>/, (end) => ` ${name}="${value}"${end}`);
+        };
+        if (attributes.ref !== undefined) {
+          const bounded = boundRange(attributes.ref);
+          if (!bounded) return "";
+          replace("ref", bounded);
+        }
+        if (/<(?:\w+:)?col\b/.test(opening)) {
+          const min = Math.max(1, Number(attributes.min ?? 1));
+          const max = Math.min(OFFICE_PREVIEW_MAX_COLUMNS, Number(attributes.max ?? 16384));
+          if (!Number.isInteger(min) || !Number.isInteger(max) || min > max) return "";
+          replace("min", String(min));
+          replace("max", String(max));
+        }
+        return tag;
+      },
+    );
   return {
     xml: emptyData
-      ? xml
+      ? metadata(xml)
       : `${metadata(xml.slice(0, dataStart))}${[...rows]
           .sort(([a], [b]) => a - b)
           .map(
@@ -384,14 +408,17 @@ function boundedWorksheet(
 
 async function boundWorkbook(archive: JSZip) {
   const paths = new Map<string, string>();
+  let sharedPath = "xl/sharedStrings.xml";
   const relationships = xmlParser();
   relationships.on("opentag", (tag) => {
-    if (tag.local !== "Relationship" || !tag.attributes.Type?.value.endsWith("/worksheet")) return;
-    const target = tag.attributes.Target?.value ?? "";
-    paths.set(
-      tag.attributes.Id?.value ?? "",
-      new URL(target, "https://docx.invalid/xl/workbook.xml").pathname.slice(1),
-    );
+    if (tag.local !== "Relationship") return;
+    const type = tag.attributes.Type?.value;
+    const path = new URL(
+      tag.attributes.Target?.value ?? "",
+      "https://docx.invalid/xl/workbook.xml",
+    ).pathname.slice(1);
+    if (type?.endsWith("/worksheet")) paths.set(tag.attributes.Id?.value ?? "", path);
+    if (type?.endsWith("/sharedStrings")) sharedPath = path;
   });
   relationships
     .write((await archive.file("xl/_rels/workbook.xml.rels")?.async("string")) ?? "")
@@ -408,7 +435,7 @@ async function boundWorkbook(archive: JSZip) {
   });
   workbook.write((await archive.file("xl/workbook.xml")?.async("string")) ?? "").close();
   const strings: string[] = [];
-  const shared = await archive.file("xl/sharedStrings.xml")?.async("string");
+  const shared = await archive.file(sharedPath)?.async("string");
   if (shared) {
     const parser = xmlParser();
     let text = "";
