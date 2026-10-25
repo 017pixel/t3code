@@ -45,20 +45,44 @@ const isChildRunLive = (
       thread.status === "running" ||
       thread.status === "waiting";
 
+// Waiting runs have ended their provider turn and are only draining effects.
+const isAgentTurnWorking = (
+  thread: Pick<OrchestrationV2ThreadShell, "activityRunStatus" | "status">,
+) => {
+  const status = thread.activityRunStatus ?? thread.status;
+  return status === "preparing" || status === "starting" || status === "running";
+};
+
 /** Provider-native
     subagents ask on their parent, so they are skipped. */
-function subagentRequest(thread: OrchestrationV2ThreadShell): PendingSubagentRequest | null {
-  const kind = thread.pendingRuntimeRequest?.kind;
+function subagentRequest(
+  thread: OrchestrationV2ThreadShell,
+  byId: ReadonlyMap<ThreadId, OrchestrationV2ThreadShell>,
+): PendingSubagentRequest | null {
+  const request = thread.pendingRuntimeRequest;
   if (
-    kind === undefined ||
-    kind === "auth_refresh" ||
+    request === null ||
+    request.kind === "auth_refresh" ||
     thread.lineage.relationshipToParent !== "subagent" ||
     isProviderNativeSubagentThread(thread) ||
     !isChildRunLive(thread)
   ) {
     return null;
   }
-  return kind === "user_input" ? "user_input" : "approval";
+  if (request.kind !== "user_input") return "approval";
+  if (request.blocking === false && isAgentTurnWorking(thread)) return null;
+  // A running or queued parent turn reads and answers the question itself.
+  // Only a person can enter a secret, and older servers do not mark one.
+  const parentId = thread.lineage.parentThreadId;
+  const parent = parentId === null ? undefined : byId.get(parentId);
+  if (
+    request.secret === false &&
+    parent !== undefined &&
+    (parent.status === "queued" || isAgentTurnWorking(parent))
+  ) {
+    return null;
+  }
+  return "user_input";
 }
 
 export function pendingSubagentRequestsByThread(
@@ -67,9 +91,10 @@ export function pendingSubagentRequestsByThread(
   const requests = new Map<ThreadId, PendingSubagentRequest>();
   let byId: ReadonlyMap<ThreadId, OrchestrationV2ThreadShell> | undefined;
   for (const child of threads) {
-    const request = subagentRequest(child);
-    if (request === null) continue;
+    if (child.pendingRuntimeRequest === null) continue;
     byId ??= new Map(threads.map((thread) => [thread.id, thread] as const));
+    const request = subagentRequest(child, byId);
+    if (request === null) continue;
     const seen = new Set<ThreadId>([child.id]);
     let current: OrchestrationV2ThreadShell | undefined = child;
     while (current?.lineage.relationshipToParent === "subagent") {
@@ -294,6 +319,7 @@ export function createEnvironmentThreadShellAtoms(input: {
         else children.set(parent, [thread]);
       }
       const subagentRequests = get(pendingSubagentRequestsAtom(ref.environmentId));
+      const threadsById = get(environmentThreadIndexAtom(ref.environmentId));
       const seen = new Set<ThreadId>([ref.threadId]);
       const pending = [ref.threadId];
       const next: EnvironmentThreadShell[] = [];
@@ -302,7 +328,7 @@ export function createEnvironmentThreadShellAtoms(input: {
           if (seen.has(child.id)) continue;
           seen.add(child.id);
           pending.push(child.id);
-          if (subagentRequest(child) !== null) {
+          if (subagentRequest(child, threadsById) !== null) {
             next.push(scopedThread(ref.environmentId, child, subagentRequests));
           }
         }

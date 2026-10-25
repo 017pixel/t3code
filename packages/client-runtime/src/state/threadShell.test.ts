@@ -180,6 +180,7 @@ describe("v2 thread shell lists", () => {
           kind: "user_input",
           createdAt: v2Now,
           blocking,
+          secret: false,
         },
       };
       const parent = threads.threadShellAtom({ environmentId, threadId: v2ThreadShell.id });
@@ -201,7 +202,10 @@ describe("v2 thread shell lists", () => {
       );
       expectAsking(false);
 
-      // Only a blocked child needs a person once no parent turn can answer.
+      // Only a blocked child needs a person once no parent turn can answer. A
+      // waiting parent has ended its turn and is only draining checkpoints.
+      setThreads({ ...runningParent, status: "waiting", activityRunStatus: "waiting" }, child);
+      expectAsking(blocking);
       setThreads(
         { ...runningParent, activeRunId: null, status: "completed", activityRunStatus: null },
         child,
@@ -220,6 +224,16 @@ describe("v2 thread shell lists", () => {
       });
       expect(registry.get(parent)?.pendingSubagentRequest).toBe("approval");
       expect(registry.get(inputs).map((thread) => thread.id)).toEqual([child.id]);
+
+      // Only a person can enter a secret, and older servers do not mark one.
+      for (const secret of [true, undefined]) {
+        const { secret: _, ...question } = child.pendingRuntimeRequest!;
+        setThreads(runningParent, {
+          ...child,
+          pendingRuntimeRequest: secret === undefined ? question : { ...question, secret },
+        });
+        expectAsking(blocking);
+      }
       disposeInputs();
       disposeParent();
       registry.dispose();

@@ -3356,6 +3356,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             kind: "user_input",
             createdAt: now,
             blocking,
+            secret: false,
           });
         }
       }
@@ -4418,6 +4419,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       ]) {
         assert.equal(shell?.pendingRuntimeRequest?.id, "secret:b");
         assert.isTrue(shell?.pendingRuntimeRequest?.blocking);
+        assert.isTrue(shell?.pendingRuntimeRequest?.secret);
       }
 
       const requestId = RuntimeRequestId.make(`request:${suffix}:async`);
