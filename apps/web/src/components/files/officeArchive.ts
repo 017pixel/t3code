@@ -175,8 +175,8 @@ function wordDocuments(
   for (const batch of batches) {
     const section = sections.find((section) => section.body || section.end >= batch.end);
     const document = prefix + batch.content + (section?.xml ?? "") + suffix;
-    length += document.length;
-    markup += document.match(/<(?![!?/])/g)?.length ?? 0;
+    length += batch.content.length;
+    markup += batch.content.match(/<(?![!?/])/g)?.length ?? 0;
     if (length > 3 * 1024 * 1024 || markup > 100_000) {
       truncated = true;
       break;
@@ -370,7 +370,7 @@ async function boundWorkbook(archive: JSZip) {
     const target = tag.attributes.Target?.value ?? "";
     paths.set(
       tag.attributes.Id?.value ?? "",
-      target.startsWith("/") ? target.slice(1) : `xl/${target}`,
+      new URL(target, "https://docx.invalid/xl/workbook.xml").pathname.slice(1),
     );
   });
   relationships
@@ -817,8 +817,8 @@ async function wordExpansion(
   }
   for (const [path, cost] of auxiliaryCosts) {
     if (optional.has(path) && !used.has(path)) continue;
-    bytes += cost.bytes * documents.length;
-    markup += cost.markup * documents.length;
+    bytes += cost.bytes;
+    markup += cost.markup;
   }
   const overBudget =
     bytes > 3 * 1024 * 1024 || markup > 100_000 || media > OFFICE_PREVIEW_MAX_BYTES;
@@ -858,7 +858,7 @@ async function wordExpansion(
 
 // Stream each entry before handing it to an engine. A tiny compressed archive
 // must not turn into an unbounded allocation on the UI thread.
-export async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open" }>) {
+async function boundedArchive(input: Extract<OfficeWorkerRequest, { type: "open" }>) {
   const { bytes } = input;
   if (bytes.byteLength > OFFICE_PREVIEW_MAX_BYTES)
     throw new Error("Preview limited to files under 50 MB.");
@@ -998,14 +998,15 @@ export async function boundedArchive(input: Extract<OfficeWorkerRequest, { type:
       archive.remove(path);
       costs.delete(path);
     }
-    let bytes = 0;
-    let markup = 0;
     let mediaBytes = 0;
     const usedImages = new Set<string>();
     const auxiliary = [...costs.values()].reduce(
       (sum, cost) => ({ bytes: sum.bytes + cost.bytes, markup: sum.markup + cost.markup }),
       { bytes: 0, markup: 0 },
     );
+    // The worker engine parses shared parts once, rather than once per legacy render batch.
+    let bytes = auxiliary.bytes;
+    let markup = auxiliary.markup;
     const documents: string[] = [];
     for (const document of word.documents) {
       const rawCost = wordXmlCost(document, undefined);
@@ -1014,13 +1015,13 @@ export async function boundedArchive(input: Extract<OfficeWorkerRequest, { type:
       const images = extra.media;
       const batchImages = new Set(extra.images);
       if (
-        bytes + cost.bytes + auxiliary.bytes > 3 * 1024 * 1024 ||
-        markup + cost.markup + auxiliary.markup > 100_000 ||
+        bytes + cost.bytes > 3 * 1024 * 1024 ||
+        markup + cost.markup > 100_000 ||
         mediaBytes + images > OFFICE_PREVIEW_MAX_BYTES
       )
         break;
-      bytes += cost.bytes + auxiliary.bytes;
-      markup += cost.markup + auxiliary.markup;
+      bytes += cost.bytes;
+      markup += cost.markup;
       mediaBytes += images;
       for (const path of batchImages) usedImages.add(path);
       documents.push(document);

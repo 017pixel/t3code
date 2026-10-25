@@ -21,59 +21,60 @@ import { OfficeFilePreview } from "./OfficeFilePreview";
 import { MermaidFilePreview } from "./MermaidFilePreview";
 import type { OfficeWorkerResult } from "./officePreviewProtocol";
 
-it.each(["", "x:"])(
-  "preserves %sworksheet namespaces, inferred row metadata, and retained column ranges",
-  async (prefix) => {
-    const { default: JSZip } = await import("jszip");
-    const archive = new JSZip();
-    const ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
-    archive.file(
-      "xl/workbook.xml",
-      '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet" sheetId="1" r:id="s"/></sheets></workbook>',
-    );
-    archive.file(
-      "xl/_rels/workbook.xml.rels",
-      '<Relationships><Relationship Id="s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
-    );
-    archive.file(
-      "xl/worksheets/sheet1.xml",
-      `<${prefix}worksheet xmlns${prefix ? ":x" : ""}="${ns}"><${prefix}cols><${prefix}col min="49" max="60" width="20"/><${prefix}col min="51" max="80" hidden="1"/></${prefix}cols><${prefix}sheetData><${prefix}row ht="42" customHeight="1" hidden="1"><${prefix}c r="A50" t="inlineStr"><${prefix}is><${prefix}t>${"value".repeat(1000)}</${prefix}t></${prefix}is></${prefix}c></${prefix}row></${prefix}sheetData></${prefix}worksheet>`,
-    );
-    const bytes = await archive.generateAsync({ type: "arraybuffer" });
-    const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
-      type: "module",
-    });
-    try {
-      const result = await new Promise<OfficeWorkerResult>((resolve) => {
-        worker.addEventListener(
-          "message",
-          (event: MessageEvent<OfficeWorkerResult>) => resolve(event.data),
-          { once: true },
-        );
-        worker.postMessage({ type: "open", kind: "xlsx", bytes }, [bytes]);
-      });
-      expect(result.type).toBe("xlsx");
-      if (result.type !== "xlsx") throw new Error("Expected bounded workbook");
-      const bounded = await JSZip.loadAsync(result.bytes);
-      const sheet = new DOMParser().parseFromString(
-        await bounded.file("xl/worksheets/sheet1.xml")!.async("string"),
-        "application/xml",
+it.each([
+  ["", "worksheets/./sheet1.xml"],
+  ["x:", "../xl/worksheets/sheet1.xml"],
+  ["", "/xl/worksheets/sheet1.xml"],
+])("preserves %sworksheet metadata with relationship target %s", async (prefix, target) => {
+  const { default: JSZip } = await import("jszip");
+  const archive = new JSZip();
+  const ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+  archive.file(
+    "xl/workbook.xml",
+    '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet" sheetId="1" r:id="s"/></sheets></workbook>',
+  );
+  archive.file(
+    "xl/_rels/workbook.xml.rels",
+    `<Relationships><Relationship Id="s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="${target}"/></Relationships>`,
+  );
+  archive.file(
+    "xl/worksheets/sheet1.xml",
+    `<${prefix}worksheet xmlns${prefix ? ":x" : ""}="${ns}"><${prefix}cols><${prefix}col min="49" max="60" width="20"/><${prefix}col min="51" max="80" hidden="1"/></${prefix}cols><${prefix}sheetData><${prefix}row ht="42" customHeight="1" hidden="1"><${prefix}c r="A50" t="inlineStr"><${prefix}is><${prefix}t>${"value".repeat(1000)}</${prefix}t></${prefix}is></${prefix}c></${prefix}row></${prefix}sheetData></${prefix}worksheet>`,
+  );
+  const bytes = await archive.generateAsync({ type: "arraybuffer" });
+  const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
+    type: "module",
+  });
+  try {
+    const result = await new Promise<OfficeWorkerResult>((resolve) => {
+      worker.addEventListener(
+        "message",
+        (event: MessageEvent<OfficeWorkerResult>) => resolve(event.data),
+        { once: true },
       );
-      expect(sheet.querySelector("parsererror")).toBeNull();
-      const row = sheet.getElementsByTagNameNS(ns, "row")[0]!;
-      expect(row.getAttribute("ht")).toBe("42");
-      expect(row.getAttribute("hidden")).toBe("1");
-      expect(row.getElementsByTagNameNS(ns, "c")[0]!.getAttribute("r")).toBe("A50");
-      expect(row.getElementsByTagNameNS(ns, "t")[0]!.textContent).toHaveLength(4096);
-      const columns = sheet.getElementsByTagNameNS(ns, "col");
-      expect(columns).toHaveLength(1);
-      expect(columns[0]!.getAttribute("min")).toBe("49");
-      expect(columns[0]!.getAttribute("max")).toBe("50");
-    } finally {
-      worker.terminate();
-    }
-  },
-);
+      worker.postMessage({ type: "open", kind: "xlsx", bytes }, [bytes]);
+    });
+    expect(result.type).toBe("xlsx");
+    if (result.type !== "xlsx") throw new Error("Expected bounded workbook");
+    const bounded = await JSZip.loadAsync(result.bytes);
+    const sheet = new DOMParser().parseFromString(
+      await bounded.file("xl/worksheets/sheet1.xml")!.async("string"),
+      "application/xml",
+    );
+    expect(sheet.querySelector("parsererror")).toBeNull();
+    const row = sheet.getElementsByTagNameNS(ns, "row")[0]!;
+    expect(row.getAttribute("ht")).toBe("42");
+    expect(row.getAttribute("hidden")).toBe("1");
+    expect(row.getElementsByTagNameNS(ns, "c")[0]!.getAttribute("r")).toBe("A50");
+    expect(row.getElementsByTagNameNS(ns, "t")[0]!.textContent).toHaveLength(4096);
+    const columns = sheet.getElementsByTagNameNS(ns, "col");
+    expect(columns).toHaveLength(1);
+    expect(columns[0]!.getAttribute("min")).toBe("49");
+    expect(columns[0]!.getAttribute("max")).toBe("50");
+  } finally {
+    worker.terminate();
+  }
+});
 
 it("reports the final slide at maximum scroll after page visibility changes", async () => {
   const { OfficePages } = await import("./office/OfficePages");
@@ -578,45 +579,48 @@ it("bounds shared-string text per cell and across sheets in the worker and viewe
   }
 });
 
-it("bounds auxiliary XML together with the retained Word body", async () => {
-  const { default: JSZip } = await import("jszip");
-  const archive = new JSZip();
-  const ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-  archive.file(
-    "word/document.xml",
-    `<w:document xmlns:w="${ns}"><w:body>${"<w:p><w:r><w:t>body</w:t></w:r></w:p>".repeat(5_000)}</w:body></w:document>`,
-  );
-  archive.file(
-    "word/_rels/document.xml.rels",
-    '<Relationships><Relationship Id="settings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>',
-  );
-  const settings = `<w:settings xmlns:w="${ns}"><w:unused>${"s".repeat(120_000)}</w:unused></w:settings>`;
-  archive.file("word/settings.xml", settings);
-  const bytes = await archive.generateAsync({ type: "arraybuffer" });
-  const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
-    type: "module",
-  });
-  try {
-    const result = await new Promise<OfficeWorkerResult>((resolve) => {
-      worker.addEventListener(
-        "message",
-        (event: MessageEvent<OfficeWorkerResult>) => resolve(event.data),
-        { once: true },
-      );
-      worker.postMessage({ type: "open", kind: "docx", bytes }, [bytes]);
+it.each([1, 145])(
+  "counts shared Word settings once with %s text repetitions",
+  async (repetitions) => {
+    const { default: JSZip } = await import("jszip");
+    const archive = new JSZip();
+    const ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    archive.file(
+      "word/document.xml",
+      `<w:document xmlns:w="${ns}"><w:body>${`<w:p><w:r><w:t>${"body".repeat(repetitions)}</w:t></w:r></w:p>`.repeat(5_000)}</w:body></w:document>`,
+    );
+    archive.file(
+      "word/_rels/document.xml.rels",
+      '<Relationships><Relationship Id="settings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>',
+    );
+    const settings = `<w:settings xmlns:w="${ns}"><w:unused>${"s".repeat(120_000)}</w:unused></w:settings>`;
+    archive.file("word/settings.xml", settings);
+    const bytes = await archive.generateAsync({ type: "arraybuffer" });
+    const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
+      type: "module",
     });
-    expect(result.type).toBe("docx");
-    if (result.type !== "docx") throw new Error("Expected a Word prefix");
-    expect(result.truncated).toBe(true);
-    const bounded = await JSZip.loadAsync(result.bytes);
-    const document = await bounded.file("word/document.xml")!.async("string");
-    const retainedSettings = await bounded.file("word/settings.xml")!.async("string");
-    expect(document.match(/<w:p>/g)!.length).toBeGreaterThan(100);
-    expect(document.length + retainedSettings.length).toBeLessThanOrEqual(3 * 1024 * 1024);
-  } finally {
-    worker.terminate();
-  }
-});
+    try {
+      const result = await new Promise<OfficeWorkerResult>((resolve) => {
+        worker.addEventListener(
+          "message",
+          (event: MessageEvent<OfficeWorkerResult>) => resolve(event.data),
+          { once: true },
+        );
+        worker.postMessage({ type: "open", kind: "docx", bytes }, [bytes]);
+      });
+      expect(result.type).toBe("docx");
+      if (result.type !== "docx") throw new Error("Expected a Word prefix");
+      expect(result.truncated).toBe(repetitions > 1);
+      const bounded = await JSZip.loadAsync(result.bytes);
+      const document = await bounded.file("word/document.xml")!.async("string");
+      const retainedSettings = await bounded.file("word/settings.xml")!.async("string");
+      expect(document.match(/<w:p>/g)!.length).toBeGreaterThan(100);
+      expect(document.length + retainedSettings.length).toBeLessThanOrEqual(3 * 1024 * 1024);
+    } finally {
+      worker.terminate();
+    }
+  },
+);
 
 it.each(["repeated binary", "XML relationship alias", "duplicate relationship ID"])(
   "bounds Word image expansion for %s",

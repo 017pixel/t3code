@@ -189,7 +189,7 @@ type Entry = {
  * picture as base64, which for a deck of photos costs tens of megabytes of engine memory the worker never gives back.
  * Entries keep their compressed bytes. A package this cannot read, such as a ZIP64 one, stays as it is.
  */
-export function withoutMedia(bytes: Uint8Array): Uint8Array {
+function withoutMedia(bytes: Uint8Array): Uint8Array {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const end = endOfDirectory(view);
 

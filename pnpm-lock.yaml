@@ -102,6 +102,9 @@ catalogs:
 
 overrides:
   expo-modules-core: 58.0.22
+  expo-network: 58.0.3
+  node-pty: 1.2.0-beta.15
+  '@expo/fingerprint': 0.21.5
   '@exodus/bytes>@noble/hashes': 1.8.0
   '@react-navigation/core': 7.24.0
   dbus-next>usocket: '-'
@@ -515,7 +518,7 @@ importers:
         specifier: ~58.0.13
         version: 58.0.13(expo@58.0.14)(react-native@0.88.0(@babel/core@7.29.7)(@react-native/metro-config@0.88.0(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)(typescript@7.0.2)
       expo-network:
-        specifier: ~58.0.3
+        specifier: 58.0.3
         version: 58.0.3(patch_hash=cd09b6d1744dde4efa081b5619ebcff38877d98f7502a51cab121629dece8237)(expo@58.0.14)(react@19.3.0)
       expo-notifications:
         specifier: ~58.1.5
@@ -738,7 +741,7 @@ importers:
         specifier: 'catalog:'
         version: 6.2.2
       node-pty:
-        specifier: ^1.2.0-beta.15
+        specifier: 1.2.0-beta.15
         version: 1.2.0-beta.15(patch_hash=f1e680afec85f650699ea756f91f469844ec4c976f4f168492a45c6b3f67d651)
       playwright-core:
         specifier: 1.60.0
