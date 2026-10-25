@@ -1,13 +1,13 @@
-import type { ResolvedKeybindingsConfig, ScopedThreadRef } from "@t3tools/contracts";
+import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { AnyRouter } from "@tanstack/react-router";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { act, render } from "../../test/render";
+import { act } from "../../test/render";
 
 const state = vi.hoisted(() => ({
-  keybindings: [] as ResolvedKeybindingsConfig,
   params: {} as Record<string, string>,
   workspaceAvailable: true,
   navigate: vi.fn(),
@@ -16,29 +16,15 @@ const state = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock(import("./preview/openPreviewSession"), async (original) => ({
-  ...(await original()),
-  openPreviewSession: state.openPreview,
+// No original spread: it pulls in settings and the theme library, which import the mocked
+// server state while its factory is still resolving.
+vi.mock(import("./preview/openPreviewSession"), () => ({
+  openPreviewSession: state.openPreview as never,
 }));
-vi.mock(import("@effect/atom-react"), async (original) => ({
-  ...(await original()),
-  useAtomValue: (() => state.keybindings) as never,
-}));
-vi.mock(import("@tanstack/react-router"), async (original) => ({
-  ...(await original()),
-  useNavigate: (() => state.navigate) as never,
-  useParams: (() => state.params) as never,
-}));
-vi.mock(import("../state/use-atom-command"), async (original) => ({
-  ...(await original()),
-  useAtomCommand: ((command: unknown) => command) as never,
-}));
-vi.mock(import("../state/preview"), async (original) => {
+vi.mock(import("../state/server"), async (original) => {
   const actual = await original();
-  return {
-    ...actual,
-    previewEnvironment: { ...actual.previewEnvironment, open: state.openPreview as never },
-  };
+  const { Atom } = await import("effect/reactivity");
+  return { ...actual, primaryServerKeybindingsAtom: Atom.make(DEFAULT_RESOLVED_KEYBINDINGS) };
 });
 vi.mock(import("../connection/catalog"), async (original) => {
   const actual = await original();
@@ -74,7 +60,8 @@ vi.mock(import("./ui/toast"), async (original) => {
 import { useClosedViewStore } from "../closedViewStore";
 import { selectThreadRightPanelState, useRightPanelStore } from "../rightPanelStore";
 import { useTerminalUiStateStore } from "../terminalUiStateStore";
-import { ReopenClosedViewShortcut } from "./ReopenClosedViewShortcut";
+import { dispatchMenuAction } from "../shortcuts/dispatcher";
+import { installReopenClosedViewCommands } from "./ReopenClosedViewShortcut";
 
 const ref = { environmentId: "remote", threadId: "thread-1" } as ScopedThreadRef;
 const snapshot = {
@@ -85,12 +72,9 @@ const snapshot = {
   canGoForward: false,
   updatedAt: "2026-09-22T12:00:00.000Z",
 } as const;
-let menuAction: ((action: string) => void) | undefined;
-
 function setup() {
   vi.clearAllMocks();
   Object.assign(state, {
-    keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
     params: {},
     workspaceAvailable: true,
   });
@@ -104,22 +88,28 @@ function setup() {
   });
 }
 
-async function renderShortcut() {
+const menuAction = (action: string) => dispatchMenuAction(action);
+
+async function installShortcut() {
   await using stack = new AsyncDisposableStack();
   stack.use(vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux x86_64"));
   window.desktopBridge = {
     preview: { setForwardedShortcuts: state.setShortcuts },
-    onMenuAction: (listener: (action: string) => void) => {
-      menuAction = listener;
-      return () => {
-        menuAction = undefined;
-      };
-    },
+    onMenuAction: () => () => {},
   } as unknown as NonNullable<typeof window.desktopBridge>;
   stack.defer(() => {
     delete window.desktopBridge;
   });
-  stack.use(await render(<ReopenClosedViewShortcut />));
+  const router = {
+    state: {
+      get matches() {
+        return [{ params: state.params }];
+      },
+    },
+    navigate: state.navigate,
+    subscribe: () => () => {},
+  } as unknown as AnyRouter;
+  stack.defer(installReopenClosedViewCommands(router));
   const environment = stack.move();
   return {
     /** Attaches an element to the document until the test ends. */
@@ -157,7 +147,7 @@ describe("root reopen shortcut", () => {
         finish = resolve;
       }),
     );
-    await using _view = await renderShortcut();
+    await using _view = await installShortcut();
     await act(() => {
       press();
       press();
@@ -182,7 +172,7 @@ describe("root reopen shortcut", () => {
     store.remember({ kind: "browser", threadRef: ref, snapshot });
     state.openPreview.mockResolvedValue(AsyncResult.success({ tabId: "new-tab" }));
     state.navigate.mockRejectedValueOnce(new Error("navigation failed"));
-    await using _view = await renderShortcut();
+    await using _view = await installShortcut();
     await act(() => {
       press();
     });
@@ -194,9 +184,33 @@ describe("root reopen shortcut", () => {
     );
     expect(useClosedViewStore.getState().entries.map((entry) => entry.id)).toEqual([older]);
     await act(() => {
-      menuAction?.("view.reopenClosed");
+      menuAction("view.reopenClosed");
     });
     expect(state.openPreview).toHaveBeenCalledOnce();
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, ref).activeSurfaceId,
+    ).toBe("diff");
+    expect(useClosedViewStore.getState().entries).toEqual([]);
+  });
+
+  it("reopens from a focused widget that consumes the chord itself", async () => {
+    setup();
+    useClosedViewStore
+      .getState()
+      .remember({ kind: "panel-tab", threadRef: ref, surface: { kind: "diff", id: "diff" } });
+    await using view = await installShortcut();
+    // Stands in for the terminal surface, which encodes Ctrl+Shift+T and stops propagation.
+    const terminalInput = view.append(document.createElement("textarea"));
+    const terminalReceived = vi.fn();
+    terminalInput.addEventListener("keydown", (event) => {
+      terminalReceived();
+      event.stopPropagation();
+    });
+    terminalInput.focus();
+    await act(() => {
+      press(terminalInput);
+    });
+    expect(terminalReceived).not.toHaveBeenCalled();
     expect(
       selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, ref).activeSurfaceId,
     ).toBe("diff");
@@ -233,7 +247,7 @@ describe("root reopen shortcut", () => {
       );
       state.workspaceAvailable = false;
       state.openPreview.mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("offline"))));
-      await using _view = await renderShortcut();
+      await using _view = await installShortcut();
       await act(() => {
         press();
       });
@@ -243,7 +257,7 @@ describe("root reopen shortcut", () => {
       ]);
       expect(state.navigate).not.toHaveBeenCalled();
       await act(() => {
-        menuAction?.("view.reopenClosed");
+        menuAction("view.reopenClosed");
       });
       expect(
         selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, ref).activeSurfaceId,

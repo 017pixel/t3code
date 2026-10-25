@@ -1,23 +1,15 @@
 import { RefreshIcon } from "~/components/ui/refresh-icon";
-import { scopeProjectRef } from "@t3tools/client-runtime/environment";
-import { createFileRoute, useRouter } from "@tanstack/react-router";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { createFileRoute } from "@tanstack/react-router";
 
 import { isElectron } from "../env";
 import { NoProjectsHero } from "../components/NoProjectsHero";
-import { sortScopedProjectsForSidebar } from "../components/Sidebar.logic";
 import { Button } from "../components/ui/button";
 import { HostedEmptyState } from "../components/HostedEmptyState";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/ui/empty";
 import { SidebarInset } from "../components/ui/sidebar";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
-import { useNewThreadHandler } from "../hooks/useHandleNewThread";
-import {
-  readProject,
-  useAllEnvironmentShellsBootstrapped,
-  useProjects,
-  useThreadShells,
-} from "../state/entities";
+import { retryIndexDraftStart, useIndexDraftStartFailed } from "../components/indexDraftStart";
+import { useAllEnvironmentShellsBootstrapped, useProjects } from "../state/entities";
 import { useEnvironments } from "../state/environments";
 
 function ChatIndexRouteView() {
@@ -34,51 +26,12 @@ function ChatIndexRouteView() {
 
 function IndexDraftLanding() {
   const projects = useProjects();
-  const threads = useThreadShells();
   const bootstrapped = useAllEnvironmentShellsBootstrapped();
-  const handleNewThread = useNewThreadHandler();
-  const router = useRouter();
-  // Read at effect time; this page can stay mounted while the router is already navigating away.
-  const isStillOnIndex = useEffectEvent(() => router.state.location.pathname === "/");
-  const startedAttemptRef = useRef<number | null>(null);
-  const [startState, setStartState] = useState({ failed: false, retryRequest: 0 });
+  const failed = useIndexDraftStartFailed();
 
-  const mostRecentProject =
-    sortScopedProjectsForSidebar(projects, threads, "updated_at")[0] ?? null;
-  const attempt = startState.retryRequest;
-
-  useEffect(() => {
-    // Starting a draft after the user has left would replace the page they picked.
-    if (mostRecentProject === null || startedAttemptRef.current === attempt || !isStillOnIndex()) {
-      return;
-    }
-    const projectRef = scopeProjectRef(mostRecentProject.environmentId, mostRecentProject.id);
-    if (readProject(projectRef) === null) {
-      return;
-    }
-    startedAttemptRef.current = attempt;
-    void handleNewThread(projectRef, { replace: true })
-      .then((opened) => {
-        if (opened === null) {
-          setStartState((state) => ({ ...state, retryRequest: state.retryRequest + 1 }));
-        }
-      })
-      .catch(() => {
-        setStartState((state) => ({ ...state, failed: true }));
-      });
-  }, [attempt, handleNewThread, mostRecentProject]);
-
-  if (mostRecentProject !== null) {
-    return startState.failed ? (
-      <DraftStartError
-        onRetry={() => {
-          setStartState((state) => ({
-            failed: false,
-            retryRequest: state.retryRequest + 1,
-          }));
-        }}
-      />
-    ) : null;
+  // startIndexDraftStart opens the draft; this page only covers the moment before it lands.
+  if (projects.length > 0) {
+    return failed ? <DraftStartError onRetry={retryIndexDraftStart} /> : null;
   }
   // A pending environment cannot prove the workspace is empty.
   return bootstrapped ? <NoProjectsHero /> : null;

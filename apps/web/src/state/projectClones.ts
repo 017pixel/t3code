@@ -36,12 +36,6 @@ export function useProjectClone(ref: ScopedProjectRef | null): ProjectCloneSnaps
   return useAtomValue(ref === null ? EMPTY_CLONE_ATOM : projectCloneAtom(scopedProjectKey(ref)));
 }
 
-export function useEnvironmentProjectClones(
-  environmentId: EnvironmentId,
-): ReadonlyArray<ProjectCloneSnapshot> {
-  return useAtomValue(environmentProjectClonesAtom(environmentId));
-}
-
 const silencedCloneToasts = new Set<string>();
 
 /**

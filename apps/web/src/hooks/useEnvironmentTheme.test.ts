@@ -1,11 +1,23 @@
+import type { EnvironmentTheme } from "@t3tools/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { environmentThemeDefinition, publishedThemeDefinitions } from "./useEnvironmentTheme";
+const publishedThemes = vi.hoisted(() => ({
+  atom: null as unknown as import("effect/reactivity").Atom.Writable<
+    ReadonlyArray<EnvironmentTheme>
+  >,
+}));
+vi.mock(import("../state/server"), async () => {
+  const { Atom } = await import("effect/reactivity");
+  publishedThemes.atom = Atom.make<ReadonlyArray<EnvironmentTheme>>([]);
+  return { primaryServerEnvironmentThemesAtom: publishedThemes.atom } as never;
+});
+
+import { appAtomRegistry } from "../rpc/atomRegistry";
 import {
   getThemeDefinition,
   installCustomTheme,
   invalidateCustomThemes,
-  setEnvironmentThemes,
+  publishedThemeDefinitions,
 } from "../themePalette";
 
 const NIGHTFALL_THEME = {
@@ -17,7 +29,7 @@ const NIGHTFALL_THEME = {
 } as const;
 
 afterEach(() => {
-  setEnvironmentThemes([]);
+  appAtomRegistry.set(publishedThemes.atom, []);
 });
 
 describe("environment themes", () => {
@@ -85,8 +97,10 @@ describe("environment themes", () => {
     });
     invalidateCustomThemes();
     try {
-      const environment = environmentThemeDefinition(NIGHTFALL_THEME);
-      setEnvironmentThemes([environment]);
+      appAtomRegistry.set(publishedThemes.atom, [NIGHTFALL_THEME]);
+      expect(getThemeDefinition("nightfall")?.label).toBe("Nightfall");
+      const environment = getThemeDefinition("nightfall");
+      if (!environment) throw new Error("expected the published theme");
       installCustomTheme({ ...environment, label: "My Nightfall" });
 
       expect(getThemeDefinition("nightfall")?.label).toBe("My Nightfall");

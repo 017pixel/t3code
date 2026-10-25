@@ -1,46 +1,55 @@
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { DesktopAppActivationRequest } from "@t3tools/contracts";
-import { useEffect, useEffectEvent, useRef } from "react";
+import { Atom } from "effect/reactivity";
 
 import { handleDesktopAppActivationRequest } from "../../desktopAppActivation";
-import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
+import { createNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { findProjectByPath, inferProjectTitleFromPath } from "../../lib/projectPaths";
 import { newProjectId } from "../../lib/utils";
+import type { AppRouter } from "../../router";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { readProjects, waitForProject } from "../../state/entities";
-import { usePrimaryEnvironment } from "../../state/environments";
+import { environmentPresentations } from "../../state/presentation";
+import { primaryEnvironmentIdAtom } from "../../state/primaryEnvironment";
 import { projectEnvironment } from "../../state/projects";
-import { useEnvironmentShellHasSnapshot } from "../../state/shell";
-import { useAtomCommand } from "../../state/use-atom-command";
+import { environmentShell } from "../../state/shell";
+import { whileFirstRunAppOpen } from "../onboarding/firstRunGateStore";
 
-export function DesktopAppActivationCoordinator() {
-  const primaryEnvironment = usePrimaryEnvironment();
-  const createProject = useAtomCommand(projectEnvironment.create, { reportFailure: false });
-  const openThread = useNewThreadHandler();
-  const queueRef = useRef(Promise.resolve());
-  const activation = window.desktopBridge?.appActivation;
-  const shellHasSnapshot = useEnvironmentShellHasSnapshot(
-    primaryEnvironment?.environmentId ?? null,
+const primaryActivationReadyAtom = Atom.make((get) => {
+  const environmentId = get(primaryEnvironmentIdAtom);
+  if (environmentId === null) return false;
+  const presentation = get(environmentPresentations.presentationAtom(environmentId));
+  return (
+    presentation?.connection.phase === "connected" &&
+    presentation.serverConfig !== null &&
+    get(environmentShell.hasSnapshotAtom(environmentId))
   );
-  const ready =
-    activation !== undefined &&
-    primaryEnvironment?.connection.phase === "connected" &&
-    primaryEnvironment.serverConfig !== null &&
-    shellHasSnapshot;
+}).pipe(Atom.withLabel("web-desktop-app-activation-ready"));
 
-  const processRequest = useEffectEvent(async (request: DesktopAppActivationRequest) =>
+function readActivationTarget() {
+  const environmentId = appAtomRegistry.get(primaryEnvironmentIdAtom);
+  if (environmentId === null) return null;
+  const presentation = appAtomRegistry.get(
+    environmentPresentations.presentationAtom(environmentId),
+  );
+  if (presentation?.connection.phase !== "connected" || presentation.serverConfig === null) {
+    return null;
+  }
+  return { environmentId, platform: presentation.serverConfig.environment.platform.os };
+}
+
+/**
+ * Answers the desktop shell's "open this folder" requests while the primary environment can
+ * take them, and tells the shell when it can.
+ */
+export function startDesktopAppActivation(router: AppRouter): () => void {
+  const activation = window.desktopBridge?.appActivation;
+  if (activation === undefined) return () => {};
+  const openThread = createNewThreadHandler(router);
+
+  const processRequest = (request: DesktopAppActivationRequest) =>
     handleDesktopAppActivationRequest(request, {
-      getTarget: () => {
-        if (
-          primaryEnvironment?.connection.phase !== "connected" ||
-          primaryEnvironment.serverConfig === null
-        ) {
-          return null;
-        }
-        return {
-          environmentId: primaryEnvironment.environmentId,
-          platform: primaryEnvironment.serverConfig.environment.platform.os,
-        };
-      },
+      getTarget: readActivationTarget,
       findProject: (environmentId, workspaceRoot) =>
         findProjectByPath(
           readProjects().filter((project) => project.environmentId === environmentId),
@@ -48,16 +57,22 @@ export function DesktopAppActivationCoordinator() {
         ) ?? null,
       createProject: async (environmentId, workspaceRoot) => {
         const projectId = newProjectId();
-        const result = await createProject({
-          environmentId,
-          input: {
-            projectId,
-            title: inferProjectTitleFromPath(workspaceRoot),
-            workspaceRoot,
-            createWorkspaceRootIfMissing: false,
-            defaultModelSelection: null,
+        const command = projectEnvironment.create;
+        const result = await runAtomCommand(
+          appAtomRegistry,
+          command,
+          {
+            environmentId,
+            input: {
+              projectId,
+              title: inferProjectTitleFromPath(workspaceRoot),
+              workspaceRoot,
+              createWorkspaceRootIfMissing: false,
+              defaultModelSelection: null,
+            },
           },
-        });
+          { label: command.label, reportFailure: false, reportDefect: true },
+        );
         if (result._tag === "Failure") {
           const error = squashAtomCommandFailure(result);
           throw error instanceof Error ? error : new Error("T3 Code could not add the project.");
@@ -68,30 +83,24 @@ export function DesktopAppActivationCoordinator() {
         await waitForProject(projectRef);
       },
       openThread: (projectRef) => openThread(projectRef),
-    }),
-  );
+    });
 
-  useEffect(() => {
-    if (!ready || activation === undefined) return;
-
-    let subscribed = true;
+  // One queue for the service's life: a request still in flight when readiness drops
+  // finishes before the next one starts.
+  let queue = Promise.resolve();
+  return whileFirstRunAppOpen(() => {
     const unsubscribe = activation.onRequest((request) => {
-      queueRef.current = queueRef.current.then(async () => {
-        const response = await processRequest(request);
-        await activation.complete(response);
-      });
-      queueRef.current = queueRef.current.catch(() => undefined);
+      queue = queue
+        .then(async () => {
+          const response = await processRequest(request);
+          await activation.complete(response);
+        })
+        .catch(() => undefined);
     });
-    // Skip readiness if React runs cleanup before this subscription can receive requests.
-    queueMicrotask(() => {
-      if (subscribed) void activation.setReady(true).catch(() => undefined);
-    });
+    void activation.setReady(true).catch(() => undefined);
     return () => {
-      subscribed = false;
       void activation.setReady(false).catch(() => undefined);
       unsubscribe();
     };
-  }, [activation, ready]);
-
-  return null;
+  }, primaryActivationReadyAtom);
 }

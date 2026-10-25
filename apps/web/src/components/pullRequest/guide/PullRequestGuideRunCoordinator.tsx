@@ -1,4 +1,4 @@
-import { useRouter, type AnyRouter } from "@tanstack/react-router";
+import type { AnyRouter } from "@tanstack/react-router";
 import type { PullRequestReviewGuideResult } from "@t3tools/contracts";
 import { CircleAlertIcon, CircleCheckIcon } from "lucide-react";
 import * as Option from "effect/Option";
@@ -12,9 +12,6 @@ import {
   playNotificationSound,
 } from "~/threadNotifications";
 
-import { useEffect } from "react";
-
-import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { toastManager } from "../../ui/toast";
 import { readPullRequestListPreferences } from "../pullRequestListPreferences";
 import { useGuideRunStore, type GuideRunWatch } from "./guideRunStore";
@@ -176,14 +173,4 @@ function watchGuideRun(
     clearInterval(timer);
     unsubscribe();
   };
-}
-
-/**
- * Compat shim: the base root route still mounts this until the web-chat-view
- * layer starts the notifications from appInit.
- */
-export function PullRequestGuideRunCoordinator() {
-  const router = useRouter();
-  useEffect(() => startGuideRunNotifications(appAtomRegistry, router), [router]);
-  return null;
 }

@@ -744,7 +744,3 @@ export function __setClientSettingsForTests(settings: ClientSettings): void {
   clientSettingsHydrationStatus = "ready";
   clientSettingsHydrationPromise = null;
 }
-
-// Compat shim: appInit starts this from the app-bootstrap layer. Until then the
-// settings module starts it so model-preference migration keeps running.
-startModelPreferencesMigration();

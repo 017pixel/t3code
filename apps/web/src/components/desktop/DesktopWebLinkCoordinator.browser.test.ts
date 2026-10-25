@@ -2,7 +2,7 @@ import { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import type { Atom } from "effect/reactivity";
 import { expect, it, vi } from "vite-plus/test";
 
-import { act, render, stubGlobal } from "../../../test/render";
+import { stubGlobal } from "../../../test/render";
 
 const state = vi.hoisted(() => ({
   projects: [] as never[],
@@ -10,22 +10,20 @@ const state = vi.hoisted(() => ({
   openScratchProject: vi.fn(async () => null),
 }));
 
-// One connected primary environment that can read pull requests. Its project list and
-// discovery flag start empty so a test can deliver links before they arrive.
-vi.mock(import("@tanstack/react-router"), async (original) => ({
+// One connected primary environment that can read pull requests, with the app past the
+// first-run gate. Its project list and discovery flag start empty so a test can deliver
+// links before they arrive.
+vi.mock(import("../onboarding/firstRunGateStore"), async (original) => ({
   ...(await original()),
-  useNavigate: (() => state.navigate) as never,
-  useRouter: (() => ({ navigate: state.navigate, state: { matches: [] } })) as never,
+  whileFirstRunAppOpen: (start: () => () => void) => start(),
 }));
-vi.mock(import("../../state/environments"), async (original) => ({
-  ...(await original()),
-  usePrimaryEnvironmentId: () => "local" as EnvironmentId,
-  usePrimaryEnvironment: (() => ({
-    environmentId: "local",
-    connection: { phase: "connected" },
-    serverConfig: {},
-  })) as never,
-}));
+vi.mock(import("../../state/primaryEnvironment"), async (original) => {
+  const { Atom } = await import("effect/reactivity");
+  return {
+    ...(await original()),
+    primaryEnvironmentIdAtom: Atom.make<EnvironmentId | null>(EnvironmentId.make("local")),
+  };
+});
 vi.mock(import("../../state/server"), async (original) => {
   const { Atom } = await import("effect/reactivity");
   const capabilities = { pullRequests: true, threadPullRequests: true };
@@ -46,15 +44,16 @@ vi.mock(import("../../state/entities"), async (original) => ({
 }));
 vi.mock(import("../../hooks/useScratchProject"), async (original) => ({
   ...(await original()),
-  useScratchProject: (() => ({
+  createRouterScratchProject: (() => ({
     scratchEnvironmentId: () => "local",
     openScratchProject: state.openScratchProject,
   })) as never,
 }));
 
-import { AppAtomRegistryProvider, appAtomRegistry } from "../../rpc/atomRegistry";
+import type { AppRouter } from "../../router";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { allReachableShellsLiveAtom } from "../../state/shell";
-import { DesktopWebLinkCoordinator } from "./DesktopWebLinkCoordinator";
+import { startDesktopWebLinks } from "./DesktopWebLinkCoordinator";
 
 const discoverySettled = allReachableShellsLiveAtom as Atom.Writable<boolean>;
 const environmentId = EnvironmentId.make("local");
@@ -93,7 +92,7 @@ function setup() {
   appAtomRegistry.set(discoverySettled, false);
 }
 
-/** Mounts the coordinator behind a desktop bridge that hands over `urls` once the renderer is ready. */
+/** Starts the service behind a desktop bridge that hands over `urls` once the renderer is ready. */
 async function mount(...urls: string[]) {
   let deliver: ((url: string) => void) | undefined;
   await using stack = new AsyncDisposableStack();
@@ -111,13 +110,10 @@ async function mount(...urls: string[]) {
       },
     }),
   );
-  stack.use(
-    await render(
-      <AppAtomRegistryProvider>
-        <DesktopWebLinkCoordinator />
-      </AppAtomRegistryProvider>,
-    ),
-  );
+  const router = { navigate: state.navigate, state: { matches: [] } } as unknown as AppRouter;
+  // The app keeps discovery mounted; without a subscriber a write to it would not stick.
+  stack.defer(appAtomRegistry.mount(discoverySettled));
+  stack.defer(startDesktopWebLinks(router));
   return stack.move();
 }
 
@@ -131,10 +127,8 @@ it("holds a launch PR link until project discovery settles, then opens the PR vi
   const navigated = new Promise<void>((resolve) => {
     state.navigate.mockImplementationOnce(async () => resolve());
   });
-  await act(async () => {
-    appAtomRegistry.set(discoverySettled, true);
-    await navigated;
-  });
+  appAtomRegistry.set(discoverySettled, true);
+  await navigated;
   expect(state.navigate).toHaveBeenCalledExactlyOnceWith(pullRequestView);
   expect(state.openScratchProject).not.toHaveBeenCalled();
 });

@@ -385,7 +385,3 @@ export function resetBrowserHistoryForTests(): void {
   });
   useBrowserHistoryStore.persist.clearStorage();
 }
-
-// Compat shim: appInit starts this from the app-bootstrap layer. Until then the
-// store starts it so preview titles keep being recorded.
-startPreviewTitleRecording();
