@@ -1411,7 +1411,7 @@ export default function FilePreviewPanel({
             absolutePath &&
             (isDocument || file.readError?.failure === "binary_file") ? (
             <AttachmentFilePreview
-              key={`${environmentId}:${absolutePath}:${workspaceMutationId}`}
+              key={`${environmentId}:${absolutePath}:${workspaceMutationId}:${fileRefreshRevision}`}
               name={relativePath.split(/[\\/]/).at(-1) || relativePath}
               mimeType="application/octet-stream"
               sizeBytes={0}
@@ -1534,10 +1534,10 @@ export default function FilePreviewPanel({
               selectedPathRevealId={revealRequestId}
               onOpenFile={onOpenFile}
               workspaceMutationId={workspaceMutationId}
-              {...(previewPath && !isMedia && !isPdf && !isDocument
+              {...(previewPath && !isMedia && !isPdf
                 ? {
                     onRefreshSelectedFile: () => {
-                      file.refresh();
+                      if (!isDocument) file.refresh();
                       setFileRefreshRevision((value) => value + 1);
                     },
                   }
