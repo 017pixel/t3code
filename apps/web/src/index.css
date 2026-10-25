@@ -1200,12 +1200,14 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     --warning-surface: color-mix(in srgb, var(--warning) 16%, transparent);
     --update-foreground: var(--color-blue-400);
     --update-surface: color-mix(in srgb, var(--update) 18%, transparent);
-    --sidebar: var(--card);
+    /* Sidebar surfaces outside [data-app-sidebar] (mobile sheet) keep the flat
+       step instead of following the lifted card. */
+    --sidebar: color-mix(in srgb, var(--background) 97%, var(--color-white));
     --sidebar-control-surface: var(--muted);
     --sidebar-row-hover: var(--accent);
     --sidebar-row-active: var(--accent);
     --sidebar-row-selected: var(--muted);
-    --sidebar-stage-fade: var(--card);
+    --sidebar-stage-fade: var(--sidebar);
     --terminal-cursor: rgb(180 203 255);
     --terminal-selection-background: rgb(180 203 255 / 25%);
   }
