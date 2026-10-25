@@ -16,6 +16,7 @@ import {
   replaceCatalogValue,
   Persistence,
   makeStoredShellSnapshotEncoder,
+  catalogMeshCaptainStore,
 } from "@t3tools/client-runtime/platform";
 import { TokenStore } from "@t3tools/client-runtime/authorization";
 import {
@@ -27,6 +28,7 @@ import {
   StoredPullRequestRoutingPermission,
   pullRequestRoutingConnectionKey,
   pullRequestRoutingPermissionFor,
+  MeshCaptain,
 } from "@t3tools/client-runtime/connection";
 import { EnvironmentId, ServerConfig, ThreadId, VcsListRefsResult } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -931,6 +933,7 @@ export const layer = Layer.effectContext(
       Context.add(CredentialStore.ConnectionCredentialStore, credentialStore),
       Context.add(TokenStore.RemoteDpopAccessTokenStore, remoteTokenStore),
       Context.add(Persistence.EnvironmentCacheStore, cacheStore),
+      Context.add(MeshCaptain.MeshCaptainStore, catalogMeshCaptainStore(catalog)),
     );
   }),
 );

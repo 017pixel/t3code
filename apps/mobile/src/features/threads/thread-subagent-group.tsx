@@ -7,6 +7,7 @@ import type {
   EnvironmentId,
   OrchestrationV2Subagent,
   OrchestrationV2TurnItem,
+  ThreadId,
 } from "@t3tools/contracts";
 import { useEffect, useState } from "react";
 import { AppState, Pressable, View, type ColorValue } from "react-native";
@@ -17,6 +18,7 @@ import { ProviderIcon } from "../../components/ProviderIcon";
 import { cn } from "../../lib/cn";
 import type { ThreadFeedActivity } from "../../lib/threadActivity";
 import { serverEnvironment } from "../../state/server";
+import { useEnvironmentShellReadiness } from "../../state/shell";
 import { environmentThreadDetails } from "../../state/threads";
 import { subagentCardElapsed } from "./subagent-card-presentation";
 import { SubagentRow } from "./SubagentRow";
@@ -70,7 +72,6 @@ export function ThreadSubagentGroup(props: {
   readonly onToggleRow: (rowId: string, anchorKey: string) => void;
 }) {
   const config = useAtomValue(serverEnvironment.configValueAtom(props.environmentId));
-  const navigation = useNavigation();
   const members = props.activities.flatMap(({ projectedItem }) =>
     projectedItem.item.type === "subagent" ? [projectedItem.item] : [],
   );
@@ -89,6 +90,7 @@ export function ThreadSubagentGroup(props: {
       result: live?.result ?? item.result,
       progress: live?.progress ?? item.progress,
       model: live?.model ?? null,
+      remoteThreadId: live?.remote?.threadId ?? null,
     };
   });
   const grouped = agents.length > 1;
@@ -146,39 +148,66 @@ export function ThreadSubagentGroup(props: {
       ) : null}
       {!grouped || expanded ? (
         <View className="mb-1 gap-px rounded-xl border border-border bg-card/30 p-1">
-          {agents.map((agent) => {
-            const threadId = agent.childThreadId;
-            return (
-              <Pressable
-                key={agent.item.id}
-                accessible
-                accessibilityRole={threadId === null ? undefined : "link"}
-                accessibilityHint={
-                  threadId === null ? "Provider-managed agent" : "Opens this agent's thread"
-                }
-                disabled={threadId === null}
-                onPress={() => {
-                  // Push preserves Back to the parent; navigate would reuse this Thread route.
-                  if (threadId !== null)
-                    navigation.dispatch(
-                      StackActions.push("Thread", {
-                        environmentId: String(props.environmentId),
-                        threadId: String(threadId),
-                      }),
-                    );
-                }}
-                className="rounded-lg px-3 py-3 active:bg-subtle"
-              >
-                <SubagentRow
-                  environmentId={props.environmentId}
-                  subagent={agent}
-                  elapsed={<SubagentElapsed agents={[agent]} />}
-                />
-              </Pressable>
-            );
-          })}
+          {agents.map((agent) => (
+            <AgentRow key={agent.item.id} agent={agent} environmentId={props.environmentId} />
+          ))}
         </View>
       ) : null}
     </WorkLogBlock>
+  );
+}
+
+/** A remote task's child opens on its machine, and only while this app is connected to it. */
+function AgentRow(props: {
+  readonly environmentId: EnvironmentId;
+  readonly agent: Parameters<typeof SubagentRow>[0]["subagent"] &
+    AgentTiming & {
+      readonly item: SubagentItem;
+      readonly remoteThreadId: ThreadId | null;
+    };
+}) {
+  const navigation = useNavigation();
+  const { agent } = props;
+  const remote = agent.item.remote;
+  const remoteLive = useEnvironmentShellReadiness(remote?.environmentId ?? null).status === "live";
+  const target =
+    remote === undefined
+      ? agent.childThreadId === null
+        ? null
+        : { environmentId: props.environmentId, threadId: agent.childThreadId }
+      : remoteLive && agent.remoteThreadId !== null
+        ? { environmentId: remote.environmentId, threadId: agent.remoteThreadId }
+        : null;
+  return (
+    <Pressable
+      accessible
+      accessibilityRole={target === null ? undefined : "link"}
+      accessibilityHint={
+        target !== null
+          ? "Opens this agent's thread"
+          : remote === undefined
+            ? "Provider-managed agent"
+            : `Runs on ${remote.label}. Connect to it to open.`
+      }
+      disabled={target === null}
+      onPress={() => {
+        // Push preserves Back to the parent; navigate would reuse this Thread route.
+        if (target !== null)
+          navigation.dispatch(
+            StackActions.push("Thread", {
+              environmentId: String(target.environmentId),
+              threadId: String(target.threadId),
+            }),
+          );
+      }}
+      className="rounded-lg px-3 py-3 active:bg-subtle"
+    >
+      <SubagentRow
+        environmentId={props.environmentId}
+        subagent={agent}
+        canOpenThread={target !== null}
+        elapsed={<SubagentElapsed agents={[agent]} />}
+      />
+    </Pressable>
   );
 }

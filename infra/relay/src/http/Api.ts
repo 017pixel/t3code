@@ -20,6 +20,7 @@ import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as HttpTraceContext from "effect/http/HttpTraceContext";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as HttpApiError from "effect/http-api/HttpApiError";
+import { RELAY_MESH_SOCKET_PATH } from "@t3tools/contracts";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
 import * as HttpObservability from "@t3tools/shared/httpObservability";
 
@@ -80,6 +81,7 @@ import * as EnvironmentPublishSignatures from "../environments/EnvironmentPublis
 import * as MobileRegistrations from "../agentActivity/MobileRegistrations.ts";
 import { withSpanAttributes } from "../observability.ts";
 import { isRelayHookPath, redactRelayHookUrl } from "../hooks/HookForwarder.ts";
+import * as MeshDirectory from "../mesh/MeshDirectory.ts";
 import * as RelayDb from "../db.ts";
 
 // Delegated IDs exceed the router's default 100-character limit; match the environment server.
@@ -150,7 +152,7 @@ export const layerCors = HttpRouter.middleware(
     >,
   ) {
     const request = yield* HttpServerRequest.HttpServerRequest;
-    if (isRelayHookPath(request.url)) {
+    if (isRelayHookPath(request.url) || isRelayMeshSocketPath(request.url)) {
       return yield* httpEffect;
     }
     return yield* relayCorsMiddleware(httpEffect);
@@ -172,8 +174,16 @@ export const layerDocsRedirectRoute = HttpRouter.add(
 
 // Finish before the mobile client's 10 s timeout so request cancellation cannot discard unexported spans.
 export const RELAY_REQUEST_DEADLINE_MS = 9_000;
+
 /** Allow body reading, upstream wait, and inbox hold; an API-sized deadline would drop held webhooks. */
 export const RELAY_HOOK_REQUEST_DEADLINE_MS = 25_000;
+
+/**
+ * A mesh socket outlives any request deadline, and its 101 response must reach the runtime
+ * untouched: added headers make Effect copy the response, which can drop its WebSocket.
+ */
+export const isRelayMeshSocketPath = (url: string): boolean =>
+  url.split("?", 1)[0] === RELAY_MESH_SOCKET_PATH;
 
 const relayRequestDeadline = <E, R>(
   httpEffect: Effect.Effect<
@@ -234,10 +244,12 @@ export const traceRelayHttpRequest = Effect.fnUntraced(function* <E, R>(
   >,
 ) {
   const request = yield* HttpServerRequest.HttpServerRequest;
-  const traced = annotateRelayEdgeLocation.pipe(
-    Effect.andThen(appendRelayTraceContextResponseHeader),
-    Effect.andThen(relayRequestDeadline(httpEffect)),
-  );
+  const traced = isRelayMeshSocketPath(request.url)
+    ? annotateRelayEdgeLocation.pipe(Effect.andThen(httpEffect))
+    : annotateRelayEdgeLocation.pipe(
+        Effect.andThen(appendRelayTraceContextResponseHeader),
+        Effect.andThen(relayRequestDeadline(httpEffect)),
+      );
   if (!isRelayHookPath(request.url)) {
     return yield* HttpMiddleware.tracer(traced).pipe(
       Effect.provideService(HttpMiddleware.TracerDisabledWhen, () => false),
@@ -547,6 +559,17 @@ export const unlinkEnvironmentRecord = Effect.fn("relay.api.client.unlinkEnviron
             deprovisionTarget.tunnelName,
           )
         : null;
+    if (unlinked) {
+      const mesh = yield* MeshDirectory.MeshDirectory;
+      yield* mesh.unlink({ userId: input.userId, environmentId: input.environmentId }).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("Could not remove the unlinked environment from its mesh", {
+            environmentId: input.environmentId,
+            errorTag: error._tag,
+          }),
+        ),
+      );
+    }
     if (endpointKey !== null) {
       const inbox = yield* HookInbox.HookInbox;
       yield* inbox.clear({ endpointKey }).pipe(
@@ -824,6 +847,7 @@ export const layerClientApi = HttpApiBuilder.group(
     const links = yield* EnvironmentLinks.EnvironmentLinks;
     const managedEndpointProvider = yield* ManagedEndpointProvider.ManagedEndpointProvider;
     const devices = yield* Devices.Devices;
+    const mesh = yield* MeshDirectory.MeshDirectory;
     return handlers
       .handle(
         "listEnvironments",
@@ -831,6 +855,16 @@ export const layerClientApi = HttpApiBuilder.group(
           const { userId } = yield* RelayClientPrincipal;
           const environments = yield* links.listForUser({ userId });
           return { environments };
+        }, mapRelayCommonApiErrors("not_authorized")),
+      )
+      .handle(
+        "getMesh",
+        Effect.fn("relay.api.client.getMesh")(function* () {
+          const { userId } = yield* RelayClientPrincipal;
+          if (!MeshDirectory.isMeshAllowlisted(config, userId)) {
+            return { available: false, members: [], captain: null, pin: null };
+          }
+          return { available: true, ...(yield* mesh.view(userId)) };
         }, mapRelayCommonApiErrors("not_authorized")),
       )
       .handle(
@@ -1170,6 +1204,9 @@ export const layerServerApi = HttpApiBuilder.group(
     const publisher = yield* AgentActivityPublisher.AgentActivityPublisher;
     const publishSignatures = yield* EnvironmentPublishSignatures.EnvironmentPublishSignatures;
     const heldHooks = yield* HeldHooks.HeldHooks;
+    const links = yield* EnvironmentLinks.EnvironmentLinks;
+    const config = yield* RelayConfiguration.RelayConfiguration;
+    const mesh = yield* MeshDirectory.MeshDirectory;
     const requireOwnEnvironment =
       /* Request instrumentation already owns the span; keep this helper in that context. */
       Effect.fnUntraced(function* (environmentId: string) {
@@ -1414,6 +1451,33 @@ export const layerServerApi = HttpApiBuilder.group(
           });
           return { pending };
         }, mapRelayCommonApiErrors("not_authorized")),
+      )
+      .handleRaw(
+        "openMeshSocket",
+        Effect.fn("relay.api.server.openMeshSocket")(function* ({ request }) {
+          if (request.headers.upgrade?.toLowerCase() !== "websocket") {
+            return HttpServerResponse.empty({ status: 426 });
+          }
+          const principal = yield* RelayEnvironmentPrincipal;
+          const userIds = yield* links.listActiveUsersForKey({
+            environmentId: principal.environmentId,
+            environmentPublicKey: principal.environmentPublicKey,
+          });
+          const admission = MeshDirectory.meshAdmission(userIds, config);
+          yield* Effect.annotateCurrentSpan({ "relay.mesh.admission": admission._tag });
+          switch (admission._tag) {
+            case "Unlinked":
+              return yield* new HttpApiError.Unauthorized({});
+            case "Refused":
+              return yield* mesh.refuseSocket(admission.code, admission.reason);
+            case "Admitted":
+              return yield* mesh.openSocket({
+                userId: admission.userId,
+                environmentId: principal.environmentId,
+                request,
+              });
+          }
+        }, mapRelayCommonApiErrors("not_authorized")),
       );
   }),
 );
@@ -1458,6 +1522,7 @@ const RelayCommonPersistenceError = Schema.Union([
   DeliveryAttempts.DeliveryAttemptRecordPersistenceError,
   EnvironmentLinks.EnvironmentLinkEnvironmentLookupPersistenceError,
   HookInbox.HookInboxError,
+  MeshDirectory.MeshDirectoryError,
 ]);
 type RelayCommonPersistenceError = typeof RelayCommonPersistenceError.Type;
 const isRelayCommonPersistenceError = Schema.is(RelayCommonPersistenceError);

@@ -7,6 +7,8 @@ import {
   type AuthEnvironmentScope,
   AuthWebSocketTicketUse,
   type ClientSurface,
+  EnvironmentId,
+  MESH_MEMBER_SUBJECT,
   RuntimeMode,
   type ServerAuthSessionMethod,
 } from "@t3tools/contracts";
@@ -18,6 +20,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
@@ -40,6 +43,23 @@ import {
   timingSafeEqualBase64Url,
 } from "./utils.ts";
 
+const MESH_MEMBER_SUBJECT_PREFIX = `${MESH_MEMBER_SUBJECT}:`;
+
+/**
+ * A `mesh-member` session's stored subject names its caller, so a renewal replaces only that
+ * caller's session and revocation can target one member.
+ */
+export const meshMemberSubject = (meshCaller: EnvironmentId): string =>
+  `${MESH_MEMBER_SUBJECT_PREFIX}${meshCaller}`;
+
+export const isMeshMemberSubject = (subject: string): boolean =>
+  subject.startsWith(MESH_MEMBER_SUBJECT_PREFIX);
+
+const meshCallerOfSubject = (subject: string): EnvironmentId | null =>
+  isMeshMemberSubject(subject) && subject.length > MESH_MEMBER_SUBJECT_PREFIX.length
+    ? EnvironmentId.make(subject.slice(MESH_MEMBER_SUBJECT_PREFIX.length))
+    : null;
+
 export interface IssuedSession {
   readonly sessionId: AuthSessionId;
   readonly token: string;
@@ -60,6 +80,8 @@ export interface VerifiedSession {
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly proofKeyThumbprint?: string;
   readonly runtimeModeCeiling?: RuntimeMode;
+  /** Set for `mesh-member` sessions: the member that holds the session. */
+  readonly meshCaller?: EnvironmentId;
 }
 
 export interface VerifiedWebSocketTicket extends VerifiedSession {
@@ -350,6 +372,17 @@ export class OtherSessionsRevocationError extends Schema.TaggedError<OtherSessio
   }
 }
 
+export class SubjectSessionsRevocationError extends Schema.TaggedError<SubjectSessionsRevocationError>()(
+  "SubjectSessionsRevocationError",
+  {
+    ...sessionCredentialInternalErrorContext,
+  },
+) {
+  override get message(): string {
+    return "Failed to revoke sessions by subject.";
+  }
+}
+
 export const SessionCredentialInternalError = Schema.Union([
   SessionClaimsEncodingError,
   SessionCredentialIssueError,
@@ -359,6 +392,7 @@ export const SessionCredentialInternalError = Schema.Union([
   ActiveSessionsListError,
   SessionRevocationError,
   OtherSessionsRevocationError,
+  SubjectSessionsRevocationError,
 ]);
 export type SessionCredentialInternalError = typeof SessionCredentialInternalError.Type;
 
@@ -413,8 +447,16 @@ export class SessionStore extends Context.Service<
     readonly revoke: (
       sessionId: AuthSessionId,
     ) => Effect.Effect<boolean, SessionCredentialInternalError>;
+    /** Keeps `mesh-member` sessions: the mesh owns them, and they are not listed. */
     readonly revokeAllExcept: (
       sessionId: AuthSessionId,
+    ) => Effect.Effect<number, SessionCredentialInternalError>;
+    readonly revokeBySubject: (
+      subject: string,
+    ) => Effect.Effect<number, SessionCredentialInternalError>;
+    /** Revokes `mesh-member` sessions, except those held by `keepCallers`. */
+    readonly revokeMeshMemberSessions: (
+      keepCallers: ReadonlyArray<EnvironmentId>,
     ) => Effect.Effect<number, SessionCredentialInternalError>;
     readonly markConnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
     readonly markDisconnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
@@ -484,6 +526,11 @@ function toClientMetadata(record: {
   };
 }
 
+const withMeshCaller = (subject: string) => {
+  const meshCaller = meshCallerOfSubject(subject);
+  return meshCaller === null ? {} : { meshCaller };
+};
+
 function toAuthClientSession(input: Omit<AuthClientSession, "current">): AuthClientSession {
   return {
     ...input,
@@ -499,7 +546,11 @@ const make = Effect.gen(function* () {
   const authSessions = yield* AuthSessions.AuthSessionRepository;
   const signingSecret = yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32);
   const connectedSessionsRef = yield* Ref.make(new Map<AuthSessionId, number>());
-  const changesPubSub = yield* PubSub.unbounded<SessionCredentialChange>();
+  // Hidden changes (`mesh-member` sessions) reach awaitInvalidation but not streamChanges.
+  const changesPubSub = yield* PubSub.unbounded<{
+    readonly change: SessionCredentialChange;
+    readonly hidden: boolean;
+  }>();
   const cookieInput = {
     mode: serverConfig.mode,
     port: serverConfig.port,
@@ -538,15 +589,36 @@ const make = Effect.gen(function* () {
 
   const emitUpsert = (clientSession: AuthClientSession) =>
     PubSub.publish(changesPubSub, {
-      type: "clientUpserted",
-      clientSession,
+      change: { type: "clientUpserted", clientSession },
+      hidden: isMeshMemberSubject(clientSession.subject),
     }).pipe(Effect.asVoid);
 
-  const emitRemoved = (sessionId: AuthSessionId) =>
+  const emitRemoved = (sessionId: AuthSessionId, hidden = false) =>
     PubSub.publish(changesPubSub, {
-      type: "clientRemoved",
-      sessionId,
+      change: { type: "clientRemoved", sessionId },
+      hidden,
     }).pipe(Effect.asVoid);
+
+  const forgetRemovedSessions = (
+    sessionIds: ReadonlyArray<AuthSessionId>,
+    options: { readonly hidden: boolean },
+  ) =>
+    sessionIds.length === 0
+      ? Effect.void
+      : Ref.update(connectedSessionsRef, (current) => {
+          const next = new Map(current);
+          for (const sessionId of sessionIds) {
+            next.delete(sessionId);
+          }
+          return next;
+        }).pipe(
+          Effect.andThen(
+            Effect.forEach(sessionIds, (sessionId) => emitRemoved(sessionId, options.hidden), {
+              concurrency: "unbounded",
+              discard: true,
+            }),
+          ),
+        );
 
   const loadActiveSession = Effect.fn("SessionStore.loadActiveSession")(function* (
     sessionId: AuthSessionId,
@@ -726,19 +798,9 @@ const make = Effect.gen(function* () {
             })
           : authSessions.create(sessionRecord).pipe(Effect.as([] as ReadonlyArray<AuthSessionId>))
       ).pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ sessionId, cause })));
-      if (replacedSessionIds.length > 0) {
-        yield* Ref.update(connectedSessionsRef, (current) => {
-          const next = new Map(current);
-          for (const replacedSessionId of replacedSessionIds) {
-            next.delete(replacedSessionId);
-          }
-          return next;
-        });
-        yield* Effect.forEach(replacedSessionIds, emitRemoved, {
-          concurrency: "unbounded",
-          discard: true,
-        });
-      }
+      yield* forgetRemovedSessions(replacedSessionIds, {
+        hidden: isMeshMemberSubject(claims.sub),
+      });
       yield* emitUpsert(
         toAuthClientSession({
           sessionId,
@@ -860,6 +922,7 @@ const make = Effect.gen(function* () {
         scopes: claims.scopes,
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
         ...(claims.rtc ? { runtimeModeCeiling: claims.rtc } : {}),
+        ...withMeshCaller(claims.sub),
       } satisfies VerifiedSession;
     },
   );
@@ -972,6 +1035,7 @@ const make = Effect.gen(function* () {
       scopes: row.value.scopes,
       ...(claims.aud ? { audience: claims.aud } : {}),
       ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
+      ...withMeshCaller(row.value.subject),
     } satisfies VerifiedWebSocketTicket;
   });
 
@@ -984,19 +1048,21 @@ const make = Effect.gen(function* () {
         connectedSessionIds: Array.from(connectedSessions.keys()),
       });
 
-      return rows.map((row) =>
-        toAuthClientSession({
-          sessionId: row.sessionId,
-          subject: row.subject,
-          scopes: row.scopes,
-          method: row.method,
-          client: toClientMetadata(row.client),
-          issuedAt: row.issuedAt,
-          expiresAt: row.expiresAt,
-          lastConnectedAt: row.lastConnectedAt,
-          connected: connectedSessions.has(row.sessionId),
-        }),
-      );
+      return rows
+        .filter((row) => !isMeshMemberSubject(row.subject))
+        .map((row) =>
+          toAuthClientSession({
+            sessionId: row.sessionId,
+            subject: row.subject,
+            scopes: row.scopes,
+            method: row.method,
+            client: toClientMetadata(row.client),
+            issuedAt: row.issuedAt,
+            expiresAt: row.expiresAt,
+            lastConnectedAt: row.lastConnectedAt,
+            connected: connectedSessions.has(row.sessionId),
+          }),
+        );
     },
     Effect.mapError((cause) => new ActiveSessionsListError({ cause })),
   );
@@ -1030,31 +1096,40 @@ const make = Effect.gen(function* () {
       .revokeAllExcept({
         currentSessionId: sessionId,
         revokedAt,
+        keepSubjectPrefix: MESH_MEMBER_SUBJECT_PREFIX,
       })
       .pipe(
         Effect.mapError(
           (cause) => new OtherSessionsRevocationError({ currentSessionId: sessionId, cause }),
         ),
       );
-    if (revokedSessionIds.length > 0) {
-      yield* Ref.update(connectedSessionsRef, (current) => {
-        const next = new Map(current);
-        for (const revokedSessionId of revokedSessionIds) {
-          next.delete(revokedSessionId);
-        }
-        return next;
-      });
-      yield* Effect.forEach(
-        revokedSessionIds,
-        (revokedSessionId) => emitRemoved(revokedSessionId),
-        {
-          concurrency: "unbounded",
-          discard: true,
-        },
-      );
-    }
+    yield* forgetRemovedSessions(revokedSessionIds, { hidden: false });
     return revokedSessionIds.length;
   });
+
+  const revokeMatching = Effect.fn("SessionStore.revokeMatching")(function* (
+    match: AuthSessions.RevokeAuthSessionsBySubjectInput["match"],
+  ) {
+    const revokedAt = yield* DateTime.now;
+    const revokedSessionIds = yield* authSessions
+      .revokeBySubject({ revokedAt, match })
+      .pipe(Effect.mapError((cause) => new SubjectSessionsRevocationError({ cause })));
+    yield* forgetRemovedSessions(revokedSessionIds, {
+      hidden: "prefix" in match || isMeshMemberSubject(match.subject),
+    });
+    return revokedSessionIds.length;
+  });
+
+  const revokeBySubject: SessionStore["Service"]["revokeBySubject"] = (subject) =>
+    revokeMatching({ subject });
+
+  const revokeMeshMemberSessions: SessionStore["Service"]["revokeMeshMemberSessions"] = (
+    keepCallers,
+  ) =>
+    revokeMatching({
+      prefix: MESH_MEMBER_SUBJECT_PREFIX,
+      keep: keepCallers.map(meshMemberSubject),
+    });
 
   const awaitInvalidation = Effect.fn(function* (sessionId: AuthSessionId) {
     return yield* Effect.scoped(
@@ -1075,7 +1150,7 @@ const make = Effect.gen(function* () {
         yield* Effect.raceFirst(
           Stream.fromSubscription(subscription).pipe(
             Stream.filter(
-              (change) => change.type === "clientRemoved" && change.sessionId === sessionId,
+              ({ change }) => change.type === "clientRemoved" && change.sessionId === sessionId,
             ),
             Stream.runHead,
           ),
@@ -1095,10 +1170,16 @@ const make = Effect.gen(function* () {
     listActive,
     awaitInvalidation,
     get streamChanges() {
-      return Stream.fromPubSub(changesPubSub);
+      return Stream.fromPubSub(changesPubSub).pipe(
+        Stream.filterMap(({ change, hidden }) =>
+          hidden ? Result.failVoid : Result.succeed(change),
+        ),
+      );
     },
     revoke,
     revokeAllExcept,
+    revokeBySubject,
+    revokeMeshMemberSessions,
     markConnected,
     markDisconnected,
     recordClientConnection,

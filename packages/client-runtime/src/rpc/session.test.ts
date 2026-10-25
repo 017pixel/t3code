@@ -1,6 +1,7 @@
 import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  MeshCloseCode,
   ServerConfig,
   type ServerConfig as ServerConfigType,
   ServerConfigStreamEvent,
@@ -340,6 +341,23 @@ describe("RpcSessionFactory", () => {
       expect(configStreamError).toMatchObject({ _tag: "RpcClientError" });
       yield* Effect.yieldNow;
       expect(sockets).toHaveLength(1);
+    }),
+  );
+
+  it.effect("keeps the close code of an open session, which names a captain change", () =>
+    Effect.gen(function* () {
+      const { factory, sockets } = yield* makeFactory();
+      const session = yield* factory.connect(PREPARED);
+      const readyFiber = yield* Effect.forkChild(session.ready);
+      const socket = yield* awaitSocket(sockets);
+      socket.open();
+      yield* completeInitialConfig(socket);
+      yield* Fiber.join(readyFiber);
+
+      socket.close(MeshCloseCode.captainChanged, "captain changed");
+      expect(yield* Effect.flip(session.closed)).toMatchObject({
+        closeCode: MeshCloseCode.captainChanged,
+      });
     }),
   );
 

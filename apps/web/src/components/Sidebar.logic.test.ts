@@ -1,4 +1,8 @@
-import { presentThreadShell } from "@t3tools/client-runtime/state/models";
+import {
+  presentThreadShell,
+  type EnvironmentThreadShell,
+} from "@t3tools/client-runtime/state/models";
+import { unloadedOlderSettledCount } from "@t3tools/client-runtime/state/threads";
 import * as DateTime from "effect/DateTime";
 import { deriveActiveWorkStartedAt } from "../session-logic.ts";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -10,6 +14,8 @@ import {
   getFallbackThreadIdAfterDelete,
   hasUnseenCompletion,
   resolveSidebarRowThreadId,
+  resolveSidebarThreadNesting,
+  routeThreadOnly,
   isSidebarThreadWorking,
   orderItemsByPreferredIds,
   pinOrderKeyBetween,
@@ -162,6 +168,113 @@ describe("archiveSelectedThreadEntries", () => {
 });
 
 describe("sidebar thread lineage helpers", () => {
+  it("retains a selected remote child's root row in a collapsed shelf", () => {
+    const parent = makeThreadFixture({
+      environmentId: localEnvironmentId,
+      id: ThreadId.make("parent"),
+      settledOverride: "settled",
+    });
+    const other = makeThreadFixture({
+      environmentId: localEnvironmentId,
+      id: ThreadId.make("other"),
+      settledOverride: "settled",
+    });
+    const childBase = makeThreadFixture({
+      environmentId: EnvironmentId.make("environment-remote"),
+      id: ThreadId.make("child"),
+    });
+    const child = {
+      ...childBase,
+      source: {
+        ...childBase.source,
+        meshOrigin: {
+          environmentId: parent.environmentId,
+          threadId: parent.id,
+          delegated: true as const,
+        },
+      },
+    };
+    const grandchildBase = makeThreadFixture({
+      environmentId: EnvironmentId.make("environment-third"),
+      id: ThreadId.make("grandchild"),
+    });
+    const grandchild = {
+      ...grandchildBase,
+      source: {
+        ...grandchildBase.source,
+        meshOrigin: {
+          environmentId: child.environmentId,
+          threadId: child.id,
+          delegated: true as const,
+        },
+      },
+    };
+    const nesting = resolveSidebarThreadNesting([other, parent, child, grandchild], null);
+    const retained = (selectedThreadKey: string | null) =>
+      routeThreadOnly(nesting.rootThreads, selectedThreadKey, nesting.meshChildrenByParentKey);
+
+    expect(retained(`${child.environmentId}:${child.id}`)).toEqual([parent]);
+    expect(retained(`${grandchild.environmentId}:${grandchild.id}`)).toEqual([parent]);
+    expect(retained(`${parent.environmentId}:${parent.id}`)).toEqual([parent]);
+    expect(retained(`${localEnvironmentId}:${child.id}`)).toEqual([]);
+    expect(retained(null)).toEqual([]);
+
+    const scoped = resolveSidebarThreadNesting(
+      [parent, child],
+      new Set([`${child.environmentId}:${child.projectId}`]),
+    );
+    expect(
+      routeThreadOnly(
+        scoped.rootThreads,
+        `${child.environmentId}:${child.id}`,
+        scoped.meshChildrenByParentKey,
+      ),
+    ).toEqual([child]);
+  });
+
+  it("stops counting an older settled mesh child as unloaded once its page loads", () => {
+    const parent = makeThreadFixture({
+      id: ThreadId.make("mesh-parent"),
+      environmentId: localEnvironmentId,
+    });
+    const childFixture = makeThreadFixture({
+      id: ThreadId.make("mesh-child"),
+      environmentId: EnvironmentId.make("environment-remote"),
+      settledOverride: "settled",
+      settledAt: "2026-01-01T00:00:00.000Z",
+    });
+    const child = {
+      ...childFixture,
+      source: {
+        ...childFixture.source,
+        meshOrigin: { environmentId: parent.environmentId, threadId: parent.id },
+      },
+    };
+    const scopedProjectKeys = new Set([
+      `${parent.environmentId}:${parent.projectId}`,
+      `${child.environmentId}:${child.projectId}`,
+    ]);
+    const unloadedCount = (threads: readonly EnvironmentThreadShell[]) =>
+      unloadedOlderSettledCount({
+        threads,
+        scopes: [{ environmentId: child.environmentId, projectIds: [child.projectId] }],
+        olderSettled: () => ({
+          before: "2026-01-02T00:00:00.000Z",
+          beforeMs: DateTime.toEpochMillis(DateTime.makeUnsafe("2026-01-02T00:00:00.000Z")),
+          counts: new Map([[child.projectId, 1]]),
+        }),
+      });
+    const beforeLoad = resolveSidebarThreadNesting([parent], scopedProjectKeys);
+    expect(unloadedCount(beforeLoad.visibleThreads)).toBe(1);
+
+    const afterLoad = resolveSidebarThreadNesting([parent, child], scopedProjectKeys);
+    expect(afterLoad.rootThreads).toEqual([parent]);
+    expect(afterLoad.meshChildrenByParentKey.get(`${parent.environmentId}:${parent.id}`)).toEqual([
+      child,
+    ]);
+    expect(unloadedCount(afterLoad.visibleThreads)).toBe(0);
+  });
+
   it("maps an open subagent to its nearest visible ancestor's sidebar row", () => {
     const environmentId = EnvironmentId.make("environment-row");
     const otherEnvironmentId = EnvironmentId.make("environment-other");

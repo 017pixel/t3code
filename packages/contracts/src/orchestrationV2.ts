@@ -14,6 +14,7 @@ import {
   CommandId,
   ContextHandoffId,
   ContextTransferId,
+  EnvironmentId,
   EventId,
   GuestMessageId,
   GuestShareId,
@@ -52,6 +53,7 @@ import {
   OrchestrationGetTurnDiffInput,
   OrchestrationGetTurnDiffResult,
 } from "./checkpointDiff.ts";
+import { ProviderOptionSelection } from "./model.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import {
   ThreadLinkedPullRequest,
@@ -398,6 +400,18 @@ const LenientThreadOpens = Schema.NullOr(OrchestrationV2ThreadOpens).pipe(
   Schema.catchDecoding(() => Effect.succeedSome(null)),
 );
 
+/**
+ * EXPERIMENTAL mesh v1. Server-only: set on a thread a mesh call created, naming the calling
+ * member and, when the caller was a thread, that thread. Clients cannot set it.
+ */
+export const OrchestrationV2ThreadMeshOrigin = Schema.Struct({
+  environmentId: EnvironmentId,
+  threadId: Schema.NullOr(ThreadId),
+  /** Remote delegate_task children have no local subagent lineage. */
+  delegated: Schema.optional(Schema.Literal(true)),
+});
+export type OrchestrationV2ThreadMeshOrigin = typeof OrchestrationV2ThreadMeshOrigin.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -449,6 +463,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   opens: Schema.optional(LenientThreadOpens),
+  meshOrigin: Schema.optional(OrchestrationV2ThreadMeshOrigin),
   titleRegeneration: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
@@ -469,6 +484,14 @@ export const OrchestrationV2AppThread = Schema.Struct({
   deletedAt: Schema.NullOr(Schema.DateTimeUtc),
 });
 export type OrchestrationV2AppThread = typeof OrchestrationV2AppThread.Type;
+
+export function isSubagentThread(
+  thread: Pick<OrchestrationV2AppThread, "lineage" | "meshOrigin">,
+): boolean {
+  return (
+    thread.lineage.relationshipToParent === "subagent" || thread.meshOrigin?.delegated === true
+  );
+}
 
 /** Provider-native children cannot receive messages; T3 delegate_task children can. */
 export function isProviderNativeSubagentThread(
@@ -757,6 +780,59 @@ export type OrchestrationV2SubagentWorkflow = typeof OrchestrationV2SubagentWork
  */
 const DedupedBodyMarker = Schema.optionalKey(Schema.Literal(true));
 
+/** EXPERIMENTAL mesh v1. Marks a task card whose child runs on another member. */
+export const OrchestrationV2SubagentItemRemote = Schema.Struct({
+  environmentId: EnvironmentId,
+  label: TrimmedNonEmptyString,
+});
+export type OrchestrationV2SubagentItemRemote = typeof OrchestrationV2SubagentItemRemote.Type;
+
+/**
+ * EXPERIMENTAL mesh v1. delegate_task's `target`, kept whole: the member resolves it against its
+ * own providers, inheriting from the task's model selection the way a local task does.
+ */
+export const OrchestrationV2SubagentRemoteTarget = Schema.Struct({
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+  driverKind: Schema.optional(ProviderDriverKind),
+  model: Schema.optional(TrimmedNonEmptyString),
+  options: Schema.optional(Schema.Array(ProviderOptionSelection)),
+});
+export type OrchestrationV2SubagentRemoteTarget = typeof OrchestrationV2SubagentRemoteTarget.Type;
+
+/** EXPERIMENTAL mesh v1. What a remote task's launch needs, recorded before any network call. */
+export const OrchestrationV2SubagentRemoteLaunch = Schema.Struct({
+  /** Matched against the member's projects by repository key. */
+  repositoryKey: TrimmedNonEmptyString,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  workspaceStrategy: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
+  target: Schema.optional(OrchestrationV2SubagentRemoteTarget),
+});
+export type OrchestrationV2SubagentRemoteLaunch = typeof OrchestrationV2SubagentRemoteLaunch.Type;
+
+/** EXPERIMENTAL mesh v1. An open question or approval seen on the member running a remote task. */
+export const OrchestrationV2SubagentRemotePending = Schema.Struct({
+  kind: Schema.Literals(["question", "approval"]),
+  requestId: RuntimeRequestId,
+});
+export type OrchestrationV2SubagentRemotePending = typeof OrchestrationV2SubagentRemotePending.Type;
+
+/**
+ * EXPERIMENTAL mesh v1. An app-owned task whose child runs on another member. Its
+ * `childThreadId` stays null; `threadId` and `runId` fill in once that member attaches them.
+ */
+export const OrchestrationV2SubagentRemote = Schema.Struct({
+  environmentId: EnvironmentId,
+  threadId: Schema.NullOr(ThreadId),
+  runId: Schema.NullOr(RunId),
+  label: TrimmedNonEmptyString,
+  launch: Schema.optional(OrchestrationV2SubagentRemoteLaunch),
+  pending: Schema.optional(OrchestrationV2SubagentRemotePending),
+  /** Stop ended the task here, and the member's thread has not confirmed its stop yet. */
+  stopOwed: Schema.optional(Schema.Boolean),
+});
+export type OrchestrationV2SubagentRemote = typeof OrchestrationV2SubagentRemote.Type;
+
 export const OrchestrationV2Subagent = Schema.Struct({
   id: NodeId,
   threadId: ThreadId,
@@ -768,6 +844,7 @@ export const OrchestrationV2Subagent = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   providerThreadId: Schema.NullOr(ProviderThreadId),
   childThreadId: Schema.NullOr(ThreadId),
+  remote: Schema.optional(OrchestrationV2SubagentRemote),
   nativeTaskRef: Schema.NullOr(OrchestrationV2ProviderRef),
   prompt: Schema.String,
   title: Schema.NullOr(Schema.String),
@@ -1605,6 +1682,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     driver: ProviderDriverKind,
     providerInstanceId: ProviderInstanceId,
     childThreadId: Schema.NullOr(ThreadId),
+    remote: Schema.optional(OrchestrationV2SubagentItemRemote),
     prompt: Schema.String,
     progress: Schema.optional(Schema.String),
     result: Schema.NullOr(Schema.String),
@@ -1908,6 +1986,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   forkedFrom: Schema.NullOr(OrchestrationV2AppThread.fields.forkedFrom),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
+  /** EXPERIMENTAL mesh v1. The member and thread whose mesh call created this thread. */
+  meshOrigin: Schema.optional(OrchestrationV2ThreadMeshOrigin),
   latestRunId: Schema.NullOr(RunId),
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2439,6 +2519,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     driver: ProviderDriverKind,
     providerInstanceId: ProviderInstanceId,
     childThreadId: Schema.NullOr(ThreadId),
+    remote: Schema.optional(OrchestrationV2SubagentItemRemote),
     prompt: Schema.String,
     progress: Schema.optional(Schema.String),
     result: Schema.NullOr(Schema.String),
@@ -2752,6 +2833,8 @@ export const OrchestrationV2Command = Schema.Union([
         metadata: Schema.optional(OrchestrationV2ProviderThreadNativeMetadata),
       }),
     ),
+    /** EXPERIMENTAL mesh v1. Server-only: client dispatch strips it with the creation provenance. */
+    meshOrigin: Schema.optional(OrchestrationV2ThreadMeshOrigin),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.archive"),
@@ -3276,6 +3359,57 @@ const OrchestrationV2InternalCommand = Schema.Union([
     placeholder: Schema.optional(Schema.String),
     delivery: Schema.optional(OrchestrationV2SecretRequestDelivery),
     secretStatus: OrchestrationV2SecretRequestStatus,
+  }),
+  // EXPERIMENTAL mesh v1: an app-owned task whose child runs on another member.
+  /** Records the task as pending before any network call, with everything a relaunch needs. */
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.remote.request"),
+    ...OrchestrationV2CreationFields,
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    parentRunId: RunId,
+    parentNodeId: NodeId,
+    task: TrimmedNonEmptyString,
+    title: Schema.optional(TrimmedNonEmptyString),
+    /** The parent's model: used on the member when it has it, and what `launch.target` inherits from. */
+    modelSelection: ModelSelection,
+    environmentId: EnvironmentId,
+    label: TrimmedNonEmptyString,
+    launch: OrchestrationV2SubagentRemoteLaunch,
+    completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+    createdAt: Schema.optional(Schema.DateTimeUtc),
+  }),
+  /** The member launched the task's thread. Needs no active parent run. */
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.remote.attach"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    threadId: ThreadId,
+    runId: RunId,
+    modelSelection: ModelSelection,
+  }),
+  /** A question or approval opened (or `pending: null`, closed) on the member. */
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.remote.progress"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    pending: Schema.NullOr(OrchestrationV2SubagentRemotePending),
+  }),
+  /**
+   * The member's work, with its nested children, settled. On a task Stop already ended, this only
+   * records that the member's thread stopped.
+   */
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.remote.complete"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    status: Schema.Literals(["completed", "failed", "cancelled", "interrupted"]),
+    result: Schema.String,
+    /** The caller already reported the outcome, so the parent is not woken for it. */
+    disposeDelivery: Schema.optional(Schema.Boolean),
   }),
 ]);
 export type OrchestrationV2InternalCommand = typeof OrchestrationV2InternalCommand.Type;

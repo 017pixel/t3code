@@ -151,6 +151,14 @@
       "types": "./src/delayedStatus.ts",
       "default": "./src/delayedStatus.ts"
     },
+    "./state/mesh-status": {
+      "types": "./src/state/meshStatus.ts",
+      "default": "./src/state/meshStatus.ts"
+    },
+    "./mesh-thread-nesting": {
+      "types": "./src/meshThreadNesting.ts",
+      "default": "./src/meshThreadNesting.ts"
+    },
     "./state/connections": {
       "types": "./src/state/connections.ts",
       "default": "./src/state/connections.ts"

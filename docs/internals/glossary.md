@@ -16,6 +16,8 @@ Terms whose meaning matters across T3 Code. Architecture and lifecycle constrain
 | Turn           | One user-to-agent cycle, a V2 run. Provider work can end before checkpoint and diff work settles. |
 | Activity       | A non-message timeline item, such as a tool action, approval, or failure.                         |
 | T3 home        | The base data directory. Runtime state normally lives under its `userdata` directory.             |
+| Mesh           | Experimental. The environments linked to one T3 Connect account. Each is a member.                |
+| Captain        | The mesh member the relay picks to carry client traffic to the other members.                     |
 
 ## Orchestration
 

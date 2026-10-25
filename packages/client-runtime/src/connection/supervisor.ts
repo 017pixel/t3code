@@ -18,6 +18,7 @@ import * as Tracer from "effect/Tracer";
 import type { ConnectionCatalogEntry, ConnectionRoute } from "./catalog.ts";
 import * as Connectivity from "./connectivity.ts";
 import * as ConnectionDriver from "./driver.ts";
+import type { BetterRouteTickSession } from "./meshCaptain.ts";
 import {
   type ConnectionAttemptError,
   type ConnectionTarget,
@@ -35,8 +36,11 @@ import {
   connectionRouteKind,
   connectionRoutes,
   entryWithRoutes,
+  isCaptainRouteId,
   type ReportedEndpoint,
+  withCaptainRoutes,
 } from "./routes.ts";
+import { MeshCloseCode } from "@t3tools/contracts";
 
 const RETRY_BASE_DELAY_MS = 1_000;
 const RETRY_MAX_DELAY_MS = 300_000;
@@ -122,7 +126,26 @@ export interface EnvironmentSupervisorOptions {
     readonly activeRoute: ConnectionRoute;
     readonly reported: ReadonlyArray<ReportedEndpoint>;
   }) => Effect.Effect<Option.Option<ConnectionCatalogEntry>>;
+  /** EXPERIMENTAL mesh: captain routes, kept apart from saved and learned routes. */
+  readonly mesh?: {
+    /** Present from the first attempt, so a cold start races a saved captain at once. */
+    readonly initialRoutes: ReadonlyArray<ConnectionRoute>;
+    /** Each value replaces every captain route. */
+    readonly routes: Stream.Stream<ReadonlyArray<ConnectionRoute>>;
+    /** Runs on each better-route tick, before the "already on the best route" gate. */
+    readonly beforeBetterRouteCheck: (session: BetterRouteTickSession) => Effect.Effect<void>;
+    /** The captain closed the session because it was demoted. Returns fresh captain routes. */
+    readonly captainChanged: Effect.Effect<ReadonlyArray<ConnectionRoute>>;
+  };
 }
+
+function routesSignature(routes: ReadonlyArray<ConnectionRoute>): string {
+  return routes.map((route) => connectionRouteId(route.target)).join("\n");
+}
+
+const isCaptainLease = (lease: ConnectionDriver.EnvironmentConnectionLease) =>
+  lease.prepared.target._tag === "BearerConnectionTarget" &&
+  isCaptainRouteId(lease.prepared.target.connectionId);
 
 function retryDelayMs(failureCount: number, random: number): number {
   const ceiling = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** (failureCount + 1));
@@ -272,15 +295,19 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   );
   const session = yield* SubscriptionRef.make<Option.Option<RpcSession.RpcSession>>(Option.none());
   const prepared = yield* SubscriptionRef.make<Option.Option<PreparedConnection>>(Option.none());
-  // Learned routes arrive while a session is live, so the route list is read
-  // fresh by each attempt and check instead of being fixed at creation.
+  // Learned and captain routes arrive while a session is live, so the route list
+  // is read fresh by each attempt and check instead of being fixed at creation.
   const currentEntry = yield* Ref.make(entry);
-  const currentRoutes = Ref.get(currentEntry).pipe(Effect.map(connectionRoutes));
+  const captainRoutes = yield* Ref.make(options?.mesh?.initialRoutes ?? []);
+  const latestEntry = Effect.all([Ref.get(currentEntry), Ref.get(captainRoutes)]).pipe(
+    Effect.map(([saved, captain]) => withCaptainRoutes(saved, captain)),
+  );
+  const currentRoutes = latestEntry.pipe(Effect.map(connectionRoutes));
   const preferredRouteId = yield* Ref.make(Option.none<string>());
   const routeCooldowns = yield* Ref.make<ReadonlyMap<string, bigint>>(new Map());
 
   const attemptEntry = Effect.gen(function* () {
-    const latest = yield* Ref.get(currentEntry);
+    const latest = yield* latestEntry;
     const routes = connectionRoutes(latest);
     const preferred = yield* Ref.getAndSet(preferredRouteId, Option.none());
     if (Option.isNone(preferred)) return latest;
@@ -320,11 +347,21 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       ),
     );
 
+  // A captain route that was replaced is gone from the list, so every route is a candidate.
+  const betterRouteBound = (lease: ConnectionDriver.EnvironmentConnectionLease) =>
+    routeIndex(lease).pipe(
+      Effect.flatMap((index) =>
+        index === -1 && isCaptainLease(lease)
+          ? currentRoutes.pipe(Effect.map((routes) => routes.length))
+          : Effect.succeed(index),
+      ),
+    );
+
   const checkBetterRoutes = Effect.fnUntraced(function* (
     lease: ConnectionDriver.EnvironmentConnectionLease,
   ) {
-    const latest = yield* Ref.get(currentEntry);
-    const current = yield* routeIndex(lease);
+    const latest = yield* latestEntry;
+    const current = yield* betterRouteBound(lease);
     if (current <= 0) return;
     const now = yield* Clock.monotonicTimeNanos;
     const cooldowns = yield* Ref.get(routeCooldowns);
@@ -348,11 +385,27 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
 
   const betterRouteChecks = yield* Queue.dropping<ConnectionDriver.EnvironmentConnectionLease>(1);
   const requestBetterRouteCheck = (lease: ConnectionDriver.EnvironmentConnectionLease) =>
-    routeIndex(lease).pipe(
+    betterRouteBound(lease).pipe(
       Effect.flatMap((index) =>
         index > 0 ? Queue.offer(betterRouteChecks, lease).pipe(Effect.asVoid) : Effect.void,
       ),
     );
+
+  const liveLease = Effect.all([SubscriptionRef.get(session), SubscriptionRef.get(prepared)]).pipe(
+    Effect.map(([live, livePrepared]) =>
+      Option.isSome(live) && Option.isSome(livePrepared)
+        ? Option.some({ session: live.value, prepared: livePrepared.value })
+        : Option.none<ConnectionDriver.EnvironmentConnectionLease>(),
+    ),
+  );
+
+  /** Like learned routes, a change asks for a better-route check; an unchanged list does not. */
+  const setCaptainRoutes = Effect.fnUntraced(function* (next: ReadonlyArray<ConnectionRoute>) {
+    const previous = yield* Ref.getAndSet(captainRoutes, next);
+    if (routesSignature(previous) === routesSignature(next)) return;
+    const lease = yield* liveLease;
+    if (Option.isSome(lease)) yield* requestBetterRouteCheck(lease.value);
+  });
 
   const clearLease = Effect.all(
     [SubscriptionRef.set(session, Option.none()), SubscriptionRef.set(prepared, Option.none())],
@@ -534,7 +587,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   });
 
   const isRelayLease = (lease: ConnectionDriver.EnvironmentConnectionLease) =>
-    lease.prepared.target._tag === "RelayConnectionTarget";
+    lease.prepared.target._tag === "RelayConnectionTarget" || isCaptainLease(lease);
 
   const connectedLeaseEnd = Effect.fnUntraced(function* (
     next: SupervisorSignal,
@@ -598,11 +651,23 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         next._tag === "RetryRequested" ? Ref.set(resetRetryState, false) : Effect.void,
       ),
     );
+    const mesh = options?.mesh;
+    // A connected session already has its initial config: `ready` waited for it.
+    const meshTick =
+      mesh === undefined
+        ? Effect.void
+        : lease.session.initialConfig.pipe(
+            Effect.map((config) => config.environment.capabilities.meshMember === true),
+            Effect.orElseSucceed(() => false),
+            Effect.flatMap((meshMember) =>
+              mesh.beforeBetterRouteCheck({ onCaptainRoute: isCaptainLease(lease), meshMember }),
+            ),
+          );
     // Ticks always run: the check skips the preferred route itself, and the
     // route list can grow while connected (learned routes).
     yield* Stream.tick(BETTER_ROUTE_CHECK_INTERVAL).pipe(
       Stream.drop(1),
-      Stream.runForEach(() => requestBetterRouteCheck(lease)),
+      Stream.runForEach(() => meshTick.pipe(Effect.andThen(requestBetterRouteCheck(lease)))),
       Effect.forkScoped,
     );
     for (;;) {
@@ -699,7 +764,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       // each route that reaches synchronizing adds its own snapshot budget, so
       // a route that fails late does not eat the next route's time.
       Effect.gen(function* () {
-        const routeCount = connectionRoutes(yield* Ref.get(currentEntry)).length;
+        const routeCount = (yield* currentRoutes).length;
         const startedAt = yield* Clock.monotonicTimeNanos;
         const setup = Duration.toNanosUnsafe(Duration.times(establishmentTimeout, routeCount));
         while (true) {
@@ -957,7 +1022,16 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         continue;
       }
 
-      if (failedProbe) {
+      // A demoted captain closes every forwarded socket. Read the mesh first so the next
+      // attempt already has the new captain's routes, and reconnect without backoff.
+      const mesh = options?.mesh;
+      const captainChanged =
+        mesh !== undefined &&
+        outcome.established &&
+        error._tag === "ConnectionTransientError" &&
+        error.closeCode === MeshCloseCode.captainChanged;
+      if (captainChanged) yield* setCaptainRoutes(yield* mesh.captainChanged);
+      if (failedProbe || captainChanged) {
         resetRetryLadder();
         yield* setState(connectingState(yield* Ref.get(intent), generation, 1, latestFailure));
         continue;
@@ -1010,6 +1084,9 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     Effect.forever,
     Effect.forkScoped,
   );
+  if (options?.mesh !== undefined) {
+    yield* options.mesh.routes.pipe(Stream.runForEach(setCaptainRoutes), Effect.forkScoped);
+  }
   yield* run().pipe(Effect.forkScoped);
 
   const connect = Ref.update(intent, (current) => ({

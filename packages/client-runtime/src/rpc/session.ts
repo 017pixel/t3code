@@ -183,6 +183,15 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     const connected = yield* Deferred.make<void>();
     const disconnected = yield* Deferred.make<never, ConnectionTransientError>();
     const pingTimedOut = yield* Ref.make(false);
+    // The RPC protocol drops the close code, and a mesh captain's "captain changed" close needs it.
+    let closeCode: number | undefined;
+    const observedWebSocketConstructor: typeof webSocketConstructor = (url, protocols) => {
+      const socket = webSocketConstructor(url, protocols);
+      socket.addEventListener("close", (event) => {
+        closeCode = event.code;
+      });
+      return socket;
+    };
     const hooks = RpcClient.ConnectionHooks.of({
       onConnect: Deferred.succeed(connected, undefined).pipe(Effect.asVoid),
       onDisconnect: Effect.all([Deferred.isDone(connected), Ref.get(pingTimedOut)]).pipe(
@@ -200,6 +209,7 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
                   ? `${connection.label} stopped responding for ${PING_TIMEOUT_SECONDS}s. ${UNRESPONSIVE_HOST_HINT}`
                   : `${connection.label} disconnected.`,
               ...socketFailureLocation(via),
+              ...(wasConnected && closeCode !== undefined ? { closeCode } : {}),
             }),
           ),
         ),
@@ -208,7 +218,9 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     });
     const layerSocket = Socket.layerWebSocket(connection.socketUrl, {
       openTimeout: SOCKET_OPEN_TIMEOUT,
-    }).pipe(Layer.provide(Layer.succeed(Socket.WebSocketConstructor, webSocketConstructor)));
+    }).pipe(
+      Layer.provide(Layer.succeed(Socket.WebSocketConstructor, observedWebSocketConstructor)),
+    );
     const layerProtocol = Layer.effect(
       RpcClient.Protocol,
       RpcClient.makeProtocolSocket({

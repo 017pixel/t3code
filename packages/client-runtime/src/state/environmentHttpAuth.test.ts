@@ -20,6 +20,7 @@ import type { HttpClient } from "effect/http";
 
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import {
+  BearerConnectionTarget,
   ConnectionTransientError,
   RelayConnectionTarget,
   type PreparedConnection,
@@ -397,6 +398,39 @@ describe("authenticated environment HTTP requests", () => {
         accessToken: "renewed-token",
       });
       expect(harness.calls[1]!.init.body).toEqual(harness.calls[0]!.init.body);
+    }),
+  );
+
+  it.effect("keeps a captain route's base when the token renews, and signs the member URL", () =>
+    Effect.gen(function* () {
+      const captainBase = "http://192.168.1.5:3773/api/mesh/via/handle/environment-1";
+      const harness = makeHarness((requestNumber) =>
+        requestNumber === 1 ? credentialRejectedResponse() : Response.json(DIFF_RESULT),
+      );
+      const result = yield* PullRequestDiffLoader.fetchEnvironmentPullRequestDiff({
+        ...harness.input,
+        prepared: {
+          ...PREPARED,
+          httpBaseUrl: captainBase,
+          proofBaseUrl: "https://previous.example.test/",
+          target: new BearerConnectionTarget({
+            environmentId: TARGET.environmentId,
+            label: TARGET.label,
+            connectionId: `captain:captain-1@${captainBase}`,
+          }),
+        },
+        diff: DIFF,
+      }).pipe(Effect.provide(harness.httpLayer));
+
+      expect(result).toEqual(DIFF_RESULT);
+      expect(harness.calls.map((call) => call.url)).toEqual([
+        `${captainBase}/api/pull-requests/diff`,
+        `${captainBase}/api/pull-requests/diff`,
+      ]);
+      expect(harness.proofs.map((proof) => proof.url)).toEqual([
+        `${CURRENT_ORIGIN}/api/pull-requests/diff`,
+        `${RENEWED_ORIGIN}/api/pull-requests/diff`,
+      ]);
     }),
   );
 

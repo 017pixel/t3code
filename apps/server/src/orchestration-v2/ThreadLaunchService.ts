@@ -9,6 +9,7 @@ import {
   type ModelSelection,
   type OrchestrationV2Actor,
   type OrchestrationV2CreationSource,
+  type OrchestrationV2ThreadMeshOrigin,
   type OrchestrationV2ProviderThreadNativeMetadata,
   type OrchestrationV2ThreadProjection,
   type ProviderDriverKind,
@@ -96,6 +97,8 @@ export interface ThreadLaunchInput {
   };
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
+  /** EXPERIMENTAL mesh v1. Set when another member's mesh call launches the thread. */
+  readonly meshOrigin?: OrchestrationV2ThreadMeshOrigin;
 }
 
 type PreparationInput = Pick<
@@ -913,6 +916,7 @@ const make = Effect.gen(function* () {
                   : { importedNativeThread: input.importedNativeThread }),
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
+                ...(input.meshOrigin === undefined ? {} : { meshOrigin: input.meshOrigin }),
               });
         const claimed = yield* claimDispatch.pipe(
           Effect.mapError(

@@ -166,7 +166,9 @@ export type ProjectionRecoveryKind =
   | "queued-runs"
   | "runtime"
   | "subagent-results"
-  | "delegated-completions";
+  | "delegated-completions"
+  // EXPERIMENTAL mesh v1: parents of remote tasks still running, or still owing a stop.
+  | "remote-delegations";
 
 export type ProjectionLimitRecoveryCandidate = Pick<
   OrchestrationV2ThreadShell,
@@ -186,7 +188,7 @@ export type ProjectionLimitRecoveryCandidate = Pick<
 
 export type ProjectionThreadPullRequests = Pick<
   OrchestrationV2AppThread,
-  "id" | "projectId" | "lineage" | "settledOverride" | "settledAt" | "pullRequests"
+  "id" | "projectId" | "lineage" | "meshOrigin" | "settledOverride" | "settledAt" | "pullRequests"
 >;
 
 export type ProjectionSettlementCandidate = Pick<
@@ -670,6 +672,13 @@ function needsRecovery(
       );
     case "delegated-completions":
       return projection.runs.some((run) => run.delegatedCompletion?.delivery != null);
+    case "remote-delegations":
+      return projection.subagents.some(
+        (task) =>
+          task.remote !== undefined &&
+          (["pending", "running", "waiting"].includes(task.status) ||
+            task.remote.stopOwed === true),
+      );
     case "subagent-results": {
       const parentThreadId = projection.thread.lineage.parentThreadId;
       return (
@@ -1656,6 +1665,9 @@ export function threadShellFromProjection(
     ...(projection.thread.historyOrigin === undefined
       ? {}
       : { historyOrigin: projection.thread.historyOrigin }),
+    ...(projection.thread.meshOrigin === undefined
+      ? {}
+      : { meshOrigin: projection.thread.meshOrigin }),
     latestRunId: latestRun?.id ?? null,
     latestRunRequestedAt: latestRun?.requestedAt ?? null,
     latestRunStartedAt: latestRun?.startedAt ?? null,
@@ -1928,6 +1940,9 @@ function shellFromState(input: {
     ...(input.state.thread.historyOrigin === undefined
       ? {}
       : { historyOrigin: input.state.thread.historyOrigin }),
+    ...(input.state.thread.meshOrigin === undefined
+      ? {}
+      : { meshOrigin: input.state.thread.meshOrigin }),
     latestRunId: input.state.latestRunId,
     latestRunRequestedAt: input.state.latestRunRequestedAt,
     latestRunStartedAt: input.state.latestRunStartedAt,
@@ -3985,6 +4000,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 SELECT thread_id FROM orchestration_v2_projection_runs
                 WHERE CASE WHEN json_valid(payload_json)
                   THEN json_type(payload_json, '$.delegatedCompletion.delivery') = 'object'
+                  ELSE 0 END
+              `;
+            case "remote-delegations":
+              return sql`
+                SELECT thread_id FROM orchestration_v2_projection_subagents
+                WHERE origin = 'app_owned'
+                  AND CASE WHEN json_valid(payload_json) THEN
+                    json_type(payload_json, '$.remote') = 'object'
+                    AND (status IN ('pending', 'running', 'waiting')
+                      OR json_extract(payload_json, '$.remote.stopOwed') IS 1)
                   ELSE 0 END
               `;
             case "subagent-results":
@@ -6242,6 +6267,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 id: thread.id,
                 projectId: thread.projectId,
                 lineage: thread.lineage,
+                meshOrigin: thread.meshOrigin,
                 settledOverride: thread.settledOverride,
                 settledAt: thread.settledAt,
                 pullRequests: thread.pullRequests ?? [],
@@ -7020,6 +7046,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 id: thread.id,
                 projectId: thread.projectId,
                 lineage: thread.lineage,
+                meshOrigin: thread.meshOrigin,
                 settledOverride: thread.settledOverride,
                 settledAt: thread.settledAt,
                 pullRequests: thread.pullRequests ?? [],

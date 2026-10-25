@@ -214,6 +214,10 @@ export const make = Effect.gen(function* () {
     serverVersion: packageJson.version,
     orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
     capabilities: {
+      // EXPERIMENTAL mesh v1: this server can act as captain (`MeshProxy`).
+      meshGateway: true,
+      // EXPERIMENTAL mesh v1: other members' agents may call this machine's `/mcp`.
+      meshAgents: true,
       repositoryIdentity: true,
       connectionProbe: true,
       attachmentUploads: true,
@@ -264,6 +268,7 @@ export const make = Effect.gen(function* () {
         : {}),
       ...(desktopAppUpdate ? { desktopAppUpdate: true } : {}),
       serverBrowser: true,
+      meshMember: true,
     },
   };
 

@@ -8,6 +8,7 @@ import * as Option from "effect/Option";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
+import { environmentIdentityBaseUrl } from "@t3tools/client-runtime/connection";
 import { normalizeHostname } from "~/browser/browserTargetResolver";
 import { useQuietThreadShell } from "~/state/entities";
 import { usePreparedConnection } from "~/state/session";
@@ -298,7 +299,7 @@ export function useFaviconForThreadUrl(threadRef: ScopedThreadRef, url: string):
   const projectRef = useFaviconProjectRefForThread(threadRef);
   const preparedConnection = usePreparedConnection(threadRef.environmentId);
   const environmentHostname = Option.isSome(preparedConnection)
-    ? new URL(preparedConnection.value.httpBaseUrl).hostname
+    ? new URL(environmentIdentityBaseUrl(preparedConnection.value)).hostname
     : null;
   return useBrowserFaviconStore((state) =>
     lookupFavicon(state.byKey, projectRef, url, environmentHostname),

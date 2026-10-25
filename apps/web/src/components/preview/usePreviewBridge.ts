@@ -4,6 +4,7 @@ import type {
   ScopedThreadRef,
   ThreadId,
 } from "@t3tools/contracts";
+import { environmentIdentityBaseUrl } from "@t3tools/client-runtime/connection";
 import * as Option from "effect/Option";
 import { useEffect, useEffectEvent, useRef } from "react";
 
@@ -43,7 +44,7 @@ export function usePreviewBridge(input: {
   const projectRef = useFaviconProjectRefForThread(stableThreadRef);
   const preparedConnection = usePreparedConnection(stableThreadRef.environmentId);
   const environmentHostname = Option.isSome(preparedConnection)
-    ? new URL(preparedConnection.value.httpBaseUrl).hostname
+    ? new URL(environmentIdentityBaseUrl(preparedConnection.value)).hostname
     : undefined;
 
   const lastReportedUrl = useRef<string | null>(null);

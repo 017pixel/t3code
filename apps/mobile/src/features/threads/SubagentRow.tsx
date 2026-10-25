@@ -26,14 +26,20 @@ type SubagentRowSubagent = Pick<
   | "status"
   | "progress"
   | "result"
->;
+> & {
+  /** Set when the child runs on another machine. */
+  readonly remote?: { readonly label: string } | undefined;
+};
 
 export function SubagentRow(props: {
   readonly environmentId: EnvironmentId;
   readonly subagent: SubagentRowSubagent;
   readonly elapsed: ReactNode;
+  /** Overrides whether the row opens a thread, for children that run on another machine. */
+  readonly canOpenThread?: boolean;
 }) {
   const presentation = resolveSubagentRowPresentation(props.subagent);
+  const machineLabel = props.subagent.remote?.label;
   const detail = subagentCardDetail(presentation.detail);
   return (
     <View className="flex-row gap-3">
@@ -64,9 +70,14 @@ export function SubagentRow(props: {
             >
               {presentation.statusLabel}
             </Text>
+            {machineLabel === undefined ? null : (
+              <Text numberOfLines={1} className="min-w-0 shrink text-xs text-foreground-muted">
+                on {machineLabel}
+              </Text>
+            )}
           </View>
           {props.elapsed}
-          {presentation.canOpenThread ? (
+          {(props.canOpenThread ?? presentation.canOpenThread) ? (
             <SymbolView name="chevron.right" size={12} tintColorClassName="accent-icon-subtle" />
           ) : null}
         </View>

@@ -5,6 +5,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import { TestClock } from "effect/testing";
 
 import { mcpToolSession, runAcpMcpStdioBridge } from "./AcpMcpStdioBridge.ts";
 
@@ -309,6 +310,193 @@ describe("AcpMcpStdioBridge", () => {
       yield* Fiber.interrupt(fiber);
       expect(signal?.aborted).toBe(true);
     }),
+  );
+
+  for (const transport of ["session", "stdio"] as const) {
+    it.effect.each(["application/json", "text/event-stream"])(
+      `aborts a stalled %s body when the ${transport} caller is interrupted`,
+      (contentType) =>
+        Effect.gen(function* () {
+          const reading = yield* Deferred.make<AbortSignal | undefined>();
+          const input = new NodeStream.PassThrough();
+          yield* Effect.addFinalizer(() => Effect.sync(() => input.destroy()));
+          let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
+          yield* Effect.addFinalizer(() => Effect.sync(() => bodyController?.error("test ended")));
+          const fetchImplementation = async (_url: string, init?: RequestInit) => {
+            if (init?.method === "DELETE") return new Response(null, { status: 204 });
+            const body = JSON.parse(String(init?.body)) as { id?: string; method: string };
+            if (body.method !== "tools/call") {
+              return body.id === undefined
+                ? new Response(null, { status: 202 })
+                : Response.json({
+                    jsonrpc: "2.0",
+                    id: body.id,
+                    result: { protocolVersion: "2025-06-18" },
+                  });
+            }
+            return new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  bodyController = controller;
+                  init?.signal?.addEventListener("abort", () => controller.error("aborted"));
+                  controller.enqueue(
+                    new TextEncoder().encode(
+                      contentType === "application/json" ? '{"jsonrpc":' : 'data: {"jsonrpc":',
+                    ),
+                  );
+                },
+                pull() {
+                  Deferred.doneUnsafe(reading, Effect.succeed(init?.signal ?? undefined));
+                },
+              }),
+              { headers: { "content-type": contentType } },
+            );
+          };
+          const options = {
+            endpoint: "http://127.0.0.1:1/mcp",
+            clientName: "t3-code-mesh",
+            authorization: "Bearer bridge-test",
+            fetchImplementation,
+          };
+          const call = yield* (
+            transport === "session"
+              ? mcpToolSession(options).pipe(
+                  Effect.flatMap((session) => session.call("t3_thread_read", {})),
+                  Effect.scoped,
+                )
+              : runAcpMcpStdioBridge({ ...options, input, output: { write: () => undefined } })
+          ).pipe(Effect.forkChild);
+          if (transport === "stdio") {
+            input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call" })}\n`);
+          }
+
+          const signal = yield* Deferred.await(reading);
+          yield* Fiber.interrupt(call);
+
+          expect(signal?.aborted).toBe(true);
+        }),
+    );
+  }
+
+  it.effect("awaits DELETE before closing the session scope without a request timeout", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const events: Array<string> = [];
+      let releaseDelete!: (response: Response) => void;
+      const pendingDelete = new Promise<Response>((resolve) => {
+        releaseDelete = resolve;
+      });
+      const call = yield* mcpToolSession({
+        endpoint: "http://127.0.0.1:1/mcp",
+        clientName: "t3-code-cli",
+        authorization: "Bearer bridge-test",
+        fetchImplementation: async (_url, init) => {
+          if (init?.method === "DELETE") {
+            Deferred.doneUnsafe(started, Effect.void);
+            const response = await pendingDelete;
+            events.push("delete completed");
+            return response;
+          }
+          const body = JSON.parse(String(init?.body)) as { id?: string; method: string };
+          return body.id === undefined
+            ? new Response(null, { status: 202 })
+            : Response.json(
+                {
+                  jsonrpc: "2.0",
+                  id: body.id,
+                  result:
+                    body.method === "initialize"
+                      ? { protocolVersion: "2025-06-18" }
+                      : { content: [] },
+                },
+                { headers: { "mcp-session-id": "session-cli-cleanup" } },
+              );
+        },
+      }).pipe(
+        Effect.flatMap((session) => session.call("t3_thread_read", {})),
+        Effect.scoped,
+        Effect.ensuring(Effect.sync(() => events.push("scope closed"))),
+        Effect.forkChild,
+      );
+
+      yield* Deferred.await(started);
+      yield* TestClock.adjust("0 seconds");
+      releaseDelete(new Response(null, { status: 204 }));
+      yield* Fiber.join(call);
+
+      expect(events).toEqual(["delete completed", "scope closed"]);
+    }),
+  );
+
+  it.effect.each(["result", "deadline", "cancellation"] as const)(
+    "does not delay the caller's %s while DELETE is pending and aborts cleanup after two seconds",
+    (completion) =>
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<AbortSignal | undefined>();
+        const toolStarted = yield* Deferred.make<AbortSignal | undefined>();
+        let releaseDelete: (response: Response) => void = () => {};
+        const pendingDelete = new Promise<Response>((resolve) => {
+          releaseDelete = resolve;
+        });
+        const call = yield* mcpToolSession({
+          endpoint: "http://127.0.0.1:1/mcp",
+          clientName: "t3-code-mesh",
+          requestTimeout: "60 seconds",
+          fetchImplementation: async (_url, init) => {
+            if (init?.method === "DELETE") {
+              Deferred.doneUnsafe(started, Effect.succeed(init.signal ?? undefined));
+              return pendingDelete;
+            }
+            const body = JSON.parse(String(init?.body)) as { id?: string; method: string };
+            if (body.method === "tools/call" && completion !== "result") {
+              return pendingFetch(toolStarted)(_url, init);
+            }
+            return body.id === undefined
+              ? new Response(null, { status: 202 })
+              : Response.json(
+                  {
+                    jsonrpc: "2.0",
+                    id: body.id,
+                    result:
+                      body.method === "initialize"
+                        ? { protocolVersion: "2025-06-18" }
+                        : { content: [] },
+                  },
+                  { headers: { "mcp-session-id": "session-cleanup" } },
+                );
+          },
+        }).pipe(
+          Effect.flatMap((session) => session.call("t3_thread_search", {})),
+          Effect.scoped,
+          Effect.timeoutOption("10 seconds"),
+          Effect.forkChild,
+        );
+
+        if (completion !== "result") yield* Deferred.await(toolStarted);
+        const cancellation =
+          completion === "cancellation"
+            ? yield* Fiber.interrupt(call).pipe(Effect.forkChild)
+            : undefined;
+        if (completion === "deadline") yield* TestClock.adjust("10 seconds");
+        const signal = yield* Deferred.await(started);
+        yield* TestClock.adjust("0 seconds");
+        const result = (cancellation ?? call).pollUnsafe();
+        yield* TestClock.adjust("1 second");
+        const abortedBeforeDeadline = signal?.aborted;
+        yield* TestClock.adjust("1 second");
+        const aborted = signal?.aborted;
+        releaseDelete(new Response(null, { status: 204 }));
+        yield* Fiber.await(call);
+        if (cancellation !== undefined) yield* Fiber.join(cancellation);
+        expect(result?._tag).toBe("Success");
+        if (completion === "result") {
+          expect(result).toMatchObject({ value: { _tag: "Some", value: { content: [] } } });
+        } else if (completion === "deadline") {
+          expect(result).toMatchObject({ value: { _tag: "None" } });
+        }
+        expect(abortedBeforeDeadline).toBe(false);
+        expect(aborted).toBe(true);
+      }),
   );
 
   it.effect("aborts the pending fetch when the stdio bridge is interrupted", () =>

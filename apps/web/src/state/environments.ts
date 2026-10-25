@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   connectionCatalogDisplayUrl,
+  environmentIdentityBaseUrl,
   hasRelayRoute,
   type EnvironmentPresentation as BaseEnvironmentPresentation,
 } from "@t3tools/client-runtime/connection";
@@ -80,6 +81,12 @@ export function usePrimaryEnvironment(): EnvironmentPresentation | null {
 export function useEnvironmentHttpBaseUrl(environmentId: EnvironmentId | null): string | null {
   const prepared = usePreparedConnection(environmentId);
   return Option.isSome(prepared) ? prepared.value.httpBaseUrl : null;
+}
+
+/** The environment's own address for host checks and public URLs, never a captain's. */
+export function useEnvironmentIdentityBaseUrl(environmentId: EnvironmentId | null): string | null {
+  const prepared = usePreparedConnection(environmentId);
+  return Option.isSome(prepared) ? environmentIdentityBaseUrl(prepared.value) : null;
 }
 
 export function useRelayEnvironmentDiscovery(): Discovery.RelayEnvironmentDiscoveryState {

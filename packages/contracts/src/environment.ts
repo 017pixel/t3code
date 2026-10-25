@@ -69,7 +69,19 @@ export const ServerSelfUpdateCapability = Schema.Literals([
 ]);
 export type ServerSelfUpdateCapability = typeof ServerSelfUpdateCapability.Type;
 
+/**
+ * EXPERIMENTAL mesh v1. Absent means false. `meshMember` joins the relay mesh, `meshAgents`
+ * accepts agent calls from other members, `meshGateway` can act as captain.
+ */
+export const MeshCapabilities = Schema.Struct({
+  meshMember: Schema.optionalKey(Schema.Boolean),
+  meshAgents: Schema.optionalKey(Schema.Boolean),
+  meshGateway: Schema.optionalKey(Schema.Boolean),
+});
+export type MeshCapabilities = typeof MeshCapabilities.Type;
+
 export const ExecutionEnvironmentCapabilities = Schema.Struct({
+  ...MeshCapabilities.fields,
   repositoryIdentity: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   connectionProbe: Schema.optionalKey(Schema.Boolean),
   attachmentUploads: Schema.optionalKey(Schema.Boolean),

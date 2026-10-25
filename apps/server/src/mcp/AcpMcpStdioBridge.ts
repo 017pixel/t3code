@@ -3,6 +3,7 @@
 import * as NodeReadline from "node:readline";
 
 import * as Cause from "effect/Cause";
+import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Scope from "effect/Scope";
@@ -13,6 +14,8 @@ import { discardResponseBody, responsePayloads } from "@t3tools/shared/mcpRespon
 
 export class AcpMcpBridgeError extends Error {
   readonly _tag = "AcpMcpBridgeError";
+  /** The endpoint's HTTP status, when it answered with one other than 2xx. */
+  status?: number;
 }
 
 const bridgeError = (cause: unknown): AcpMcpBridgeError =>
@@ -52,8 +55,15 @@ function protocolVersionOf(entry: unknown): string | null {
 
 export interface McpToolSessionOptions {
   readonly endpoint: string;
-  readonly authorization: string;
+  readonly authorization?: string;
+  /** Extra headers for each request, such as a fresh DPoP proof for its method and URL. */
+  readonly requestHeaders?: (request: {
+    readonly method: string;
+    readonly url: string;
+  }) => Effect.Effect<Readonly<Record<string, string>>>;
   readonly clientName: string;
+  /** Bounds each HTTP request, including response body completion. */
+  readonly requestTimeout?: Duration.Input;
   readonly fetchImplementation?: (url: string, init?: RequestInit) => Promise<Response>;
 }
 
@@ -65,6 +75,35 @@ export interface McpToolSession {
   ) => Effect.Effect<unknown, AcpMcpBridgeError>;
 }
 
+const withMcpResponse = Effect.fn("AcpMcpStdioBridge.withResponse")(function* <A>(
+  options: Pick<McpToolSessionOptions, "endpoint" | "fetchImplementation" | "requestTimeout">,
+  init: RequestInit,
+  use: (response: Response) => Effect.Effect<A, AcpMcpBridgeError>,
+) {
+  const request = Effect.acquireUseRelease(
+    Effect.sync(() => new AbortController()),
+    (controller) =>
+      Effect.tryPromise({
+        try: () =>
+          (options.fetchImplementation ?? fetch)(options.endpoint, {
+            ...init,
+            signal: controller.signal,
+          }),
+        catch: bridgeError,
+      }).pipe(Effect.flatMap(use)),
+    // Fetch resolves at the headers; its signal must stay active while the body is read.
+    (controller) => Effect.sync(() => controller.abort()),
+  );
+  return yield* options.requestTimeout === undefined
+    ? request
+    : request.pipe(
+        Effect.timeoutOrElse({
+          duration: options.requestTimeout,
+          orElse: () => Effect.fail(new AcpMcpBridgeError("T3 Code MCP request timed out.")),
+        }),
+      );
+});
+
 /**
  * One initialized MCP session over T3 Code's HTTP endpoint, terminated when
  * the scope closes. Used by the ACP terminal fallback and `t3 thread`.
@@ -72,43 +111,50 @@ export interface McpToolSession {
 export const mcpToolSession = (
   options: McpToolSessionOptions,
 ): Effect.Effect<McpToolSession, AcpMcpBridgeError, Scope.Scope> => {
-  const fetchImplementation = options.fetchImplementation ?? fetch;
   let sessionId: string | null = null;
   let protocolVersion: string | null = null;
   let nextId = 0;
 
-  const headers = () => ({
-    accept: "application/json, text/event-stream",
-    authorization: options.authorization,
-    ...(sessionId === null ? {} : { "mcp-session-id": sessionId }),
-    ...(protocolVersion === null ? {} : { "mcp-protocol-version": protocolVersion }),
-  });
+  const headers = (method: string) =>
+    (options.requestHeaders?.({ method, url: options.endpoint }) ?? Effect.succeed({})).pipe(
+      Effect.map((extra) => ({
+        accept: "application/json, text/event-stream",
+        ...(options.authorization === undefined ? {} : { authorization: options.authorization }),
+        ...extra,
+        ...(sessionId === null ? {} : { "mcp-session-id": sessionId }),
+        ...(protocolVersion === null ? {} : { "mcp-protocol-version": protocolVersion }),
+      })),
+    );
 
   const send = Effect.fn("AcpMcpStdioBridge.send")(function* (
     message: unknown,
   ): Effect.fn.Return<ReadonlyArray<unknown>, AcpMcpBridgeError> {
-    const response = yield* Effect.tryPromise({
-      try: (signal) =>
-        fetchImplementation(options.endpoint, {
-          method: "POST",
-          headers: { "content-type": "application/json", ...headers() },
-          body: JSON.stringify(message),
-          signal,
+    const requestHeaders = yield* headers("POST");
+    return yield* withMcpResponse(
+      options,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...requestHeaders },
+        body: JSON.stringify(message),
+      },
+      (response) =>
+        Effect.gen(function* () {
+          sessionId = response.headers.get("mcp-session-id") ?? sessionId;
+          if (!response.ok) {
+            yield* discardResponseBody(response);
+            const error = new AcpMcpBridgeError(
+              `T3 Code MCP endpoint responded with HTTP ${response.status}.`,
+            );
+            error.status = response.status;
+            return yield* Effect.fail(error);
+          }
+          const payloads = yield* Stream.runCollect(responsePayloads(response, bridgeError));
+          for (const payload of payloads) {
+            protocolVersion = protocolVersionOf(payload) ?? protocolVersion;
+          }
+          return payloads;
         }),
-      catch: bridgeError,
-    });
-    sessionId = response.headers.get("mcp-session-id") ?? sessionId;
-    if (!response.ok) {
-      yield* discardResponseBody(response);
-      return yield* Effect.fail(
-        new AcpMcpBridgeError(`T3 Code MCP endpoint responded with HTTP ${response.status}.`),
-      );
-    }
-    const payloads = yield* Stream.runCollect(responsePayloads(response, bridgeError));
-    for (const payload of payloads) {
-      protocolVersion = protocolVersionOf(payload) ?? protocolVersion;
-    }
-    return payloads;
+    );
   });
 
   const request = Effect.fn("AcpMcpStdioBridge.request")(function* (
@@ -131,15 +177,30 @@ export const mcpToolSession = (
   const terminate = Effect.suspend(() =>
     sessionId === null
       ? Effect.void
-      : Effect.tryPromise(() =>
-          fetchImplementation(options.endpoint, { method: "DELETE", headers: headers() }),
-        ).pipe(Effect.flatMap(discardResponseBody), Effect.ignore),
+      : headers("DELETE").pipe(
+          Effect.flatMap((requestHeaders) =>
+            withMcpResponse(
+              options,
+              { method: "DELETE", headers: requestHeaders },
+              discardResponseBody,
+            ),
+          ),
+          Effect.ignore,
+        ),
   );
 
   // Registered before the handshake so a session the server opened is ended
   // even when the handshake fails, and the handshake stays interruptible.
   return Effect.gen(function* () {
-    yield* Effect.addFinalizer(() => terminate);
+    yield* Effect.addFinalizer(() => {
+      const cleanup = terminate.pipe(
+        Effect.timeoutOrElse({ duration: "2 seconds", orElse: () => Effect.void }),
+      );
+      // CLI callers must finish DELETE before the outer scope revokes their bearer.
+      return options.requestTimeout === undefined
+        ? cleanup
+        : cleanup.pipe(Effect.forkDetach({ startImmediately: true }), Effect.asVoid);
+    });
     yield* request("initialize", {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
@@ -172,153 +233,153 @@ function callAcpMcpTool(options: {
   );
 }
 
-export function runAcpMcpStdioBridge(options: AcpMcpStdioBridgeOptions): Effect.Effect<void> {
-  const fetchImplementation = options.fetchImplementation ?? fetch;
-  return Effect.gen(function* () {
-    let sessionId: string | null = null;
-    let protocolVersion: string | null = null;
-    const running = new Set<Fiber.Fiber<void>>();
+export const runAcpMcpStdioBridge = Effect.fn("AcpMcpStdioBridge.run")(function* (
+  options: AcpMcpStdioBridgeOptions,
+): Effect.fn.Return<void> {
+  let sessionId: string | null = null;
+  let protocolVersion: string | null = null;
+  const running = new Set<Fiber.Fiber<void>>();
 
-    const writeMessage = (message: unknown): Effect.Effect<void> =>
-      Effect.sync(() => {
-        options.output.write(`${JSON.stringify(message)}\n`);
-      });
-
-    const handleServerPayload = Effect.fn("AcpMcpStdioBridge.handleServerPayload")(function* (
-      payload: unknown,
-    ): Effect.fn.Return<void> {
-      for (const entry of Array.isArray(payload) ? payload : [payload]) {
-        protocolVersion = protocolVersionOf(entry) ?? protocolVersion;
-        yield* writeMessage(entry);
-      }
+  const writeMessage = (message: unknown): Effect.Effect<void> =>
+    Effect.sync(() => {
+      options.output.write(`${JSON.stringify(message)}\n`);
     });
 
-    const respondWithError = (
-      requestId: unknown,
-      message: string,
-      code = -32603,
-    ): Effect.Effect<void> =>
-      writeMessage({
-        jsonrpc: "2.0",
-        id: requestId ?? null,
-        error: { code, message },
-      });
+  const handleServerPayload = Effect.fn("AcpMcpStdioBridge.handleServerPayload")(function* (
+    payload: unknown,
+  ): Effect.fn.Return<void> {
+    for (const entry of Array.isArray(payload) ? payload : [payload]) {
+      protocolVersion = protocolVersionOf(entry) ?? protocolVersion;
+      yield* writeMessage(entry);
+    }
+  });
 
-    const forward: (line: string, envelope: JsonRpcEnvelope) => Effect.Effect<void> = Effect.fn(
-      "AcpMcpStdioBridge.forward",
-    )(
-      function* (line: string, envelope: JsonRpcEnvelope) {
-        const response = yield* Effect.tryPromise({
-          try: (signal) =>
-            fetchImplementation(options.endpoint, {
-              method: "POST",
-              headers: {
-                "content-type": "application/json",
-                accept: "application/json, text/event-stream",
-                authorization: options.authorization,
-                ...(sessionId === null ? {} : { "mcp-session-id": sessionId }),
-                ...(protocolVersion === null ? {} : { "mcp-protocol-version": protocolVersion }),
-              },
-              body: line,
-              signal,
-            }),
-          catch: bridgeError,
-        });
-        sessionId = response.headers.get("mcp-session-id") ?? sessionId;
-        if (!response.ok) {
-          if (envelope.id !== undefined) {
-            yield* respondWithError(
-              envelope.id,
-              `T3 Code MCP endpoint responded with HTTP ${response.status}.`,
-            );
-          }
-          return yield* discardResponseBody(response);
-        }
-        yield* Stream.runForEach(responsePayloads(response, bridgeError), handleServerPayload);
-      },
-      (effect, _line, envelope) =>
-        effect.pipe(
-          Effect.catchCause((cause) => {
-            if (envelope.id === undefined) return Effect.void;
-            const error = Cause.squash(cause);
-            return respondWithError(
-              envelope.id,
-              `T3 Code MCP bridge request failed: ${error instanceof Error ? error.message : String(error)}`,
-            );
+  const respondWithError = (
+    requestId: unknown,
+    message: string,
+    code = -32603,
+  ): Effect.Effect<void> =>
+    writeMessage({
+      jsonrpc: "2.0",
+      id: requestId ?? null,
+      error: { code, message },
+    });
+
+  const forward: (line: string, envelope: JsonRpcEnvelope) => Effect.Effect<void> = Effect.fn(
+    "AcpMcpStdioBridge.forward",
+  )(
+    function* (line: string, envelope: JsonRpcEnvelope) {
+      yield* withMcpResponse(
+        options,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json, text/event-stream",
+            authorization: options.authorization,
+            ...(sessionId === null ? {} : { "mcp-session-id": sessionId }),
+            ...(protocolVersion === null ? {} : { "mcp-protocol-version": protocolVersion }),
+          },
+          body: line,
+        },
+        (response) =>
+          Effect.gen(function* () {
+            sessionId = response.headers.get("mcp-session-id") ?? sessionId;
+            if (!response.ok) {
+              if (envelope.id !== undefined) {
+                yield* respondWithError(
+                  envelope.id,
+                  `T3 Code MCP endpoint responded with HTTP ${response.status}.`,
+                );
+              }
+              return yield* discardResponseBody(response);
+            }
+            yield* Stream.runForEach(responsePayloads(response, bridgeError), handleServerPayload);
+          }),
+      );
+    },
+    (effect, _line, envelope) =>
+      effect.pipe(
+        Effect.catchCause((cause) => {
+          if (envelope.id === undefined) return Effect.void;
+          const error = Cause.squash(cause);
+          return respondWithError(
+            envelope.id,
+            `T3 Code MCP bridge request failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+      ),
+  );
+
+  // Order only session establishment; SSE responses must bypass it to avoid deadlock. Calls remain concurrent after initialization.
+  let sessionBarrier: Effect.Effect<void> = Effect.void;
+  let sessionBarrierPending = false;
+
+  const launch = Effect.fn("AcpMcpStdioBridge.launch")(function* (
+    task: Effect.Effect<void>,
+  ): Effect.fn.Return<void> {
+    const fiber = yield* Effect.forkChild(task);
+    running.add(fiber);
+    yield* Effect.forkChild(
+      Fiber.await(fiber).pipe(
+        Effect.andThen(
+          Effect.sync(() => {
+            running.delete(fiber);
           }),
         ),
+      ),
     );
+  });
 
-    // Order only session establishment; SSE responses must bypass it to avoid deadlock. Calls remain concurrent after initialization.
-    let sessionBarrier: Effect.Effect<void> = Effect.void;
-    let sessionBarrierPending = false;
-
-    const launch = Effect.fn("AcpMcpStdioBridge.launch")(function* (
-      task: Effect.Effect<void>,
-    ): Effect.fn.Return<void> {
-      const fiber = yield* Effect.forkChild(task);
+  const dispatch = Effect.fn("AcpMcpStdioBridge.dispatch")(function* (
+    line: string,
+  ): Effect.fn.Return<void> {
+    if (line.trim().length === 0) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return yield* respondWithError(null, "Parse error", -32700);
+    }
+    const envelope = asEnvelope(parsed);
+    if (envelope === null) return;
+    const isResponse = envelope.id !== undefined && ("result" in envelope || "error" in envelope);
+    const isSessionHandshake =
+      envelope.method === "initialize" || envelope.method === "notifications/initialized";
+    if (isResponse) {
+      return yield* launch(forward(line, envelope));
+    }
+    if (isSessionHandshake) {
+      const prior = sessionBarrier;
+      const fiber = yield* Effect.forkChild(prior.pipe(Effect.andThen(forward(line, envelope))));
       running.add(fiber);
+      const barrier = Fiber.await(fiber).pipe(Effect.asVoid);
+      sessionBarrier = barrier;
+      sessionBarrierPending = true;
       yield* Effect.forkChild(
         Fiber.await(fiber).pipe(
           Effect.andThen(
             Effect.sync(() => {
               running.delete(fiber);
+              if (sessionBarrier === barrier) sessionBarrierPending = false;
             }),
           ),
         ),
       );
-    });
-
-    const dispatch = Effect.fn("AcpMcpStdioBridge.dispatch")(function* (
-      line: string,
-    ): Effect.fn.Return<void> {
-      if (line.trim().length === 0) return;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        return yield* respondWithError(null, "Parse error", -32700);
-      }
-      const envelope = asEnvelope(parsed);
-      if (envelope === null) return;
-      const isResponse = envelope.id !== undefined && ("result" in envelope || "error" in envelope);
-      const isSessionHandshake =
-        envelope.method === "initialize" || envelope.method === "notifications/initialized";
-      if (isResponse) {
-        return yield* launch(forward(line, envelope));
-      }
-      if (isSessionHandshake) {
-        const prior = sessionBarrier;
-        const fiber = yield* Effect.forkChild(prior.pipe(Effect.andThen(forward(line, envelope))));
-        running.add(fiber);
-        const barrier = Fiber.await(fiber).pipe(Effect.asVoid);
-        sessionBarrier = barrier;
-        sessionBarrierPending = true;
-        yield* Effect.forkChild(
-          Fiber.await(fiber).pipe(
-            Effect.andThen(
-              Effect.sync(() => {
-                running.delete(fiber);
-                if (sessionBarrier === barrier) sessionBarrierPending = false;
-              }),
-            ),
-          ),
-        );
-        return;
-      }
-      const task = sessionBarrierPending
-        ? sessionBarrier.pipe(Effect.andThen(forward(line, envelope)))
-        : forward(line, envelope);
-      return yield* launch(task);
-    });
-
-    const reader = NodeReadline.createInterface({ input: options.input });
-    yield* Stream.runForEach(Stream.fromAsyncIterable(reader, bridgeError), dispatch).pipe(
-      Effect.catchCause(() => Effect.void),
-    );
-    yield* Fiber.awaitAll(running);
+      return;
+    }
+    const task = sessionBarrierPending
+      ? sessionBarrier.pipe(Effect.andThen(forward(line, envelope)))
+      : forward(line, envelope);
+    return yield* launch(task);
   });
-}
+
+  const reader = NodeReadline.createInterface({ input: options.input });
+  yield* Stream.runForEach(Stream.fromAsyncIterable(reader, bridgeError), dispatch).pipe(
+    Effect.catchCause(() => Effect.void),
+  );
+  yield* Fiber.awaitAll(running);
+});
 
 /** Avoid heavy imports on the ACP first-message path. */
 export async function runAcpMcpCliFastPath(

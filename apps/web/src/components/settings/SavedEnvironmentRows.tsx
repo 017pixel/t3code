@@ -6,6 +6,7 @@ import {
   RouteIcon,
 } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
+import { meshCaptainRouteLabel } from "@t3tools/client-runtime/state/mesh-status";
 import { useEffect, useEffectEvent, useState } from "react";
 import {
   AuthRelayWriteScope,
@@ -34,6 +35,7 @@ import {
   useConnectionDiagnosis,
 } from "./ConnectionDiagnosisDetails";
 import { usePreparedConnection } from "~/state/session";
+import { meshEnvironment } from "~/state/mesh";
 import { EnvironmentRow, environmentTransportLabel } from "./EnvironmentRow";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Switch } from "../ui/switch";
@@ -199,6 +201,11 @@ export function SavedBackendListRow({
   const diagnosis = resumingServerUpdate ? null : currentDiagnosis;
   const prepared = usePreparedConnection(environmentId);
   const connectedTarget = isConnected && prepared._tag === "Some" ? prepared.value.target : null;
+  const relayMesh = useAtomValue(meshEnvironment.relayMeshAtom);
+  const captainRouteLabel =
+    isConnected && prepared._tag === "Some"
+      ? meshCaptainRouteLabel(prepared.value, relayMesh)
+      : null;
   const mcpUrl = environmentMcpUrl({
     entry: environment.entry,
     relayHttpBaseUrl: discoveredRelayHttpBaseUrl ?? lastRelayHttpBaseUrl,
@@ -210,7 +217,7 @@ export function SavedBackendListRow({
   );
   const routeCount = connectionRoutes(environment.entry).length;
   const subtitleText = [
-    environmentTransportLabel(environment, connectedTarget),
+    captainRouteLabel ?? environmentTransportLabel(environment, connectedTarget),
     // The headline below names the failure in full.
     diagnosis ? null : resumingServerUpdate ? "Restarting" : status.text,
     enabled && versionMismatch ? serverVersion : null,

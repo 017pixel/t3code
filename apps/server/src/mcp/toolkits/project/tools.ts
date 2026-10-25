@@ -13,7 +13,12 @@ import {
   ProjectCreatePayload,
   ProjectUpdatePayload,
   ProjectId,
+  OrchestratorMcpClientRequestId,
   OrchestratorMcpFailure,
+  OrchestratorMcpMachine,
+  OrchestratorMcpMachineSelector,
+  OrchestratorMcpTarget,
+  orchestratorMcpMachineListResult,
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
 } from "@t3tools/contracts";
@@ -30,6 +35,7 @@ import * as ThreadManagementService from "../../../orchestration-v2/ThreadManage
 import * as SourceControlRepositoryService from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 
 const shared = {
   success: Project,
@@ -44,15 +50,19 @@ const shared = {
 };
 const ProjectListTool = Tool.make("t3_project_list", {
   ...shared,
-  description: "List projects. Pages can shift.",
+  description:
+    'List projects. Pages can shift. Mesh: `machine` lists another machine\'s; `"all"` returns one section per machine.',
   parameters: Schema.Struct({
+    machine: Schema.optional(OrchestratorMcpMachineSelector),
     cursor: Schema.optional(NonNegativeInt),
     limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
   }),
-  success: Schema.Struct({
-    projects: Schema.Array(Project),
-    nextCursor: Schema.NullOr(NonNegativeInt),
-  }),
+  success: orchestratorMcpMachineListResult(
+    Schema.Struct({
+      projects: Schema.Array(Project),
+      nextCursor: Schema.NullOr(NonNegativeInt),
+    }),
+  ),
 })
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
@@ -66,10 +76,11 @@ const ProjectReadTool = Tool.make("t3_project_read", {
 const ProjectCreateTool = Tool.make("t3_project_create", {
   ...shared,
   description:
-    "Register a project folder. `createWorkspaceRootIfMissing` creates it; a registered folder is rejected. No `workspaceRoot`: makes a git repo from `title` with README, icon, first commit (`commitError` on failure; project still exists). Clone first with `t3_project_clone` if needed.",
+    "Register a project folder. `createWorkspaceRootIfMissing` creates it; a registered folder is rejected. No `workspaceRoot`: makes a git repo from `title` with README, icon, first commit (`commitError` on failure; project still exists). Clone first with `t3_project_clone` if needed. Mesh: `machine` registers on another machine, such as the cwd `t3_project_clone` returned there.",
   parameters: Schema.Struct({
     ...ProjectCreatePayload.fields,
     workspaceRoot: Schema.optional(ProjectCreatePayload.fields.workspaceRoot),
+    machine: Schema.optional(OrchestratorMcpMachine),
   }),
   success: Schema.Struct({ ...Project.fields, commitError: Schema.optional(Schema.String) }),
   dependencies: [...shared.dependencies, ManagedProjectFolders.ManagedProjectFolders],
@@ -87,8 +98,11 @@ const ProjectDeleteTool = Tool.make("t3_project_delete", {
 const ProjectCloneTool = Tool.make("t3_project_clone", {
   ...shared,
   description:
-    "Clone a repository (`destinationPath` new or empty). Register after with `t3_project_create`.",
-  parameters: SourceControlCloneRepositoryInput,
+    "Clone a repository (`destinationPath` new or empty). Register after with `t3_project_create`. Mesh: `machine` clones on another machine.",
+  parameters: Schema.Struct({
+    ...SourceControlCloneRepositoryInput.fields,
+    machine: Schema.optional(OrchestratorMcpMachine),
+  }),
   success: SourceControlCloneRepositoryResult,
   dependencies: [
     ...shared.dependencies,
@@ -100,9 +114,11 @@ const ProjectCloneTool = Tool.make("t3_project_clone", {
 const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   ...shared,
   description:
-    "Create one new top-level thread, bound to its workspace before the agent starts. Task in `message`. Omit `projectId`, model and modes to inherit yours (outside a thread, pass `projectId` or `scratch`); modes cannot exceed yours. No retry key: after an error or lost reply, check `t3_thread_list` before retrying. Follow it with `t3_thread_read` or `t3_thread_wait`. Mention it with its `link`.",
+    "Create one new top-level thread, bound to its workspace before the agent starts. Task in `message`. Omit `projectId`, model and modes to inherit yours (outside a thread, pass `projectId` or `scratch`); modes cannot exceed yours. Pass `clientRequestId` and reuse it on retry to get the same thread; without one, check `t3_thread_list` after an error or lost reply. Follow it with `t3_thread_read` or `t3_thread_wait`. Mention it with its `link`. Mesh: `machine` launches on another machine in its project for this repository; only committed work is there, attachments are refused, and a `target` resolves against its providers.",
   parameters: Schema.Struct({
     projectId: Schema.optional(ProjectId),
+    machine: Schema.optional(OrchestratorMcpMachine),
+    clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
     scratch: Schema.optional(
       Schema.Boolean.annotate({
         description:
@@ -111,6 +127,12 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     ),
     title: TrimmedNonEmptyString,
     modelSelection: Schema.optional(ModelSelection),
+    target: Schema.optional(
+      OrchestratorMcpTarget.annotate({
+        description:
+          "Provider, model and options as for delegate_task, resolved against this machine's providers. Inherits from modelSelection, else from the calling thread or the project default; options inherit only for the same instance and model.",
+      }),
+    ),
     runtimeMode: Schema.optional(RuntimeMode),
     interactionMode: Schema.optional(ProviderInteractionMode),
     workspaceStrategy: Schema.optional(
@@ -142,6 +164,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     FileSystem.FileSystem,
     ServerConfig.ServerConfig,
     ServerSettings.ServerSettingsService,
+    OrchestratorMcpService.OrchestratorMcpService,
   ],
 })
   .annotate(Tool.Destructive, true)

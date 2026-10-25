@@ -24,6 +24,10 @@ import {
   type AuthWebSocketTicketUse,
   DpopFailureReason,
   type DpopFailureReason as DpopFailureReasonType,
+  type EnvironmentId,
+  MESH_OWNS_PATH,
+  MESH_SESSION_PATH,
+  MESH_TASK_STATE_PATH,
 } from "@t3tools/contracts";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
 import * as Context from "effect/Context";
@@ -34,6 +38,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -45,6 +50,7 @@ import * as SessionStore from "./SessionStore.ts";
 import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./ReusableDevAuth.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
+import { CLOUD_LINKED_USER_ID } from "../cloud/config.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 
 const DEFAULT_SESSION_SUBJECT = "cli-issued-session";
@@ -74,6 +80,30 @@ export interface IssuedBearerSession {
 const MCP_CLIENT_SUBJECT = "mcp-client";
 const MCP_CLIENT_SESSION_TTL = Duration.days(30);
 
+// Mesh sessions are machine-to-machine and renew themselves; one hour bounds a leaked token.
+const MESH_MEMBER_SESSION_TTL = Duration.hours(1);
+
+/**
+ * The only paths that accept a `mesh-member` session. It holds `orchestration:read`, which would
+ * otherwise open most of the HTTP API and the RPC socket. Never sockets or `/api/mesh/via`.
+ */
+const MESH_MEMBER_HTTP_PATHS: ReadonlySet<string> = new Set([
+  MESH_SESSION_PATH,
+  MESH_OWNS_PATH,
+  MESH_TASK_STATE_PATH,
+  "/mcp",
+]);
+
+const CLOUD_CONNECT_SUBJECT = "cloud-connect";
+const CLOUD_CONNECT_BOOTSTRAP_PREFIX = `${CLOUD_CONNECT_SUBJECT}:`;
+
+/**
+ * A Connect bootstrap's subject records the cloud user it was minted for, so the exchange can
+ * refuse it after an account change. The session it yields is plain `cloud-connect`.
+ */
+export const cloudConnectBootstrapSubject = (cloudUserId: string): string =>
+  `${CLOUD_CONNECT_BOOTSTRAP_PREFIX}${cloudUserId}`;
+
 export const mcpClientScopes = (
   access: AuthMcpClientAccess,
 ): ReadonlyArray<AuthEnvironmentScope> =>
@@ -101,6 +131,13 @@ export interface AuthenticatedSession {
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly proofKeyThumbprint?: string;
   readonly expiresAt?: DateTime.DateTime;
+  /** Set for `mesh-member` sessions: the member that holds the session. */
+  readonly meshCaller?: EnvironmentId;
+}
+
+export interface MeshMemberSession {
+  readonly sessionId: AuthSessionId;
+  readonly meshCaller: EnvironmentId;
 }
 
 const serverAuthInternalErrorContext = {
@@ -572,6 +609,30 @@ export class EnvironmentAuth extends Context.Service<
     readonly authenticateBrowserSession: (
       request: HttpServerRequest.HttpServerRequest,
     ) => Effect.Effect<AuthenticatedSession, ServerAuthCredentialError | ServerAuthInternalError>;
+    /**
+     * A `mesh-member` session on a path that admits one: `Authorization: DPoP` with a fresh proof
+     * from the session's key for this exact request, so a token without its key is useless.
+     */
+    readonly authenticateMeshMember: (
+      request: HttpServerRequest.HttpServerRequest,
+    ) => Effect.Effect<MeshMemberSession, ServerAuthCredentialError | ServerAuthInternalError>;
+    /** A `mesh-member` session for `meshCaller`. Replaces that caller's earlier session. */
+    readonly issueMeshMemberSession: (input: {
+      readonly meshCaller: EnvironmentId;
+      readonly proofKeyThumbprint: string;
+    }) => Effect.Effect<
+      { readonly token: string; readonly expiresAt: DateTime.DateTime },
+      ServerAuthInternalError
+    >;
+    /** Serializes mesh session issuance with membership and account revocation. */
+    readonly withMeshSessionLock: <A, E, R>(
+      effect: Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E, R>;
+    /** Revokes `mesh-member` sessions, except those whose caller is in `keepCallers`. */
+    readonly revokeMeshMemberSessions: (input?: {
+      readonly keepCallers?: ReadonlyArray<EnvironmentId>;
+    }) => Effect.Effect<number, ServerAuthInternalError>;
+    readonly revokeCloudConnectSessions: () => Effect.Effect<number, ServerAuthInternalError>;
   }
 >()("t3/auth/EnvironmentAuth") {}
 
@@ -611,13 +672,44 @@ function toBootstrapExchangeError(
   });
 }
 
-const rejectMcpClientAudience = <S extends { readonly subject: string }>(session: S) =>
-  session.subject === MCP_CLIENT_SUBJECT
-    ? Effect.fail(
+const requestPath = (request: HttpServerRequest.HttpServerRequest) =>
+  request.url.split("?", 1)[0] ?? "";
+
+// MCP clients and mesh members hold scopes that the full HTTP and RPC surface would let them
+// exceed, so each is fenced to its own paths.
+const rejectRestrictedAudience =
+  (request: HttpServerRequest.HttpServerRequest) =>
+  <S extends { readonly subject: string }>(session: S) => {
+    if (session.subject === MCP_CLIENT_SUBJECT) {
+      return Effect.fail(
         new ServerAuthInvalidCredentialError({
           diagnostic: "MCP client sessions are only accepted by the MCP endpoint.",
         }),
-      ).pipe(Effect.tap(() => Effect.logWarning("Rejected an MCP client session outside /mcp.")))
+      ).pipe(Effect.tap(() => Effect.logWarning("Rejected an MCP client session outside /mcp.")));
+    }
+    if (
+      SessionStore.isMeshMemberSubject(session.subject) &&
+      !MESH_MEMBER_HTTP_PATHS.has(requestPath(request))
+    ) {
+      return Effect.fail(
+        new ServerAuthInvalidCredentialError({
+          diagnostic: "Mesh member sessions are only accepted by the mesh endpoints.",
+        }),
+      ).pipe(
+        Effect.tap(() => Effect.logWarning("Rejected a mesh member session outside /api/mesh.")),
+      );
+    }
+    return Effect.succeed(session);
+  };
+
+// Whatever path an upgrade names, a mesh member never holds a socket.
+const rejectMeshMemberSocket = <S extends { readonly subject: string }>(session: S) =>
+  SessionStore.isMeshMemberSubject(session.subject)
+    ? Effect.fail(
+        new ServerAuthInvalidCredentialError({
+          diagnostic: "Mesh member sessions cannot open sockets.",
+        }),
+      )
     : Effect.succeed(session);
 
 const mapSessionVerificationErrors = <A, R>(
@@ -720,9 +812,11 @@ export const make = Effect.gen(function* () {
   const descriptor = yield* policy.getDescriptor();
   const config = yield* ServerConfig.ServerConfig;
   const devAuth = resolveReusableDevAuth(config);
+  const meshSessionLock = yield* Semaphore.make(1);
 
   const authenticateToken = (
     token: string,
+    request: HttpServerRequest.HttpServerRequest,
   ): Effect.Effect<
     AuthenticatedSession,
     ServerAuthInvalidCredentialError | ServerAuthInternalError
@@ -738,7 +832,7 @@ export const make = Effect.gen(function* () {
           : Effect.void,
       ),
       mapSessionVerificationErrors,
-      Effect.flatMap(rejectMcpClientAudience),
+      Effect.flatMap(rejectRestrictedAudience(request)),
       Effect.map((session) => ({
         sessionId: session.sessionId,
         subject: session.subject,
@@ -746,6 +840,7 @@ export const make = Effect.gen(function* () {
         scopes: session.scopes,
         ...(session.proofKeyThumbprint ? { proofKeyThumbprint: session.proofKeyThumbprint } : {}),
         ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
+        ...(session.meshCaller ? { meshCaller: session.meshCaller } : {}),
       })),
     );
 
@@ -790,7 +885,7 @@ export const make = Effect.gen(function* () {
         }),
       );
     }
-    return authenticateToken(credential.token).pipe(
+    return authenticateToken(credential.token, request).pipe(
       Effect.flatMap((session) => {
         if (session.proofKeyThumbprint) {
           if (!dpopToken || dpopToken !== credential.token) {
@@ -913,6 +1008,24 @@ export const make = Effect.gen(function* () {
   > & {
     readonly method: PairingGrantStore.BootstrapGrant["method"] | "reusable-dev-token";
   };
+  // Refuses a Connect bootstrap minted for a cloud user this environment no longer has installed.
+  const resolveCloudConnectGrant = <G extends ResolvedBootstrapGrant>(grant: G) => {
+    if (!grant.subject.startsWith(CLOUD_CONNECT_BOOTSTRAP_PREFIX)) return Effect.succeed(grant);
+    const mintedFor = grant.subject.slice(CLOUD_CONNECT_BOOTSTRAP_PREFIX.length);
+    return secretStore.get(CLOUD_LINKED_USER_ID).pipe(
+      Effect.mapError((cause) => new ServerAuthLinkedCloudAccountReadError({ cause })),
+      Effect.flatMap((installed) =>
+        Option.isSome(installed) && new TextDecoder().decode(installed.value) === mintedFor
+          ? Effect.succeed({ ...grant, subject: CLOUD_CONNECT_SUBJECT })
+          : Effect.fail(
+              new ServerAuthInvalidCredentialError({
+                diagnostic: "This T3 Connect credential was minted for another account.",
+              }),
+            ),
+      ),
+    );
+  };
+
   const resolveBootstrapGrant = (
     credential: string,
     input?: {
@@ -924,15 +1037,14 @@ export const make = Effect.gen(function* () {
     ServerAuthInvalidCredentialError | ServerAuthInternalError | ServerAuthScopeNotGrantedError
   > => {
     if (!devAuth?.matches(credential)) {
-      return bootstrapCredentials
-        .consume(credential, input)
-        .pipe(
-          Effect.mapError((cause) =>
-            cause._tag === "BootstrapCredentialScopeNotGrantedError"
-              ? new ServerAuthScopeNotGrantedError({})
-              : toBootstrapExchangeError(cause),
-          ),
-        );
+      return bootstrapCredentials.consume(credential, input).pipe(
+        Effect.mapError((cause) =>
+          cause._tag === "BootstrapCredentialScopeNotGrantedError"
+            ? new ServerAuthScopeNotGrantedError({})
+            : toBootstrapExchangeError(cause),
+        ),
+        Effect.flatMap(resolveCloudConnectGrant),
+      );
     }
     return sessions.verify(credential).pipe(
       mapSessionVerificationErrors,
@@ -986,6 +1098,7 @@ export const make = Effect.gen(function* () {
               );
           }),
         ),
+        meshSessionLock.withPermit,
         Effect.flatMap((session) =>
           DateTime.now.pipe(
             Effect.map(
@@ -1246,7 +1359,11 @@ export const make = Effect.gen(function* () {
         if (websocketTicket && websocketTicket.trim().length > 0) {
           const session = yield* sessions
             .verifyWebSocketToken(websocketTicket)
-            .pipe(mapSessionVerificationErrors, Effect.flatMap(rejectMcpClientAudience));
+            .pipe(
+              mapSessionVerificationErrors,
+              Effect.flatMap(rejectRestrictedAudience(request)),
+              Effect.flatMap(rejectMeshMemberSocket),
+            );
           if (session.audience !== undefined && session.audience !== use) {
             return yield* new ServerAuthInvalidCredentialError({
               diagnostic: `WebSocket ticket was issued for the ${session.audience} route.`,
@@ -1289,8 +1406,37 @@ export const make = Effect.gen(function* () {
         }
       }
 
-      return yield* authenticateRequest(request);
+      return yield* authenticateRequest(request).pipe(Effect.flatMap(rejectMeshMemberSocket));
     });
+
+  const authenticateMeshMember: EnvironmentAuth["Service"]["authenticateMeshMember"] = (
+    request,
+  ) => {
+    const token = parseDpopToken(request);
+    if (token === null) return Effect.fail(new ServerAuthMissingCredentialError({}));
+    return authenticateToken(token, request).pipe(
+      Effect.flatMap((session) =>
+        session.meshCaller === undefined ||
+        session.method !== "dpop-access-token" ||
+        session.proofKeyThumbprint === undefined
+          ? Effect.fail(
+              new ServerAuthInvalidCredentialError({
+                diagnostic: "Only mesh member sessions are accepted here.",
+              }),
+            )
+          : verifyRequestDpopProof({
+              request,
+              expectedThumbprint: session.proofKeyThumbprint,
+              expectedAccessToken: token,
+            }).pipe(
+              Effect.provideService(ServerSecretStore.ServerSecretStore, secretStore),
+              Effect.provideService(Crypto.Crypto, crypto),
+              Effect.as({ sessionId: session.sessionId, meshCaller: session.meshCaller }),
+            ),
+      ),
+      Effect.withSpan("EnvironmentAuth.authenticateMeshMember"),
+    );
+  };
 
   const authenticateMcpClient: EnvironmentAuth["Service"]["authenticateMcpClient"] = (request) => {
     const token = parseBearerToken(request);
@@ -1373,6 +1519,37 @@ export const make = Effect.gen(function* () {
       Effect.withSpan("EnvironmentAuth.consumeMcpApprovalCode"),
     );
 
+  const issueMeshMemberSession: EnvironmentAuth["Service"]["issueMeshMemberSession"] = (input) =>
+    sessions
+      .issue({
+        subject: SessionStore.meshMemberSubject(input.meshCaller),
+        method: "dpop-access-token",
+        scopes: [AuthOrchestrationReadScope],
+        proofKeyThumbprint: input.proofKeyThumbprint,
+        ttl: MESH_MEMBER_SESSION_TTL,
+        replaceActiveForSubjectAndMethod: true,
+        client: { label: `Mesh member ${input.meshCaller}`, deviceType: "bot" },
+      })
+      .pipe(
+        Effect.map((issued) => ({ token: issued.token, expiresAt: issued.expiresAt })),
+        Effect.mapError((cause) => new ServerAuthSessionTokenIssueError({ cause })),
+        Effect.withSpan("EnvironmentAuth.issueMeshMemberSession"),
+      );
+
+  const revokeMeshMemberSessions: EnvironmentAuth["Service"]["revokeMeshMemberSessions"] = (
+    input,
+  ) =>
+    sessions.revokeMeshMemberSessions(input?.keepCallers ?? []).pipe(
+      Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause })),
+      Effect.withSpan("EnvironmentAuth.revokeMeshMemberSessions"),
+    );
+
+  const revokeCloudConnectSessions: EnvironmentAuth["Service"]["revokeCloudConnectSessions"] = () =>
+    sessions.revokeBySubject(CLOUD_CONNECT_SUBJECT).pipe(
+      Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause })),
+      Effect.withSpan("EnvironmentAuth.revokeCloudConnectSessions"),
+    );
+
   return EnvironmentAuth.of({
     getDescriptor: () =>
       Effect.succeed(descriptor).pipe(Effect.withSpan("EnvironmentAuth.getDescriptor")),
@@ -1399,6 +1576,11 @@ export const make = Effect.gen(function* () {
     issueMcpClientSession,
     consumeMcpApprovalCode,
     authenticateBrowserSession,
+    authenticateMeshMember,
+    issueMeshMemberSession,
+    withMeshSessionLock: meshSessionLock.withPermit,
+    revokeMeshMemberSessions,
+    revokeCloudConnectSessions,
   });
 });
 

@@ -1,6 +1,7 @@
 import { expect, it } from "@effect/vitest";
 import {
   CommandId,
+  EnvironmentId,
   MessageId,
   type OrchestrationV2Run,
   type OrchestrationV2ProviderThread,
@@ -35,6 +36,32 @@ import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 const layerReceiptsTest = CommandReceiptStore.layer.pipe(
   Layer.provide(SqlitePersistence.layerMemory),
 );
+
+it("strips remote delegation provenance from client thread.create commands", () => {
+  const created = ThreadManagementService.withCreationProvenance(
+    {
+      type: "thread.create",
+      commandId: CommandId.make("client:forged-mesh-origin"),
+      threadId: ThreadId.make("client:thread"),
+      projectId: ProjectId.make("project:client"),
+      title: "Client thread",
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "agent",
+      creationSource: "mcp",
+      meshOrigin: {
+        environmentId: EnvironmentId.make("remote"),
+        threadId: ThreadId.make("parent"),
+        delegated: true,
+      },
+    },
+    { createdBy: "user", creationSource: "web" },
+  );
+  expect(created).not.toHaveProperty("meshOrigin");
+});
 
 const layerDispatchChokepointTest =
   (settingsLayer: ReturnType<typeof ServerSettings.layerTest>) => (dispatched: Array<string>) =>

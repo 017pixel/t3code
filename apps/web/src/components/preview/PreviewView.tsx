@@ -45,6 +45,7 @@ import { useEnvironmentSupportsServerBrowser } from "~/state/entities";
 import {
   useEnvironment,
   useEnvironmentHttpBaseUrl,
+  useEnvironmentIdentityBaseUrl,
   usePrimaryEnvironmentId,
 } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
@@ -169,8 +170,9 @@ export function PreviewView({
   const addPreviewAnnotation = useComposerDraftStore((store) => store.addPreviewAnnotation);
   const addImage = useComposerDraftStore((store) => store.addImage);
   const environmentHttpBaseUrl = useEnvironmentHttpBaseUrl(threadRef.environmentId);
-  const environmentHostname = environmentHttpBaseUrl
-    ? new URL(environmentHttpBaseUrl).hostname
+  const environmentIdentityUrl = useEnvironmentIdentityBaseUrl(threadRef.environmentId);
+  const environmentHostname = environmentIdentityUrl
+    ? new URL(environmentIdentityUrl).hostname
     : null;
   const open = useAtomCommand(previewEnvironment.open);
   const closePreview = useAtomCommand(previewEnvironment.close, "preview close");

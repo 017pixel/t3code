@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  EnvironmentId,
   MessageId,
   EventId,
   NodeId,
@@ -34,6 +35,7 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
+import * as ThreadManagementService from "./ThreadManagementService.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const instanceId = ProviderInstanceId.make("codex");
@@ -1366,5 +1368,45 @@ it.effect("explicit settle clears snooze atomically and stays idempotent after r
     } as const;
     assert.deepInclude(yield* projections.getThreadShell(threadId), active);
     assert.deepInclude((yield* projections.getThreadProjection(threadId)).thread, active);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("keeps a server-stamped mesh origin and drops one a client sends", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const meshOrigin = {
+      environmentId: EnvironmentId.make("env-caller"),
+      threadId: ThreadId.make("thread:caller"),
+    };
+    const create = (threadId: ThreadId) =>
+      ({
+        type: "thread.create",
+        commandId: CommandId.make(`create:${threadId}`),
+        threadId,
+        projectId: ProjectId.make("project:mesh-origin"),
+        title: "Mesh",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "agent",
+        creationSource: "mcp",
+        meshOrigin,
+      }) as const;
+
+    const stamped = ThreadId.make("thread:mesh-stamped");
+    yield* orchestrator.dispatch(create(stamped));
+    assert.deepEqual((yield* projections.getThreadShell(stamped))?.meshOrigin, meshOrigin);
+
+    const fromClient = ThreadId.make("thread:mesh-client");
+    yield* orchestrator.dispatch(
+      ThreadManagementService.withCreationProvenance(create(fromClient), {
+        createdBy: "user",
+        creationSource: "web",
+      }),
+    );
+    assert.isUndefined((yield* projections.getThreadShell(fromClient))?.meshOrigin);
   }).pipe(Effect.provide(layerTest)),
 );

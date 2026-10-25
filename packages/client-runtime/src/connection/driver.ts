@@ -3,8 +3,10 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
 import * as HttpClient from "effect/http/HttpClient";
+import { MESH_VIA_NOT_CAPTAIN_STATUS, MESH_VIA_REFUSED_STATUS } from "@t3tools/contracts";
 
 import type { ConnectionCatalogEntry, ConnectionRoute } from "./catalog.ts";
 import type {
@@ -14,7 +16,9 @@ import type {
 } from "./model.ts";
 import { ConnectionTransientError } from "./model.ts";
 import * as ConnectionResolver from "./resolver.ts";
+import * as MeshCaptain from "./meshCaptain.ts";
 import {
+  type CaptainPath,
   connectionRoutes,
   routeEntry,
   routeHttpBaseUrl,
@@ -23,6 +27,7 @@ import {
 } from "./routes.ts";
 import * as RpcSession from "../rpc/session.ts";
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
+import { RemoteEnvironmentAuthUndeclaredStatusError } from "../rpc/http.ts";
 
 export type ConnectionDriverProgress =
   | {
@@ -38,7 +43,8 @@ export interface EnvironmentConnectionLease {
   readonly session: RpcSession.RpcSession;
 }
 
-export type RouteCheck = "answered" | "silent" | "unchecked";
+/** `refused`: a captain turned the route down (421 or 410), so it is not tried at all. */
+export type RouteCheck = "answered" | "silent" | "unchecked" | "refused";
 
 const ROUTE_CHECK_TIMEOUT_MS = 2_500;
 // Preferred direct routes share one head start, so a relay connection does not
@@ -103,6 +109,7 @@ export const connectOverRoutes = Effect.fn("ConnectionDriver.connectOverRoutes")
             Fiber.join(checks[index]!),
             Fiber.join(headStart).pipe(Effect.as<RouteCheck>("silent")),
           );
+    if (check === "refused") continue;
     if (check === "silent") {
       silent.push({ route, index });
       continue;
@@ -118,7 +125,7 @@ export const connectOverRoutes = Effect.fn("ConnectionDriver.connectOverRoutes")
     concurrency: "unbounded",
   });
   const retry = [
-    ...silent.filter((_, position) => late[position] !== "silent"),
+    ...silent.filter((_, position) => late[position] !== "silent" && late[position] !== "refused"),
     ...silent.filter((_, position) => late[position] === "silent"),
   ];
   for (const { route } of retry) {
@@ -136,11 +143,29 @@ export const connectOverRoutes = Effect.fn("ConnectionDriver.connectOverRoutes")
   );
 });
 
+function captainPathOf(route: ConnectionRoute): CaptainPath | null {
+  const profile = Option.getOrNull(route.profile);
+  return profile?._tag === "BearerConnectionProfile" && profile.captain !== undefined
+    ? { captain: profile.captain, httpBaseUrl: profile.httpBaseUrl }
+    : null;
+}
+
 /** @public */
 export const make = Effect.gen(function* () {
   const resolver = yield* ConnectionResolver.ConnectionResolver;
   const sessions = yield* RpcSession.RpcSessionFactory;
   const httpClient = yield* HttpClient.HttpClient;
+  const mesh = yield* Effect.serviceOption(MeshCaptain.MeshCaptain);
+
+  const reportCaptainFailure = (
+    route: ConnectionRoute,
+    reason: MeshCaptain.CaptainRouteFailure,
+  ): Effect.Effect<void> => {
+    const path = captainPathOf(route);
+    return path === null || Option.isNone(mesh)
+      ? Effect.void
+      : mesh.value.reportRouteFailure(path, reason);
+  };
 
   const checkRoute = (entry: ConnectionCatalogEntry, route: ConnectionRoute) => {
     const httpBaseUrl = routeHttpBaseUrl(route);
@@ -154,7 +179,19 @@ export const make = Effect.gen(function* () {
       Effect.map((descriptor): RouteCheck =>
         descriptor.environmentId === entry.target.environmentId ? "answered" : "silent",
       ),
-      Effect.orElseSucceed((): RouteCheck => "silent"),
+      Effect.catch((error) => {
+        const status = error instanceof RemoteEnvironmentAuthUndeclaredStatusError && error.status;
+        // A captain's 421 (stale handle, unknown member) or 410 (demoted) is not a silent
+        // route: the mesh is read again, which mints a new handle, and this route is skipped.
+        // A silent captain is not reported, so a dead one cannot cause a read and mint loop.
+        if (captainPathOf(route) !== null && status === MESH_VIA_REFUSED_STATUS) {
+          return reportCaptainFailure(route, "refused").pipe(Effect.as<RouteCheck>("refused"));
+        }
+        if (captainPathOf(route) !== null && status === MESH_VIA_NOT_CAPTAIN_STATUS) {
+          return reportCaptainFailure(route, "not-captain").pipe(Effect.as<RouteCheck>("refused"));
+        }
+        return Effect.succeed<RouteCheck>("silent");
+      }),
       Effect.provideService(HttpClient.HttpClient, httpClient),
       Effect.withSpan("ConnectionDriver.checkRoute", {
         attributes: { "connection.target.kind": route.target._tag },

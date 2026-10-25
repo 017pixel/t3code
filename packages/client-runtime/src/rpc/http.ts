@@ -86,9 +86,9 @@ export const layerRemoteHttpClient = (
     HttpObservability.layer,
   );
 
+// Keeps the base path: a captain route's endpoints live under its forwarding path.
 const remoteApiBaseUrl = (httpBaseUrl: string): string => {
   const url = new URL(httpBaseUrl);
-  url.pathname = "/";
   url.search = "";
   url.hash = "";
   return url.toString();

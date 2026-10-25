@@ -21,6 +21,7 @@ import * as Schema from "effect/Schema";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
+import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import { request } from "../rpc/client.ts";
 import type { ProjectFaviconCache, ProjectFaviconTarget } from "../projectFaviconCache.ts";
@@ -58,7 +59,7 @@ function parseAssetCollectionKey(
 
 export function resolveAssetUrl(httpBaseUrl: string, relativeUrl: string): string | null {
   try {
-    return new URL(relativeUrl, httpBaseUrl).toString();
+    return environmentEndpointUrl(httpBaseUrl, relativeUrl);
   } catch {
     return null;
   }
@@ -163,7 +164,7 @@ export function createAssetEnvironmentAtoms<R, E>(
     const asset = yield* registry
       .run(local.environmentId, request(WS_METHODS.assetsCreateUrl, input))
       .pipe(Effect.catchCause((cause) => Effect.failCause(Cause.map(cause, () => error))));
-    return { ...asset, relativeUrl: new URL(asset.relativeUrl, local.httpBaseUrl).href };
+    return { ...asset, relativeUrl: environmentEndpointUrl(local.httpBaseUrl, asset.relativeUrl) };
   });
   const createUrl = createEnvironmentQueryAtomFamily(runtime, {
     label: "environment-data:assets:create-url",

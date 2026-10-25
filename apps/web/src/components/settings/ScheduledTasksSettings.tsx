@@ -61,7 +61,7 @@ import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useNowMinute } from "../../hooks/useNowMinute";
 import {
   useEnvironment,
-  useEnvironmentHttpBaseUrl,
+  useEnvironmentIdentityBaseUrl,
   type EnvironmentPresentation,
 } from "../../state/environments";
 import { useProjects } from "../../state/entities";
@@ -972,7 +972,7 @@ function WebhookEndpointField({
   const canRotate = useAtomValue(
     serverEnvironment.rotateScheduledTaskWebhookToken.permissionAtom(environmentId),
   );
-  const httpBaseUrl = useEnvironmentHttpBaseUrl(environmentId);
+  const httpBaseUrl = useEnvironmentIdentityBaseUrl(environmentId);
   const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "webhook URL" });
   const rotate = useAtomCommand(serverEnvironment.rotateScheduledTaskWebhookToken, {
     label: "scheduled task rotate webhook token",

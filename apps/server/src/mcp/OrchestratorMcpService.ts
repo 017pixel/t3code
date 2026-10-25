@@ -16,6 +16,7 @@ import {
   OrchestratorMcpFailure,
   type OrchestratorMcpCapabilitiesInput,
   type OrchestratorMcpCapabilitiesResult,
+  type MeshMachineRef,
   type OrchestratorMcpModelOption,
   type OrchestratorMcpCreateThreadsInput,
   type OrchestratorMcpCreateThreadsResult,
@@ -106,16 +107,18 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
-  clientRuntimeModeCeiling,
+  nonThreadCallerLimits,
   type McpInvocationScope,
   type McpThreadInvocationScope,
   requireThreadScope,
 } from "./McpInvocationContext.ts";
 import * as Metrics from "../observability/Metrics.ts";
+import * as RemoteDelegation from "../mesh/RemoteDelegation.ts";
+import * as McpMeshLaunch from "./McpMeshLaunch.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 
-const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
-const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
+export const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
+export const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
 const TASK_WAKE_EVENTS = [
   { thread: "parent", eventType: "subagent.updated" },
   { thread: "child", eventType: "run.updated" },
@@ -129,7 +132,7 @@ const DEFAULT_THREAD_READ_LIMIT = 50;
 const DEFAULT_THREAD_RUN_LIMIT = 10;
 const DEFAULT_THREAD_ITEM_MAX_CHARS = 20_000;
 
-interface ResolvedTarget {
+export interface ResolvedTarget {
   readonly modelSelection: ModelSelection;
   readonly supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined;
 }
@@ -201,6 +204,16 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadInterruptInput,
   ) => Effect.Effect<OrchestratorMcpThreadInterruptResult, OrchestratorMcpFailure>;
+  /**
+   * delegate_task's target rules for a thread launch: `target` resolves against this machine's
+   * providers, inheriting provider, model and options from `inherited`. With nothing to inherit,
+   * the target must name a provider.
+   */
+  readonly resolveLaunchTarget: (input: {
+    readonly projectId: ProjectId;
+    readonly inherited: ModelSelection | undefined;
+    readonly target: OrchestratorMcpTarget;
+  }) => Effect.Effect<ResolvedTarget, OrchestratorMcpFailure>;
 }
 
 export class OrchestratorMcpService extends Context.Service<
@@ -500,6 +513,22 @@ function endsTaskWait(result: OrchestratorMcpDelegateTaskResult): boolean {
   );
 }
 
+function decorateTaskResult(
+  result: OrchestratorMcpDelegateTaskResult,
+  task: OrchestrationV2Subagent,
+  title: string,
+): OrchestratorMcpDelegateTaskResult {
+  return {
+    ...result,
+    ...(result.notStartedOn === undefined
+      ? { link: formatThreadLink(result.childThreadId, title) }
+      : {}),
+    ...(endsTaskWait(result) || task.completionDelivery?.state === "disposed"
+      ? {}
+      : { next: ORCHESTRATOR_MCP_RUNNING_TASK_NEXT }),
+  };
+}
+
 const isApprovalRequestKind = Schema.is(ProviderRequestKind);
 
 function pendingTaskApproval(
@@ -732,7 +761,8 @@ function stablePart(value: string): string {
   return encodeURIComponent(value);
 }
 
-function stableCommandId(input: {
+/** A command id derived from a caller's retry key, so a retry replays the first receipt. */
+export function stableCommandId(input: {
   readonly scope: McpInvocationScope;
   readonly requestKey: string;
   readonly operation: string;
@@ -1062,6 +1092,14 @@ const make = Effect.gen(function* () {
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  // EXPERIMENTAL mesh v1. Absent on servers built without the mesh layers.
+  const remoteDelegation = yield* Effect.serviceOption(RemoteDelegation.RemoteDelegation);
+  const requireRemoteDelegation: Effect.Effect<
+    RemoteDelegation.RemoteDelegation["Service"],
+    OrchestratorMcpFailure
+  > = Option.isSome(remoteDelegation)
+    ? Effect.succeed(remoteDelegation.value)
+    : Effect.fail(failure("mesh_unavailable", "This server cannot run tasks on other machines."));
 
   const requireProject = (projectId: ProjectId) =>
     projects.getById(projectId).pipe(
@@ -1153,10 +1191,10 @@ const make = Effect.gen(function* () {
     if (scope.thread === undefined) {
       return {
         parent: undefined,
-        limits: {
-          runtimeMode: clientRuntimeModeCeiling(scope.client),
-          interactionMode: "default",
-        } satisfies { runtimeMode: RuntimeMode; interactionMode: ProviderInteractionMode },
+        limits: nonThreadCallerLimits(scope) satisfies {
+          runtimeMode: RuntimeMode;
+          interactionMode: ProviderInteractionMode;
+        },
       } as const;
     }
     const parent = yield* loadProjection(scope.thread.threadId);
@@ -1312,7 +1350,7 @@ const make = Effect.gen(function* () {
     const instanceId =
       input.target?.providerInstanceId ??
       (input.target?.driverKind === undefined
-        ? input.parent.thread.modelSelection.instanceId
+        ? input.parent.thread.modelSelection?.instanceId
         : undefined);
     const resolved = resolveTarget(input);
     if (instanceId === undefined) return resolved;
@@ -1328,7 +1366,12 @@ const make = Effect.gen(function* () {
   };
 
   const resolveTarget = Effect.fn("OrchestratorMcpService.resolveTarget")(function* (input: {
-    readonly parent: Pick<OrchestrationV2ThreadProjection, "thread">;
+    readonly parent: {
+      readonly thread: Pick<OrchestrationV2ThreadProjection["thread"], "projectId"> & {
+        /** Undefined for a launch with nothing to inherit. */
+        readonly modelSelection: ModelSelection | undefined;
+      };
+    };
     readonly target: OrchestratorMcpTarget | undefined;
     readonly providers: ReadonlyArray<ServerProvider>;
     /** Receipt replays bypass current settings because they start no work. Dispatch must reuse the checked command ID. */
@@ -1355,7 +1398,7 @@ const make = Effect.gen(function* () {
         (candidate) => providerConstraints(candidate, true).length === 0,
       );
       const inheritedCandidate = healthyCandidates.find(
-        (candidate) => candidate.instanceId === input.parent.thread.modelSelection.instanceId,
+        (candidate) => candidate.instanceId === input.parent.thread.modelSelection?.instanceId,
       );
       const orderedCandidates = [
         ...(inheritedCandidate === undefined ? [] : [inheritedCandidate]),
@@ -1382,7 +1425,13 @@ const make = Effect.gen(function* () {
         );
       }
     }
-    instanceId ??= input.parent.thread.modelSelection.instanceId;
+    instanceId ??= input.parent.thread.modelSelection?.instanceId;
+    if (instanceId === undefined) {
+      return yield* failure(
+        "invalid_request",
+        "There is no model to inherit: name providerInstanceId or driverKind in target, or pass modelSelection.",
+      );
+    }
 
     const provider = input.providers.find((candidate) => candidate.instanceId === instanceId);
     if (provider === undefined) {
@@ -1412,7 +1461,7 @@ const make = Effect.gen(function* () {
     const requestedModel = input.target?.model;
     const model =
       requestedModel ??
-      (instanceId === inheritedSelection.instanceId
+      (inheritedSelection?.instanceId === instanceId
         ? inheritedSelection.model
         : provider?.models[0]?.slug);
     if (model === undefined) {
@@ -1447,7 +1496,7 @@ const make = Effect.gen(function* () {
     }
 
     const inheritsOptions =
-      instanceId === inheritedSelection.instanceId && model === inheritedSelection.model;
+      inheritedSelection?.instanceId === instanceId && model === inheritedSelection.model;
     let options = inheritsOptions ? inheritedSelection.options : undefined;
     if (requestedOptions !== undefined) {
       const selections = new Map(
@@ -1487,6 +1536,23 @@ const make = Effect.gen(function* () {
         candidate.origin === "app_owned" &&
         candidate.threadId === scope.thread.threadId,
     );
+    if (task?.remote !== undefined) {
+      const response = decorateTaskResult(
+        yield* readRemoteTask(task, task.remote, waitTimedOut),
+        task,
+        task.title ?? task.prompt.slice(0, 80),
+      );
+      if (acknowledgeTerminal) {
+        yield* acknowledgeTask(
+          scope,
+          parentProjection,
+          task,
+          response.status,
+          acknowledgementOperation,
+        );
+      }
+      return response;
+    }
     if (task === undefined || task.childThreadId === null) {
       return yield* failure(
         "task_not_found",
@@ -1601,7 +1667,6 @@ const make = Effect.gen(function* () {
     const result = {
       taskId: task.id,
       childThreadId: task.childThreadId,
-      link: formatThreadLink(task.childThreadId, childControls.thread.title),
       childRunId: childRun?.id ?? null,
       childNodeId: task.id,
       status,
@@ -1634,43 +1699,139 @@ const make = Effect.gen(function* () {
           : pendingTaskApproval(childControls, task.id, childRun),
       waitTimedOut,
     } satisfies OrchestratorMcpDelegateTaskResult;
-    const response: OrchestratorMcpDelegateTaskResult =
-      endsTaskWait(result) || task.completionDelivery?.state === "disposed"
-        ? result
-        : { ...result, next: ORCHESTRATOR_MCP_RUNNING_TASK_NEXT };
-    if (
-      acknowledgeTerminal &&
-      isTerminalTaskStatus(status) &&
-      task.completionDelivery?.state !== "acknowledged" &&
-      task.completionDelivery?.state !== "disposed"
-    ) {
-      const observingRun = ThreadManagementService.latestActiveRun(parentProjection);
-      const acknowledgementRequestKey = yield* requestKey(undefined);
-      yield* threadManagement
-        .dispatch({
-          type: "delegated_task.completion-delivery.acknowledge",
-          commandId: stableCommandId({
-            scope,
-            requestKey: acknowledgementRequestKey,
-            operation: acknowledgementOperation,
-          }),
-          parentThreadId: scope.thread.threadId,
-          taskId,
-          observedByRunId:
-            observingRun?.providerInstanceId === scope.thread.providerInstanceId
-              ? observingRun.id
-              : null,
-        })
-        .pipe(
-          Effect.mapError((error) =>
-            failure(
-              "orchestration_error",
-              `Unable to acknowledge delegated task ${taskId}: ${errorMessage(error)}`,
-            ),
-          ),
-        );
+    const response = decorateTaskResult(result, task, childControls.thread.title);
+    if (acknowledgeTerminal) {
+      yield* acknowledgeTask(scope, parentProjection, task, status, acknowledgementOperation);
     }
     return response;
+  });
+
+  /** The agent saw a terminal result, so the parent is not woken for it again. */
+  const acknowledgeTask = Effect.fn("OrchestratorMcpService.acknowledgeTask")(function* (
+    scope: McpThreadInvocationScope,
+    parentProjection: Pick<OrchestrationV2ThreadProjection, "runs">,
+    task: OrchestrationV2Subagent,
+    status: OrchestratorMcpDelegateTaskResult["status"],
+    operation: string,
+  ) {
+    if (
+      !isTerminalTaskStatus(status) ||
+      task.completionDelivery?.state === "acknowledged" ||
+      task.completionDelivery?.state === "disposed"
+    ) {
+      return;
+    }
+    const observingRun = ThreadManagementService.latestActiveRun(parentProjection);
+    const acknowledgementRequestKey = yield* requestKey(undefined);
+    yield* threadManagement
+      .dispatch({
+        type: "delegated_task.completion-delivery.acknowledge",
+        commandId: stableCommandId({
+          scope,
+          requestKey: acknowledgementRequestKey,
+          operation,
+        }),
+        parentThreadId: scope.thread.threadId,
+        taskId: task.id,
+        observedByRunId:
+          observingRun?.providerInstanceId === scope.thread.providerInstanceId
+            ? observingRun.id
+            : null,
+      })
+      .pipe(
+        Effect.mapError((error) =>
+          failure(
+            "orchestration_error",
+            `Unable to acknowledge delegated task ${task.id}: ${errorMessage(error)}`,
+          ),
+        ),
+      );
+  });
+
+  /**
+   * EXPERIMENTAL mesh v1. A remote task's child is the member's thread: agents get its id as
+   * childThreadId, and thread tools forward to it. Live state is read from the member, not copied.
+   */
+  const readRemoteTask = Effect.fn("OrchestratorMcpService.readRemoteTask")(function* (
+    task: OrchestrationV2Subagent,
+    remote: NonNullable<OrchestrationV2Subagent["remote"]>,
+    waitTimedOut: boolean,
+  ) {
+    const ended =
+      task.status === "completed" ||
+      task.status === "failed" ||
+      task.status === "cancelled" ||
+      task.status === "interrupted"
+        ? task.status
+        : null;
+    const modelSelection = task.modelSelection ?? {
+      instanceId: task.providerInstanceId,
+      model: task.model ?? "",
+    };
+    if (remote.threadId === null) {
+      // Recorded here, not started there: the record is all there is to read.
+      return {
+        taskId: task.id,
+        childThreadId: ThreadId.make(task.id),
+        childEnvironmentId: remote.environmentId,
+        notStartedOn: { environmentId: remote.environmentId, label: remote.label },
+        childRunId: null,
+        childNodeId: task.id,
+        status: ended ?? "queued",
+        workState: ended === null ? "working" : "result_available",
+        hasPendingChildRuns: false,
+        providerInstanceId: modelSelection.instanceId,
+        model: modelSelection.model,
+        options: modelSelection.options ?? [],
+        summary: task.result,
+        resultContextTransferId: null,
+        latestTerminalRunId: null,
+        latestTerminalStatus: null,
+        latestTerminalSummary: null,
+        latestTerminalResultContextTransferId: null,
+        hasPendingQuestion: false,
+        pendingApproval: null,
+        waitTimedOut,
+      } satisfies OrchestratorMcpDelegateTaskResult;
+    }
+    const state =
+      ended === null
+        ? yield* requireRemoteDelegation.pipe(
+            Effect.flatMap((delegation) => delegation.readState(remote)),
+          )
+        : undefined;
+    const status: OrchestratorMcpDelegateTaskResult["status"] =
+      ended ??
+      (state === undefined || !state.settled
+        ? state?.status === "queued"
+          ? "queued"
+          : "running"
+        : state.status);
+    return {
+      taskId: task.id,
+      childThreadId: remote.threadId,
+      childEnvironmentId: remote.environmentId,
+      childRunId: remote.runId,
+      childNodeId: task.id,
+      status,
+      workState: state === undefined ? "result_available" : state.workState,
+      hasPendingChildRuns: false,
+      providerInstanceId: modelSelection.instanceId,
+      model: modelSelection.model,
+      options: modelSelection.options ?? [],
+      summary: task.result ?? state?.result ?? null,
+      resultContextTransferId: null,
+      latestTerminalRunId: null,
+      latestTerminalStatus: null,
+      latestTerminalSummary: null,
+      latestTerminalResultContextTransferId: null,
+      hasPendingQuestion: !isTerminalTaskStatus(status) && state?.hasPendingQuestion === true,
+      pendingApproval:
+        isTerminalTaskStatus(status) || task.completionDelivery?.state === "disposed"
+          ? null
+          : (state?.pendingApproval ?? null),
+      waitTimedOut,
+    } satisfies OrchestratorMcpDelegateTaskResult;
   });
 
   const waitForTask = Effect.fn("OrchestratorMcpService.waitForTask")(
@@ -1684,6 +1845,35 @@ const make = Effect.gen(function* () {
       const afterSequence = yield* threadManagement
         .getThreadEventSequence(scope.thread.threadId)
         .pipe(Effect.mapError(streamError));
+      const remote = (yield* loadProjection(scope.thread.threadId)).subagents.find(
+        (task) => task.id === taskId && task.remote !== undefined,
+      );
+      if (remote !== undefined) {
+        // The follower records the member's questions, approvals and end on the task here.
+        const endsRemoteWait = (task: OrchestrationV2Subagent | undefined) =>
+          task === undefined ||
+          !isOrchestrationV2WorkActive(task.status) ||
+          task.remote?.pending !== undefined;
+        if (!endsRemoteWait(remote)) {
+          yield* threadManagement
+            .streamStoredEventsFrom({
+              threadId: scope.thread.threadId,
+              afterSequence,
+              eventType: "subagent.updated",
+            })
+            .pipe(
+              Stream.mapError(streamError),
+              Stream.filter(
+                (stored) =>
+                  stored.event.type === "subagent.updated" &&
+                  stored.event.payload.id === taskId &&
+                  endsRemoteWait(stored.event.payload),
+              ),
+              Stream.runHead,
+            );
+        }
+        return Option.some(yield* readTask(scope, taskId, false, true));
+      }
       const initial = yield* readTask(scope, taskId, false, true);
       if (endsTaskWait(initial)) {
         return Option.some(initial);
@@ -1708,6 +1898,205 @@ const make = Effect.gen(function* () {
     (effect, _scope, _taskId, timeoutMs) =>
       effect.pipe(Effect.timeoutOption(Duration.millis(timeoutMs)), Effect.map(Option.flatten)),
   );
+
+  /** Returns at once for async tasks; mode=wait blocks until the task ends or asks something. */
+  const finishDelegation = Effect.fn("OrchestratorMcpService.finishDelegation")(function* (
+    scope: McpThreadInvocationScope,
+    input: OrchestratorMcpDelegateTaskInput,
+    key: string,
+    taskId: NodeId,
+  ) {
+    if (input.mode !== "wait") {
+      return yield* readTask(scope, taskId, false, true);
+    }
+    const timeoutMs = Math.min(
+      MAX_WAIT_TIMEOUT_MS,
+      Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
+    );
+    const waited = yield* waitForTask(scope, taskId, timeoutMs);
+    if (Option.isSome(waited) && isTerminalTaskStatus(waited.value.status)) {
+      return waited.value;
+    }
+    yield* upgradeWakePolicy(scope, key, taskId);
+    return yield* readTask(scope, taskId, Option.isNone(waited), true);
+  });
+
+  // An incomplete wait gives up delivery: upgrade so a later terminal
+  // wakes the parent even mid-turn.
+  const upgradeWakePolicy = (scope: McpThreadInvocationScope, key: string, taskId: NodeId) =>
+    threadManagement
+      .dispatch({
+        type: "delegated_task.wake-policy",
+        commandId: stableCommandId({
+          scope,
+          requestKey: key,
+          operation: "delegate-task-wake-policy",
+        }),
+        parentThreadId: scope.thread.threadId,
+        taskId,
+        completionWake: "always",
+      })
+      .pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("orchestrator-mcp.delegate-task.wake-policy-failed", {
+            taskId,
+            outcome:
+              error._tag === "OrchestratorCommandPreviouslyRejectedError"
+                ? "previously_rejected"
+                : "dispatch_failed",
+            error,
+          }),
+        ),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("orchestrator-mcp.delegate-task.wake-policy-failed", {
+            taskId,
+            outcome: "defect",
+            cause,
+          }),
+        ),
+      );
+
+  /**
+   * EXPERIMENTAL mesh v1. Records the task before its service follower launches on the member.
+   * The caller waits for the first attempt; interruption leaves the follower running.
+   */
+  const delegateRemoteTask = Effect.fn("OrchestratorMcpService.delegateRemoteTask")(function* ({
+    scope,
+    parent,
+    parentRun,
+    input,
+    machine,
+    delegation,
+  }: {
+    readonly scope: McpThreadInvocationScope;
+    readonly parent: Pick<OrchestrationV2ThreadProjection, "thread">;
+    readonly parentRun: OrchestrationV2Run & { readonly rootNodeId: NodeId };
+    readonly input: OrchestratorMcpDelegateTaskInput;
+    readonly machine: MeshMachineRef;
+    readonly delegation: RemoteDelegation.RemoteDelegation["Service"];
+  }) {
+    const key = yield* requestKey(input.clientRequestId);
+    const runtimeMode = yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode);
+    const interactionMode = yield* resolveInteractionMode(
+      parent.thread.interactionMode,
+      input.interactionMode,
+    );
+    const project = yield* requireProject(parent.thread.projectId);
+    const repositoryKey = McpMeshLaunch.projectRepositoryKey(project);
+    if (repositoryKey === null) {
+      return yield* failure(
+        "invalid_request",
+        `${machine.label} runs the task in its checkout of this repository, but project "${project.title}" has no repository identity to match.`,
+      );
+    }
+    // The member resolves the target against its own providers, as this machine would here.
+    const target =
+      input.target !== undefined && Object.values(input.target).some((value) => value !== undefined)
+        ? input.target
+        : undefined;
+    const result = yield* threadManagement
+      .dispatch({
+        type: "delegated_task.remote.request",
+        createdBy: "agent",
+        creationSource: "mcp",
+        commandId: stableCommandId({ scope, requestKey: key, operation: "delegate-task" }),
+        parentThreadId: scope.thread.threadId,
+        parentRunId: parentRun.id,
+        parentNodeId: parentRun.rootNodeId,
+        task: taskPrompt(input),
+        ...(input.title === undefined ? {} : { title: input.title }),
+        modelSelection: parent.thread.modelSelection,
+        environmentId: machine.environmentId,
+        label: machine.label,
+        launch: {
+          repositoryKey,
+          runtimeMode,
+          interactionMode,
+          ...(target === undefined ? {} : { target }),
+          // The parent's commit may not exist there, so the worktree starts from its checkout.
+          ...(input.isolation === "worktree"
+            ? { workspaceStrategy: { type: "worktree", baseRef: "HEAD", startFromOrigin: false } }
+            : {}),
+        },
+        completionWake: input.mode === "wait" ? "settled_only" : "always",
+      })
+      .pipe(
+        Effect.mapError((error) =>
+          failure("orchestration_error", `Unable to create delegated task: ${errorMessage(error)}`),
+        ),
+      );
+    const taskId = result.storedEvents.find((stored) => stored.event.type === "subagent.updated")
+      ?.event.nodeId;
+    if (taskId === undefined) {
+      return yield* failure(
+        "orchestration_error",
+        "Delegated task command did not produce a task projection.",
+      );
+    }
+    yield* delegation
+      .launch({ parentThreadId: scope.thread.threadId, taskId, report: "caller" })
+      .pipe(
+        Effect.catch((error) =>
+          error.code !== "machine_offline" &&
+          error.code !== "machine_unreachable" &&
+          error.code !== "mesh_unavailable"
+            ? Effect.fail(error)
+            : Effect.gen(function* () {
+                // The launch may have landed; its follower keeps retrying with the same key.
+                if (input.mode === "wait") yield* upgradeWakePolicy(scope, key, taskId);
+                return yield* failure(
+                  error.code,
+                  `${error.message} Task ${taskId} is recorded and starts when ${machine.label} answers; its result wakes this thread. task_status and task_cancel work on it now.`,
+                );
+              }),
+        ),
+      );
+    return yield* finishDelegation(scope, input, key, taskId);
+  });
+
+  /**
+   * EXPERIMENTAL mesh v1. Ends the task here at once; its follower stops the member's thread,
+   * retrying while the member does not answer. The member checks this thread's modes itself.
+   */
+  const cancelRemoteTask = Effect.fn("OrchestratorMcpService.cancelRemoteTask")(function* (
+    scope: McpThreadInvocationScope,
+    input: OrchestratorMcpTaskCancelInput,
+    task: OrchestrationV2Subagent,
+  ) {
+    yield* requireCapability(scope);
+    if (
+      task.status === "completed" ||
+      task.status === "failed" ||
+      task.status === "cancelled" ||
+      task.status === "interrupted"
+    ) {
+      return { taskId: task.id, status: task.status } satisfies OrchestratorMcpTaskCancelResult;
+    }
+    if (task.runId === null) {
+      return yield* failure("task_not_cancellable", `Delegated task ${task.id} has no owning run.`);
+    }
+    const key = yield* requestKey(input.clientRequestId);
+    yield* threadManagement
+      .dispatch({
+        type: "subagent.stop",
+        commandId: stableCommandId({ scope, requestKey: key, operation: "cancel-task" }),
+        threadId: scope.thread.threadId,
+        runId: task.runId,
+        subagentId: task.id,
+      })
+      .pipe(
+        Effect.mapError((error) =>
+          failure(
+            "task_not_cancellable",
+            `Unable to cancel delegated task ${task.id}: ${errorMessage(error)}`,
+          ),
+        ),
+      );
+    if (Option.isSome(remoteDelegation)) {
+      yield* remoteDelegation.value.follow(scope.thread.threadId, task.id);
+    }
+    return { taskId: task.id, status: "cancelled" } satisfies OrchestratorMcpTaskCancelResult;
+  });
 
   const scheduledTaskRunModes = Effect.fn("OrchestratorMcpService.scheduledTaskRunModes")(
     function* (task: ScheduledTask) {
@@ -1792,6 +2181,13 @@ const make = Effect.gen(function* () {
   });
 
   return OrchestratorMcpService.of({
+    resolveLaunchTarget: Effect.fn("OrchestratorMcpService.resolveLaunchTarget")(function* (input) {
+      return yield* resolveTargetRechecking({
+        parent: { thread: { projectId: input.projectId, modelSelection: input.inherited } },
+        target: input.target,
+        providers: yield* loadProviders,
+      });
+    }),
     scheduleTask: Effect.fn("OrchestratorMcpService.scheduleTask")(function* (scope, input) {
       const { parent, limits } = yield* loadCaller(scope);
       const projectId = yield* resolveProjectTarget(parent, input.projectId);
@@ -2148,6 +2544,20 @@ const make = Effect.gen(function* () {
           "Delegated tasks require an active run owned by this MCP provider session.",
         );
       }
+      if (input.machine !== undefined) {
+        const delegation = yield* requireRemoteDelegation;
+        const machine = yield* delegation.resolveMachine(input.machine);
+        if (Option.isSome(machine)) {
+          return yield* delegateRemoteTask({
+            scope,
+            parent,
+            parentRun: { ...parentRun, rootNodeId: parentRun.rootNodeId },
+            input,
+            machine: machine.value,
+            delegation,
+          });
+        }
+      }
       const providers = yield* loadProviders;
       const key = yield* requestKey(input.clientRequestId);
       const commandId = stableCommandId({
@@ -2261,51 +2671,7 @@ const make = Effect.gen(function* () {
         });
       }
 
-      if (input.mode !== "wait") {
-        return yield* readTask(scope, taskId, false, true);
-      }
-      const timeoutMs = Math.min(
-        MAX_WAIT_TIMEOUT_MS,
-        Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
-      );
-      const waited = yield* waitForTask(scope, taskId, timeoutMs);
-      if (Option.isSome(waited) && isTerminalTaskStatus(waited.value.status)) {
-        return waited.value;
-      }
-      // An incomplete wait gives up delivery: upgrade so a later terminal
-      // wakes the parent even mid-turn.
-      yield* threadManagement
-        .dispatch({
-          type: "delegated_task.wake-policy",
-          commandId: stableCommandId({
-            scope,
-            requestKey: key,
-            operation: "delegate-task-wake-policy",
-          }),
-          parentThreadId: scope.thread.threadId,
-          taskId,
-          completionWake: "always",
-        })
-        .pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("orchestrator-mcp.delegate-task.wake-policy-failed", {
-              taskId,
-              outcome:
-                error._tag === "OrchestratorCommandPreviouslyRejectedError"
-                  ? "previously_rejected"
-                  : "dispatch_failed",
-              error,
-            }),
-          ),
-          Effect.catchCause((cause) =>
-            Effect.logWarning("orchestrator-mcp.delegate-task.wake-policy-failed", {
-              taskId,
-              outcome: "defect",
-              cause,
-            }),
-          ),
-        );
-      return yield* readTask(scope, taskId, Option.isNone(waited), true);
+      return yield* finishDelegation(scope, input, key, taskId);
     }),
     taskStatus: Effect.fn("OrchestratorMcpService.taskStatus")(function* (callerScope, taskId) {
       const scope = yield* requireThreadScope(callerScope, "task_status");
@@ -2313,6 +2679,11 @@ const make = Effect.gen(function* () {
     }),
     cancelTask: Effect.fn("OrchestratorMcpService.cancelTask")(function* (callerScope, input) {
       const scope = yield* requireThreadScope(callerScope, "task_cancel");
+      const remoteTask = (yield* loadProjection(scope.thread.threadId)).subagents.find(
+        (task) =>
+          task.id === input.taskId && task.origin === "app_owned" && task.remote !== undefined,
+      );
+      if (remoteTask !== undefined) return yield* cancelRemoteTask(scope, input, remoteTask);
       const current = yield* readTask(scope, input.taskId);
       const key = yield* requestKey(input.clientRequestId);
       const parentProjection = yield* loadProjection(scope.thread.threadId);
@@ -2912,6 +3283,29 @@ const make = Effect.gen(function* () {
       yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);
       yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
       const key = yield* requestKey(input.clientRequestId);
+      if (input.stop === true) {
+        const active = ThreadManagementService.latestActiveRun(target);
+        yield* threadManagement
+          .dispatch({
+            type: "thread.stop",
+            commandId: stableCommandId({ scope, requestKey: key, operation: "thread-stop" }),
+            threadId: input.threadId,
+            reason: agentStopReason(input.reason),
+          })
+          .pipe(
+            Effect.mapError((error) =>
+              failure(
+                "orchestration_error",
+                `Unable to stop thread ${input.threadId}: ${errorMessage(error)}`,
+              ),
+            ),
+          );
+        return {
+          threadId: input.threadId,
+          runId: active?.id ?? null,
+          status: active === undefined ? "no_active_run" : "interrupt_requested",
+        } satisfies OrchestratorMcpThreadInterruptResult;
+      }
       const result = yield* threadManagement
         .interruptThread({
           projectId: target.thread.projectId,

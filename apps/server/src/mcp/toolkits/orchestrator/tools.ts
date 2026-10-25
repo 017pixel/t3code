@@ -23,6 +23,7 @@ import {
   OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadListInput,
   OrchestratorMcpThreadListResult,
+  orchestratorMcpMachineListResult,
   OrchestratorMcpThreadReadInput,
   OrchestratorMcpThreadReadResult,
   OrchestratorMcpThreadSendInput,
@@ -37,6 +38,7 @@ import { Tool, Toolkit } from "effect/ai";
 import * as Schema from "effect/Schema";
 
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as ProjectService from "../../../project/ProjectService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
@@ -54,7 +56,7 @@ const threadMetadataDependencies = [
 
 const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
   description:
-    "List providers, models, options, and runtime modes for `delegate_task`. Short list. `search` finds others. Any catalog model works.",
+    "List providers, models, options, and runtime modes for `delegate_task`. Short list. `search` finds others. Any catalog model works. Mesh: `machine` lists another machine's; `machines` lists the mesh.",
   parameters: OrchestratorMcpCapabilitiesInput,
   success: OrchestratorMcpCapabilitiesResult,
   failure: OrchestratorMcpFailure,
@@ -214,12 +216,12 @@ const CreateThreadsTool = Tool.make("create_threads", {
 
 const ThreadListTool = Tool.make("t3_thread_list", {
   description:
-    "List threads in a project, newest first. Omit `projectId` for yours. Filter by status, title, settled, or snoozed. Page with the cursor.",
+    "List threads in a project, newest first. Omit `projectId` for yours. Filter by status, title, settled, or snoozed. Page with the cursor. Mesh: a `projectId` from another machine lists there; `machine` lists that machine's project for this repository (the error lists its projects); `machine: \"all\"` returns one section per machine.",
   parameters: OrchestratorMcpThreadListInput,
-  success: OrchestratorMcpThreadListResult,
+  success: orchestratorMcpMachineListResult(OrchestratorMcpThreadListResult),
   failure: OrchestratorMcpFailure,
   failureMode: "return",
-  dependencies,
+  dependencies: [...dependencies, ProjectService.ProjectService],
 })
   .annotate(Tool.Title, "List T3 threads")
   .annotate(Tool.Readonly, true)

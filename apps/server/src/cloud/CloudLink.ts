@@ -52,9 +52,11 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
+import * as PubSub from "effect/PubSub";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as Stream from "effect/Stream";
 import {
   HttpClient,
   HttpClientRequest,
@@ -84,6 +86,7 @@ import {
   CLOUD_LINK_REVOKED,
   CLOUD_LINKED_USER_ID,
   CLOUD_MINT_PUBLIC_KEY,
+  CLOUD_SESSIONS_USER_ID,
   decodeConfirmedOrigin,
   decodeRuntimeConfig,
   encodeConfirmedOriginJson,
@@ -523,6 +526,8 @@ export class CloudLink extends Context.Service<
       | CliTokenManager.CloudCliTokenManagerError
       | HttpClientError.HttpClientError
     >;
+    /** Emits after this process applies or removes the relay link. */
+    readonly linkChanges: Stream.Stream<void>;
   }
 >()("t3/cloud/CloudLink") {}
 
@@ -542,6 +547,46 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
 
   const withSecrets = Effect.provideService(ServerSecretStore.ServerSecretStore, secrets);
+  const linkChanges = yield* PubSub.unbounded<void>();
+
+  // Connect and mesh sessions belong to the cloud user that minted them. Another installed user,
+  // or an unknown one, revokes both. Unlinking revokes only mesh sessions: the machine left the
+  // mesh, but relinking the same account should not sign out its clients.
+  const reconcileSessionAccount = Effect.fn("environment.cloud.reconcileSessionAccount")(
+    function* (installedCloudUserId: string | null) {
+      if (installedCloudUserId === null) {
+        yield* environmentAuth.revokeMeshMemberSessions();
+        return;
+      }
+      const previous = Option.map(yield* secrets.get(CLOUD_SESSIONS_USER_ID), bytesToString);
+      if (Option.contains(previous, installedCloudUserId)) return;
+      yield* environmentAuth.revokeCloudConnectSessions();
+      yield* environmentAuth.revokeMeshMemberSessions();
+      yield* secrets.set(CLOUD_SESSIONS_USER_ID, stringToBytes(installedCloudUserId));
+    },
+    environmentAuth.withMeshSessionLock,
+    Effect.catchCause((cause) =>
+      Effect.logWarning("Could not revoke sessions after a T3 Connect account change", { cause }),
+    ),
+  );
+  // Installs from before the marker hold sessions of the linked user. Run before unlinking or
+  // relinking changes that id.
+  const seedSessionAccount = Effect.gen(function* () {
+    if (Option.isSome(yield* secrets.get(CLOUD_SESSIONS_USER_ID))) return;
+    const linked = yield* secrets.get(CLOUD_LINKED_USER_ID);
+    if (Option.isSome(linked)) yield* secrets.set(CLOUD_SESSIONS_USER_ID, linked.value);
+  });
+  const afterLinkChange = (installedCloudUserId: string | null) =>
+    reconcileSessionAccount(installedCloudUserId).pipe(
+      Effect.andThen(PubSub.publish(linkChanges, undefined)),
+    );
+  // The mesh does not open its relay socket while the link is marked revoked, so it needs to hear
+  // when the mark goes away.
+  const clearLinkRevoked = Effect.gen(function* () {
+    if (Option.isNone(yield* secrets.get(CLOUD_LINK_REVOKED))) return;
+    yield* secrets.remove(CLOUD_LINK_REVOKED);
+    yield* PubSub.publish(linkChanges, undefined);
+  });
   const withRuntimeFiles = <A, E>(
     effect: Effect.Effect<A, E, ServerConfig.ServerConfig | FileSystem.FileSystem | Path.Path>,
   ) =>
@@ -794,6 +839,7 @@ const make = Effect.gen(function* () {
         RELAY_ISSUER_SECRET,
         stringToBytes(payload.relayIssuer ?? payload.relayUrl),
       );
+      yield* seedSessionAccount;
       yield* secrets.set(CLOUD_LINKED_USER_ID, stringToBytes(payload.cloudUserId));
       yield* secrets.set(
         RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
@@ -801,6 +847,7 @@ const make = Effect.gen(function* () {
       );
       yield* secrets.remove(CLOUD_LINK_REVOKED);
       yield* secrets.set(CLOUD_MINT_PUBLIC_KEY, stringToBytes(payload.cloudMintPublicKey));
+      yield* afterLinkChange(payload.cloudUserId);
       yield* awarenessRelay.requestCatchUp();
       if (endpointRuntimeJson !== null) {
         yield* secrets.set(CLOUD_ENDPOINT_RUNTIME_CONFIG, stringToBytes(endpointRuntimeJson));
@@ -1060,7 +1107,7 @@ const make = Effect.gen(function* () {
     if (registered === "revoked" || registered === "superseded") {
       return { status: registered };
     }
-    yield* secrets.remove(CLOUD_LINK_REVOKED);
+    yield* clearLinkRevoked;
     if (registered.status === "recovery_required") {
       return { status: registered.status, config };
     }
@@ -1161,7 +1208,7 @@ const make = Effect.gen(function* () {
         }
         yield* secrets.set(CLOUD_ENDPOINT_RUNTIME_CONFIG, stringToBytes(encoded));
         yield* secrets.remove(CLOUD_ENDPOINT_CONFIRMED_ORIGIN);
-        yield* secrets.remove(CLOUD_LINK_REVOKED);
+        yield* clearLinkRevoked;
         return true;
       }),
     );
@@ -1330,6 +1377,7 @@ const make = Effect.gen(function* () {
       return yield* endpointRuntime.withLinkStateLock(
         Effect.gen(function* () {
           const endpointRuntimeStatus = yield* endpointRuntime.applyConfig(null);
+          yield* seedSessionAccount;
           yield* Effect.all(
             [
               secrets.remove(CLOUD_LINKED_USER_ID),
@@ -1346,6 +1394,7 @@ const make = Effect.gen(function* () {
             { concurrency: 10 },
           );
           yield* setCliDesiredCloudLink(false).pipe(withSecrets);
+          yield* afterLinkChange(null);
           return { ok: true, endpointRuntimeStatus } satisfies EnvironmentCloudRelayConfigResult;
         }),
       );
@@ -1596,7 +1645,7 @@ const make = Effect.gen(function* () {
       const keyPair = yield* getOrCreateEnvironmentKeyPairFromSecretStore(secrets);
       const issued = yield* environmentAuth.createPairingLink({
         scopes: AuthStandardClientScopes,
-        subject: "cloud-connect",
+        subject: EnvironmentAuth.cloudConnectBootstrapSubject(linkedCloudUserId),
         ttl: Duration.minutes(2),
         label: "T3 Connect connect",
         proofKeyThumbprint: proof.clientProofKeyThumbprint,
@@ -1649,6 +1698,7 @@ const make = Effect.gen(function* () {
     recoverManagedTunnel,
     startManagedTunnelIfOriginConfirmed,
     releaseManagedTunnelOnShutdown,
+    linkChanges: Stream.fromPubSub(linkChanges),
   });
 });
 

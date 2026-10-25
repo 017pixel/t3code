@@ -1,5 +1,6 @@
 import {
   CommandId,
+  isSubagentThread,
   type OrchestrationProjectShell,
   type OrchestrationV2ThreadShell,
   type SourceControlProviderKind,
@@ -270,7 +271,7 @@ const make = Effect.gen(function* () {
       threadPullRequestsOf(shell).find(
         (link) => link.source !== "stack-dismissed" && threadPullRequestKeysEqual(link, target),
       );
-    if (watching && thread.lineage.relationshipToParent === "subagent") {
+    if (watching && isSubagentThread(thread)) {
       return yield* new PullRequestWatchFromSubagentError();
     }
     const before = watchedLink(thread);
@@ -357,73 +358,88 @@ const make = Effect.gen(function* () {
     handle: (params: P) => Effect.Effect<A, E, R>,
   ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
-  return {
-    link_pull_request: writesThread((input) =>
-      Effect.gen(function* () {
-        const thread = yield* requireThread(PullRequestLinkFailedError, input.threadId);
-        const project = yield* projectOf(thread, PullRequestLinkFailedError);
-        const target = yield* resolveTarget(input, project);
-        const existing = threadPullRequestsOf(thread).find((link) =>
-          threadPullRequestKeysEqual(link, target),
-        );
-        if (existing && existing.source !== "stack-dismissed")
-          return { ...target, alreadyLinked: true };
-        const alreadyLinked = yield* engine
-          .dispatch({
-            type: "thread.pull-request.link",
-            commandId: yield* commandId("mcp-pr-link", thread.id),
-            threadId: thread.id,
-            host: target.host,
-            repository: target.repository,
-            number: target.number,
-            url: target.url,
-            source: "agent",
-          })
-          .pipe(
-            Effect.as(false),
+  // Watching stays here: the watch wakes this machine's thread.
+  const byThread = <P extends { readonly threadId?: ThreadId | undefined }>(params: P) =>
+    McpToolAccess.threadTarget(params.threadId);
 
-            Effect.catchCause(dispatchFailure(PullRequestLinkFailedError)),
+  return {
+    link_pull_request: McpToolAccess.routed(
+      { owner: byThread },
+      writesThread((input) =>
+        Effect.gen(function* () {
+          const thread = yield* requireThread(PullRequestLinkFailedError, input.threadId);
+          const project = yield* projectOf(thread, PullRequestLinkFailedError);
+          const target = yield* resolveTarget(input, project);
+          const existing = threadPullRequestsOf(thread).find((link) =>
+            threadPullRequestKeysEqual(link, target),
           );
-        return { ...target, alreadyLinked };
-      }),
+          if (existing && existing.source !== "stack-dismissed")
+            return { ...target, alreadyLinked: true };
+          const alreadyLinked = yield* engine
+            .dispatch({
+              type: "thread.pull-request.link",
+              commandId: yield* commandId("mcp-pr-link", thread.id),
+              threadId: thread.id,
+              host: target.host,
+              repository: target.repository,
+              number: target.number,
+              url: target.url,
+              source: "agent",
+            })
+            .pipe(
+              Effect.as(false),
+
+              Effect.catchCause(dispatchFailure(PullRequestLinkFailedError)),
+            );
+          return { ...target, alreadyLinked };
+        }),
+      ),
     ),
-    unlink_pull_request: writesThread((input) =>
-      Effect.gen(function* () {
-        const thread = yield* requireThread(PullRequestUnlinkFailedError, input.threadId);
-        const project = yield* projectOf(thread, PullRequestUnlinkFailedError);
-        const target = yield* resolveTarget(input, project);
-        if (!threadPullRequestsOf(thread).some((link) => threadPullRequestKeysEqual(link, target)))
+    unlink_pull_request: McpToolAccess.routed(
+      { owner: byThread },
+      writesThread((input) =>
+        Effect.gen(function* () {
+          const thread = yield* requireThread(PullRequestUnlinkFailedError, input.threadId);
+          const project = yield* projectOf(thread, PullRequestUnlinkFailedError);
+          const target = yield* resolveTarget(input, project);
+          if (
+            !threadPullRequestsOf(thread).some((link) => threadPullRequestKeysEqual(link, target))
+          )
+            return {
+              host: target.host,
+              repository: target.repository,
+              number: target.number,
+              wasLinked: false,
+            };
+          const wasLinked = yield* engine
+            .dispatch({
+              type: "thread.pull-request.unlink",
+              commandId: yield* commandId("mcp-pr-unlink", thread.id),
+              threadId: thread.id,
+              host: target.host,
+              repository: target.repository,
+              number: target.number,
+            })
+            .pipe(
+              Effect.as(true),
+
+              Effect.catchCause(dispatchFailure(PullRequestUnlinkFailedError)),
+            );
           return {
             host: target.host,
             repository: target.repository,
             number: target.number,
-            wasLinked: false,
+            wasLinked,
           };
-        const wasLinked = yield* engine
-          .dispatch({
-            type: "thread.pull-request.unlink",
-            commandId: yield* commandId("mcp-pr-unlink", thread.id),
-            threadId: thread.id,
-            host: target.host,
-            repository: target.repository,
-            number: target.number,
-          })
-          .pipe(
-            Effect.as(true),
-
-            Effect.catchCause(dispatchFailure(PullRequestUnlinkFailedError)),
-          );
-        return {
-          host: target.host,
-          repository: target.repository,
-          number: target.number,
-          wasLinked,
-        };
-      }),
+        }),
+      ),
     ),
-    list_thread_pull_requests: McpToolAccess.reads((input) =>
-      requireThread(PullRequestListFailedError, input.threadId).pipe(
-        Effect.map(listThreadPullRequests),
+    list_thread_pull_requests: McpToolAccess.routed(
+      { owner: byThread },
+      McpToolAccess.reads((input) =>
+        requireThread(PullRequestListFailedError, input.threadId).pipe(
+          Effect.map(listThreadPullRequests),
+        ),
       ),
     ),
     watch_pull_request: writesThread((input) => setWatching(input, true)),

@@ -1,4 +1,5 @@
 import type { ScheduledTaskWebhookEndpoint } from "@t3tools/contracts";
+import { environmentEndpointUrl } from "@t3tools/shared/advertisedEndpoint";
 import { isLocalLoopbackHost } from "@t3tools/shared/hostClassification";
 
 export interface WebhookAddress {
@@ -7,6 +8,7 @@ export interface WebhookAddress {
   readonly note: string | null;
 }
 
+/** `httpBaseUrl` names the environment itself, never a captain that forwards to it. */
 export function webhookAddress(
   endpoint: ScheduledTaskWebhookEndpoint,
   httpBaseUrl: string | null,
@@ -21,7 +23,7 @@ export function webhookAddress(
       note: "Link this environment to T3 Connect for a public URL.",
     };
   }
-  const url = new URL(endpoint.path, httpBaseUrl);
+  const url = new URL(environmentEndpointUrl(httpBaseUrl, endpoint.path));
   return {
     address: url.href,
     copyable: true,

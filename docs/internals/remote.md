@@ -69,9 +69,16 @@ revokes it; reordering does not, because the same addresses remain trusted.
 ## Hosted web is a client
 
 The hosted web app stores its connection catalog in the browser and connects
-directly to each environment. It does not proxy traffic or hold server-side
-pairing state. Hosting the UI over HTTPS therefore cannot make a plain HTTP LAN
-backend accessible from that browser context.
+to each environment itself. The hosted origin never proxies traffic or holds
+server-side pairing state, so hosting the UI over HTTPS cannot make a plain HTTP
+LAN backend reachable from that browser context by itself.
+
+The exception runs through an environment, never the hosted origin. In an
+experimental [mesh](./mesh.md), the browser reaches the captain over its Connect
+tunnel (HTTPS), and the captain forwards to each member over its own route,
+which can be plain HTTP on the LAN. Hosted web then uses a LAN route it cannot
+open itself. The member still needs a Connect URL, and it still checks the
+browser's own credential.
 
 A [hosted pairing URL](../../apps/web/src/hostedPairing.ts) identifies the backend
 in its query and carries the pairing secret in its fragment. Fragments stay out

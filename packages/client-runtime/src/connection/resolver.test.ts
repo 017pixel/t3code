@@ -28,6 +28,7 @@ import {
 } from "./model.ts";
 import * as ConnectionProfileStore from "./profileStore.ts";
 import * as RpcHttp from "../rpc/http.ts";
+import { captainRoute } from "./routes.ts";
 import {
   PullRequestRoutingPermissions,
   pullRequestRoutingConnectionKey,
@@ -205,6 +206,39 @@ describe("ConnectionResolver", () => {
         httpAuthorization: null,
         target,
       });
+    }),
+  );
+
+  it.effect("prepares a captain route with its captain and a forwarded proof base", () =>
+    Effect.gen(function* () {
+      const forwarded = yield* Ref.make<boolean | undefined>(undefined);
+      const captain = EnvironmentId.make("captain-1");
+      const route = captainRoute(
+        { environmentId: ENVIRONMENT_ID, label: "Member" },
+        { captain, httpBaseUrl: "http://192.168.1.4:3773/api/mesh/via/handle/environment-1" },
+      );
+      const layerBroker = yield* makeDependencies({
+        authorizeDpop: (input) =>
+          Ref.set(forwarded, input.directEndpoint?.forwarded).pipe(
+            Effect.as({
+              environmentId: input.expectedEnvironmentId,
+              label: "Member",
+              httpBaseUrl: input.directEndpoint?.httpBaseUrl ?? ENDPOINT.httpBaseUrl,
+              proofBaseUrl: ENDPOINT.httpBaseUrl,
+              socketUrl: "ws://192.168.1.4:3773/api/mesh/via/handle/environment-1/ws",
+              httpAuthorization: {
+                _tag: "Dpop" as const,
+                accessToken: "dpop-access-token",
+                expiresAtEpochMs: Number.MAX_SAFE_INTEGER,
+              },
+            }),
+          ),
+      });
+      const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layerBroker));
+
+      const prepared = yield* broker.prepare(catalogEntry(route.target, route.profile));
+      expect(prepared.captain).toBe(captain);
+      expect(yield* Ref.get(forwarded)).toBe(true);
     }),
   );
 

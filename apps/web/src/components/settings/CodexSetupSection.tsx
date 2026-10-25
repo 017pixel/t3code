@@ -28,7 +28,7 @@ import {
 
 import { ensureLocalApi } from "../../localApi";
 import {
-  useEnvironmentHttpBaseUrl,
+  useEnvironmentIdentityBaseUrl,
   usePrimaryEnvironmentId,
   useEnvironment,
 } from "../../state/environments";
@@ -239,8 +239,8 @@ function ManagedCodexSetup({
   const hasSavedAccount = auth?.methods?.some((method) => method.id.startsWith("chatgpt-profile:"));
   const url = auth?.interaction?.type === "browser" ? auth.interaction.url : auth?.authorizationUrl;
   const installation = installQuery.data;
-  const httpBaseUrl = useEnvironmentHttpBaseUrl(environmentId);
-  const local = httpBaseUrl !== null && isLoopbackHost(new URL(httpBaseUrl).hostname);
+  const identityBaseUrl = useEnvironmentIdentityBaseUrl(environmentId);
+  const local = identityBaseUrl !== null && isLoopbackHost(new URL(identityBaseUrl).hostname);
   const options = { reportFailure: false, reportDefect: false };
   const startAuth = useAtomCommand(serverEnvironment.startProviderAuth, options);
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, options);
@@ -256,7 +256,7 @@ function ManagedCodexSetup({
   const remoteWeb = clientCallback && !window.desktopBridge?.receiveProviderAuthCallback;
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const primaryEnvironment = useEnvironment(primaryEnvironmentId);
-  const primaryHttpBaseUrl = useEnvironmentHttpBaseUrl(primaryEnvironmentId);
+  const primaryHttpBaseUrl = useEnvironmentIdentityBaseUrl(primaryEnvironmentId);
   const primaryAuthEnvironmentId =
     !local &&
     primaryEnvironmentId &&

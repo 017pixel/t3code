@@ -2,10 +2,13 @@ import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
+  ThreadId,
   type Project as ProjectRecord,
   type ModelSelection,
   type RuntimeMode,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -15,17 +18,25 @@ import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import { McpSchema, McpServer } from "effect/ai";
 
+import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
+import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskService.ts";
+import * as SecretRequests from "../../../secrets/SecretRequests.ts";
+import * as SourceControlRepositoryService from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../../vcs/VcsProcess.ts";
+import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -34,6 +45,8 @@ const clientLaunchHarness = (input: {
   readonly defaultRuntimeMode?: RuntimeMode;
   /** Where Settings saves a project's model; the legacy project field stays null. */
   readonly overrideModel?: ModelSelection;
+  /** A project with no saved model, so only modelSelection or a target names one. */
+  readonly noDefaultModel?: true;
   readonly launched: Array<ThreadLaunch.ThreadLaunchInput>;
   readonly workspaceRoot?: string;
   readonly checkWorktreeBase?: ThreadLaunch.ThreadLaunchService["Service"]["checkWorktreeBase"];
@@ -43,7 +56,20 @@ const clientLaunchHarness = (input: {
     instanceId: ProviderInstanceId.make("claudeAgent"),
     model: "claude-opus",
   };
-  const layerDependencies = Layer.mergeAll(
+  const scope: McpInvocationContext.McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment"),
+    requestNamespace: "client:session-1",
+    thread: undefined,
+    client: {
+      sessionId: "session-1",
+      label: "Claude Code",
+      access: input.runtimeModeCeiling,
+    },
+    issuedAt: 0,
+    capabilities: new Set(["orchestration" as const]),
+  };
+  // Everything the handlers read except the caller, which the MCP server provides per request.
+  const layerServices = Layer.mergeAll(
     ServerSettings.layerTest({
       ...(input.defaultRuntimeMode === undefined
         ? {}
@@ -58,18 +84,6 @@ const clientLaunchHarness = (input: {
           }),
     }),
     NodeCrypto.layer,
-    Layer.succeed(McpInvocationContext.McpInvocationContext, {
-      environmentId: EnvironmentId.make("environment"),
-      requestNamespace: "client:session-1",
-      thread: undefined,
-      client: {
-        sessionId: "session-1",
-        label: "Claude Code",
-        access: input.runtimeModeCeiling,
-      },
-      issuedAt: 0,
-      capabilities: new Set(["orchestration" as const]),
-    }),
     Layer.mock(ThreadManagement.ThreadManagementService)({}),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({
       checkWorktreeBase: input.checkWorktreeBase ?? (() => Effect.void),
@@ -97,12 +111,25 @@ const clientLaunchHarness = (input: {
             ? Option.some({
                 id,
                 workspaceRoot: input.workspaceRoot ?? "/projects/client-target",
-                defaultModelSelection: input.overrideModel === undefined ? modelSelection : null,
+                defaultModelSelection:
+                  input.overrideModel === undefined && input.noDefaultModel !== true
+                    ? modelSelection
+                    : null,
               } as unknown as ProjectRecord)
             : Option.none(),
         ),
     }),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
+    Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({}),
+    Layer.mock(ProviderRegistry.ProviderRegistry)({
+      getProviders: Effect.succeed([codexProvider]),
+      refreshInstance: () => Effect.succeed([codexProvider]),
+    }),
+    Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+      list: () => Effect.succeed([codexProvider.instanceId]),
+    }),
+    Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+    Layer.mock(SecretRequests.SecretRequests)({}),
     NodeServices.layer,
   ).pipe(
     Layer.provideMerge(GitVcsDriver.layer),
@@ -114,8 +141,103 @@ const clientLaunchHarness = (input: {
     ),
     Layer.provideMerge(NodeServices.layer),
   );
-  return { projectId, modelSelection, dependencies: layerDependencies };
+  const dependencies = OrchestratorMcpService.layer.pipe(
+    Layer.provideMerge(layerServices),
+    Layer.provideMerge(Layer.succeed(McpInvocationContext.McpInvocationContext, scope)),
+  );
+  return { projectId, modelSelection, scope, layerServices, dependencies };
 };
+
+const codexProvider: ServerProvider = {
+  instanceId: ProviderInstanceId.make("codex"),
+  driver: ProviderDriverKind.make("codex"),
+  enabled: true,
+  installed: true,
+  version: "test",
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: "2026-10-25T00:00:00.000Z",
+  models: [{ slug: "gpt-6", name: "gpt-6", isCustom: false, capabilities: null }],
+  slashCommands: [],
+  skills: [],
+};
+
+const mcpClient = McpSchema.McpServerClient.of({
+  clientId: 1,
+  protocolVersion: "2025-06-18",
+  clientCapabilities: {},
+  clientInfo: { name: "project-handlers", version: "1" },
+  initializePayload: {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "project-handlers", version: "1" },
+  },
+  getClient: Effect.die("unused"),
+});
+
+/** Calls t3_thread_launch through the toolkits server.ts registers, as an MCP client would. */
+const launchThroughServer = (
+  harness: ReturnType<typeof clientLaunchHarness>,
+  args: Record<string, unknown>,
+) =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const result = yield* server
+      .callTool({ name: "t3_thread_launch", arguments: { projectId: harness.projectId, ...args } })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, harness.scope),
+        Effect.provideService(McpSchema.McpServerClient, mcpClient),
+      );
+    const text = result.content[0];
+    return result.isError === true && text?.type === "text"
+      ? (JSON.parse(text.text) as { readonly code: string; readonly message: string })
+      : undefined;
+  }).pipe(
+    Effect.provide(
+      McpHttpServer.layerOrchestrationToolkits.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(harness.layerServices),
+      ),
+    ),
+  );
+
+it.effect.each([undefined, true] as const)(
+  "persists remote delegation provenance only from the mesh caller (%s)",
+  (delegated) =>
+    Effect.gen(function* () {
+      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const harness = clientLaunchHarness({ runtimeModeCeiling: "full-access", launched });
+      const source = {
+        kind: "thread" as const,
+        threadId: ThreadId.make("remote-parent"),
+        ...(delegated === undefined ? {} : { delegated }),
+      };
+      const mesh = {
+        sourceEnvironmentId: EnvironmentId.make("remote"),
+        sessionId: "mesh-session",
+        modeLimit: { runtimeMode: "full-access" as const, interactionMode: "default" as const },
+        source,
+      };
+      yield* launchThroughServer(
+        { ...harness, scope: { ...harness.scope, client: undefined, mesh } },
+        { title: "Remote task", meshOrigin: { ...source, delegated: true } },
+      );
+      expect(launched[0]?.meshOrigin).toEqual({
+        environmentId: mesh.sourceEnvironmentId,
+        threadId: source.threadId,
+        ...(delegated === undefined ? {} : { delegated }),
+      });
+      yield* launchThroughServer(harness, {
+        title: "Local task",
+        meshOrigin: {
+          environmentId: mesh.sourceEnvironmentId,
+          threadId: source.threadId,
+          delegated: true,
+        },
+      });
+      expect(launched[1]?.meshOrigin).toBeUndefined();
+    }),
+);
 
 it.effect(
   "a client launches with the project's default model and mode, capped at its ceiling",
@@ -298,6 +420,54 @@ it.effect("a launch into a new worktree creates nothing when its base ref has no
     expect(launched).toHaveLength(0);
 
     expect((yield* launchFrom("main")).at(-1)?.result).toMatchObject({ projectId });
+    expect(launched).toHaveLength(1);
+  }),
+);
+
+it.effect("an explicit target resolves through the production registration", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const harness = clientLaunchHarness({ runtimeModeCeiling: "full-access", launched });
+    const refused = yield* launchThroughServer(harness, {
+      title: "Fix",
+      target: { providerInstanceId: "codex", model: "gpt-6" },
+    });
+    expect(refused).toBeUndefined();
+    expect(launched[0]?.modelSelection).toEqual({
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-6",
+    });
+  }),
+);
+
+it.effect("a target that names a provider stands in for a missing default model", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const harness = clientLaunchHarness({
+      runtimeModeCeiling: "full-access",
+      noDefaultModel: true,
+      launched,
+    });
+    expect(
+      yield* launchThroughServer(harness, {
+        title: "Fix",
+        target: { providerInstanceId: "codex" },
+      }),
+    ).toBeUndefined();
+    expect(launched[0]?.modelSelection).toEqual({
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-6",
+    });
+
+    const modelOnly = yield* launchThroughServer(harness, {
+      title: "Fix",
+      target: { model: "gpt-6" },
+    });
+    expect(modelOnly?.code).toBe("invalid_request");
+    expect(modelOnly?.message).toContain("name providerInstanceId or driverKind");
+    expect((yield* launchThroughServer(harness, { title: "Fix" }))?.message).toContain(
+      "Pass modelSelection or a target provider",
+    );
     expect(launched).toHaveLength(1);
   }),
 );

@@ -381,6 +381,7 @@ import {
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
+import { MeshRpcError, MeshSetEnabledInput, MeshSetPinInput, MeshStatus } from "./mesh.ts";
 
 export const WS_METHODS = {
   projectsList: "projects.list",
@@ -529,6 +530,10 @@ export const WS_METHODS = {
 
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
   cloudInstallRelayClient: "cloud.installRelayClient",
+
+  meshStatus: "mesh.status",
+  meshSetEnabled: "mesh.setEnabled",
+  meshSetPin: "mesh.setPin",
 
   pullRequestsList: "pullRequests.list",
   pullRequestsListStats: "pullRequests.listStats",
@@ -928,6 +933,24 @@ const WsCloudInstallRelayClientRpc = Rpc.make(WS_METHODS.cloudInstallRelayClient
   success: RelayClientInstallProgressEventSchema,
   error: Schema.Union([RelayClientInstallFailedError, EnvironmentAuthorizationError]),
   stream: true,
+});
+
+const MeshRpcErrors = Schema.Union([MeshRpcError, EnvironmentAuthorizationError]);
+
+const WsMeshStatusRpc = Rpc.make(WS_METHODS.meshStatus, {
+  payload: Schema.Struct({}),
+  success: MeshStatus,
+  error: MeshRpcErrors,
+});
+
+const WsMeshSetEnabledRpc = Rpc.make(WS_METHODS.meshSetEnabled, {
+  payload: MeshSetEnabledInput,
+  error: Schema.Union([MeshRpcError, ServerSettingsError, EnvironmentAuthorizationError]),
+});
+
+const WsMeshSetPinRpc = Rpc.make(WS_METHODS.meshSetPin, {
+  payload: MeshSetPinInput,
+  error: MeshRpcErrors,
 });
 
 const WsServerReportClientActivityRpc = Rpc.make(WS_METHODS.serverReportClientActivity, {
@@ -2106,4 +2129,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2SubscribeShellRpc,
   WsOrchestrationV2SubscribeThreadRpc,
   WsOrchestrationV2SubscribeCommandOutputRpc,
+  WsMeshStatusRpc,
+  WsMeshSetEnabledRpc,
+  WsMeshSetPinRpc,
 ).middleware(RpcScopeAuthorization);

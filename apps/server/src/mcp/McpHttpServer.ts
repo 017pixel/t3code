@@ -120,6 +120,12 @@ export class McpClientAuthenticator extends Context.Service<
   }
 >()("t3/mcp/McpHttpServer/McpClientAuthenticator") {}
 
+const meshModeLimitRequired = (error: McpInvocationContext.McpMeshModeLimitError) =>
+  HttpServerResponse.jsonUnsafe(
+    { error: "mesh_mode_limit_required", message: error.message },
+    { status: 400, headers: { "cache-control": "no-store" } },
+  );
+
 type AuthenticatedHttpEffect = Effect.Effect<
   HttpServerResponse.HttpServerResponse,
   Types.unhandled,
@@ -152,9 +158,22 @@ const looksLikeProviderToken = (token: string) => token.length > 0 && !token.inc
 const makeMcpAuthMiddleware = Effect.gen(function* () {
   const registry = yield* McpSessionRegistry.McpSessionRegistry;
   const clients = yield* Effect.serviceOption(McpClientAuthenticator);
+  const members = yield* Effect.serviceOption(McpInvocationContext.McpMeshAuthenticator);
   return Effect.fn("McpHttpServer.authenticateRequest")(function* (httpEffect) {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const authorization = request.headers.authorization;
+    if (authorization?.startsWith("DPoP ") === true && Option.isSome(members)) {
+      const member = yield* members.value.authenticate(request).pipe(Effect.result);
+      if (member._tag === "Failure") return meshModeLimitRequired(member.failure);
+      if (member.success === undefined) {
+        yield* Effect.logWarning("rejected MCP request with an unusable mesh credential");
+        return unauthorized({ request, presentedToken: true, offerOAuth: false });
+      }
+      return yield* httpEffect.pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, member.success),
+        Effect.map(normalizeMcpHttpResponse),
+      );
+    }
     const token =
       authorization?.startsWith("Bearer ") === true
         ? authorization.slice("Bearer ".length).trim()
@@ -981,10 +1000,14 @@ export const layerPreviewToolkit = Layer.mergeAll(
   layerPreviewSnapshotRegistration,
 );
 
-export const layerOrchestratorToolkit = toolkitRegistration(
+const layerOrchestratorRegistration = toolkitRegistration(
   OrchestratorToolkit,
   OrchestratorHandlers.layer,
-).pipe(Layer.provide(OrchestratorMcpService.layer), Layer.provide(ThreadMetadataMcpService.layer));
+).pipe(Layer.provide(ThreadMetadataMcpService.layer));
+
+export const layerOrchestratorToolkit = layerOrchestratorRegistration.pipe(
+  Layer.provide(OrchestratorMcpService.layer),
+);
 
 export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
 
@@ -1003,7 +1026,11 @@ const layerEnvironmentToolkit = toolkitRegistration(
   EnvironmentHandlers.layer,
 ).pipe(Layer.provide(ThreadCommandExecutor.layer));
 
-const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer);
+/** delegate_task and t3_thread_launch resolve a `target` through the same service. */
+export const layerOrchestrationToolkits = Layer.mergeAll(
+  layerOrchestratorRegistration,
+  toolkitRegistration(ProjectToolkit, ProjectHandlers.layer),
+).pipe(Layer.provide(OrchestratorMcpService.layer));
 
 export const layerAttachmentToolkit = toolkitRegistration(
   AttachmentToolkit,
@@ -1040,10 +1067,9 @@ export const layerMcpTransport = McpServer.layerHttp({
 
 export const layer = Layer.mergeAll(
   layerPreviewToolkit,
-  layerOrchestratorToolkit,
+  layerOrchestrationToolkits,
   layerThreadToolkit,
   layerAttachmentToolkit,
-  layerProjectRegistration,
   layerEnvironmentToolkit,
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,

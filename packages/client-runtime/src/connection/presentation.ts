@@ -3,7 +3,12 @@ import * as Option from "effect/Option";
 
 import type { ConnectionCatalogEntry } from "./catalog.ts";
 import type { ConnectionTarget, SupervisorConnectionState } from "./model.ts";
-import { connectionRouteId, connectionRoutes, routeHttpBaseUrl } from "./routes.ts";
+import {
+  connectionRouteId,
+  connectionRouteKind,
+  connectionRoutes,
+  routeHttpBaseUrl,
+} from "./routes.ts";
 
 export type EnvironmentConnectionPhase =
   | "available"
@@ -102,7 +107,7 @@ export function presentEnvironmentConnection(
 
 /**
  * SSH connections ride a local forward that disappears with the client, so they have no stable
- * address.
+ * address. A captain route names the captain, not this environment, so it never yields one.
  */
 export function environmentMcpUrl(input: {
   readonly entry: ConnectionCatalogEntry;
@@ -110,7 +115,9 @@ export function environmentMcpUrl(input: {
   readonly connectedTarget?: ConnectionTarget | null | undefined;
 }): string | null {
   const connectedRouteId = input.connectedTarget ? connectionRouteId(input.connectedTarget) : null;
-  const routes = connectionRoutes(input.entry);
+  const routes = connectionRoutes(input.entry).filter(
+    (route) => connectionRouteKind(route) !== "captain",
+  );
   const connectedRoute = routes.find(
     (route) => connectionRouteId(route.target) === connectedRouteId,
   );

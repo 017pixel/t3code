@@ -148,9 +148,17 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
     if (profile.authorization === "t3-connect") {
       const authorized = yield* remote.authorizeDpop({
         expectedEnvironmentId: target.environmentId,
-        directEndpoint: { httpBaseUrl: profile.httpBaseUrl, wsBaseUrl: profile.wsBaseUrl },
+        directEndpoint: {
+          httpBaseUrl: profile.httpBaseUrl,
+          wsBaseUrl: profile.wsBaseUrl,
+          ...(profile.captain === undefined ? {} : { forwarded: true }),
+        },
       });
-      return { ...authorized, target } satisfies PreparedConnection;
+      return {
+        ...authorized,
+        ...(profile.captain === undefined ? {} : { captain: profile.captain }),
+        target,
+      } satisfies PreparedConnection;
     }
     const credential = yield* credentials.get(credentialConnectionId(target.connectionId)).pipe(
       Effect.flatMap(

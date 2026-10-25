@@ -37,6 +37,7 @@ import { searchableSetting } from "./settingsSearch";
 import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { LoadBalancingSettings } from "./LoadBalancingSettings";
+import { MeshSettings } from "./MeshSettings";
 import { PullRequestRoutingSettings } from "./PullRequestRoutingSettings";
 import { Input } from "../ui/input";
 import {
@@ -1527,6 +1528,7 @@ export function ConnectionsSettings() {
           }}
         />
       ) : null}
+      <MeshSettings environments={environments} />
       <LoadBalancingSettings environments={loadBalancingEnvironments} />
       <PullRequestRoutingSettings environments={loadBalancingEnvironments} />
     </SettingsPageContainer>

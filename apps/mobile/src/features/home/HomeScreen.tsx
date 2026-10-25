@@ -15,6 +15,7 @@ import {
 } from "@t3tools/client-runtime/state/thread-search";
 import { type EnvironmentId, type SidebarProjectGroupingMode } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
+import { meshMachineLabel } from "@t3tools/client-runtime/state/mesh-status";
 import { useFocusEffect } from "@react-navigation/native";
 import { use, useEffect, useRef, useState, type ComponentProps } from "react";
 import {
@@ -56,6 +57,7 @@ import { useThreadListSearchMatches } from "../threads/useThreadListSearchMatche
 import { useThreadListV2 } from "../threads/useThreadListV2";
 import { useThreadJumpShortcuts } from "../keyboard/threadKeyboardShortcuts";
 import { usePendingThreadOrder } from "../../state/thread-order";
+import { meshEnvironment } from "../../state/mesh";
 import { threadListEnvironmentsAtom } from "../../state/server";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import { useQueuedThreadKeys } from "../../state/use-thread-outbox";
@@ -436,6 +438,7 @@ export function HomeScreen(props: HomeScreenProps) {
     return () => clearInterval(id);
   });
   const listEnvironments = useAtomValue(threadListEnvironmentsAtom);
+  const meshMarkers = useAtomValue(meshEnvironment.markersAtom);
   const {
     providersByEnvironmentId,
     machineByEnvironmentId,
@@ -600,10 +603,16 @@ export function HomeScreen(props: HomeScreenProps) {
         providerInstance={resolveProviderInstance(thread)}
         providers={providersByEnvironmentId.get(thread.environmentId)}
         environmentLabel={
-          Object.keys(props.savedConnectionsById).length > 1
-            ? (props.savedConnectionsById[thread.environmentId]?.environmentLabel ?? null)
-            : null
+          item.item.meshChild
+            ? `on ${props.savedConnectionsById[thread.environmentId]?.environmentLabel ?? "another machine"}`
+            : Object.keys(props.savedConnectionsById).length > 1
+              ? (meshMachineLabel(
+                  props.savedConnectionsById[thread.environmentId]?.environmentLabel,
+                  meshMarkers.get(thread.environmentId),
+                ) ?? null)
+              : null
         }
+        meshChild={item.item.meshChild === true}
         environmentMachine={machineByEnvironmentId.get(thread.environmentId)}
         searchMatch={
           // Only rows listed for their messages show one and open at it.

@@ -510,6 +510,99 @@ describe("buildThreadListV2Items", () => {
   });
 });
 
+describe("buildThreadListV2Items mesh children", () => {
+  it.each(["settled", "snoozed", "working"] as const)(
+    "keeps a selected remote child under its parent in a collapsed %s shelf",
+    (shelf) => {
+      const shelfState =
+        shelf === "settled"
+          ? { settledOverride: "settled" as const, settledAt: "2026-06-01T00:00:00.000Z" }
+          : shelf === "snoozed"
+            ? { snoozedAt: "2026-06-01T00:00:00.000Z", snoozedUntil: "2026-06-03T00:00:00.000Z" }
+            : {};
+      const parent = makeThread({
+        id: ThreadId.make("parent"),
+        title: "Parent",
+        ...shelfState,
+      });
+      const other = makeThread({
+        id: ThreadId.make("other"),
+        title: "Other",
+        ...shelfState,
+      });
+      const base = makeThread({
+        environmentId: EnvironmentId.make("environment-remote"),
+        id: ThreadId.make("child"),
+        title: "Child",
+      });
+      const child = {
+        ...base,
+        source: {
+          ...base.source,
+          meshOrigin: { environmentId, threadId: parent.id, delegated: true as const },
+        },
+      };
+      const build = (selectedThreadKey: string | null) =>
+        buildThreadListV2Items({
+          threads: [parent, other, child],
+          environmentId: null,
+          searchQuery: "",
+          now: NOW,
+          workingShelfEnabled: true,
+          workingShelfExpanded: false,
+          snoozedShelfExpanded: false,
+          settledShelfExpanded: false,
+          settledLimit: 0,
+          isWorking: () => shelf === "working",
+          selectedThreadKey,
+        });
+
+      const layout = build(`${child.environmentId}:${child.id}`);
+      expect(layout.items.map((item) => item.thread.id)).toEqual([parent.id, child.id]);
+      expect(layout.items[1]?.meshChild).toBe(true);
+      expect(build(null).items).toEqual([]);
+    },
+  );
+
+  it("lists a thread another machine started right after its parent", () => {
+    const parent = makeThread({ id: ThreadId.make("parent"), title: "Parent" });
+    const otherMachine = EnvironmentId.make("environment-2");
+    const base = makeThreadShellFixture({
+      environmentId: otherMachine,
+      id: ThreadId.make("child"),
+      title: "Child",
+    });
+    const child: EnvironmentThreadShell = {
+      ...base,
+      source: Object.assign({}, base.source, {
+        meshOrigin: { environmentId, threadId: parent.id },
+      }),
+    };
+    const layout = buildThreadListV2Items({
+      threads: [
+        child,
+        makeThread({ id: ThreadId.make("other"), title: "Other" }),
+        parent,
+        makeThread({
+          id: ThreadId.make("snoozed"),
+          title: "Snoozed",
+          snoozedUntil: "2026-06-03T09:00:00.000Z",
+          snoozedAt: "2026-06-01T12:00:00.000Z",
+        }),
+      ],
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+      snoozedShelfExpanded: true,
+    });
+
+    const order = layout.items.map((item) => item.thread.id);
+    expect(order.indexOf(ThreadId.make("child"))).toBe(order.indexOf(parent.id) + 1);
+    expect(layout.items.find((item) => item.thread.id === "child")?.meshChild).toBe(true);
+    expect(layout.snoozedShelfHeaderIndex).toBe(order.indexOf(ThreadId.make("snoozed")));
+  });
+});
+
 describe("buildThreadListV2Items settled paging", () => {
   it("caps the settled tail at settledLimit and reports the hidden count", () => {
     const threads = [

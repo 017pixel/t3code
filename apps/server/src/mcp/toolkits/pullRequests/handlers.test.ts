@@ -6,6 +6,7 @@ import {
   type OrchestrationV2ServerCommand as OrchestrationCommand,
   PullRequestOperationError,
   type OrchestrationProjectShell,
+  type OrchestrationV2ThreadMeshOrigin,
   type PullRequestRef,
   type PullRequestReviewGuideResult,
   type ThreadPullRequestLink,
@@ -136,6 +137,7 @@ function makeLink(
 }
 
 interface HarnessOptions {
+  readonly meshOrigin?: OrchestrationV2ThreadMeshOrigin;
   readonly thread?: PullRequestTestThread | null;
   readonly project?: OrchestrationProjectShell | null;
   readonly reject?: (command: OrchestrationCommand) => string | null;
@@ -194,7 +196,14 @@ const makeHarness = Effect.fn("makePullRequestsToolkitHarness")(function* (
     }),
     Layer.mock(Orchestrator.OrchestratorV2)({
       getThreadShell: (id) =>
-        Effect.succeed(id === THREAD_ID && thread ? v2PullRequestThread(thread) : null),
+        Effect.succeed(
+          id === THREAD_ID && thread
+            ? {
+                ...v2PullRequestThread(thread),
+                ...(options.meshOrigin === undefined ? {} : { meshOrigin: options.meshOrigin }),
+              }
+            : null,
+        ),
       dispatch,
     }),
     Layer.succeed(Crypto.Crypto, testCrypto),
@@ -351,6 +360,35 @@ describe("pull request toolkit handlers", () => {
       expect(error).toMatchObject({ _tag: "PullRequestWatchFromSubagentError" });
       expect(yield* Ref.get(harness.commands)).toEqual([]);
     }),
+  );
+
+  it.effect.each([undefined, true] as const)(
+    "refuses watches from remote delegated children, preserving ordinary launches (%s)",
+    (delegated) =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          meshOrigin: {
+            environmentId: EnvironmentId.make("remote"),
+            threadId: ThreadId.make("remote-parent"),
+            ...(delegated === undefined ? {} : { delegated }),
+          },
+        });
+        const result = yield* harness
+          .call("watch_pull_request", { repository: "t3tools/t3code", number: 1 })
+          .pipe(Effect.result);
+        if (delegated) {
+          expect(result).toMatchObject({
+            _tag: "Failure",
+            failure: { _tag: "PullRequestWatchFromSubagentError" },
+          });
+          expect(yield* Ref.get(harness.commands)).toEqual([]);
+        } else {
+          expect(result._tag).toBe("Success");
+          expect(yield* Ref.get(harness.commands)).toMatchObject([
+            { type: "thread.pull-request.watch", watching: true },
+          ]);
+        }
+      }),
   );
 
   it.effect("canonicalizes GitCafe links independently of the thread's project host", () =>

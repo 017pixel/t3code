@@ -2,7 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { authScopeResponse, AuthStandardClientScopes } from "@t3tools/contracts";
+import { authScopeResponse, AuthStandardClientScopes, EnvironmentId } from "@t3tools/contracts";
 import {
   computeDpopAccessTokenHash,
   computeDpopJwkThumbprint,
@@ -10,10 +10,16 @@ import {
 } from "@t3tools/shared/dpop";
 import { expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
+import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 
+import { CLOUD_LINKED_USER_ID } from "../cloud/config.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -44,6 +50,13 @@ const layerEnvironmentAuth = (overrides?: Partial<ServerConfig.ServerConfig["Ser
     Layer.provide(ServerEnvironment.layerIdentity),
     Layer.provide(layerServerConfig(overrides)),
   );
+
+const layerEnvironmentAuthWithSecrets = EnvironmentAuth.layer.pipe(
+  Layer.provideMerge(SqlitePersistence.layerMemory),
+  Layer.provideMerge(ServerSecretStore.layer),
+  Layer.provide(ServerEnvironment.layerIdentity),
+  Layer.provide(layerServerConfig()),
+);
 
 const makeCookieRequest = (
   cookieName: string,
@@ -747,5 +760,135 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
     }).pipe(
       Effect.provide(layerEnvironmentAuth({ desktopBootstrapToken: "desktop-bootstrap-token" })),
     ),
+  );
+
+  it.effect("refuses a Connect bootstrap minted for a cloud user that is no longer installed", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sessions = yield* SessionStore.SessionStore;
+      const secrets = yield* ServerSecretStore.ServerSecretStore;
+      const key = makeDpopKey();
+      const installUser = (cloudUserId: string) =>
+        secrets.set(CLOUD_LINKED_USER_ID, new TextEncoder().encode(cloudUserId));
+      const mintFor = (cloudUserId: string) =>
+        serverAuth.createPairingLink({
+          scopes: AuthStandardClientScopes,
+          subject: EnvironmentAuth.cloudConnectBootstrapSubject(cloudUserId),
+          ttl: Duration.minutes(2),
+          proofKeyThumbprint: key.thumbprint,
+        });
+      const exchange = (credential: string) =>
+        serverAuth.exchangeBootstrapCredentialForAccessToken(
+          credential,
+          undefined,
+          requestMetadata,
+          { proofKeyThumbprint: key.thumbprint },
+        );
+
+      yield* installUser("user-old");
+      const current = yield* exchange((yield* mintFor("user-old")).credential);
+      expect((yield* sessions.verify(current.access_token)).subject).toBe("cloud-connect");
+
+      const stale = yield* mintFor("user-old");
+      yield* installUser("user-new");
+      const refused = yield* Effect.flip(exchange(stale.credential));
+      expect(refused._tag).toBe("ServerAuthInvalidCredentialError");
+    }).pipe(Effect.provide(layerEnvironmentAuthWithSecrets)),
+  );
+
+  it.effect("serializes the Connect bootstrap account check and issuance with revocation", () =>
+    Effect.gen(function* () {
+      const auth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sessions = yield* SessionStore.SessionStore;
+      const secrets = yield* ServerSecretStore.ServerSecretStore;
+      const checked = yield* Deferred.make<void>();
+      const resumeCheck = yield* Deferred.make<void>();
+      const issuing = yield* Deferred.make<void>();
+      const resumeIssue = yield* Deferred.make<void>();
+      const revoking = yield* Deferred.make<void>();
+      yield* secrets.set(CLOUD_LINKED_USER_ID, new TextEncoder().encode("user-old"));
+      const bootstrap = yield* auth.createPairingLink({
+        scopes: AuthStandardClientScopes,
+        subject: EnvironmentAuth.cloudConnectBootstrapSubject("user-old"),
+        proofKeyThumbprint: "old-user-key",
+      });
+      const get = secrets.get;
+      Object.assign(secrets, {
+        get: Effect.fn("test.readLinkedAccount")(function* (name: string) {
+          const value = yield* get(name);
+          if (name === CLOUD_LINKED_USER_ID) {
+            yield* Deferred.succeed(checked, undefined);
+            yield* Deferred.await(resumeCheck);
+          }
+          return value;
+        }),
+      });
+      const issue = sessions.issue;
+      Object.assign(sessions, {
+        issue: Effect.fn("test.issueConnectSession")(function* (
+          input: Parameters<typeof issue>[0],
+        ) {
+          if (input?.subject === "cloud-connect") {
+            yield* Deferred.succeed(issuing, undefined);
+            yield* Deferred.await(resumeIssue);
+          }
+          return yield* issue(input);
+        }),
+      });
+
+      const exchange = yield* auth
+        .exchangeBootstrapCredentialForAccessToken(
+          bootstrap.credential,
+          undefined,
+          requestMetadata,
+          { proofKeyThumbprint: "old-user-key" },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(checked);
+      yield* secrets.set(CLOUD_LINKED_USER_ID, new TextEncoder().encode("user-new"));
+      const revoke = yield* auth
+        .withMeshSessionLock(
+          Deferred.succeed(revoking, undefined).pipe(
+            Effect.andThen(auth.revokeCloudConnectSessions()),
+          ),
+        )
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      const revokedDuringCheck = yield* Deferred.isDone(revoking);
+      yield* Deferred.succeed(resumeCheck, undefined);
+      yield* Deferred.await(issuing);
+      const revokedDuringIssue = yield* Deferred.isDone(revoking);
+      yield* Deferred.succeed(resumeIssue, undefined);
+      const issued = yield* Fiber.join(exchange);
+      const revoked = yield* Fiber.join(revoke);
+
+      expect(revokedDuringCheck).toBe(false);
+      expect(revokedDuringIssue).toBe(false);
+      expect(revoked).toBe(1);
+      const invalid = yield* sessions.verify(issued.access_token).pipe(Effect.flip);
+      expect(invalid._tag).toBe("SessionTokenRevokedError");
+    }).pipe(Effect.provide(layerEnvironmentAuthWithSecrets)),
+  );
+
+  it.effect("keeps mesh member sessions out of the public access stream", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sessions = yield* SessionStore.SessionStore;
+      const firstChange = yield* sessions.streamChanges.pipe(
+        Stream.runHead,
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* serverAuth.issueMeshMemberSession({
+        meshCaller: EnvironmentId.make("env-other"),
+        proofKeyThumbprint: "thumbprint",
+      });
+      const owner = yield* serverAuth.issueSession({ label: "owner" });
+      const change = yield* Fiber.join(firstChange);
+      expect(
+        Option.map(
+          change,
+          (value) => value.type === "clientUpserted" && value.clientSession.sessionId,
+        ),
+      ).toEqual(Option.some(owner.sessionId));
+    }).pipe(Effect.provide(layerEnvironmentAuth())),
   );
 });

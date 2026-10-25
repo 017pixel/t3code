@@ -10,9 +10,11 @@ import {
 import { pullRequestRoutingConnectionKey } from "./pullRequestRoutingPermissions.ts";
 import { BearerConnectionTarget, RelayConnectionTarget } from "./model.ts";
 import {
+  captainRoute,
   connectionRouteId,
   connectionRouteKind,
   connectionRouteLabel,
+  connectionRoutes,
   credentialConnectionId,
   insertRoute,
   entryWithRoutes,
@@ -22,6 +24,7 @@ import {
   sendsTokenInClear,
   upsertRoute,
   usableRoutes,
+  withCaptainRoutes,
 } from "./routes.ts";
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-1");
@@ -415,5 +418,69 @@ describe("learned routes", () => {
     });
     expect(moved).not.toBeNull();
     expect(profileOf(moved![0]!)).toMatchObject({ httpBaseUrl: "https://desk.local:3773/" });
+  });
+});
+
+describe("captain routes", () => {
+  const target = { environmentId: ENVIRONMENT_ID, label: "Desk" };
+  const viaCaptain = (captain: string, address: string) =>
+    captainRoute(target, {
+      captain: EnvironmentId.make(captain),
+      httpBaseUrl: `${address}api/mesh/via/handle/${ENVIRONMENT_ID}`,
+    });
+  const LOOPBACK = direct("lo", "http://127.0.0.1:3773/");
+  const entry: ConnectionCatalogEntry = {
+    target: LOOPBACK.target,
+    profile: LOOPBACK.profile,
+    alternateRoutes: [LAN, RELAY],
+    enabled: true,
+  };
+
+  it("ranks a captain route after loopback and before LAN, and replaces it as a set", () => {
+    const first = viaCaptain("box", "http://192.168.1.5:3773/");
+    expect(connectionRouteKind(first)).toBe("captain");
+    expect(connectionRouteLabel(first)).toBe("Captain");
+    expect(connectionRoutes(withCaptainRoutes(entry, [first]))).toEqual([
+      LOOPBACK,
+      first,
+      LAN,
+      RELAY,
+    ]);
+    const next = viaCaptain("vps", "https://vps.t3.test/");
+    expect(connectionRoutes(withCaptainRoutes(withCaptainRoutes(entry, [first]), [next]))).toEqual([
+      LOOPBACK,
+      next,
+      LAN,
+      RELAY,
+    ]);
+    expect(withCaptainRoutes(withCaptainRoutes(entry, [first]), [])).toEqual(entry);
+  });
+
+  it("is left out of learned-route reconciliation", () => {
+    const captain = viaCaptain("box", "http://192.168.1.5:3773/");
+    const relayOnly: ConnectionCatalogEntry = {
+      target: RELAY.target,
+      profile: RELAY.profile,
+      enabled: true,
+    };
+    const routes = mergeLearnedRoutes({
+      entry: withCaptainRoutes(relayOnly, [captain]),
+      activeRoute: captain,
+      // The member and the captain can share a LAN; an address the member reports still counts.
+      reported: [{ httpBaseUrl: "http://192.168.1.5:3773/" }],
+      allowInsecure: true,
+    });
+    expect(routes?.map((route) => connectionRouteId(route.target))).toEqual([
+      `learned:${ENVIRONMENT_ID}:http://192.168.1.5:3773`,
+      "relay",
+    ]);
+    expect(
+      mergeLearnedRoutes({
+        entry: withCaptainRoutes(relayOnly, [captain]),
+        activeRoute: RELAY,
+        reported: [],
+        allowInsecure: true,
+      }),
+    ).toBeNull();
   });
 });

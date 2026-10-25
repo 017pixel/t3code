@@ -11,6 +11,10 @@ import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled"
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { resolveThreadProviderStack } from "@t3tools/client-runtime/state/models";
 import {
+  nestMeshChildren,
+  resolveMeshThreadRootKey,
+} from "@t3tools/client-runtime/mesh-thread-nesting";
+import {
   threadSearchMatchKey,
   threadSearchSubject,
 } from "@t3tools/client-runtime/state/thread-search";
@@ -272,6 +276,8 @@ export interface ThreadListV2Item {
   readonly pinned: boolean;
   readonly wokeAt: string | null;
   readonly isLast: boolean;
+  /** Listed under the thread on another machine that started it. */
+  readonly meshChild?: boolean;
 }
 
 export interface ThreadListV2Layout {
@@ -372,6 +378,7 @@ export function threadListV2ListItemsAreEqual(
         previous.item.snoozed === item.item.snoozed &&
         previous.item.pinned === item.item.pinned &&
         previous.item.wokeAt === item.item.wokeAt &&
+        previous.item.meshChild === item.item.meshChild &&
         previous.snoozeWakeLabelText === item.snoozeWakeLabelText &&
         previous.timeLabel === item.timeLabel &&
         previous.snoozePresetMinute === item.snoozePresetMinute &&
@@ -464,8 +471,9 @@ export function buildThreadListV2ListItems(input: {
       canSnooze(item.thread, { now: input.snoozeLabelNow })
         ? input.snoozeLabelNow
         : undefined;
+    // A nested row moves with its parent, not on its own.
     const move =
-      item.variant === "card"
+      item.variant === "card" && item.meshChild !== true
         ? input.moveAvailability?.get(`${item.thread.environmentId}:${item.thread.id}`)
         : undefined;
     return {
@@ -638,7 +646,10 @@ export function buildThreadListV2Items(input: {
   // Threads listed only because their messages match; only their rows show
   // the message and open at it.
   const contentOnlyThreadKeys = new Set<string>();
-  for (const thread of listedThreads) {
+  // Search ranks every match on its own; otherwise a thread another machine started follows its
+  // parent's row instead of taking a place in a section.
+  const meshNesting = rankedMatches === null ? nestMeshChildren(listedThreads) : null;
+  for (const thread of meshNesting?.roots ?? listedThreads) {
     if (matchingThreads !== null && !matchingThreads.has(thread)) {
       const key = threadSearchMatchKey({
         environmentId: thread.environmentId,
@@ -721,7 +732,10 @@ export function buildThreadListV2Items(input: {
     (left, right) =>
       parseTimestampMs(left.snoozedUntil ?? "") - parseTimestampMs(right.snoozedUntil ?? ""),
   );
-  const selectedThreadKey = input.selectedThreadKey ?? null;
+  const selectedThreadKey =
+    meshNesting === null
+      ? (input.selectedThreadKey ?? null)
+      : resolveMeshThreadRootKey(input.selectedThreadKey ?? null, meshNesting.childrenByParentKey);
   const visibleWorking =
     input.workingShelfExpanded === true
       ? orderedWorking
@@ -760,12 +774,29 @@ export function buildThreadListV2Items(input: {
         );
 
   const items: ThreadListV2Item[] = [];
+  const pushItem = (item: ThreadListV2Item) => {
+    items.push(item);
+    const children = meshNesting?.childrenByParentKey.get(
+      `${item.thread.environmentId}:${item.thread.id}`,
+    );
+    for (const child of children ?? []) {
+      items.push({
+        thread: child,
+        variant: item.variant,
+        snoozed: false,
+        pinned: child.pinnedAt != null,
+        wokeAt: item.variant === "card" ? resolveThreadListV2WokeAt(child, { now }) : null,
+        isLast: false,
+        meshChild: true,
+      });
+    }
+  };
   for (const thread of applyPendingThreadOrder(
     sortPinnedThreadsByOrderKey(pinned),
     "pinned",
     pending,
   )) {
-    items.push({
+    pushItem({
       thread,
       variant: "card",
       snoozed: false,
@@ -775,7 +806,7 @@ export function buildThreadListV2Items(input: {
     });
   }
   for (const thread of orderedActive) {
-    items.push({
+    pushItem({
       thread,
       variant: "card",
       snoozed: false,
@@ -786,7 +817,7 @@ export function buildThreadListV2Items(input: {
   }
   const workingShelfHeaderIndex = orderedWorking.length > 0 ? items.length : null;
   for (const thread of visibleWorking) {
-    items.push({
+    pushItem({
       thread,
       variant: "card",
       snoozed: false,
@@ -797,7 +828,7 @@ export function buildThreadListV2Items(input: {
   }
   const snoozedShelfHeaderIndex = orderedSnoozed.length > 0 ? items.length : null;
   for (const thread of visibleSnoozed) {
-    items.push({
+    pushItem({
       thread,
       variant: "slim",
       snoozed: true,
@@ -808,7 +839,7 @@ export function buildThreadListV2Items(input: {
   }
   const settledShelfHeaderIndex = settledTotal > 0 ? items.length : null;
   for (const thread of visibleSettled) {
-    items.push({
+    pushItem({
       thread,
       variant: "slim",
       snoozed: false,

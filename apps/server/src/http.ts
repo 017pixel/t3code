@@ -3,6 +3,7 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  MESH_VIA_PATH,
 } from "@t3tools/contracts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
 import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@t3tools/shared/mcpApp";
@@ -388,8 +389,13 @@ const UNTRACED_REQUEST_PATHS: ReadonlySet<string> = new Set([OTLP_TRACES_PROXY_P
 const layerUntracedRequests = Layer.succeed(HttpMiddleware.TracerDisabledWhen)((request) => {
   const queryIndex = request.url.indexOf("?");
   const path = queryIndex === -1 ? request.url : request.url.slice(0, queryIndex);
-  // Webhook URLs carry their secret token in the path, so they never reach a trace.
-  return UNTRACED_REQUEST_PATHS.has(path) || path.startsWith(`${WEBHOOK_ROUTE_PREFIX}/`);
+  // Webhook URLs carry their secret token in the path, and captain route paths carry the mesh
+  // handle, so neither reaches a trace. The member traces forwarded requests itself.
+  return (
+    UNTRACED_REQUEST_PATHS.has(path) ||
+    path.startsWith(`${WEBHOOK_ROUTE_PREFIX}/`) ||
+    path.startsWith(`${MESH_VIA_PATH}/`)
+  );
 });
 
 export const withUntracedRequests = Layer.provide(layerUntracedRequests);

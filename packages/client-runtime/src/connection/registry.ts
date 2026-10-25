@@ -32,6 +32,7 @@ import type {
   ConnectionTarget,
   NetworkStatus,
   PersistedConnectionTarget,
+  PreparedConnection,
   SupervisorConnectionState,
 } from "./model.ts";
 import { ConnectionBlockedError } from "./model.ts";
@@ -39,17 +40,22 @@ import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionDriver from "./driver.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
+import * as MeshCaptain from "./meshCaptain.ts";
 import {
   PullRequestRoutingPermissions,
   pullRequestRoutingConnectionKey,
 } from "./pullRequestRoutingPermissions.ts";
 import {
   RELAY_ROUTE_ID,
+  type CaptainPath,
+  captainRoute,
   connectionRouteId,
+  connectionRouteKind,
   connectionRoutes,
   credentialConnectionId,
   entryWithRoutes,
   findRouteToSameAddress,
+  hasRelayRoute,
   hasSavedBearerRoute,
   mergeLearnedRoutes,
   routesAfterRemoving,
@@ -213,6 +219,7 @@ export const make = Effect.gen(function* () {
   const driver = yield* ConnectionDriver.ConnectionDriver;
   const wakeups = yield* ConnectionWakeups.ConnectionWakeups;
   const ssh = yield* ClientCapabilities.SshEnvironmentGateway;
+  const mesh = yield* Effect.serviceOption(MeshCaptain.MeshCaptain);
   const persistedTargets = yield* storage.list;
   const disabledEnvironmentIds = new Set(yield* storage.listDisabled);
   const loadRoute = Effect.fn("EnvironmentRegistry.loadRoute")(function* (
@@ -350,17 +357,41 @@ export const make = Effect.gen(function* () {
     yield* Scope.close(lease.scope, Exit.void);
   });
 
+  /** Captain routes reach members through T3 Connect credentials, so only relay environments get them. */
+  const meshRoutes = Effect.fn("EnvironmentRegistry.meshRoutes")(function* (
+    entry: ConnectionCatalogEntry,
+  ) {
+    if (Option.isNone(mesh) || !hasRelayRoute(entry)) return undefined;
+    const captain = mesh.value;
+    const environmentId = entry.target.environmentId;
+    const routesFrom = (paths: ReadonlyMap<EnvironmentId, CaptainPath>) => {
+      const path = paths.get(environmentId);
+      return path === undefined ? [] : [captainRoute(entry.target, path)];
+    };
+    return {
+      initialRoutes: routesFrom(yield* SubscriptionRef.get(captain.paths)),
+      routes: SubscriptionRef.changes(captain.paths).pipe(Stream.map(routesFrom)),
+      beforeBetterRouteCheck: (session) => captain.betterRouteTick(environmentId, session),
+      captainChanged: captain.refresh.pipe(
+        Effect.andThen(SubscriptionRef.get(captain.paths)),
+        Effect.map(routesFrom),
+      ),
+    } satisfies EnvironmentSupervisor.EnvironmentSupervisorOptions["mesh"];
+  });
+
   const createServiceScope = Effect.fn("EnvironmentRegistry.createServiceScope")(
     (entry: ConnectionCatalogEntry) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
           const environmentId = entry.target.environmentId;
           const scope = yield* Scope.fork(registryScope);
+          const meshOptions = yield* meshRoutes(entry);
           const supervisor = yield* EnvironmentSupervisor.make(entry, {
             // Seed the intent to avoid publishing a false switched-off state
             // before an enabled, compatible environment starts connecting.
             initiallyDesired: entry.enabled && entry.unsupportedReason === undefined,
             learnRoutes: (input) => learnRoutes({ environmentId, ...input }),
+            ...(meshOptions === undefined ? {} : { mesh: meshOptions }),
           }).pipe(
             Effect.provideService(Connectivity.Connectivity, connectivity),
             Effect.provideService(ConnectionDriver.ConnectionDriver, driver),
@@ -381,6 +412,21 @@ export const make = Effect.gen(function* () {
             ),
             Effect.forkIn(scope),
           );
+          // The captain route follows the client's own live session to the captain.
+          if (Option.isSome(mesh)) {
+            const observe = (live: Option.Option<PreparedConnection>) =>
+              mesh.value.observeConnection(environmentId, live);
+            yield* SubscriptionRef.changes(supervisor.session).pipe(
+              Stream.mapEffect((session) =>
+                Option.isSome(session)
+                  ? SubscriptionRef.get(supervisor.prepared)
+                  : Effect.succeed(Option.none<PreparedConnection>()),
+              ),
+              Stream.runForEach(observe),
+              Effect.ensuring(observe(Option.none())),
+              Effect.forkIn(scope),
+            );
+          }
           return supervisor;
         }),
       ),
@@ -518,8 +564,11 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  // Captain routes are built from mesh state and must never be saved.
   const persistedRoutes = (entry: ConnectionCatalogEntry) =>
-    connectionRoutes(entry).map((route) => route.target as PersistedConnectionTarget);
+    connectionRoutes(entry)
+      .filter((route) => connectionRouteKind(route) !== "captain")
+      .map((route) => route.target as PersistedConnectionTarget);
 
   /**
    * Pull request routing trust and an unsupported verdict both belong to the saved addresses: a changed set may

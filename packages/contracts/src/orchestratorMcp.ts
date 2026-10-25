@@ -1,9 +1,11 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
+import * as Struct from "effect/Struct";
 
 import {
   ContextTransferId,
+  EnvironmentId,
   IsoDateTime,
   MessageId,
   NodeId,
@@ -42,9 +44,61 @@ import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000));
 const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
-const OrchestratorMcpClientRequestId = TrimmedNonEmptyString.check(
+export const OrchestratorMcpClientRequestId = TrimmedNonEmptyString.check(
   Schema.isMaxLength(256),
 ).annotate({ description: "Reuse it to retry the same call. A new call gets a new key." });
+
+/** EXPERIMENTAL mesh v1. `machine` value that a list or search tool reads as every member. */
+export const MESH_ALL_MACHINES = "all" as const;
+
+/** EXPERIMENTAL mesh v1. Names one mesh member; omitted means this machine. */
+export const OrchestratorMcpMachine = TrimmedNonEmptyString.check(Schema.isMaxLength(256)).annotate(
+  {
+    description:
+      "Mesh machine to run on: an environment id or machine label. Omit for this machine.",
+  },
+);
+
+/** EXPERIMENTAL mesh v1. Like {@link OrchestratorMcpMachine}, and also accepts "all". */
+export const OrchestratorMcpMachineSelector = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(256),
+).annotate({
+  description:
+    'Mesh machine to read: an environment id, a machine label, or "all" for every member.',
+});
+
+/** EXPERIMENTAL mesh v1. Same fields as `MeshMachineRef`; mesh.ts imports this module. */
+export const OrchestratorMcpMachineRef = Schema.Struct({
+  environmentId: EnvironmentId,
+  label: TrimmedNonEmptyString,
+});
+
+/**
+ * EXPERIMENTAL mesh v1. A list tool's answer for `machine: "all"`: one section per member, each
+ * with its own result (and cursor) or error. Offline members are listed with `online: false`.
+ */
+const orchestratorMcpMachineSections = <S extends Schema.Top>(result: S) =>
+  Schema.Array(
+    Schema.Struct({
+      machine: OrchestratorMcpMachineRef,
+      online: Schema.Boolean,
+      result: Schema.optional(result),
+      error: Schema.optional(Schema.Struct({ code: Schema.String, message: Schema.String })),
+    }),
+  );
+
+/**
+ * EXPERIMENTAL mesh v1. A list tool's success schema: the normal result, or only `sections` for
+ * `machine: "all"`. One object schema, because MCP clients reject an output schema whose root is
+ * not an object.
+ */
+export const orchestratorMcpMachineListResult = <F extends Schema.Struct.Fields>(
+  result: Schema.Struct<F>,
+) =>
+  Schema.Struct({
+    ...Struct.map(result.fields, Schema.optionalKey),
+    sections: Schema.optionalKey(orchestratorMcpMachineSections(result)),
+  });
 
 // OpenCode 1.15 serializes nested MCP union objects as JSON strings; decode that form at the boundary.
 const OrchestratorMcpScheduleFromJsonString = Schema.fromJsonString(
@@ -144,9 +198,25 @@ export const OrchestratorMcpTerminalDelegatedTaskStatus = Schema.Literals([
 export type OrchestratorMcpTerminalDelegatedTaskStatus =
   typeof OrchestratorMcpTerminalDelegatedTaskStatus.Type;
 
+export const OrchestratorMcpDelegatedTaskWorkState = Schema.Literals([
+  "working",
+  "waiting_for_children",
+  "result_available",
+]);
+export type OrchestratorMcpDelegatedTaskWorkState =
+  typeof OrchestratorMcpDelegatedTaskWorkState.Type;
+
+export const OrchestratorMcpPendingApproval = Schema.Struct({
+  requestId: RuntimeRequestId,
+  kind: ProviderRequestKind,
+  runId: RunId,
+});
+export type OrchestratorMcpPendingApproval = typeof OrchestratorMcpPendingApproval.Type;
+
 export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   task: OrchestratorMcpPrompt,
   target: Schema.optional(OrchestratorMcpTarget),
+  machine: Schema.optional(OrchestratorMcpMachine),
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
   isolation: Schema.optional(
@@ -183,11 +253,23 @@ const OrchestratorMcpRunningTaskNext = Schema.Literal(ORCHESTRATOR_MCP_RUNNING_T
 export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   taskId: NodeId,
   childThreadId: ThreadId,
+  childEnvironmentId: Schema.optional(
+    EnvironmentId.annotate({
+      description:
+        "Set when the child runs on another mesh machine. childThreadId is then that machine's thread id; thread tools reach it by id.",
+    }),
+  ),
+  notStartedOn: Schema.optional(
+    OrchestratorMcpMachineRef.annotate({
+      description:
+        "Set while a task for another mesh machine has not started there. Status is queued until that machine answers and the task starts, or terminal with summary saying why it never started. Until it starts, childThreadId repeats taskId and names no thread.",
+    }),
+  ),
   link: Schema.optional(Schema.String),
   childRunId: Schema.NullOr(RunId),
   childNodeId: NodeId,
   status: OrchestratorMcpDelegatedTaskStatus,
-  workState: Schema.Literals(["working", "waiting_for_children", "result_available"]),
+  workState: OrchestratorMcpDelegatedTaskWorkState,
   hasPendingChildRuns: Schema.Boolean,
   latestTerminalRunId: Schema.NullOr(RunId),
   latestTerminalStatus: Schema.NullOr(OrchestratorMcpTerminalDelegatedTaskStatus),
@@ -202,9 +284,7 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
     description:
       "A question blocks the child and ends a wait. Answer via `t3_pending_request_*` on `childThreadId`, or the user does.",
   }),
-  pendingApproval: Schema.NullOr(
-    Schema.Struct({ requestId: RuntimeRequestId, kind: ProviderRequestKind, runId: RunId }),
-  ).annotate({
+  pendingApproval: Schema.NullOr(OrchestratorMcpPendingApproval).annotate({
     description: "Oldest pending approval, or null. Ends a wait. Grants no approval rights.",
   }),
   waitTimedOut: Schema.Boolean.annotate({
@@ -291,6 +371,7 @@ const OrchestratorMcpProjectTarget = Schema.optional(
 
 export const OrchestratorMcpThreadListInput = Schema.Struct({
   projectId: OrchestratorMcpProjectTarget,
+  machine: Schema.optional(OrchestratorMcpMachineSelector),
   statuses: Schema.optional(
     Schema.Array(OrchestratorMcpThreadStatus).check(Schema.isMaxLength(10)),
   ),
@@ -495,6 +576,12 @@ export const OrchestratorMcpThreadInterruptInput = Schema.Struct({
   runId: Schema.optional(RunId),
   reason: Schema.optional(Schema.String.check(Schema.isMaxLength(2_000))),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+  stop: Schema.optional(
+    Schema.Boolean.annotate({
+      description:
+        "Stop the thread like its Stop button: also stops every task it delegated and holds its queue. Ignores runId.",
+    }),
+  ),
 });
 export type OrchestratorMcpThreadInterruptInput = typeof OrchestratorMcpThreadInterruptInput.Type;
 
@@ -510,6 +597,7 @@ export const OrchestratorMcpThreadInterruptResult = Schema.Struct({
 export type OrchestratorMcpThreadInterruptResult = typeof OrchestratorMcpThreadInterruptResult.Type;
 
 export const OrchestratorMcpCapabilitiesInput = Schema.Struct({
+  machine: Schema.optional(OrchestratorMcpMachine),
   search: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(200)).annotate({
       description: "Match model ids and labels. Replaces the short list.",
@@ -564,6 +652,19 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
     scheduledTasks: Schema.Boolean,
     maxBatchThreads: Schema.Number,
   }),
+  /** EXPERIMENTAL mesh v1. Present when this machine is in a mesh. */
+  machines: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        ...OrchestratorMcpMachineRef.fields,
+        online: Schema.Boolean,
+        self: Schema.Boolean,
+      }),
+    ).annotate({
+      description:
+        "Mesh machines agents can reach, this one included. Pass an environmentId or label as `machine`.",
+    }),
+  ),
 });
 export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabilitiesResult.Type;
 
@@ -707,6 +808,14 @@ export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFa
       "orchestration_error",
       "thread_credential_required",
       "target_required",
+      // EXPERIMENTAL mesh v1.
+      "mesh_unavailable",
+      "machine_not_found",
+      "machine_ambiguous",
+      "machine_offline",
+      "machine_unreachable",
+      "owner_not_found",
+      "owner_ambiguous",
     ]),
     message: Schema.String,
   },

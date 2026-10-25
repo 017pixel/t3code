@@ -18,6 +18,8 @@ export const RELAY_ENVIRONMENT_CREDENTIAL_SECRET = "cloud-relay-environment-cred
 export const PUBLISH_AGENT_ACTIVITY_SECRET = "cloud-publish-agent-activity";
 export const HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET = "cloud-hold-webhooks-while-offline";
 export const CLOUD_LINK_REVOKED = "cloud-link-revoked";
+/** The cloud user whose Connect and mesh sessions may still be active here. */
+export const CLOUD_SESSIONS_USER_ID = "cloud-sessions-user-id";
 
 export const encodeEndpointRuntimeConfigJson = Schema.encodeEffect(
   Schema.fromJsonString(RelayManagedEndpointRuntimeConfig),

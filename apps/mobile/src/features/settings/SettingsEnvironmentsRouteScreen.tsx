@@ -12,6 +12,7 @@ import { AndroidAnchoredMenu } from "../../components/ui/AndroidAnchoredMenu";
 import { AndroidHeaderIconButton } from "../../components/ui/AndroidScreenHeader";
 import { CloudEnvironmentRows } from "../connection/CloudEnvironmentRows";
 import { LocalEnvironmentList } from "../connection/LocalEnvironmentList";
+import { MeshSettingsSection } from "../connection/MeshSettingsSection";
 import { PullRequestRoutingSettings } from "../connection/PullRequestRoutingSettings";
 import { splitEnvironmentSections } from "../connection/environmentSections";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
@@ -169,6 +170,12 @@ export function SettingsEnvironmentsRouteScreen() {
                 showcaseSignedIn: true,
               }
             : {})}
+        />
+        <MeshSettingsSection
+          labelOf={(environmentId) =>
+            connectedEnvironments.find((environment) => environment.environmentId === environmentId)
+              ?.environmentLabel ?? environmentId
+          }
         />
         <PullRequestRoutingSettings />
       </ScrollView>

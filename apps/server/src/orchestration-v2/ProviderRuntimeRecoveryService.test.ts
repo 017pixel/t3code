@@ -1,5 +1,6 @@
 import { assert, it, vi } from "@effect/vitest";
 import {
+  EnvironmentId,
   MessageId,
   NodeId,
   ProviderDriverKind,
@@ -1366,5 +1367,133 @@ it.effect("leaves delegated tasks to their own child threads after process loss"
         : [],
     );
     assert.deepEqual(noted, [`subagent ${nativeSubagentId}`]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("leaves a remote task to its member after process loss", () => {
+  const threadId = ThreadId.make("thread_recovery_remote");
+  const runId = RunId.make("run_recovery_remote");
+  const providerThreadId = ProviderThreadId.make("provider_thread_recovery_remote");
+  const claudeInstanceId = ProviderInstanceId.make("claude");
+  const driver = ProviderDriverKind.make("claude");
+  const taskId = NodeId.make("node_recovery_remote_task");
+  const remote = { environmentId: EnvironmentId.make("environment:box"), label: "box" };
+  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+    null;
+  const projection = {
+    thread: { id: threadId, providerInstanceId: claudeInstanceId },
+    runtimeRequests: [],
+    providerSessions: [],
+    providerThreads: [
+      {
+        id: providerThreadId,
+        driver,
+        providerInstanceId: claudeInstanceId,
+        ownerNodeId: null,
+        status: "idle",
+        pendingBackgroundTasks: [],
+      },
+    ],
+    providerTurns: [],
+    runs: [
+      {
+        id: runId,
+        ordinal: 1,
+        status: "running",
+        providerThreadId,
+        providerInstanceId: claudeInstanceId,
+      },
+    ],
+    attempts: [],
+    nodes: [{ id: taskId, runId, status: "running", kind: "subagent" }],
+    subagents: [
+      {
+        id: taskId,
+        runId,
+        origin: "app_owned",
+        childThreadId: null,
+        remote: {
+          ...remote,
+          threadId: ThreadId.make("thread:on-box"),
+          runId: RunId.make("run:on-box"),
+        },
+        driver,
+        providerInstanceId: claudeInstanceId,
+        status: "running",
+        completionWake: "always",
+      },
+    ],
+    messages: [],
+    turnItems: [
+      {
+        id: TurnItemId.make("turn_item:remote"),
+        runId,
+        nodeId: taskId,
+        providerThreadId,
+        type: "subagent",
+        status: "running",
+        subagentId: taskId,
+        origin: "app_owned",
+        childThreadId: null,
+        remote,
+        providerInstanceId: claudeInstanceId,
+        title: "remote task",
+      },
+    ],
+  } as unknown as OrchestrationV2ThreadProjection;
+  const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(ServerSettings.layerTest()),
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getRecoveryThreadIds: () => Effect.succeed([threadId]),
+          getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+        }),
+        Layer.mock(EventSink.EventSinkV2)({
+          commitCommand: (input) => {
+            committedInput = input;
+            return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+          },
+        }),
+        IdAllocator.layer,
+        Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({
+          runRecoveryOnce: Effect.succeed(false),
+        }),
+        Layer.mock(EffectOutbox.EffectOutboxV2)({
+          listByCommandId: () => Effect.succeed([]),
+          reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+        }),
+      ),
+    ),
+  );
+
+  return Effect.gen(function* () {
+    yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService).reconcile("startup");
+    const events = committedInput?.events ?? [];
+    assert.isTrue(
+      events.some(
+        (event) =>
+          event.type === "run.updated" &&
+          event.payload.id === runId &&
+          event.payload.status === "cancelled",
+      ),
+    );
+    assert.isFalse(
+      events.some(
+        (event) =>
+          (event.type === "turn-item.updated" &&
+            event.payload.type === "subagent" &&
+            event.payload.subagentId === taskId) ||
+          ((event.type === "subagent.updated" || event.type === "node.updated") &&
+            event.payload.id === taskId),
+      ),
+    );
+    assert.isFalse(
+      events.some(
+        (event) =>
+          event.type === "run.background-work-cancelled" &&
+          event.payload.restartCancelledBackgroundWork.length > 0,
+      ),
+    );
   }).pipe(Effect.provide(layer));
 });

@@ -557,6 +557,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly providerInstance: ThreadRowProviderInstance | null;
   readonly environmentLabel: string | null;
   readonly environmentMachine?: EnvironmentMachineKind;
+  /** Listed under the thread on another machine that started it. */
+  readonly meshChild?: boolean;
   readonly pane?: "screen" | "sidebar";
   readonly showTrailingDivider?: boolean;
   readonly selected?: boolean;
@@ -1367,7 +1369,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     return <View style={rowAppearance.swipeContainerStyle}>{rowContent(() => {})}</View>;
 
   return (
-    <View collapsable={false}>
+    <View collapsable={false} className={props.meshChild ? "pl-4" : undefined}>
       {customSnoozeOpen && (
         <CustomSnoozeSheet onClose={() => setCustomSnoozeOpen(false)} onSnooze={handleSnooze} />
       )}

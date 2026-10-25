@@ -1,4 +1,11 @@
-import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
+import {
+  resolveThreadWorkingStartedAt,
+  type EnvironmentThreadShell,
+} from "@t3tools/client-runtime/state/models";
+import {
+  nestMeshChildren,
+  resolveMeshThreadRootKey,
+} from "@t3tools/client-runtime/mesh-thread-nesting";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import * as React from "react";
@@ -543,6 +550,32 @@ export function filterSidebarV2VisibleThreads<
       (scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
   );
+}
+
+export function resolveSidebarThreadNesting(
+  threads: readonly EnvironmentThreadShell[],
+  scopedProjectKeys: ReadonlySet<string> | null,
+) {
+  const visibleThreads = filterSidebarV2VisibleThreads(threads, scopedProjectKeys);
+  const { roots, childrenByParentKey } = nestMeshChildren(visibleThreads);
+  return {
+    visibleThreads,
+    rootThreads: roots,
+    meshChildrenByParentKey: childrenByParentKey,
+  };
+}
+
+const EMPTY_THREADS: readonly EnvironmentThreadShell[] = [];
+
+export function routeThreadOnly(
+  threads: readonly EnvironmentThreadShell[],
+  routeThreadKey: string | null,
+  meshChildrenByParentKey: ReadonlyMap<string, ReadonlyArray<EnvironmentThreadShell>>,
+): readonly EnvironmentThreadShell[] {
+  const rootKey = resolveMeshThreadRootKey(routeThreadKey, meshChildrenByParentKey);
+  if (rootKey === null) return EMPTY_THREADS;
+  const routeThread = threads.find((thread) => `${thread.environmentId}:${thread.id}` === rootKey);
+  return routeThread === undefined ? EMPTY_THREADS : [routeThread];
 }
 
 export function buildBulkTitleRegenerationContextMenuItem(input: {

@@ -12,7 +12,9 @@ import {
   RuntimeRequestId,
   ProviderUserInputAnswers,
   IsoDateTime,
+  MeshMachineRef,
   OrchestratorMcpFailure,
+  OrchestratorMcpMachineSelector,
   OrchestrationV2DispatchCommandResult,
   ThreadId,
   RunId,
@@ -24,6 +26,7 @@ import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
+import * as ProjectService from "../../../project/ProjectService.ts";
 import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -238,10 +241,11 @@ const ThreadTransfersTool = Tool.make("t3_thread_transfers", {
 const ThreadSearchTool = Tool.make("t3_thread_search", {
   ...commandTool,
   description:
-    "Search active threads by title, branch, PR, project, then message text. Skips subagent threads. `projectId`: one project, else yours, else all outside a thread. Not exhaustive.",
+    "Search active threads by title, branch, PR, project, then message text. Skips subagent threads. `projectId`: one project, else yours, else all outside a thread. Not exhaustive. Mesh: also searches this repository on other online machines (rows carry `machine`); `machine` searches one.",
   parameters: Schema.Struct({
     ...OrchestrationSearchThreadsInput.fields,
     projectId: Schema.optional(ProjectId),
+    machine: Schema.optional(OrchestratorMcpMachineSelector),
   }),
   success: Schema.Struct({
     matches: Schema.Array(
@@ -253,10 +257,20 @@ const ThreadSearchTool = Tool.make("t3_thread_search", {
         source: Schema.Literals(["title", "user", "assistant"]),
         snippet: Schema.optional(OrchestrationThreadSearchMatch.fields.snippet),
         messageCreatedAt: Schema.optional(OrchestrationThreadSearchMatch.fields.messageCreatedAt),
+        /** EXPERIMENTAL mesh v1: the member that owns the thread, on rows from another member. */
+        machine: Schema.optional(MeshMachineRef),
+        /** EXPERIMENTAL mesh v1: the scorer's rank, so rows from several members merge. */
+        score: Schema.optional(Schema.Finite),
       }),
     ),
+    /** EXPERIMENTAL mesh v1: online members that did not answer in time. */
+    unansweredMachines: Schema.optional(Schema.Array(MeshMachineRef)),
   }),
-  dependencies: [...commandTool.dependencies, ThreadSearch.ThreadSearch],
+  dependencies: [
+    ...commandTool.dependencies,
+    ThreadSearch.ThreadSearch,
+    ProjectService.ProjectService,
+  ],
 })
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);

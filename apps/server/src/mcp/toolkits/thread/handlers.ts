@@ -1,5 +1,8 @@
 import {
   type CommandId,
+  MESH_ALL_MACHINES,
+  type MeshMachineRef,
+  type ProjectId,
   type RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ThreadProjection,
@@ -8,8 +11,14 @@ import {
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import type { Tool } from "effect/ai";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
+
+import * as MeshForwarding from "../../../mesh/MeshForwarding.ts";
+import type * as Project from "../../../project/ProjectService.ts";
+import * as McpMeshRouting from "../../McpMeshRouting.ts";
 
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
@@ -76,9 +85,149 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
     });
   return { ...context, request, item };
 });
+const byThread = <P extends { readonly threadId?: ThreadId | undefined }>(params: P) =>
+  McpToolAccess.threadTarget(params.threadId);
+
 const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
   handle: (params: P) => Effect.Effect<A, E, R>,
-) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
+) =>
+  McpToolAccess.routed(
+    { owner: byThread },
+    McpToolAccess.writesThreads((params: P) => [params.threadId], handle),
+  );
+
+const readsThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
+  handle: (params: P) => Effect.Effect<A, E, R>,
+) => McpToolAccess.routed({ owner: byThread }, McpToolAccess.reads(handle));
+
+type SearchInput = Tool.Parameters<typeof ThreadToolkit.tools.t3_thread_search>;
+type SearchResult = Tool.Success<typeof ThreadToolkit.tools.t3_thread_search>;
+type SearchRow = SearchResult["matches"][number];
+
+/** A member past this is named in unansweredMachines instead of holding the search. */
+const MEMBER_SEARCH_TIMEOUT = "10 seconds";
+
+const searchHere = Effect.fn("mcp.searchHere")(function* (
+  input: SearchInput,
+  projectId: ProjectId | undefined,
+) {
+  const threadSearch = yield* ThreadSearch.ThreadSearch;
+  const { matches } = yield* threadSearch
+    .searchThreads({ ...McpMeshRouting.withoutMachine(input), projectId })
+    .pipe(Effect.mapError(unavailable));
+  return matches.map((match) => ({
+    ...match,
+    link: formatThreadLink(match.threadId, match.title),
+  }));
+});
+
+/**
+ * Rows from one member: its projects for this caller's repository, or all its projects for a
+ * caller outside a thread. Rows carry the member so agents can call it.
+ */
+const searchMember = Effect.fn("mcp.searchMember")(function* (
+  input: SearchInput,
+  call: McpMeshRouting.MemberCall,
+  callerProjectId: ProjectId | undefined,
+) {
+  const projectIds =
+    callerProjectId === undefined
+      ? [undefined]
+      : (yield* McpMeshRouting.memberProjectsForRepository(call, callerProjectId)).matches.map(
+          (project) => project.id,
+        );
+  const results = yield* Effect.forEach(projectIds, (projectId) =>
+    McpMeshRouting.forwardTool(
+      call.mesh,
+      ThreadToolkit.tools.t3_thread_search,
+      call.machine,
+      {
+        query: input.query,
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+        ...(projectId === undefined ? {} : { projectId }),
+      },
+      call.options,
+    ),
+  );
+  return results.flatMap((result) =>
+    result.matches.map((row): SearchRow => ({ ...row, machine: call.machine })),
+  );
+});
+
+/** Titles first, then messages, each by score, with a fifth of the slots kept for messages. */
+const mergeSearchRows = (rows: ReadonlyArray<SearchRow>, limit: number) => {
+  const byScore = (left: SearchRow, right: SearchRow) => (right.score ?? 0) - (left.score ?? 0);
+  const titles = rows.filter((row) => row.source === "title").toSorted(byScore);
+  const messages = rows.filter((row) => row.source !== "title").toSorted(byScore);
+  const messageSlots = Math.min(messages.length, Math.floor(limit / 5));
+  return [...titles.slice(0, limit - messageSlots), ...messages].slice(0, limit);
+};
+
+const searchThreads = Effect.fn("mcp.searchThreads")(function* (
+  input: SearchInput,
+): Effect.fn.Return<
+  SearchResult,
+  OrchestratorMcpFailure,
+  | Effect.Services<ReturnType<typeof readCaller>>
+  | ThreadSearch.ThreadSearch
+  | Project.ProjectService
+> {
+  const context = yield* readCaller();
+  const callerProjectId = context.caller?.projectId;
+  const mesh = yield* Effect.serviceOption(MeshForwarding.MeshForwarding);
+  if (context.scope.mesh !== undefined || Option.isNone(mesh)) {
+    return { matches: yield* searchHere(input, input.projectId ?? callerProjectId) };
+  }
+  const options = McpMeshRouting.meshCallOptions(context);
+  const memberCall = (machine: MeshMachineRef) => ({ mesh: mesh.value, machine, options });
+  // "all" is the default mesh-wide search, not a machine name.
+  const machine = input.machine === MESH_ALL_MACHINES ? undefined : input.machine;
+  if (input.projectId !== undefined || machine !== undefined) {
+    const placement =
+      machine !== undefined
+        ? yield* mesh.value.resolveMachine(machine)
+        : yield* mesh.value.resolveOwner({ kind: "project", id: input.projectId! });
+    if (placement._tag === "local") {
+      return { matches: yield* searchHere(input, input.projectId ?? callerProjectId) };
+    }
+    const call = memberCall(placement.machine);
+    if (input.projectId !== undefined) {
+      const { matches } = yield* McpMeshRouting.forwardTool(
+        mesh.value,
+        ThreadToolkit.tools.t3_thread_search,
+        placement.machine,
+        input,
+        options,
+      );
+      return { matches: matches.map((row) => ({ ...row, machine: placement.machine })) };
+    }
+    return { matches: yield* searchMember(input, call, callerProjectId) };
+  }
+  const members = (yield* mesh.value.machines).filter((machine) => !machine.self && machine.online);
+  const [here, ...answers] = yield* Effect.all(
+    [
+      searchHere(input, callerProjectId),
+      ...members.map(({ online: _online, self: _self, ...machine }) =>
+        searchMember(input, memberCall(machine), callerProjectId).pipe(
+          Effect.timeoutOption(MEMBER_SEARCH_TIMEOUT),
+          Effect.orElseSucceed(() => Option.none<ReadonlyArray<SearchRow>>()),
+          Effect.map((rows) => ({ machine, rows })),
+        ),
+      ),
+    ] as const,
+    { concurrency: "unbounded" },
+  );
+  const unanswered = answers
+    .filter((answer) => Option.isNone(answer.rows))
+    .map((answer) => answer.machine);
+  return {
+    matches: mergeSearchRows(
+      [...here, ...answers.flatMap((answer) => Option.getOrElse(answer.rows, () => []))],
+      input.limit ?? 50,
+    ),
+    ...(unanswered.length === 0 ? {} : { unansweredMachines: unanswered }),
+  };
+});
 
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
@@ -102,62 +251,56 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       };
     }),
   ),
-  t3_thread_search: McpToolAccess.reads((input) =>
-    Effect.gen(function* () {
-      const { caller } = yield* readCaller();
-      const threadSearch = yield* ThreadSearch.ThreadSearch;
-      const { matches } = yield* threadSearch
-        .searchThreads({ ...input, projectId: input.projectId ?? caller?.projectId })
-        .pipe(Effect.mapError(unavailable));
-      return {
-        matches: matches.map((match) => ({
-          ...match,
-          link: formatThreadLink(match.threadId, match.title),
-        })),
-      };
-    }),
+  t3_thread_search: McpToolAccess.reads(searchThreads),
+  t3_thread_fork: McpToolAccess.routed(
+    { localThreads: (input) => [input.threadId] },
+    McpToolAccess.writesThreads(
+      (input) => [input.threadId],
+      (input) =>
+        Effect.gen(function* () {
+          const { threads, projection } = yield* readThread(input.threadId);
+          const commandId = yield* newCommandId();
+          const targetThreadId = ThreadId.make(`${commandId}:fork`);
+          const result = yield* threads
+            .dispatch({
+              type: "thread.fork",
+              commandId,
+              sourceThreadId: projection.thread.id,
+              targetThreadId,
+              sourcePoint: input.sourcePoint,
+              ...(input.title === undefined ? {} : { title: input.title }),
+              createdBy: "agent",
+              creationSource: "mcp",
+            })
+            .pipe(Effect.mapError(dispatchFailure));
+          return { sequence: result.sequence, targetThreadId };
+        }),
+    ),
   ),
-  t3_thread_fork: writesThread((input) =>
-    Effect.gen(function* () {
-      const { threads, projection } = yield* readThread(input.threadId);
-      const commandId = yield* newCommandId();
-      const targetThreadId = ThreadId.make(`${commandId}:fork`);
-      const result = yield* threads
-        .dispatch({
-          type: "thread.fork",
-          commandId,
-          sourceThreadId: projection.thread.id,
-          targetThreadId,
-          sourcePoint: input.sourcePoint,
-          ...(input.title === undefined ? {} : { title: input.title }),
-          createdBy: "agent",
-          creationSource: "mcp",
-        })
-        .pipe(Effect.mapError(dispatchFailure));
-      return { sequence: result.sequence, targetThreadId };
-    }),
+  t3_thread_merge_back: McpToolAccess.routed(
+    { localThreads: (input) => [input.targetThreadId, input.sourceThreadId] },
+    McpToolAccess.writesThreads(
+      (input) => [input.targetThreadId, input.sourceThreadId],
+      (input) =>
+        Effect.gen(function* () {
+          const context = yield* readThread(input.targetThreadId);
+          const source = yield* readThread(input.sourceThreadId);
+          const result = yield* context.threads
+            .dispatch({
+              type: "thread.merge_back",
+              commandId: yield* newCommandId(),
+              sourceThreadId: source.projection.thread.id,
+              targetThreadId: input.targetThreadId,
+              sourcePoint: input.sourcePoint,
+              createdBy: "agent",
+              creationSource: "mcp",
+            })
+            .pipe(Effect.mapError(dispatchFailure));
+          return { sequence: result.sequence, targetThreadId: input.targetThreadId };
+        }),
+    ),
   ),
-  t3_thread_merge_back: McpToolAccess.writesThreads(
-    (input) => [input.targetThreadId, input.sourceThreadId],
-    (input) =>
-      Effect.gen(function* () {
-        const context = yield* readThread(input.targetThreadId);
-        const source = yield* readThread(input.sourceThreadId);
-        const result = yield* context.threads
-          .dispatch({
-            type: "thread.merge_back",
-            commandId: yield* newCommandId(),
-            sourceThreadId: source.projection.thread.id,
-            targetThreadId: input.targetThreadId,
-            sourcePoint: input.sourcePoint,
-            createdBy: "agent",
-            creationSource: "mcp",
-          })
-          .pipe(Effect.mapError(dispatchFailure));
-        return { sequence: result.sequence, targetThreadId: input.targetThreadId };
-      }),
-  ),
-  t3_thread_transfers: McpToolAccess.reads((input) =>
+  t3_thread_transfers: readsThread((input) =>
     Effect.gen(function* () {
       const { projection } = yield* readThread(input.threadId, ["contextTransfers"]);
       return {
@@ -172,7 +315,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       };
     }),
   ),
-  t3_thread_configuration: McpToolAccess.reads((input) =>
+  t3_thread_configuration: readsThread((input) =>
     Effect.gen(function* () {
       const {
         projection: { thread },
@@ -203,7 +346,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       return { sequence: result.sequence };
     }),
   ),
-  t3_pending_request_list: McpToolAccess.reads((input) =>
+  t3_pending_request_list: readsThread((input) =>
     Effect.gen(function* () {
       const { projection } = yield* readThread(input.threadId, ["runtimeRequests"]);
       return {
@@ -213,7 +356,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       };
     }),
   ),
-  t3_pending_request_read: McpToolAccess.reads((input) =>
+  t3_pending_request_read: readsThread((input) =>
     Effect.gen(function* () {
       const { item } = yield* readQuestion(input);
       return { requestId: input.requestId, questions: item.questions };
@@ -234,7 +377,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       return { sequence: result.sequence };
     }),
   ),
-  t3_queue_list: McpToolAccess.reads((input) =>
+  t3_queue_list: readsThread((input) =>
     Effect.gen(function* () {
       const { projection } = yield* readThread(input.threadId, ["runs", "messages"]);
       const runs = queuedRunsInDeliveryOrder(projection);
@@ -249,7 +392,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       };
     }),
   ),
-  t3_queue_read: McpToolAccess.reads((input) =>
+  t3_queue_read: readsThread((input) =>
     Effect.gen(function* () {
       const { projection } = yield* readThread(input.threadId, ["runs", "messages"]);
       const entry = queueEntry(projection, input.queuedRunId, 16000);

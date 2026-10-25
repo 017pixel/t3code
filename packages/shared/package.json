@@ -215,6 +215,18 @@
       "types": "./src/connectAuth.ts",
       "import": "./src/connectAuth.ts"
     },
+    "./meshCaptain": {
+      "types": "./src/meshCaptain.ts",
+      "import": "./src/meshCaptain.ts"
+    },
+    "./meshRelayObject": {
+      "types": "./src/meshRelayObject.ts",
+      "import": "./src/meshRelayObject.ts"
+    },
+    "./meshRelayStore": {
+      "types": "./src/meshRelayStore.ts",
+      "import": "./src/meshRelayStore.ts"
+    },
     "./symlink": {
       "types": "./src/symlink.ts",
       "import": "./src/symlink.ts"

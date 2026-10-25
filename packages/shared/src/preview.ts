@@ -1,6 +1,7 @@
 import type { BrowserSearchEngine } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
+import { environmentEndpointUrl } from "./advertisedEndpoint.ts";
 import { isLocalLoopbackHost } from "./hostClassification.ts";
 
 const TAB_ID_PREFIX = "tab_";
@@ -11,10 +12,16 @@ export function previewPdfAssetUrl(rawUrl: string, httpBaseUrl: string | null): 
   try {
     const url = new URL(rawUrl);
     const baseUrl = new URL(httpBaseUrl);
+    const basePath = baseUrl.pathname.replace(/\/+$/, "");
+    // An asset URL built on a captain route carries the route's base path.
+    const path =
+      basePath !== "" && url.origin === baseUrl.origin && url.pathname.startsWith(`${basePath}/`)
+        ? url.pathname.slice(basePath.length)
+        : url.pathname;
     if (
       (url.protocol !== "http:" && url.protocol !== "https:") ||
-      !url.pathname.startsWith("/api/assets/") ||
-      !/\.pdf$/i.test(url.pathname)
+      !path.startsWith("/api/assets/") ||
+      !/\.pdf$/i.test(path)
     ) {
       return null;
     }
@@ -27,7 +34,7 @@ export function previewPdfAssetUrl(rawUrl: string, httpBaseUrl: string | null): 
     }
     // The browser may run on the host's loopback address. Fetch signed bytes
     // through this client's environment connection, including remote routes.
-    return new URL(`${url.pathname}${url.search}${url.hash}`, baseUrl).href;
+    return environmentEndpointUrl(httpBaseUrl, `${path}${url.search}${url.hash}`);
   } catch {
     return null;
   }

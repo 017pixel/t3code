@@ -25,6 +25,7 @@ import {
   type GuestMessageId,
   isOrchestrationV2WorkActive,
   isProviderNativeSubagentThread,
+  isSubagentThread,
   MessageId,
   type NodeId,
   type ModelSelection,
@@ -522,6 +523,10 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "delegated_task.wake-policy":
     case "delegated_task.completion-delivery.acknowledge":
     case "delegated_task.completion-delivery.dispose":
+    case "delegated_task.remote.request":
+    case "delegated_task.remote.attach":
+    case "delegated_task.remote.progress":
+    case "delegated_task.remote.complete":
     case "thread.created.record":
       return command.parentThreadId;
     case "secret_request.record":
@@ -598,6 +603,26 @@ function cancelledAppOwnedTask(
     updatedAt: now,
     completionDelivery: { state: "disposed", observedByRunId: null },
   };
+}
+
+/** Stop ends a remote task here at once; its follower still owes the member a stop. */
+function stoppedRemoteTask(
+  task: OrchestrationV2Subagent,
+  remote: NonNullable<OrchestrationV2Subagent["remote"]>,
+  now: DateTime.Utc,
+): OrchestrationV2Subagent {
+  const { progress: _progress, ...cancelled } = cancelledAppOwnedTask(task, now);
+  const { pending: _pending, ...rest } = remote;
+  return { ...cancelled, remote: { ...rest, stopOwed: true } };
+}
+
+function remotePendingProgress(
+  pending: NonNullable<NonNullable<OrchestrationV2Subagent["remote"]>["pending"]>,
+  label: string,
+): string {
+  return pending.kind === "question"
+    ? `Question waiting on ${label}`
+    : `Approval waiting on ${label}`;
 }
 
 function isBlockingRun(run: OrchestrationV2Run): boolean {
@@ -2514,6 +2539,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       snoozedAt: null,
       lastVisitedAt: null,
       deletedAt: null,
+      ...(command.meshOrigin === undefined ? {} : { meshOrigin: command.meshOrigin }),
     };
 
     yield* emitEvent({
@@ -2639,7 +2665,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         thread.archivedAt !== null ||
         thread.settledOverride === "settled" ||
         thread.settledAt !== null ||
-        isProviderNativeSubagentThread(thread);
+        isSubagentThread(thread);
       if (link?.watch?.startedAt !== command.startedAt || (command.wake && inactive)) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -2839,7 +2865,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (
       command.type === "thread.pull-request.watch" &&
       command.watching &&
-      thread.lineage.relationshipToParent === "subagent"
+      isSubagentThread(thread)
     ) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
@@ -7309,6 +7335,413 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     },
   );
 
+  // EXPERIMENTAL mesh v1: a remote task has no local child. Its follower reports what the member
+  // saw through these commands, so the parent's records change only under the parent's lock.
+  const dispatchRemoteDelegatedTaskRequest = Effect.fn(
+    "orchestrationV2.dispatch.remoteDelegatedTaskRequest",
+  )(function* (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "delegated_task.remote.request" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const parentProjection = yield* projectionStore
+      .getThreadRecords(command.parentThreadId, [
+        "runs",
+        "nodes",
+        "subagents",
+        "providerTurns",
+        "attempts",
+      ])
+      .pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: command.parentThreadId, cause }),
+        ),
+      );
+    const parentRun = parentProjection.runs.find(
+      (candidate) => candidate.id === command.parentRunId,
+    );
+    const parentNode = parentProjection.nodes.find(
+      (candidate) => candidate.id === command.parentNodeId,
+    );
+    if (parentRun === undefined || !isBlockingRun(parentRun)) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Parent run ${command.parentRunId} is not active.`,
+      });
+    }
+    if (
+      (yield* stopReachedRun(command, command.parentThreadId, parentRun.id)) ||
+      parentNode === undefined ||
+      parentNode.runId !== parentRun.id ||
+      parentRun.rootNodeId === null
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Parent run ${command.parentRunId} cannot start a task now.`,
+      });
+    }
+    const adapter = yield* providerAdapters.get(parentRun.providerInstanceId).pipe(
+      Effect.mapError(
+        (cause) =>
+          new OrchestratorProviderAdapterError({
+            commandId: command.commandId,
+            providerInstanceId: parentRun.providerInstanceId,
+            cause,
+          }),
+      ),
+    );
+    const now = command.createdAt ?? (yield* DateTime.now);
+    const taskId = idAllocator.derive.delegatedTaskNode({ commandId: command.commandId });
+    const task: OrchestrationV2Subagent = {
+      id: taskId,
+      threadId: command.parentThreadId,
+      runId: parentRun.id,
+      parentNodeId: command.parentNodeId,
+      origin: "app_owned",
+      createdBy: command.createdBy,
+      driver: adapter.driver,
+      providerInstanceId: parentRun.providerInstanceId,
+      providerThreadId: null,
+      childThreadId: null,
+      remote: {
+        environmentId: command.environmentId,
+        threadId: null,
+        runId: null,
+        label: command.label,
+        launch: command.launch,
+      },
+      nativeTaskRef: null,
+      prompt: command.task,
+      title: command.title ?? null,
+      model: command.modelSelection.model,
+      modelSelection: command.modelSelection,
+      ...(command.completionWake === undefined ? {} : { completionWake: command.completionWake }),
+      status: "pending",
+      result: null,
+      startedAt: now,
+      completedAt: null,
+      updatedAt: now,
+    };
+    const scope = {
+      threadId: command.parentThreadId,
+      runId: parentRun.id,
+      nodeId: taskId,
+      driver: adapter.driver,
+      providerInstanceId: parentRun.providerInstanceId,
+      occurredAt: now,
+    };
+    const emitEvent = emit(events, command);
+    yield* emitEvent({
+      ...scope,
+      type: "node.updated",
+      payload: {
+        id: taskId,
+        threadId: command.parentThreadId,
+        runId: parentRun.id,
+        parentNodeId: command.parentNodeId,
+        rootNodeId: parentRun.rootNodeId,
+        kind: "subagent",
+        status: "pending",
+        countsForRun: false,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        runtimeRequestId: null,
+        checkpointScopeId: null,
+        startedAt: now,
+        completedAt: null,
+      },
+    });
+    yield* emitEvent({ ...scope, type: "subagent.updated", payload: task });
+    yield* emitEvent({
+      ...scope,
+      type: "turn-item.updated",
+      payload: {
+        id: idAllocator.derive.delegatedTaskTurnItem({ commandId: command.commandId }),
+        threadId: command.parentThreadId,
+        runId: parentRun.id,
+        nodeId: taskId,
+        providerThreadId: parentRun.providerThreadId,
+        providerTurnId: providerTurnForRun(parentProjection, parentRun)?.id ?? null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: yield* nextTurnItemOrdinal(parentProjection),
+        status: "pending",
+        title:
+          command.title ??
+          subagentThreadTitle({
+            parentTitle: parentProjection.thread.title,
+            prompt: command.task,
+            ordinal: parentProjection.subagents.length + 1,
+          }),
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+        type: "subagent",
+        subagentId: taskId,
+        origin: "app_owned",
+        driver: adapter.driver,
+        providerInstanceId: parentRun.providerInstanceId,
+        childThreadId: null,
+        remote: { environmentId: command.environmentId, label: command.label },
+        prompt: command.task,
+        result: null,
+      },
+    });
+  });
+
+  type RemoteTaskCommand = Extract<
+    OrchestrationV2InternalCommand,
+    {
+      readonly type:
+        | "delegated_task.remote.attach"
+        | "delegated_task.remote.progress"
+        | "delegated_task.remote.complete";
+    }
+  >;
+
+  const loadRemoteTask = Effect.fnUntraced(function* (command: RemoteTaskCommand) {
+    const parent = yield* projectionStore
+      .getThreadRecords(
+        command.parentThreadId,
+        ["runs", "messages", "subagents", "providerTurns", "nodes", "turnItems"],
+        { turnItemTypes: ["subagent"], messageRoles: ["user"] },
+      )
+      .pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: command.parentThreadId, cause }),
+        ),
+      );
+    const task = parent.subagents.find(
+      (candidate) => candidate.id === command.taskId && candidate.origin === "app_owned",
+    );
+    if (task?.remote === undefined) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Task ${command.taskId} is not a remote task of thread ${command.parentThreadId}.`,
+      });
+    }
+    return { parent, task, remote: task.remote } as const;
+  });
+
+  /** Writes a remote task and keeps its node and card in step with it. */
+  const emitRemoteTask = Effect.fnUntraced(function* (input: {
+    readonly command: RemoteTaskCommand;
+    readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
+    readonly parent: Pick<OrchestrationV2ThreadProjection, "nodes" | "turnItems">;
+    readonly task: OrchestrationV2Subagent;
+    readonly now: DateTime.Utc;
+  }) {
+    const { task, now } = input;
+    const scope = {
+      threadId: task.threadId,
+      ...(task.runId === null ? {} : { runId: task.runId }),
+      nodeId: task.id,
+      driver: task.driver,
+      providerInstanceId: task.providerInstanceId,
+      occurredAt: now,
+    };
+    const emitEvent = emit(input.events, input.command);
+    yield* emitEvent({ ...scope, type: "subagent.updated", payload: task });
+    const node = input.parent.nodes.find((candidate) => candidate.id === task.id);
+    if (node !== undefined && node.status !== task.status) {
+      yield* emitEvent({
+        ...scope,
+        type: "node.updated",
+        payload: { ...node, status: task.status, completedAt: task.completedAt },
+      });
+    }
+    for (const item of input.parent.turnItems) {
+      if (item.type !== "subagent" || item.subagentId !== task.id) continue;
+      const { progress: _progress, ...rest } = item;
+      yield* emitEvent({
+        ...scope,
+        type: "turn-item.updated",
+        payload: {
+          ...rest,
+          ...(task.progress === undefined ? {} : { progress: task.progress }),
+          driver: task.driver,
+          providerInstanceId: task.providerInstanceId,
+          status: task.status,
+          result: task.result,
+          completedAt: task.completedAt,
+          updatedAt: now,
+        },
+      });
+    }
+  });
+
+  const dispatchRemoteDelegatedTaskAttach = Effect.fn(
+    "orchestrationV2.dispatch.remoteDelegatedTaskAttach",
+  )(function* (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "delegated_task.remote.attach" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const { parent, task, remote } = yield* loadRemoteTask(command);
+    if (remote.threadId !== null && remote.threadId !== command.threadId) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Task ${task.id} already runs as thread ${remote.threadId} on ${remote.label}.`,
+      });
+    }
+    // The member's provider instance may not exist here; the card then keeps the parent's icon.
+    const adapter = yield* providerAdapters
+      .get(command.modelSelection.instanceId)
+      .pipe(Effect.option);
+    const now = yield* DateTime.now;
+    yield* emitRemoteTask({
+      command,
+      events,
+      parent,
+      now,
+      task: {
+        ...task,
+        remote: { ...remote, threadId: command.threadId, runId: command.runId },
+        ...(Option.isSome(adapter)
+          ? {
+              driver: adapter.value.driver,
+              providerInstanceId: command.modelSelection.instanceId,
+            }
+          : {}),
+        model: command.modelSelection.model,
+        modelSelection: command.modelSelection,
+        // Cancelled before it attached: it stays cancelled and its follower stops the thread.
+        status: task.status === "pending" ? "running" : task.status,
+        updatedAt: now,
+      },
+    });
+  });
+
+  const dispatchRemoteDelegatedTaskProgress = Effect.fn(
+    "orchestrationV2.dispatch.remoteDelegatedTaskProgress",
+  )(function* (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "delegated_task.remote.progress" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const { parent, task, remote } = yield* loadRemoteTask(command);
+    if (!isOrchestrationV2WorkActive(task.status)) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Task ${task.id} already ended.`,
+      });
+    }
+    const now = yield* DateTime.now;
+    const { progress: _progress, ...base } = task;
+    const { pending: _pending, ...rest } = remote;
+    yield* emitRemoteTask({
+      command,
+      events,
+      parent,
+      now,
+      task: {
+        ...base,
+        ...(command.pending === null
+          ? { remote: rest }
+          : {
+              remote: { ...rest, pending: command.pending },
+              progress: remotePendingProgress(command.pending, remote.label),
+            }),
+        updatedAt: now,
+      },
+    });
+  });
+
+  const dispatchRemoteDelegatedTaskComplete = Effect.fn(
+    "orchestrationV2.dispatch.remoteDelegatedTaskComplete",
+  )(function* (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "delegated_task.remote.complete" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const { parent, task, remote } = yield* loadRemoteTask(command);
+    const now = yield* DateTime.now;
+    const { stopOwed, pending: _pending, ...settledRemote } = remote;
+    if (!isOrchestrationV2WorkActive(task.status)) {
+      if (stopOwed !== true) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Task ${task.id} already ended.`,
+        });
+      }
+      // Stop already ended the task here; the member has now confirmed its thread stopped.
+      return yield* emitRemoteTask({
+        command,
+        events,
+        parent,
+        now,
+        task: { ...task, remote: settledRemote, updatedAt: now },
+      });
+    }
+    const { progress: _progress, ...base } = task;
+    const updatedTask: OrchestrationV2Subagent = {
+      ...base,
+      remote: settledRemote,
+      status: command.status,
+      result: command.result,
+      completedAt: now,
+      updatedAt: now,
+    };
+    const parentRun =
+      task.runId === null ? undefined : parent.runs.find((run) => run.id === task.runId);
+    const plan =
+      command.disposeDelivery === true
+        ? {
+            task: {
+              ...updatedTask,
+              completionDelivery: { state: "disposed" as const, observedByRunId: null },
+            },
+            parentRun: undefined,
+            message: undefined,
+          }
+        : yield* planDelegatedCompletionDelivery({
+            parentProjection: parent,
+            parentRun,
+            task,
+            updatedTask,
+            now,
+          });
+    yield* emitRemoteTask({ command, events, parent, now, task: plan.task });
+    const emitEvent = emit(events, command);
+    if (plan.parentRun !== undefined) {
+      yield* emitEvent({
+        type: "run.updated",
+        threadId: command.parentThreadId,
+        runId: plan.parentRun.id,
+        ...(plan.parentRun.rootNodeId === null ? {} : { nodeId: plan.parentRun.rootNodeId }),
+        providerInstanceId: plan.parentRun.providerInstanceId,
+        occurredAt: now,
+        payload: plan.parentRun,
+      });
+    }
+    if (plan.message !== undefined) {
+      yield* emitEvent({
+        type: "message.updated",
+        threadId: command.parentThreadId,
+        ...(plan.message.runId === null ? {} : { runId: plan.message.runId }),
+        ...(plan.message.nodeId === null ? {} : { nodeId: plan.message.nodeId }),
+        providerInstanceId: plan.parentRun?.providerInstanceId ?? parent.thread.providerInstanceId,
+        occurredAt: now,
+        payload: plan.message,
+      });
+    }
+  });
+
   const recordSubagentFollowup = Effect.fnUntraced(function* (
     command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -9748,6 +10181,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ]);
     const run = projection.runs.find((candidate) => candidate.id === command.runId);
     const subagent = projection.subagents.find((candidate) => candidate.id === command.subagentId);
+    if (
+      subagent?.origin === "app_owned" &&
+      subagent.remote !== undefined &&
+      subagent.runId === command.runId
+    ) {
+      const records = yield* loadProjectionForCommand(command, ["nodes", "turnItems"], {
+        turnItemTypes: ["subagent"],
+        turnItemRunIds: [subagent.runId],
+      });
+      const now = yield* DateTime.now;
+      return yield* writeAppOwnedTask({
+        command,
+        events,
+        task: isOrchestrationV2WorkActive(subagent.status)
+          ? stoppedRemoteTask(subagent, subagent.remote, now)
+          : subagent,
+        nodes: records.nodes,
+        turnItems: records.turnItems,
+        now,
+      });
+    }
     // User Stop cancels app-owned tasks with no bound child run unless they are the child's
     // original task, regardless of other child work. Bound runs keep their settlement path
     // because results may still arrive; the client's next child stop interrupts the run.
@@ -10363,6 +10817,43 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ),
   );
 
+  /**
+   * Remote tasks have no local child for the delegated-tasks walk to reach, so every Stop of
+   * their parent ends them here, including the walk's own child stops.
+   */
+  const stopRemoteTasks = Effect.fn("Orchestrator.stopRemoteTasks")(function* (input: {
+    readonly command: Extract<OrchestrationV2ServerCommand, { readonly type: "thread.stop" }>;
+    readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
+    readonly projection: Pick<OrchestrationV2ThreadProjection, "subagents" | "turnItems">;
+  }) {
+    const pending = yield* Ref.get(input.events);
+    let nodes: ReadonlyArray<OrchestrationV2ExecutionNode> | undefined;
+    for (const recorded of input.projection.subagents) {
+      const updated = pending.findLast(
+        (event) => event.type === "subagent.updated" && event.payload.id === recorded.id,
+      );
+      const task = updated?.type === "subagent.updated" ? updated.payload : recorded;
+      if (
+        task.origin !== "app_owned" ||
+        task.remote === undefined ||
+        !isOrchestrationV2WorkActive(task.status)
+      )
+        continue;
+      const now = yield* DateTime.now;
+      nodes ??= (yield* projectionStore
+        .getThreadRecords(input.command.threadId, ["nodes"])
+        .pipe(mapDispatchError(input.command))).nodes;
+      yield* writeAppOwnedTask({
+        command: input.command,
+        events: input.events,
+        task: stoppedRemoteTask(task, task.remote, now),
+        nodes,
+        turnItems: input.projection.turnItems,
+        now,
+      });
+    }
+  });
+
   const dispatchThreadStop = Effect.fn("Orchestrator.dispatchThreadStop")(function* (
     command: Extract<OrchestrationV2ServerCommand, { readonly type: "thread.stop" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -10426,6 +10917,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* Ref.update(events, (existing) => [...existing, ...written]);
         yield* Ref.update(effects, (existing) => [...existing, ...enqueued]);
         yield* cancelIdleOrphans({ command, events, projection });
+        yield* stopRemoteTasks({ command, events, projection });
         yield* stopDelegatedTasks;
         return interrupted.value;
       }
@@ -10447,6 +10939,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     yield* holdStoppedThread({ command, events, projection, cohortRunIds: [], now });
     yield* cancelIdleOrphans({ command, events, projection });
+    yield* stopRemoteTasks({ command, events, projection });
     yield* stopDelegatedTasks;
     return undefined;
   });
@@ -11880,6 +12373,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "delegated_task.completion-delivery.dispose":
         yield* dispatchDelegatedTaskCompletionDeliveryResolution(command, events);
         break;
+      case "delegated_task.remote.request":
+        yield* dispatchRemoteDelegatedTaskRequest(command, events);
+        break;
+      case "delegated_task.remote.attach":
+        yield* dispatchRemoteDelegatedTaskAttach(command, events);
+        break;
+      case "delegated_task.remote.progress":
+        yield* dispatchRemoteDelegatedTaskProgress(command, events);
+        break;
+      case "delegated_task.remote.complete":
+        yield* dispatchRemoteDelegatedTaskComplete(command, events);
+        break;
       case "thread.created.record":
         yield* dispatchCreatedThreadRecord(command, events);
         break;
@@ -12100,7 +12605,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (command.type === "notification.delivery.accept") {
       yield* mapDispatchError(command)(offerDelegatedCompletionDeliveries(command.threadId));
     }
-    if (command.type === "delegated_task.wake-policy") {
+    if (
+      command.type === "delegated_task.wake-policy" ||
+      command.type === "delegated_task.remote.complete"
+    ) {
       yield* mapDispatchError(command)(offerDelegatedCompletionDeliveries(command.parentThreadId));
     }
 

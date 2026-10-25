@@ -183,6 +183,7 @@ const makeHarness = Effect.fn("TestRemoteAuthorization.makeHarness")(function* (
     unregisterDevice: unexpected,
     registerLiveActivity: unexpected,
     getAgentActivitySnapshot: unexpected,
+    getMesh: unexpected,
     resetTokenCache: Effect.void,
   });
   const layer = RemoteEnvironmentAuthorization.layer.pipe(
@@ -328,6 +329,43 @@ describe("RemoteEnvironmentAuthorization", () => {
       expect(harness.fetch.calls.map(([url]) => String(url))).toEqual([
         "http://192.168.1.10:3773/.well-known/t3/environment",
         "http://192.168.1.10:3773/api/auth/websocket-ticket/rpc",
+      ]);
+    }),
+  );
+
+  it.effect("signs a captain route's socket proofs for the member's Connect URL", () =>
+    Effect.gen(function* () {
+      const captainBase = `http://192.168.1.5:3773/api/mesh/via/handle/${ENVIRONMENT_ID}`;
+      const harness = yield* makeHarness({
+        initialToken: persistedToken(),
+        responses: [Response.json(DESCRIPTOR), websocketTicket("captain-ticket")],
+      });
+
+      const authorized = yield* Effect.gen(function* () {
+        const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+        return yield* remote.authorizeDpop({
+          expectedEnvironmentId: ENVIRONMENT_ID,
+          directEndpoint: {
+            httpBaseUrl: captainBase,
+            wsBaseUrl: captainBase.replace(/^http/, "ws"),
+            forwarded: true,
+          },
+        });
+      }).pipe(Effect.provide(harness.layer));
+
+      expect(authorized.httpBaseUrl).toBe(captainBase);
+      expect(authorized.proofBaseUrl).toBe(ENDPOINT.httpBaseUrl);
+      expect(authorized.socketUrl.startsWith(`${captainBase.replace(/^http/, "ws")}/ws?`)).toBe(
+        true,
+      );
+      expect(harness.fetch.calls.map(([url]) => String(url))).toEqual([
+        `${captainBase}/.well-known/t3/environment`,
+        `${captainBase}/api/auth/websocket-ticket/rpc`,
+      ]);
+      // The captain forwards with the member's Connect host, so the member checks these URLs.
+      expect((yield* Ref.get(harness.proofInputs)).map((proof) => proof.url)).toEqual([
+        "https://environment.example.test/api/auth/websocket-ticket/rpc",
+        "https://environment.example.test/ws",
       ]);
     }),
   );

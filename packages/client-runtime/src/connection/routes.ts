@@ -4,7 +4,7 @@ import {
   isSharedAddressSpaceHost,
   isTailnetHost,
 } from "@t3tools/shared/hostClassification";
-import type { DesktopSshEnvironmentTarget } from "@t3tools/contracts";
+import type { DesktopSshEnvironmentTarget, EnvironmentId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 
 import {
@@ -13,10 +13,12 @@ import {
   type ConnectionRoute,
 } from "./catalog.ts";
 import { BearerConnectionTarget, type ConnectionTarget } from "./model.ts";
+import { deriveWsBaseUrl } from "../environment/endpoint.ts";
 
 export type ConnectionRouteKind =
   | "relay"
   | "loopback"
+  | "captain"
   | "lan"
   | "tailnet"
   | "vpn"
@@ -89,10 +91,13 @@ export function connectionRouteKind(route: ConnectionRoute): ConnectionRouteKind
       return "ssh";
     case "PrimaryConnectionTarget":
     case "BearerConnectionTarget": {
+      const profile = Option.getOrNull(route.profile);
+      if (profile?._tag === "BearerConnectionProfile" && profile.captain !== undefined) {
+        return "captain";
+      }
       const hostname = routeHostname(route);
       if (hostname === null) return "public";
       if (isLocalLoopbackHost(hostname)) return "loopback";
-      const profile = Option.getOrNull(route.profile);
       const tailscale =
         profile?._tag === "BearerConnectionProfile" && profile.network === "tailscale";
       if (tailscale || isTailnetHost(hostname)) return "tailnet";
@@ -104,12 +109,13 @@ export function connectionRouteKind(route: ConnectionRoute): ConnectionRouteKind
 
 const ROUTE_KIND_RANK: Record<ConnectionRouteKind, number> = {
   loopback: 0,
-  lan: 1,
-  tailnet: 2,
-  vpn: 2,
-  public: 3,
-  ssh: 4,
-  relay: 5,
+  captain: 1,
+  lan: 2,
+  tailnet: 3,
+  vpn: 3,
+  public: 4,
+  ssh: 5,
+  relay: 6,
 };
 
 export function insertRoute(
@@ -161,6 +167,8 @@ export function connectionRouteLabel(route: ConnectionRoute): string {
       return "T3 Connect";
     case "loopback":
       return "This device";
+    case "captain":
+      return "Captain";
     case "lan":
       return "LAN";
     case "tailnet":
@@ -207,7 +215,8 @@ export function mergeLearnedRoutes(input: {
 }): ReadonlyArray<ConnectionRoute> | null {
   const { entry } = input;
   const active = input.activeRoute.target;
-  const saved = connectionRoutes(entry);
+  // Captain routes come from mesh state, so learned addresses never reconcile against them.
+  const saved = connectionRoutes(entry).filter((route) => connectionRouteKind(route) !== "captain");
   if (active._tag !== "RelayConnectionTarget" && active._tag !== "BearerConnectionTarget") {
     return null;
   }
@@ -420,6 +429,61 @@ export function routesAfterRemoving(
     }
     return credentialConnectionId(connectionRouteId(route.target)) !== removedId;
   });
+}
+
+const CAPTAIN_ROUTE_ID_PREFIX = "captain:";
+
+export function isCaptainRouteId(routeId: string): boolean {
+  return routeId.startsWith(CAPTAIN_ROUTE_ID_PREFIX);
+}
+
+/** Where the mesh captain forwards to one member: `<captain address>/api/mesh/via/<handle>/<id>`. */
+export interface CaptainPath {
+  readonly captain: EnvironmentId;
+  readonly httpBaseUrl: string;
+}
+
+/**
+ * The id names the captain and the full path, so a new captain, captain address or handle is a
+ * new route that replaces the old one.
+ */
+export function captainRoute(
+  target: Pick<ConnectionTarget, "environmentId" | "label">,
+  path: CaptainPath,
+): ConnectionRoute {
+  const connectionId = `${CAPTAIN_ROUTE_ID_PREFIX}${path.captain}@${path.httpBaseUrl}`;
+  return {
+    target: new BearerConnectionTarget({
+      environmentId: target.environmentId,
+      label: target.label,
+      connectionId,
+    }),
+    profile: Option.some(
+      new BearerConnectionProfile({
+        connectionId,
+        environmentId: target.environmentId,
+        label: target.label,
+        httpBaseUrl: path.httpBaseUrl,
+        wsBaseUrl: deriveWsBaseUrl(path.httpBaseUrl),
+        authorization: "t3-connect",
+        captain: path.captain,
+      }),
+    ),
+  };
+}
+
+/** Replaces the entry's captain routes, ranked after loopback and before LAN. */
+export function withCaptainRoutes(
+  entry: ConnectionCatalogEntry,
+  captainRoutes: ReadonlyArray<ConnectionRoute>,
+): ConnectionCatalogEntry {
+  const routes = connectionRoutes(entry);
+  const saved = routes.filter((route) => connectionRouteKind(route) !== "captain");
+  if (captainRoutes.length === 0 && saved.length === routes.length) return entry;
+  return entryWithRoutes(
+    entry,
+    captainRoutes.reduce<ReadonlyArray<ConnectionRoute>>(insertRoute, saved),
+  );
 }
 
 export function removedWithRelay(entry: ConnectionCatalogEntry): boolean {

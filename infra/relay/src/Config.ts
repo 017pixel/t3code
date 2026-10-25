@@ -40,6 +40,19 @@ export const legacyTunnelGraceMinutesConfig = Config.option(
   ),
 );
 
+const RELAY_MESH_ALLOWED_USER_IDS = "RELAY_MESH_ALLOWED_USER_IDS";
+
+/** EXPERIMENTAL mesh rollout: comma-separated Connect user ids. Empty turns the mesh off for all. */
+export const meshAllowedUserIdsConfig = Config.String(RELAY_MESH_ALLOWED_USER_IDS).pipe(
+  Config.withDefault(""),
+  Config.map((value) =>
+    value
+      .split(",")
+      .map((userId) => userId.trim())
+      .filter((userId) => userId.length > 0),
+  ),
+);
+
 export interface ApnsCredentials {
   readonly teamId: string;
   readonly keyId: string;
@@ -65,6 +78,8 @@ export class RelayConfiguration extends Context.Service<
     readonly managedEndpointCleanupMode?: ManagedEndpointCleanupMode;
     readonly legacyManagedEndpointCleanupMode?: ManagedEndpointCleanupMode;
     readonly legacyTunnelGraceMinutes?: number;
+    /** Absent or empty: the mesh is off for every account. */
+    readonly meshAllowedUserIds?: ReadonlyArray<string>;
   }
 >()("t3code-relay/Config/RelayConfiguration") {}
 

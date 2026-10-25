@@ -1,5 +1,6 @@
 import { EnvironmentId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import {
@@ -10,6 +11,7 @@ import {
 import { type ConnectionTarget, PersistedConnectionTarget } from "../connection/model.ts";
 import * as TokenStore from "../authorization/tokenStore.ts";
 import { StoredPullRequestRoutingPermission } from "../connection/pullRequestRoutingPermissions.ts";
+import { type MeshCaptainStoreShape, SavedMeshCaptain } from "../connection/meshCaptain.ts";
 
 export const StoredConnectionCredential = Schema.Struct({
   connectionId: Schema.String,
@@ -29,6 +31,8 @@ export const ConnectionCatalogDocument = Schema.Struct({
   disabledEnvironmentIds: Schema.Array(EnvironmentId).pipe(
     Schema.withDecodingDefaultKey(Effect.succeed([])),
   ),
+  /** EXPERIMENTAL mesh: the last captain, so a cold start can race its route at once. */
+  meshCaptain: Schema.optionalKey(SavedMeshCaptain),
 });
 export type ConnectionCatalogDocument = typeof ConnectionCatalogDocument.Type;
 
@@ -213,5 +217,28 @@ export function putRemoteDpopTokenInCatalog(
       (value) => value.environmentId,
       token,
     ),
+  };
+}
+
+/** Keeps the mesh captain in the catalog document. A failed save only costs the cold start race. */
+export function catalogMeshCaptainStore<E>(catalog: {
+  readonly read: Effect.Effect<ConnectionCatalogDocument, E>;
+  readonly update: (
+    transform: (document: ConnectionCatalogDocument) => ConnectionCatalogDocument,
+  ) => Effect.Effect<void, E>;
+}): MeshCaptainStoreShape {
+  return {
+    load: catalog.read.pipe(
+      Effect.map((document) => Option.fromUndefinedOr(document.meshCaptain)),
+      Effect.orElseSucceed(() => Option.none()),
+    ),
+    save: (saved) =>
+      catalog
+        .update(({ meshCaptain: _previous, ...document }) =>
+          Option.isSome(saved) ? { ...document, meshCaptain: saved.value } : document,
+        )
+        .pipe(
+          Effect.catch((error) => Effect.logWarning("Could not save the mesh captain.", { error })),
+        ),
   };
 }

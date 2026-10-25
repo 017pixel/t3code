@@ -37,7 +37,14 @@ import * as RpcSession from "../rpc/session.ts";
 import { presentConnectionState } from "./presentation.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
-import { connectionRouteId, entryWithRoutes, isLearned, mergeLearnedRoutes } from "./routes.ts";
+import {
+  captainRoute,
+  connectionRouteId,
+  connectionRouteKind,
+  entryWithRoutes,
+  isLearned,
+  mergeLearnedRoutes,
+} from "./routes.ts";
 
 const TARGET = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -922,6 +929,7 @@ describe("EnvironmentSupervisor", () => {
         unregisterDevice: unused,
         registerLiveActivity: unused,
         getAgentActivitySnapshot: unused,
+        getMesh: unused,
         resetTokenCache: Effect.void,
       });
       const layerHttp = RpcHttp.layerRemoteHttpClient(fetchFn);
@@ -1429,6 +1437,102 @@ describe("EnvironmentSupervisor routes", () => {
       expect(yield* Ref.get(learned)).toEqual([
         `learned:${TARGET.environmentId}:http://192.168.1.10:3773`,
       ]);
+    }),
+  );
+});
+
+describe("EnvironmentSupervisor captain routes", () => {
+  const CAPTAIN = EnvironmentId.make("captain-1");
+  const viaCaptain = (handle: string) =>
+    captainRoute(TARGET, {
+      captain: CAPTAIN,
+      httpBaseUrl: `http://192.168.1.5:3773/api/mesh/via/${handle}/${TARGET.environmentId}`,
+    });
+  const meshOptions = (
+    initialRoutes: ReadonlyArray<ConnectionRoute>,
+    routes: Stream.Stream<ReadonlyArray<ConnectionRoute>> = Stream.never,
+  ): NonNullable<EnvironmentSupervisor.EnvironmentSupervisorOptions["mesh"]> => ({
+    initialRoutes,
+    routes,
+    beforeBetterRouteCheck: () => Effect.void,
+    captainChanged: Effect.succeed([]),
+  });
+
+  it.effect("races a saved captain route on the first attempt", () =>
+    Effect.gen(function* () {
+      const route = viaCaptain("saved");
+      const harness = yield* makeHarness({
+        checkRoute: (candidate) =>
+          Effect.succeed(connectionRouteKind(candidate) === "captain" ? "answered" : "unchecked"),
+        prepare: (_attempt, target) => Effect.succeed(preparedFor(target)),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(RELAY_ENTRY, {
+        initiallyDesired: true,
+        mesh: meshOptions([route]),
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+      expect(
+        connectionRouteId(
+          Option.getOrThrow(yield* SubscriptionRef.get(supervisor.prepared)).target,
+        ),
+      ).toBe(connectionRouteId(route.target));
+      expect(yield* Ref.get(harness.prepareCount)).toBe(1);
+    }),
+  );
+
+  it.effect("skips a route the captain refused instead of trying it last", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        checkRoute: (candidate) =>
+          Effect.succeed(connectionRouteKind(candidate) === "captain" ? "refused" : "unchecked"),
+        prepare: (_attempt, target) => Effect.succeed(preparedFor(target)),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(RELAY_ENTRY, {
+        initiallyDesired: true,
+        mesh: meshOptions([viaCaptain("stale")]),
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+      expect(Option.getOrThrow(yield* SubscriptionRef.get(supervisor.prepared)).target._tag).toBe(
+        "RelayConnectionTarget",
+      );
+      expect(yield* Ref.get(harness.prepareCount)).toBe(1);
+    }),
+  );
+
+  it.effect("rechecks routes only when the captain routes change", () =>
+    Effect.gen(function* () {
+      const checked: Array<string> = [];
+      const harness = yield* makeHarness({
+        checkRoute: (candidate) =>
+          connectionRouteKind(candidate) === "captain"
+            ? Effect.sync(() => {
+                checked.push(connectionRouteId(candidate.target));
+                return "silent" as const;
+              })
+            : Effect.succeed("unchecked"),
+        prepare: (_attempt, target) => Effect.succeed(preparedFor(target)),
+      });
+      const first = viaCaptain("h1");
+      const next = viaCaptain("h2");
+      // One emission per second, so each adjust below lets exactly one take effect.
+      const routes = Stream.fromIterable([[first], [first], [next]]).pipe(
+        Stream.mapEffect((value) => Effect.sleep("1 second").pipe(Effect.as(value))),
+      );
+      const supervisor = yield* EnvironmentSupervisor.make(RELAY_ENTRY, {
+        initiallyDesired: true,
+        mesh: meshOptions([], routes),
+      }).pipe(Effect.provide(harness.dependencies));
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+
+      yield* TestClock.adjust("1 second");
+      expect(checked).toEqual([connectionRouteId(first.target)]);
+      // The relay still listing the same captain must not cause a check (and read) loop.
+      yield* TestClock.adjust("1 second");
+      expect(checked).toEqual([connectionRouteId(first.target)]);
+      yield* TestClock.adjust("1 second");
+      expect(checked).toEqual([connectionRouteId(first.target), connectionRouteId(next.target)]);
     }),
   );
 });

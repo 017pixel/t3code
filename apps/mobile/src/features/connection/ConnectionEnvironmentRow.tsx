@@ -3,9 +3,11 @@ import { ConnectionTraceId } from "./ConnectionTraceId";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { hasSavedBearerRoute, hostFreezeNotice } from "@t3tools/client-runtime/connection";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+import { meshCaptainRouteLabel } from "@t3tools/client-runtime/state/mesh-status";
 import { type EnvironmentId, resolveEnvironmentMachineKind } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import * as Cause from "effect/Cause";
+import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
 import { useCallback, useState } from "react";
 import { Platform, Pressable, View } from "react-native";
@@ -20,6 +22,8 @@ import { cn } from "../../lib/cn";
 import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
 import { serverEnvironment } from "../../state/server";
 import { environmentPresentations } from "../../state/presentation";
+import { meshEnvironment } from "../../state/mesh";
+import { environmentSession } from "../../state/session";
 import { ConnectionDiagnosisDetails, useConnectionDiagnosis } from "./ConnectionDiagnosisDetails";
 import { ConnectionFormField } from "./ConnectionFormField";
 import { ConnectionStatusDot } from "./ConnectionStatusDot";
@@ -64,7 +68,17 @@ export function ConnectionEnvironmentRow(props: {
     presentation,
   );
   const enabled = props.environment.isEnabled && !unsupported;
-  const statusLabel = connectionStatusLabel(props.environment);
+  const prepared = useAtomValue(
+    environmentSession.preparedConnectionValueAtom(props.environment.environmentId),
+  );
+  const relayMesh = useAtomValue(meshEnvironment.relayMeshAtom);
+  const captainRouteLabel =
+    props.environment.connectionState === "connected" && Option.isSome(prepared)
+      ? meshCaptainRouteLabel(prepared.value, relayMesh)
+      : null;
+  const statusLabel = [captainRouteLabel, connectionStatusLabel(props.environment)]
+    .filter((part) => part !== null)
+    .join(" · ");
   const statusTraceId = enabled ? props.environment.connectionErrorTraceId : null;
   const hasConnectionFailure = enabled && props.environment.connectionError !== null;
   const freeze = enabled

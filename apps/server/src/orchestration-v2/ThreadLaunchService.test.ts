@@ -7,6 +7,11 @@ import * as FileSystem from "effect/FileSystem";
 import * as ServerConfig from "../config.ts";
 import { createPendingAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as McpToolAccess from "../mcp/McpToolAccess.ts";
+import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
+import * as ProjectHandlers from "../mcp/toolkits/project/handlers.ts";
+import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
 import { assert, it, vi } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import {
@@ -15,6 +20,7 @@ import {
   type ChatAttachment,
   CommandId,
   DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
   GitCommandError,
   MessageId,
   ProjectId,
@@ -1384,6 +1390,74 @@ it.effect("replays a server-allocated launch", () =>
     }).pipe(Effect.provide(harness.layer));
   }),
 );
+
+// EXPERIMENTAL mesh v1: a forwarded launch keeps its key across mesh session renewals.
+it.effect("replays a forwarded t3_thread_launch retry from its launch receipt", () => {
+  const harness = makeHarness();
+  const meshScope = (sessionId: string) =>
+    Layer.succeed(McpInvocationContext.McpInvocationContext, {
+      environmentId: EnvironmentId.make("environment:box"),
+      requestNamespace: "mesh:environment:laptop",
+      thread: undefined,
+      client: undefined,
+      mesh: {
+        sourceEnvironmentId: EnvironmentId.make("environment:laptop"),
+        sessionId,
+        modeLimit: { runtimeMode: "full-access", interactionMode: "default" },
+        source: { kind: "thread", threadId: ThreadId.make("thread:on-laptop") },
+      },
+      capabilities: new Set(["orchestration" as const]),
+      issuedAt: 0,
+    });
+  const launchOnce = (sessionId: string) =>
+    Effect.gen(function* () {
+      const toolkit = yield* ProjectToolkit;
+      const handled = yield* toolkit
+        .handle("t3_thread_launch", {
+          projectId,
+          title: "Remote",
+          message: "Only once",
+          modelSelection,
+          clientRequestId: "forwarded-key",
+        })
+        .pipe(Stream.unwrap, Stream.runCollect);
+      const result = handled.at(-1)?.result;
+      if (result === undefined || !("threadId" in result)) return yield* Effect.die(result);
+      return result;
+    }).pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provideMerge(meshScope(sessionId)),
+        ),
+      ),
+    );
+  return Effect.gen(function* () {
+    const first = yield* launchOnce("mesh-session-1");
+    const retry = yield* launchOnce("mesh-session-2");
+    assert.equal(retry.threadId, first.threadId);
+    assert.equal(retry.runId, first.runId);
+    const records = yield* (yield* ThreadManagement.ThreadManagementService).getThreadRecords(
+      first.threadId,
+      ["runs", "messages"],
+    );
+    assert.equal(records.runs.length, 1);
+    assert.equal(records.messages.length, 1);
+    assert.deepEqual(records.thread.meshOrigin, {
+      environmentId: EnvironmentId.make("environment:laptop"),
+      threadId: ThreadId.make("thread:on-laptop"),
+    });
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        harness.layer,
+        NodeCrypto.layer,
+        Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+        Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({}),
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-forwarded-launch-" }),
+      ).pipe(Layer.provideMerge(NodeServices.layer)),
+    ),
+  );
+});
 
 it.effect("replays an accepted launch after the project disables the instance", () => {
   const harness = makeHarness();

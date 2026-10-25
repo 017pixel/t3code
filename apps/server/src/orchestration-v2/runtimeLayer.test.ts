@@ -12,6 +12,7 @@ import {
   CommandId,
   ContextTransferId,
   EventId,
+  EnvironmentId,
   MessageId,
   NodeId,
   RuntimeRequestId,
@@ -2358,6 +2359,164 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         "manual",
       );
     }),
+  );
+
+  it.effect.each([undefined, true] as const)(
+    "remote delegated children cannot start pull request watches (%s)",
+    (delegated) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const threadId = ThreadId.make(`remote-pr-watch-${delegated}`);
+        const meshOrigin = {
+          environmentId: EnvironmentId.make("remote"),
+          threadId: ThreadId.make("remote-parent"),
+          ...(delegated === undefined ? {} : { delegated }),
+        };
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "agent",
+          creationSource: "mcp",
+          commandId: CommandId.make(`remote-pr-create-${delegated}`),
+          threadId,
+          projectId: ProjectId.make("remote-pr-project"),
+          title: "Remote PR",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          meshOrigin,
+        });
+        assert.deepEqual((yield* orchestrator.getThreadShell(threadId))?.meshOrigin, meshOrigin);
+        const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+        assert.isTrue((yield* maintenance.rebuild).valid);
+        assert.deepEqual((yield* orchestrator.getThreadShell(threadId))?.meshOrigin, meshOrigin);
+        const watch = orchestrator.dispatch({
+          type: "thread.pull-request.watch",
+          commandId: CommandId.make(`remote-pr-start-${delegated}`),
+          threadId,
+          host: "github.com",
+          repository: "pingdotgg/t3code",
+          number: 7,
+          watching: true,
+          link: { url: "https://github.com/pingdotgg/t3code/pull/7", source: "agent" },
+        });
+        if (delegated) {
+          assert.equal((yield* watch.pipe(Effect.flip))._tag, "OrchestratorDispatchError");
+          assert.isUndefined(
+            (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch,
+          );
+        } else {
+          yield* watch;
+          assert.isDefined(
+            (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch,
+          );
+        }
+      }),
+  );
+
+  it.effect(
+    "ends persisted remote child watches without reading the host or waking the child",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const threadId = ThreadId.make("remote-pr-stale-watch");
+        yield* seedProject({
+          projectId: ProjectId.make("remote-pr-stale-project"),
+          title: "Remote child",
+          workspaceRoot: "/workspace/remote-child",
+          defaultModelSelection: null,
+          createdAt: "2026-10-25T00:00:00.000Z",
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "agent",
+          creationSource: "mcp",
+          commandId: CommandId.make("remote-pr-stale-create"),
+          threadId,
+          projectId: ProjectId.make("remote-pr-stale-project"),
+          title: "Remote child",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          meshOrigin: {
+            environmentId: EnvironmentId.make("remote"),
+            threadId: ThreadId.make("parent"),
+            delegated: true,
+          },
+        });
+        const { thread } = yield* orchestrator.getThreadRecords(threadId, []);
+        const now = yield* DateTime.now;
+        const watch = {
+          startedAt: DateTime.formatIso(now),
+          headSha: null,
+          failedChecks: [],
+          passed: false,
+          passedChecks: [],
+          conflicting: false,
+          remarksThrough: DateTime.formatIso(now),
+          remarkIds: [],
+          wakes: 0,
+        };
+        const key = { host: "github.com", repository: "pingdotgg/t3code", number: 7 };
+        yield* eventSink.write({
+          events: [
+            {
+              type: "thread.metadata-updated",
+              id: EventId.make("remote-pr-stale-seed"),
+              threadId,
+              providerInstanceId: thread.providerInstanceId,
+              occurredAt: now,
+              payload: {
+                ...thread,
+                pullRequests: [
+                  {
+                    ...key,
+                    url: "https://github.com/pingdotgg/t3code/pull/7",
+                    source: "agent",
+                    linkedAt: DateTime.formatIso(now),
+                    snapshot: null,
+                    stack: null,
+                    watch,
+                  },
+                ],
+              },
+            },
+          ],
+        });
+        const late = yield* orchestrator
+          .dispatch({
+            type: "thread.pull-request-watch.sync",
+            commandId: CommandId.make("remote-pr-late-wake"),
+            threadId,
+            ...key,
+            startedAt: watch.startedAt,
+            watch: { ...watch, wakes: 1 },
+            wake: {
+              messageId: MessageId.make("remote-pr-unwanted-wake"),
+              text: "PR changed",
+              notification: { source: { kind: "monitor" }, outcome: "updated", summary: "#7" },
+            },
+          })
+          .pipe(Effect.flip);
+        assert.equal(late._tag, "OrchestratorDispatchError");
+        const reactor = yield* PullRequestWatchReactor.make.pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              Layer.mock(PullRequestService.PullRequestService)({}),
+            ),
+          ),
+        );
+        yield* reactor.sweep;
+        assert.isUndefined(
+          (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch,
+        );
+        assert.isEmpty((yield* orchestrator.getThreadRecords(threadId, ["messages"])).messages);
+      }),
   );
 
   it.effect("starts, records, and stops a pull request watch", () =>

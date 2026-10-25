@@ -65,6 +65,24 @@ describe("browser target resolver", () => {
     ).toBe("localhost:3000/app");
   });
 
+  it("never maps environment ports onto a LAN captain's host", async () => {
+    readPreparedConnection.mockReturnValue({
+      httpBaseUrl: "http://192.168.1.5:3773/api/mesh/via/handle/environment-1",
+      proofBaseUrl: "https://environment-1.t3.example.com/",
+    });
+    const { resolveBrowserNavigationTarget, resolveDiscoveredServerUrl } =
+      await import("./browserTargetResolver");
+    expect(() =>
+      resolveBrowserNavigationTarget(EnvironmentId.make("environment-1"), {
+        kind: "environment-port",
+        port: 5173,
+      }),
+    ).toThrow(/authenticated preview gateway/);
+    expect(
+      resolveDiscoveredServerUrl(EnvironmentId.make("environment-1"), "http://localhost:5173/"),
+    ).toBe("http://localhost:5173/");
+  });
+
   it("refuses public relay hosts until the authenticated gateway exists", async () => {
     readPreparedConnection.mockReturnValue({ httpBaseUrl: "https://relay.example.com" });
     const { resolveBrowserNavigationTarget } = await import("./browserTargetResolver");

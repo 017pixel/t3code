@@ -84,8 +84,20 @@ export type RevokeAuthSessionInput = typeof RevokeAuthSessionInput.Type;
 export const RevokeOtherAuthSessionsInput = Schema.Struct({
   currentSessionId: AuthSessionId,
   revokedAt: Schema.DateTimeUtcFromString,
+  /** Sessions whose subject starts with this stay active. */
+  keepSubjectPrefix: Schema.optionalKey(Schema.String),
 });
 export type RevokeOtherAuthSessionsInput = typeof RevokeOtherAuthSessionsInput.Type;
+
+export const RevokeAuthSessionsBySubjectInput = Schema.Struct({
+  revokedAt: Schema.DateTimeUtcFromString,
+  match: Schema.Union([
+    Schema.Struct({ subject: Schema.String }),
+    /** Every subject that starts with `prefix`, except the subjects in `keep`. */
+    Schema.Struct({ prefix: Schema.String, keep: Schema.Array(Schema.String) }),
+  ]),
+});
+export type RevokeAuthSessionsBySubjectInput = typeof RevokeAuthSessionsBySubjectInput.Type;
 
 export const SetAuthSessionLastConnectedAtInput = Schema.Struct({
   sessionId: AuthSessionId,
@@ -123,6 +135,9 @@ export class AuthSessionRepository extends Context.Service<
     ) => Effect.Effect<boolean, AuthSessionRepositoryError>;
     readonly revokeAllExcept: (
       input: RevokeOtherAuthSessionsInput,
+    ) => Effect.Effect<ReadonlyArray<AuthSessionId>, AuthSessionRepositoryError>;
+    readonly revokeBySubject: (
+      input: RevokeAuthSessionsBySubjectInput,
     ) => Effect.Effect<ReadonlyArray<AuthSessionId>, AuthSessionRepositoryError>;
     readonly setLastConnectedAt: (
       input: SetAuthSessionLastConnectedAtInput,
@@ -360,12 +375,36 @@ export const make = Effect.gen(function* () {
   const revokeOtherSessionRows = SqlSchema.findAll({
     Request: RevokeOtherAuthSessionsInput,
     Result: Schema.Struct({ sessionId: AuthSessionId }),
-    execute: ({ currentSessionId, revokedAt }) =>
+    execute: ({ currentSessionId, revokedAt, keepSubjectPrefix }) =>
       sql`
         UPDATE auth_sessions
         SET revoked_at = ${revokedAt}
         WHERE session_id <> ${currentSessionId}
           AND revoked_at IS NULL
+          ${
+            keepSubjectPrefix === undefined
+              ? sql``
+              : sql`AND substr(subject, 1, ${keepSubjectPrefix.length}) <> ${keepSubjectPrefix}`
+          }
+        RETURNING session_id AS "sessionId"
+      `,
+  });
+
+  // substr instead of LIKE, so `%` and `_` in a subject match only themselves.
+  const revokeSessionRowsBySubject = SqlSchema.findAll({
+    Request: RevokeAuthSessionsBySubjectInput,
+    Result: Schema.Struct({ sessionId: AuthSessionId }),
+    execute: ({ revokedAt, match }) =>
+      sql`
+        UPDATE auth_sessions
+        SET revoked_at = ${revokedAt}
+        WHERE revoked_at IS NULL
+          AND ${
+            "subject" in match
+              ? sql`subject = ${match.subject}`
+              : sql`substr(subject, 1, ${match.prefix.length}) = ${match.prefix}
+                  AND NOT (${sql.in("subject", match.keep)})`
+          }
         RETURNING session_id AS "sessionId"
       `,
   });
@@ -492,6 +531,17 @@ export const make = Effect.gen(function* () {
       Effect.map((rows) => rows.map((row) => row.sessionId)),
     );
 
+  const revokeBySubject: AuthSessionRepository["Service"]["revokeBySubject"] = (input) =>
+    revokeSessionRowsBySubject(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "AuthSessionRepository.revokeBySubject:query",
+          "AuthSessionRepository.revokeBySubject:decodeRows",
+        ),
+      ),
+      Effect.map((rows) => rows.map((row) => row.sessionId)),
+    );
+
   const setLastConnectedAt: AuthSessionRepository["Service"]["setLastConnectedAt"] = (input) =>
     setLastConnectedAtRow(input).pipe(
       Effect.mapError(
@@ -522,6 +572,7 @@ export const make = Effect.gen(function* () {
     listActive,
     revoke,
     revokeAllExcept,
+    revokeBySubject,
     setLastConnectedAt,
     setClientConnection,
   } satisfies AuthSessionRepository["Service"];

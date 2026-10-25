@@ -29,6 +29,7 @@ import {
   type RelayProtectedError as RelayProtectedErrorType,
   RelayUnregisterDeviceEndpoint,
 } from "@t3tools/contracts/relay";
+import type { RelayMeshResponse } from "@t3tools/contracts";
 import { encodeOAuthScope, oauthScopeSetEquals } from "@t3tools/shared/oauthScope";
 import { decodeRelayJwt } from "@t3tools/shared/relayJwt";
 import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
@@ -96,6 +97,7 @@ export const ManagedRelayRequestAction = Schema.Literals([
   "unregister relay mobile device",
   "register relay live activity",
   "read relay agent activity snapshot",
+  "read relay mesh",
 ]);
 export type ManagedRelayRequestAction = typeof ManagedRelayRequestAction.Type;
 
@@ -112,6 +114,7 @@ export const ManagedRelayRequestActivity = Schema.Literals([
   "Relay mobile device unregistration",
   "Relay Live Activity registration",
   "Relay agent activity snapshot",
+  "Relay mesh read",
 ]);
 export type ManagedRelayRequestActivity = typeof ManagedRelayRequestActivity.Type;
 
@@ -260,6 +263,10 @@ export class ManagedRelayClient extends Context.Service<
     readonly listDevices: (input: {
       readonly clerkToken: string;
     }) => Effect.Effect<ReadonlyArray<RelayClientDeviceRecord>, ManagedRelayClientError>;
+    /** EXPERIMENTAL mesh: members, presence and captain of the signed-in account. */
+    readonly getMesh: (input: {
+      readonly clerkToken: string;
+    }) => Effect.Effect<RelayMeshResponse, ManagedRelayClientError>;
     readonly createEnvironmentLinkChallenge: (input: {
       readonly clerkToken: string;
       readonly payload: RelayEnvironmentLinkChallengeRequest;
@@ -421,6 +428,7 @@ function disabledManagedRelayClient(relayUrl: string): ManagedRelayClient["Servi
     relayUrl,
     listEnvironments: unavailable("clientRuntime.managedRelay.listEnvironments"),
     listDevices: unavailable("clientRuntime.managedRelay.listDevices"),
+    getMesh: unavailable("clientRuntime.managedRelay.getMesh"),
     createEnvironmentLinkChallenge: unavailable(
       "clientRuntime.managedRelay.createEnvironmentLinkChallenge",
     ),
@@ -744,6 +752,18 @@ export const make = Effect.fn("ManagedRelayClient.make")(function* (
           );
       },
       Effect.withSpan("clientRuntime.managedRelay.listDevices"),
+      withRelayClientTracing,
+    ),
+    getMesh: Effect.fnUntraced(
+      function* (input) {
+        return yield* client.client
+          .getMesh({ headers: bearerHeaders(input.clerkToken) })
+          .pipe(
+            Effect.mapError(relayRequestError("read relay mesh")),
+            timeoutRelayRequest("Relay mesh read"),
+          );
+      },
+      Effect.withSpan("clientRuntime.managedRelay.getMesh"),
       withRelayClientTracing,
     ),
     createEnvironmentLinkChallenge: Effect.fnUntraced(

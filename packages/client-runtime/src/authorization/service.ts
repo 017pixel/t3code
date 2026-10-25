@@ -23,7 +23,7 @@ import {
   type ConnectionAttemptError,
 } from "../connection/model.ts";
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
-import { environmentEndpointUrl } from "../environment/endpoint.ts";
+import { environmentEndpointUrl, environmentProofUrl } from "../environment/endpoint.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import * as ManagedRelay from "../relay/managedRelay.ts";
 import * as TokenStore from "./tokenStore.ts";
@@ -48,8 +48,20 @@ export interface AuthorizedRemoteEnvironment {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly httpBaseUrl: string;
+  /** See `PreparedConnection.proofBaseUrl`. */
+  readonly proofBaseUrl?: string;
   readonly socketUrl: string;
   readonly httpAuthorization: PreparedHttpAuthorization;
+}
+
+interface DirectEndpoint {
+  readonly httpBaseUrl: string;
+  readonly wsBaseUrl: string;
+  /**
+   * A captain route. The captain forwards each request with the member's Connect host, so
+   * proofs name the member's Connect URL instead of this address.
+   */
+  readonly forwarded?: boolean;
 }
 
 export interface AuthorizedRemoteHttpEnvironment {
@@ -76,7 +88,7 @@ export class RemoteEnvironmentAuthorization extends Context.Service<
        * for the URL it signs, so a token from the relay also works on the
        * environment's LAN or tailnet address.
        */
-      readonly directEndpoint?: { readonly httpBaseUrl: string; readonly wsBaseUrl: string };
+      readonly directEndpoint?: DirectEndpoint;
     }) => Effect.Effect<AuthorizedRemoteEnvironment, ConnectionAttemptError>;
     readonly authorizeDpopHttp: (input: {
       readonly expectedEnvironmentId: EnvironmentId;
@@ -216,14 +228,19 @@ export const make = Effect.gen(function* () {
     function* (
       token: TokenStore.RemoteDpopAccessToken,
       timeoutMs?: number,
-      endpoint: { readonly httpBaseUrl: string; readonly wsBaseUrl: string } = token.endpoint,
+      endpoint: DirectEndpoint = token.endpoint,
     ) {
+      const proofBase = {
+        httpBaseUrl: endpoint.httpBaseUrl,
+        proofBaseUrl: endpoint.forwarded === true ? token.endpoint.httpBaseUrl : undefined,
+      };
       return yield* resolveRemoteDpopWebSocketConnectionUrl({
         wsBaseUrl: endpoint.wsBaseUrl,
         httpBaseUrl: endpoint.httpBaseUrl,
         accessToken: token.accessToken,
+        // Every socket proof, including the upgrade's, names the URL the member sees.
         createProof: (proof) =>
-          signer.createProof(proof).pipe(
+          signer.createProof({ ...proof, url: environmentProofUrl(proof.url, proofBase) }).pipe(
             Effect.mapError(
               () =>
                 new ConnectionBlockedError({
@@ -500,6 +517,7 @@ export const make = Effect.gen(function* () {
     }
     const authorized = (token: TokenStore.RemoteDpopAccessToken, socketUrl: string) => ({
       ...httpAuthorization(token, endpoint?.httpBaseUrl),
+      ...(endpoint?.forwarded === true ? { proofBaseUrl: token.endpoint.httpBaseUrl } : {}),
       socketUrl,
     });
     let selected = yield* getDpopToken(input);

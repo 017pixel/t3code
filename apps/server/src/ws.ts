@@ -266,6 +266,7 @@ import {
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
 import * as AgentSessionImporter from "./project/AgentSessionImporter.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
+import * as MeshRpc from "./mesh/MeshRpc.ts";
 
 const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
 const isProviderUploadFeedbackError = Schema.is(ProviderUploadFeedbackError);
@@ -1893,6 +1894,7 @@ export const layerWsRpc = (
         return result;
       });
 
+      const meshRpc = yield* MeshRpc.makeMeshRpcHandlers;
       const handlers = ServerWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
@@ -2561,6 +2563,9 @@ export const layerWsRpc = (
           backgroundPolicy.reportHostPowerState(input),
         [WS_METHODS.serverGetBackgroundPolicy]: (_input) => backgroundPolicy.snapshot,
         [WS_METHODS.cloudGetRelayClientStatus]: (_input) => relayClient.resolve,
+        [WS_METHODS.meshStatus]: () => meshRpc.status,
+        [WS_METHODS.meshSetEnabled]: meshRpc.setEnabled,
+        [WS_METHODS.meshSetPin]: meshRpc.setPin,
         [WS_METHODS.cloudInstallRelayClient]: (_input) =>
           Stream.callback<RelayClientInstallProgressEvent, RelayClientInstallFailedError>((queue) =>
             relayClient

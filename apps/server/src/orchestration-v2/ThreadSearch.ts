@@ -242,6 +242,11 @@ export interface ThreadSearchHit {
   readonly source: "title" | OrchestrationThreadSearchSource;
   readonly snippet?: string;
   readonly messageCreatedAt?: string | null;
+  /**
+   * The scorer's rank within its kind: the palette score for title rows, the match quality for
+   * message rows. Mesh search merges several machines' rows by it.
+   */
+  readonly score?: number;
 }
 
 export class ThreadSearch extends Context.Service<
@@ -542,11 +547,12 @@ export const make = Effect.gen(function* () {
       }),
     )
       .slice(0, limit)
-      .map(({ item }) => ({
+      .map(({ item, match }) => ({
         threadId: item.thread.id,
         projectId: item.thread.projectId,
         title: item.thread.title,
         source: "title",
+        score: match.score,
       }));
     const shown = new Set(titleHits.map((hit) => hit.threadId));
     const { matches } = yield* searchMessages({
@@ -558,9 +564,10 @@ export const make = Effect.gen(function* () {
     });
     const messageHits = matches
       .filter((match) => subjectById.has(match.threadId))
-      .map(({ quality: _quality, hits: _hits, messageId: _messageId, ...match }) => ({
+      .map(({ quality, hits: _hits, messageId: _messageId, ...match }) => ({
         ...match,
         title: subjectById.get(match.threadId)!.title,
+        score: quality,
       }));
     // Titles come first, but a fifth of the slots stay for message matches,
     // as the palette keeps its "In messages" section.

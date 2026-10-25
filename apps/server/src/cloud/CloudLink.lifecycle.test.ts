@@ -1,12 +1,15 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse, HttpServer, type HttpClientRequest } from "effect/http";
 import * as NetAddress from "effect/net/NetAddress";
@@ -32,6 +35,7 @@ import {
   CLOUD_ENDPOINT_RUNTIME_CONFIG,
   CLOUD_LINK_REVOKED,
   CLOUD_LINKED_USER_ID,
+  CLOUD_SESSIONS_USER_ID,
   decodeRuntimeConfig,
   RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
   RELAY_ISSUER_SECRET,
@@ -138,6 +142,7 @@ describe("releaseManagedTunnelOnShutdown", () => {
     readonly address?: HttpServer.HttpServer["Service"]["address"];
     readonly respondEffect?: Effect.Effect<Response>;
     readonly getExisting?: CliTokenManager.CloudCliTokenManager["Service"]["getExisting"];
+    readonly environmentAuth?: EnvironmentAuth.EnvironmentAuth["Service"];
   }
 
   const writeLauncherState = (update: ServiceUpdateRecord) =>
@@ -205,7 +210,11 @@ describe("releaseManagedTunnelOnShutdown", () => {
         ),
         Effect.provideService(
           EnvironmentAuth.EnvironmentAuth,
-          EnvironmentAuth.EnvironmentAuth.of({} as EnvironmentAuth.EnvironmentAuth["Service"]),
+          EnvironmentAuth.EnvironmentAuth.of({
+            ...({} as EnvironmentAuth.EnvironmentAuth["Service"]),
+            withMeshSessionLock: (effect) => effect,
+            ...harness.environmentAuth,
+          }),
         ),
         Effect.provideService(
           CliTokenManager.CloudCliTokenManager,
@@ -626,6 +635,141 @@ describe("releaseManagedTunnelOnShutdown", () => {
     }).pipe(provideReleaseHarness({ store, applyConfigCalls: [], requests: [] }));
   });
 
+  it.effect("revokes Connect and mesh sessions only when another cloud account links", () => {
+    const { store, values } = makeMemorySecretStore([
+      [RELAY_URL_SECRET, "https://relay.example.test"],
+      [CLOUD_SESSIONS_USER_ID, "user-old"],
+    ]);
+    const revoked: Array<string> = [];
+    const record = (kind: string) => Effect.sync(() => revoked.push(kind)).pipe(Effect.as(1));
+    const environmentAuth = EnvironmentAuth.EnvironmentAuth.of({
+      ...({} as EnvironmentAuth.EnvironmentAuth["Service"]),
+      revokeCloudConnectSessions: () => record("cloud-connect"),
+      revokeMeshMemberSessions: () => record("mesh"),
+    });
+    const link = (cloudUserId: string) =>
+      Effect.flatMap(CloudLink.CloudLink, (cloudLink) =>
+        cloudLink.applyRelayConfig({
+          relayUrl: "https://relay.example.test",
+          cloudUserId,
+          environmentCredential: "credential",
+          cloudMintPublicKey:
+            "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAqZ2u2LjMoAyG2QTHXmITJ9w6RzZtVUAv394XCcPV0zE=\n-----END PUBLIC KEY-----",
+          endpointRuntime: null,
+        }),
+      );
+
+    return Effect.gen(function* () {
+      yield* link("user-new");
+      expect(revoked).toEqual(["cloud-connect", "mesh"]);
+      expect(new TextDecoder().decode(values.get(CLOUD_SESSIONS_USER_ID))).toBe("user-new");
+
+      yield* link("user-new");
+      expect(revoked).toEqual(["cloud-connect", "mesh"]);
+
+      // Unlinking ends mesh membership but keeps Connect clients of the same account.
+      yield* Effect.flatMap(CloudLink.CloudLink, (cloudLink) => cloudLink.unlink());
+      expect(revoked).toEqual(["cloud-connect", "mesh", "mesh"]);
+    }).pipe(provideReleaseHarness({ store, applyConfigCalls: [], requests: [], environmentAuth }));
+  });
+
+  it.effect("waits for mesh session issuance before revoking an old account's sessions", () => {
+    const { store } = makeMemorySecretStore([
+      [RELAY_URL_SECRET, "https://relay.example.test"],
+      [CLOUD_SESSIONS_USER_ID, "user-old"],
+    ]);
+    const events: Array<string> = [];
+    return Effect.gen(function* () {
+      const lock = yield* Semaphore.make(1);
+      const environmentAuth = EnvironmentAuth.EnvironmentAuth.of({
+        ...({} as EnvironmentAuth.EnvironmentAuth["Service"]),
+        withMeshSessionLock: lock.withPermit,
+        revokeCloudConnectSessions: () => Effect.sync(() => events.push("cloud-connect")),
+        revokeMeshMemberSessions: () => Effect.sync(() => events.push("mesh")),
+      });
+      return yield* Effect.gen(function* () {
+        const cloudLink = yield* CloudLink.CloudLink;
+        const ready = yield* Deferred.make<void>();
+        const resume = yield* Deferred.make<void>();
+        const issuance = yield* environmentAuth
+          .withMeshSessionLock(
+            Deferred.succeed(ready, undefined).pipe(
+              Effect.andThen(Deferred.await(resume)),
+              Effect.andThen(Effect.sync(() => events.push("issued"))),
+            ),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(ready);
+        const accountChange = yield* cloudLink
+          .applyRelayConfig({
+            relayUrl: "https://relay.example.test",
+            cloudUserId: "user-new",
+            environmentCredential: "credential",
+            cloudMintPublicKey:
+              "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAqZ2u2LjMoAyG2QTHXmITJ9w6RzZtVUAv394XCcPV0zE=\n-----END PUBLIC KEY-----",
+            endpointRuntime: null,
+          })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        const beforeResume = [...events];
+        yield* Deferred.succeed(resume, undefined);
+        yield* Fiber.join(issuance);
+        yield* Fiber.join(accountChange);
+        expect(beforeResume).toEqual([]);
+        expect(events).toEqual(["issued", "cloud-connect", "mesh"]);
+      }).pipe(
+        provideReleaseHarness({ store, applyConfigCalls: [], requests: [], environmentAuth }),
+      );
+    });
+  });
+
+  it.effect(
+    "revokes the old account's sessions on the first account change after an upgrade",
+    () => {
+      // Installs from before the marker: only the linked user id says whose sessions exist.
+      const { store, values } = makeMemorySecretStore([
+        [RELAY_URL_SECRET, "https://relay.example.test"],
+        [CLOUD_LINKED_USER_ID, "user-old"],
+      ]);
+      const revoked: Array<string> = [];
+      const record = (kind: string) => Effect.sync(() => revoked.push(kind)).pipe(Effect.as(1));
+      const environmentAuth = EnvironmentAuth.EnvironmentAuth.of({
+        ...({} as EnvironmentAuth.EnvironmentAuth["Service"]),
+        revokeCloudConnectSessions: () => record("cloud-connect"),
+        revokeMeshMemberSessions: () => record("mesh"),
+      });
+      const link = (cloudUserId: string) =>
+        Effect.flatMap(CloudLink.CloudLink, (cloudLink) =>
+          cloudLink.applyRelayConfig({
+            relayUrl: "https://relay.example.test",
+            cloudUserId,
+            environmentCredential: "credential",
+            cloudMintPublicKey:
+              "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAqZ2u2LjMoAyG2QTHXmITJ9w6RzZtVUAv394XCcPV0zE=\n-----END PUBLIC KEY-----",
+            endpointRuntime: null,
+          }),
+        );
+      const unlink = Effect.flatMap(CloudLink.CloudLink, (cloudLink) => cloudLink.unlink());
+
+      return Effect.gen(function* () {
+        // Another account links only after an unlink.
+        yield* unlink;
+        expect(revoked).toEqual(["mesh"]);
+        yield* link("user-new");
+        expect(revoked).toEqual(["mesh", "cloud-connect", "mesh"]);
+        expect(new TextDecoder().decode(values.get(CLOUD_SESSIONS_USER_ID))).toBe("user-new");
+
+        // Unlinked before the upgrade: nothing says whose sessions remain, so they go.
+        yield* unlink;
+        values.delete(CLOUD_SESSIONS_USER_ID);
+        revoked.length = 0;
+        yield* link("user-new");
+        expect(revoked).toEqual(["cloud-connect", "mesh"]);
+      }).pipe(
+        provideReleaseHarness({ store, applyConfigCalls: [], requests: [], environmentAuth }),
+      );
+    },
+  );
+
   it.effect(
     "starts a connector with a marker for the current origin without contacting relay",
     () => {
@@ -809,7 +953,13 @@ describe("releaseManagedTunnelOnShutdown", () => {
 
     return Effect.gen(function* () {
       const link = yield* CloudLink.CloudLink;
+      // The mesh waits for a link change before it opens the relay socket again.
+      const changed = yield* link.linkChanges.pipe(
+        Stream.runHead,
+        Effect.forkChild({ startImmediately: true }),
+      );
       expect(yield* link.recoverManagedTunnel("http://127.0.0.1:3773")).toBe(true);
+      expect(Option.isSome(yield* Fiber.join(changed))).toBe(true);
       expect(requests).toHaveLength(1);
       expect(requests[0]?.method).toBe("POST");
       expect(requests[0]?.url).toBe("https://relay.example.test/v1/environments/env_123/tunnel");

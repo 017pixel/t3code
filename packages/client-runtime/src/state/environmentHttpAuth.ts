@@ -10,6 +10,7 @@ import { FetchHttpClient, type HttpMethod } from "effect/http";
 
 import type { RemoteEnvironmentAuthorization } from "../authorization/service.ts";
 import type { PreparedConnection, PreparedHttpAuthorization } from "../connection/model.ts";
+import { environmentProofUrl } from "../environment/endpoint.ts";
 import type { ManagedRelayDpopSigner } from "../relay/managedRelay.ts";
 import {
   executeEnvironmentHttpRequest,
@@ -134,6 +135,7 @@ const executeEnvironmentRequest = Effect.fnUntraced(function* <
   Effect.Services<ReturnType<typeof makeEnvironmentHttpApiGroupClient<Group>>> | R
 > {
   let httpBaseUrl = input.prepared.httpBaseUrl;
+  let proofBaseUrl = input.prepared.proofBaseUrl;
   const requestUrlFor = (baseUrl: string) =>
     input.url(makeEnvironmentHttpApiUrlBuilder(baseUrl)[input.group]);
   return yield* Effect.gen(function* () {
@@ -162,9 +164,12 @@ const executeEnvironmentRequest = Effect.fnUntraced(function* <
                 }),
             ),
           );
-        // A learned direct route keeps its own origin; only the token renews.
+        // A learned direct route keeps its own origin; only the token renews. A captain route
+        // keeps the captain too: only the member's Connect URL its proofs name can move.
         if (input.prepared.target._tag === "RelayConnectionTarget") {
           httpBaseUrl = current.httpBaseUrl;
+        } else if (proofBaseUrl !== undefined) {
+          proofBaseUrl = current.httpBaseUrl;
         }
         authorization = current.httpAuthorization;
       }
@@ -174,7 +179,7 @@ const executeEnvironmentRequest = Effect.fnUntraced(function* <
       const headers = yield* buildEnvironmentAuthHeaders(
         authorization,
         input.method,
-        requestUrl,
+        environmentProofUrl(requestUrl, { httpBaseUrl, proofBaseUrl }),
         input.signer,
       );
       const result = yield* executeEnvironmentHttpRequest(

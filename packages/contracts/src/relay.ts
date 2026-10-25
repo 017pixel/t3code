@@ -15,6 +15,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
+import { RELAY_MESH_PATH, RELAY_MESH_SOCKET_PATH, RelayMeshResponse } from "./mesh.ts";
 
 export const RelayAgentAwarenessPlatform = Schema.Literals(["ios", "android"]);
 export type RelayAgentAwarenessPlatform = typeof RelayAgentAwarenessPlatform.Type;
@@ -1061,6 +1062,11 @@ const RelayClientGroup = HttpApiGroup.make("client")
       success: RelayListEnvironmentsResponse,
       error: RelayAuthAndInternalErrors,
     }).annotate(OpenApi.Summary, "List linked environments"),
+    HttpApiEndpoint.get("getMesh", RELAY_MESH_PATH, {
+      headers: RelayBearerRequestHeaders,
+      success: RelayMeshResponse,
+      error: RelayAuthAndInternalErrors,
+    }).annotate(OpenApi.Summary, "Read the signed-in user's mesh (EXPERIMENTAL)"),
     HttpApiEndpoint.get("listDevices", "/v1/client/devices", {
       headers: RelayBearerRequestHeaders,
       success: RelayListDevicesResponseV1,
@@ -1228,6 +1234,10 @@ const RelayServerGroup = HttpApiGroup.make("server")
       OpenApi.Summary,
       "Deliver webhook requests held while the environment was offline now",
     ),
+    // A WebSocket upgrade: the relay answers 101, then may close at once with a permanent code.
+    HttpApiEndpoint.get("openMeshSocket", RELAY_MESH_SOCKET_PATH, {
+      error: RelayAuthAndInternalErrors,
+    }).annotate(OpenApi.Summary, "Join the account's mesh over a WebSocket (EXPERIMENTAL)"),
   )
   .annotate(OpenApi.Description, "Environment-authenticated activity publication.")
   .middleware(RelayEnvironmentAuth);

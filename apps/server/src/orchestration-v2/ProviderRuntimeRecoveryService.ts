@@ -100,11 +100,13 @@ function isNonterminalNodeStatus(status: string): boolean {
   return status === "pending" || status === "running" || status === "waiting";
 }
 
+/** A remote task's child runs on another member, which settles it through its follower. */
 function isAppOwnedDelegation(task: {
   readonly origin: OrchestrationV2Subagent["origin"];
   readonly childThreadId: ThreadId | null;
+  readonly remote?: object | undefined;
 }): boolean {
-  return task.origin === "app_owned" && task.childThreadId !== null;
+  return task.origin === "app_owned" && (task.childThreadId !== null || task.remote !== undefined);
 }
 
 function isAppOwnedDelegationItem(

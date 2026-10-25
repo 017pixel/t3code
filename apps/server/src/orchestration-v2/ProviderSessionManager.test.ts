@@ -1561,12 +1561,29 @@ it.effect(
 );
 
 it.effect.each([
-  { relationshipToParent: null, subagent: false },
-  { relationshipToParent: "subagent", subagent: true },
+  { name: "root", relationshipToParent: null, subagent: false },
+  { name: "local child", relationshipToParent: "subagent", subagent: true },
+  {
+    name: "remote launch",
+    relationshipToParent: null,
+    subagent: false,
+    meshOrigin: { environmentId: EnvironmentId.make("remote"), threadId: ThreadId.make("parent") },
+  },
+  {
+    name: "remote child",
+    relationshipToParent: null,
+    subagent: true,
+    meshOrigin: {
+      environmentId: EnvironmentId.make("remote"),
+      threadId: ThreadId.make("parent"),
+      delegated: true,
+    },
+  },
 ] as const)(
-  "ProviderSessionManagerV2 marks MCP credentials of delegated children ($relationshipToParent)",
-  ({ relationshipToParent, subagent }) =>
+  "ProviderSessionManagerV2 marks MCP credentials of delegated children ($name)",
+  (input) =>
     Effect.gen(function* () {
+      const { relationshipToParent, subagent } = input;
       const state = yield* Ref.make(emptyState);
       const mcpConfigs = yield* Ref.make<
         ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
@@ -1590,6 +1607,7 @@ it.effect.each([
               ...created,
               payload: {
                 ...created.payload,
+                ...("meshOrigin" in input ? { meshOrigin: input.meshOrigin } : {}),
                 lineage:
                   relationshipToParent === null
                     ? created.payload.lineage

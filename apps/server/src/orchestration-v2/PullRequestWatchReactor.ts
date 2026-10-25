@@ -1,5 +1,6 @@
 import {
   CommandId,
+  isSubagentThread,
   MessageId,
   type OrchestrationV2Notification,
   type PullRequestActivity,
@@ -399,7 +400,7 @@ export const make = Effect.gen(function* () {
       ? "merged"
       : thread.settledOverride === "settled" || thread.settledAt !== null
         ? "settled"
-        : thread.lineage.relationshipToParent === "subagent"
+        : isSubagentThread(thread)
           ? "subagent"
           : undefined;
 

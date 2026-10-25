@@ -7,6 +7,7 @@ import {
   removeCatalogValue,
   replaceCatalogValue,
   Persistence,
+  catalogMeshCaptainStore,
 } from "@t3tools/client-runtime/platform";
 import { TokenStore } from "@t3tools/client-runtime/authorization";
 import {
@@ -15,6 +16,7 @@ import {
   ProfileStore,
   PullRequestRoutingPermissions,
   makePullRequestRoutingPermissions,
+  MeshCaptain,
 } from "@t3tools/client-runtime/connection";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -155,6 +157,7 @@ export const layer = Layer.effectContext(
       Context.add(ProfileStore.ConnectionProfileStore, profileStore),
       Context.add(CredentialStore.ConnectionCredentialStore, credentialStore),
       Context.add(TokenStore.RemoteDpopAccessTokenStore, remoteTokenStore),
+      Context.add(MeshCaptain.MeshCaptainStore, catalogMeshCaptainStore(catalog)),
     );
   }),
 );

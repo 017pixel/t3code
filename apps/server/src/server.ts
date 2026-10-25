@@ -65,6 +65,9 @@ import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceRegistryHydration.ts";
 import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrideSweep.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as MeshForwarding from "./mesh/MeshForwarding.ts";
+import * as MeshForwardingAuth from "./mesh/MeshForwardingAuth.ts";
+import * as MeshServer from "./mesh/MeshServer.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
@@ -259,7 +262,8 @@ const layerDesktopAppUpdate = DesktopAppUpdate.layer.pipe(
 );
 
 const layerBackground = BackgroundPolicy.layer.pipe(
-  Layer.provide(layerHostPowerMonitor),
+  // Merged so the mesh reads the same power state for its captain score.
+  Layer.provideMerge(layerHostPowerMonitor),
   Layer.provideMerge(layerServerSettings),
 );
 
@@ -717,6 +721,8 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerAttachmentUploadRoute,
     GuestHttp.layer,
     DeviceHubProxy.layer,
+    // EXPERIMENTAL mesh v1: member endpoints and the captain route.
+    MeshServer.layerRoutes,
     ServerBrowserStream.routeLayer,
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer,
@@ -724,6 +730,9 @@ const layerMakeRoutes = Layer.mergeAll(
   McpHttpServer.layer.pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
+    // EXPERIMENTAL mesh v1: other members' agents, and this machine's agents reaching them.
+    Layer.provide(MeshForwardingAuth.layerMcpMeshAuthenticator),
+    Layer.provide(MeshForwarding.layerWhenMeshAvailable),
   ),
 ).pipe(
   Layer.provide(
@@ -1053,7 +1062,11 @@ const layerMakeServer = Layer.unwrap(
     );
 
     return layerServerApplication.pipe(
-      Layer.provide(CloudLink.layer.pipe(Layer.provideMerge(ConnectReachability.layer))),
+      Layer.provide(
+        MeshServer.layer.pipe(
+          Layer.provideMerge(CloudLink.layer.pipe(Layer.provideMerge(ConnectReachability.layer))),
+        ),
+      ),
       Layer.provideMerge(layerRuntimeServices),
       Layer.provideMerge(
         McpSessionRegistry.layer.pipe(

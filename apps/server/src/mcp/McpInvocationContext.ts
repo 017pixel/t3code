@@ -2,6 +2,8 @@ import {
   type AuthMcpClientAccess,
   type EnvironmentId,
   McpCapabilityUnavailableError,
+  type MeshCaller,
+  type MeshModeLimit,
   OrchestratorMcpFailure,
   PreviewAutomationUnavailableError,
   type ProviderInstanceId,
@@ -11,6 +13,8 @@ import {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Schema from "effect/Schema";
+import type { HttpServerRequest } from "effect/http";
 
 const ALL_MCP_CAPABILITIES = [
   "preview",
@@ -35,8 +39,18 @@ export interface McpClientCaller {
   readonly access: AuthMcpClientAccess;
 }
 
+/** EXPERIMENTAL mesh v1. Another member calling this machine's tools over a `mesh-member` session. */
+export interface McpMeshCaller {
+  readonly sourceEnvironmentId: EnvironmentId;
+  readonly sessionId: string;
+  /** From `T3-Mesh-Mode-Limit`: the source caller's modes. Calls here never run above them. */
+  readonly modeLimit: MeshModeLimit;
+  /** From `T3-Mesh-Caller`, when the source sent it. */
+  readonly source: MeshCaller | undefined;
+}
+
 /** Read-only clients map to the lowest mode because McpToolAccess blocks writes first. */
-export const clientRuntimeModeCeiling = (client: McpClientCaller | undefined): RuntimeMode =>
+const clientRuntimeModeCeiling = (client: McpClientCaller | undefined): RuntimeMode =>
   client === undefined || client.access === "read-only" ? "approval-required" : client.access;
 
 /** Thread callers default to their own thread; client callers need thread for tools that act as the caller. */
@@ -47,7 +61,42 @@ export interface McpInvocationScope {
   readonly requestNamespace: string;
   readonly thread: McpThreadCaller | undefined;
   readonly client: McpClientCaller | undefined;
+  /** Set on calls from another mesh member. They run here only and never forward again. */
+  readonly mesh?: McpMeshCaller;
 }
+
+/** Modes of a caller that is not a thread here: a client's ceiling, or a member's mode limit. */
+export const nonThreadCallerLimits = (scope: McpInvocationScope): MeshModeLimit =>
+  scope.mesh?.modeLimit ?? {
+    runtimeMode: clientRuntimeModeCeiling(scope.client),
+    interactionMode: "default",
+  };
+
+/** An outside agent approved for read-only access, here or on the member that forwarded the call. */
+export const isReadOnlyCaller = (scope: McpInvocationScope): boolean =>
+  scope.client?.access === "read-only" ||
+  (scope.mesh?.source?.kind === "client" && scope.mesh.source.access === "read-only");
+
+/** EXPERIMENTAL mesh v1. A mesh call without a usable `T3-Mesh-Mode-Limit`; it never runs. */
+export class McpMeshModeLimitError extends Schema.TaggedError<McpMeshModeLimitError>()(
+  "McpMeshModeLimitError",
+  {},
+) {
+  override get message(): string {
+    return "Mesh calls must send T3-Mesh-Mode-Limit as <runtimeMode>/<interactionMode>.";
+  }
+}
+
+/** EXPERIMENTAL mesh v1. Admits `Authorization: DPoP` from `mesh-member` sessions. */
+export class McpMeshAuthenticator extends Context.Service<
+  McpMeshAuthenticator,
+  {
+    /** Undefined when the credential or its proof is not a valid `mesh-member` one. */
+    readonly authenticate: (
+      request: HttpServerRequest.HttpServerRequest,
+    ) => Effect.Effect<McpInvocationScope | undefined, McpMeshModeLimitError>;
+  }
+>()("t3/mcp/McpInvocationContext/McpMeshAuthenticator") {}
 
 export class McpInvocationContext extends Context.Service<
   McpInvocationContext,

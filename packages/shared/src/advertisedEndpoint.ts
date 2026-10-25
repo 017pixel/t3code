@@ -21,7 +21,7 @@ export interface CreateAdvertisedEndpointInput {
   readonly description?: string;
 }
 
-export function normalizeHttpBaseUrl(rawValue: string): string {
+function parseHttpBaseUrl(rawValue: string): URL {
   const url = new URL(rawValue);
   if (url.protocol === "ws:") {
     url.protocol = "http:";
@@ -33,23 +33,45 @@ export function normalizeHttpBaseUrl(rawValue: string): string {
     throw new Error(`Endpoint must use HTTP or HTTPS. Received ${url.protocol}`);
   }
 
-  url.pathname = "/";
   url.search = "";
   url.hash = "";
+  return url;
+}
+
+export function normalizeHttpBaseUrl(rawValue: string): string {
+  const url = parseHttpBaseUrl(rawValue);
+  url.pathname = "/";
   return url.toString();
 }
 
+/** Keeps the base path, so a captain route's socket stays under the captain's forwarding path. */
 export function deriveWsBaseUrl(httpBaseUrl: string): string {
-  const url = new URL(normalizeHttpBaseUrl(httpBaseUrl));
+  const url = parseHttpBaseUrl(httpBaseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
+}
+
+/**
+ * Resolves an environment path such as `/api/assets/...` (with any query) against a base URL and
+ * keeps the base's own path. A captain route's base is `<captain>/api/mesh/via/<handle>/<id>`, so an
+ * origin-only join would send the request to the captain itself. Absolute and protocol-relative
+ * URLs resolve as usual.
+ */
+export function environmentEndpointUrl(baseUrl: string, path: string): string {
+  const url = new URL(baseUrl);
+  if (!path.startsWith("/") || path.startsWith("//")) return new URL(path, url).href;
+  const target = new URL(path, "http://path.invalid");
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}${target.pathname}`;
+  url.search = target.search;
+  url.hash = target.hash;
+  return url.href;
 }
 
 function classifyHostedHttpsCompatibility(
   httpBaseUrl: string,
   fallback: AdvertisedEndpointHostedHttpsCompatibility = "unknown",
 ): AdvertisedEndpointHostedHttpsCompatibility {
-  const url = new URL(normalizeHttpBaseUrl(httpBaseUrl));
+  const url = parseHttpBaseUrl(httpBaseUrl);
   if (url.protocol === "http:") {
     return "mixed-content-blocked";
   }

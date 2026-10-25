@@ -128,6 +128,7 @@ function layerTest(input?: {
           listForUser: () => Effect.succeed([]),
           getForUser: () => Effect.succeed(null),
           findActiveManagedForEnvironment: () => Effect.succeed([]),
+          listActiveUsersForKey: () => Effect.succeed([]),
           setHoldWebhooksWhileOffline: () => Effect.void,
           revokeForUser: () => Effect.succeed(false),
         }),

@@ -133,6 +133,7 @@ import {
 } from "../state/entities";
 import { environmentPresentations } from "../state/presentation";
 import { primaryServerKeybindingsAtom, serverEnvironment } from "../state/server";
+import { meshEnvironment } from "../state/mesh";
 import { environmentProjects } from "../state/projects";
 import { threadEnvironment } from "../state/threads";
 import { useOlderSettledShelf, useOlderSettledShelfGrowth } from "../state/olderSettledShelf";
@@ -145,6 +146,7 @@ import { openGuestShareDialog } from "./chat/guestShareDialogState";
 import { buildThreadRouteParams, resolveActiveThreadRouteRef } from "../threadRoutes";
 import type { SidebarThreadSummary } from "../types";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
+import { meshMachineLabel } from "@t3tools/client-runtime/state/mesh-status";
 import { cn } from "~/lib/utils";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import {
@@ -155,6 +157,8 @@ import {
 import {
   applySidebarThreadDrop,
   filterSidebarV2VisibleThreads,
+  resolveSidebarThreadNesting,
+  routeThreadOnly,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
   deleteSelectedThreadEntries,
@@ -220,6 +224,7 @@ import { composerDraftHasUserContent, DraftId, useComposerDraftStore } from "../
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
 import {
   SidebarSearchResultRow,
+  NestedThreadRow,
   SortableThreadRow,
   type SidebarProviderEntry,
   type SidebarSweepAction,
@@ -281,7 +286,6 @@ const sidebarProviderEntriesAtom = Atom.make((get) => {
 }).pipe(Atom.withLabel("sidebar-provider-entries"));
 
 const EMPTY_PROVIDER_ENTRIES: ReadonlyMap<string, SidebarProviderEntry> = new Map();
-const EMPTY_THREADS: readonly EnvironmentThreadShell[] = [];
 
 const SETTLED_TAIL_INITIAL_COUNT = 10;
 const SETTLED_TAIL_PAGE_COUNT = 25;
@@ -348,15 +352,6 @@ function resolveDraggedOrders(input: {
         ).map(threadShellKey)
       : undefined,
   };
-}
-
-function routeThreadOnly(
-  threads: readonly EnvironmentThreadShell[],
-  routeThreadKey: string | null,
-): readonly EnvironmentThreadShell[] {
-  if (routeThreadKey === null) return EMPTY_THREADS;
-  const routeThread = threads.find((thread) => threadShellKey(thread) === routeThreadKey);
-  return routeThread === undefined ? EMPTY_THREADS : [routeThread];
 }
 
 // Separate hooks cache maps independently of later Sidebar hooks and preserve dnd-kit inputs.
@@ -446,26 +441,23 @@ function useSidebarThreads(input: {
     settledThreads.length + olderSettledShelf.unloadedCount(partition.visibleThreads);
   const visibleSettledThreads = (() => {
     const visible = listedSettledThreads.slice(0, settledVisibleCount);
-    if (
-      routeRowThreadKey !== null &&
-      !visible.some((thread) => threadShellKey(thread) === routeRowThreadKey)
-    ) {
-      const routeThread = settledThreads.find(
-        (thread) => threadShellKey(thread) === routeRowThreadKey,
-      );
-      if (routeThread !== undefined) visible.push(routeThread);
-    }
+    const [routeThread] = routeThreadOnly(
+      settledThreads,
+      routeRowThreadKey,
+      partition.meshChildrenByParentKey,
+    );
+    if (routeThread !== undefined && !visible.includes(routeThread)) visible.push(routeThread);
     return visible.length === settledThreads.length ? settledThreads : visible;
   })();
   const renderedSettledThreads = settledShelfExpanded
     ? visibleSettledThreads
-    : routeThreadOnly(visibleSettledThreads, routeRowThreadKey);
+    : routeThreadOnly(visibleSettledThreads, routeRowThreadKey, partition.meshChildrenByParentKey);
   const visibleSnoozedThreads = snoozedShelfExpanded
     ? snoozedThreads
-    : routeThreadOnly(snoozedThreads, routeRowThreadKey);
+    : routeThreadOnly(snoozedThreads, routeRowThreadKey, partition.meshChildrenByParentKey);
   const visibleWorkingThreads = workingShelfExpanded
     ? workingThreads
-    : routeThreadOnly(workingThreads, routeRowThreadKey);
+    : routeThreadOnly(workingThreads, routeRowThreadKey, partition.meshChildrenByParentKey);
   const orderedThreads = [
     ...pinnedThreads,
     ...activeThreads,
@@ -494,6 +486,7 @@ function useSidebarThreads(input: {
       ...workingThreads,
       ...snoozedThreads,
       ...settledThreads,
+      ...[...partition.meshChildrenByParentKey.values()].flat(),
     ],
     settledVisibleCount,
     settledCount,
@@ -532,7 +525,10 @@ function useSidebarThreads(input: {
 function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
   const { threads, scopedProjectKeys, serverConfigs, optimisticDrop, workingShelfEnabled } = input;
   const preciseNow = new Date().toISOString();
-  const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys);
+  const { rootThreads, visibleThreads, meshChildrenByParentKey } = resolveSidebarThreadNesting(
+    threads,
+    scopedProjectKeys,
+  );
   const inboxObservation = inboxReturns.observe(workingShelfEnabled ? threads : null);
   const pinned: EnvironmentThreadShell[] = [];
   const active: EnvironmentThreadShell[] = [];
@@ -546,7 +542,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
   const settled: EnvironmentThreadShell[] = [];
   const draggable = new Set<string>();
   const activeReorderable = new Set<string>();
-  for (const thread of visible) {
+  for (const thread of rootThreads) {
     const capabilities = serverConfigs.get(thread.environmentId)?.environment.capabilities;
     const supportsSettlement = capabilities?.threadSettlement === true;
     const supportsSnooze = capabilities?.threadSnooze === true;
@@ -619,7 +615,9 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
         firstValidTimestampMs(right.snoozedUntil ?? null),
     ),
     settledThreads: sortSettledThreads(settled),
-    visibleThreads: visible,
+    // Listed under their parent's row, outside every section and drag order.
+    meshChildrenByParentKey,
+    visibleThreads,
     snoozeNow: preciseNow,
   };
 }
@@ -719,8 +717,15 @@ function useSidebarLookups() {
   const serverConfigs = useServerConfigs();
   const providerEntriesByEnvironment = useAtomValue(sidebarProviderEntriesAtom);
   const projectGroups = useSidebarProjectGroups();
+  const meshMarkerById = useAtomValue(meshEnvironment.markersAtom);
   const environmentLabelById = new Map(
-    environments.map((environment) => [environment.environmentId, environment.label] as const),
+    environments.map(
+      (environment) =>
+        [
+          environment.environmentId,
+          meshMachineLabel(environment.label, meshMarkerById.get(environment.environmentId)),
+        ] as const,
+    ),
   );
   const projectByKey = new Map(
     projects.map((project) => [`${project.environmentId}:${project.id}`, project] as const),
@@ -743,6 +748,7 @@ function useSidebarLookups() {
     projects,
     serverConfigs,
     projectGroups,
+    meshMarkerById,
     environmentLabelById,
     providerEntriesByEnvironment,
     projectByKey,
@@ -790,6 +796,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projects,
     serverConfigs,
     projectGroups,
+    meshMarkerById,
     environmentLabelById,
     providerEntriesByEnvironment,
     projectByKey,
@@ -1079,6 +1086,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     workingThreads,
     snoozedThreads,
     settledThreads,
+    meshChildrenByParentKey,
     snoozeNow,
     searchableThreads,
     settledVisibleCount,
@@ -2966,6 +2974,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                       const renderThreadRow = (
                         thread: EnvironmentThreadShell,
                         section: SidebarSection,
+                        nested = false,
                       ) => {
                         const threadKey = scopedThreadKey(
                           scopeThreadRef(thread.environmentId, thread.id),
@@ -2973,8 +2982,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                         const isCard =
                           section === "active" || section === "pinned" || section === "working";
                         const rowVariant = isCard ? "card" : "slim";
+                        const ThreadRow = nested ? NestedThreadRow : SortableThreadRow;
                         return (
-                          <SortableThreadRow
+                          <ThreadRow
                             key={threadKey}
                             sortableId={threadKey}
                             contextDrag={isContextDrag}
@@ -3038,6 +3048,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                               environmentMachineById.get(thread.environmentId) ?? "server"
                             }
                             scratchMachineLabel={scratchMachineLabelFor(thread)}
+                            meshChildMachineLabel={
+                              nested
+                                ? (environmentLabelById.get(thread.environmentId) ?? null)
+                                : null
+                            }
+                            machineOffline={meshMarkerById.get(thread.environmentId) === "offline"}
                             project={
                               projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ??
                               null
@@ -3087,6 +3103,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                       for (const item of sidebarListItems) {
                         if (item.kind === "thread") {
                           items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
+                          for (const child of meshChildrenByParentKey.get(item.key) ?? []) {
+                            items.push(renderThreadRow(child, item.section, true));
+                          }
                           continue;
                         }
                         switch (item.marker) {

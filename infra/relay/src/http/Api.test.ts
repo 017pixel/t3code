@@ -61,6 +61,7 @@ import * as RelayDb from "../db.ts";
 import * as EnvironmentCredentials from "../environments/EnvironmentCredentials.ts";
 import * as HeldHooks from "../hooks/HeldHooks.ts";
 import * as HookInbox from "../hooks/HookInbox.ts";
+import * as MeshDirectory from "../mesh/MeshDirectory.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as ManagedEndpointAllocations from "../environments/ManagedEndpointAllocations.ts";
 import * as ManagedEndpointProvider from "../environments/ManagedEndpointProvider.ts";
@@ -105,6 +106,7 @@ describe("managed endpoint provisioning errors", () => {
           Layer.mock(ManagedEndpointProvider.ManagedEndpointProvider, {}),
           Layer.mock(RelayDb.RelayTransactions, {}),
           Layer.mock(HookInbox.HookInbox, {}),
+          Layer.mock(MeshDirectory.MeshDirectory, {}),
         ),
       ),
       Layer.provide(
@@ -128,6 +130,7 @@ describe("managed endpoint provisioning errors", () => {
           Layer.mock(EnvironmentLinks.EnvironmentLinks, {}),
           Layer.mock(ManagedEndpointProvider.ManagedEndpointProvider, {}),
           Layer.mock(Devices.Devices, {}),
+          Layer.mock(MeshDirectory.MeshDirectory, {}),
         ),
       ),
       Layer.provideMerge(
@@ -222,6 +225,7 @@ describe("device listing compatibility", () => {
           Layer.mock(ManagedEndpointProvider.ManagedEndpointProvider, {}),
           Layer.mock(RelayDb.RelayTransactions, {}),
           Layer.mock(HookInbox.HookInbox, {}),
+          Layer.mock(MeshDirectory.MeshDirectory, {}),
         ),
       ),
       Layer.provide(
@@ -232,6 +236,7 @@ describe("device listing compatibility", () => {
           Layer.mock(EnvironmentLinker.EnvironmentLinker, {}),
           Layer.mock(EnvironmentLinks.EnvironmentLinks, {}),
           Layer.mock(ManagedEndpointProvider.ManagedEndpointProvider, {}),
+          Layer.mock(MeshDirectory.MeshDirectory, {}),
           Layer.mock(Devices.Devices, {
             listForUser: ({ userId }) => {
               expect(userId).toBe("user-1");
@@ -307,6 +312,7 @@ describe("Cloudflare rate-limit retry hint", () => {
           Layer.mock(ManagedEndpointProvider.ManagedEndpointProvider, {}),
           Layer.mock(RelayDb.RelayTransactions, {}),
           Layer.mock(HookInbox.HookInbox, {}),
+          Layer.mock(MeshDirectory.MeshDirectory, {}),
         ),
       ),
       Layer.provide(
@@ -318,6 +324,7 @@ describe("Cloudflare rate-limit retry hint", () => {
           Layer.mock(EnvironmentLinks.EnvironmentLinks, {}),
           Layer.mock(ManagedEndpointProvider.ManagedEndpointProvider, {}),
           Layer.mock(Devices.Devices, {}),
+          Layer.mock(MeshDirectory.MeshDirectory, {}),
         ),
       ),
       Layer.provideMerge(
@@ -512,10 +519,14 @@ function layerRelayUnlinkTest(input?: {
   readonly reconcileOrigin?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["reconcileOrigin"];
   readonly release?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["release"];
   readonly clearInbox?: HookInbox.HookInbox["Service"]["clear"];
+  readonly meshUnlink?: MeshDirectory.MeshDirectory["Service"]["unlink"];
 }) {
   return Layer.mergeAll(
     Layer.mock(HookInbox.HookInbox, {
       clear: input?.clearInbox ?? (() => Effect.void),
+    }),
+    Layer.mock(MeshDirectory.MeshDirectory, {
+      unlink: input?.meshUnlink ?? (() => Effect.void),
     }),
     Layer.succeed(
       RelayDb.RelayTransactions,
@@ -531,6 +542,7 @@ function layerRelayUnlinkTest(input?: {
         listForUser: () => Effect.die("unused listForUser"),
         getForUser: input?.getForUser ?? (() => Effect.succeed(null)),
         findActiveManagedForEnvironment: () => Effect.die("unused findActiveManagedForEnvironment"),
+        listActiveUsersForKey: () => Effect.die("unused listActiveUsersForKey"),
         setHoldWebhooksWhileOffline: () => Effect.die("unused setHoldWebhooksWhileOffline"),
         revokeForUser: input?.revokeForUser ?? (() => Effect.succeed(false)),
       }),
@@ -1113,6 +1125,33 @@ describe("relay environment unlink", () => {
     });
   });
 
+  it.effect("removes the unlinked environment from the user's mesh, even if that fails", () => {
+    const removed: Array<string> = [];
+    const unlink = (meshFails: boolean) =>
+      unlinkEnvironmentRecord({ userId: "user-1", environmentId: "environment-1" }).pipe(
+        Effect.provide(
+          layerRelayUnlinkTest({
+            getForUser: () => Effect.succeed(linkedEnvironmentRecord),
+            revokeForUser: () => Effect.succeed(true),
+            meshUnlink: ({ userId, environmentId }) =>
+              meshFails
+                ? Effect.fail(
+                    new MeshDirectory.MeshDirectoryError({
+                      operation: "unlink",
+                      cause: new Error("unavailable"),
+                    }),
+                  )
+                : Effect.sync(() => void removed.push(`${userId}/${environmentId}`)),
+          }),
+        ),
+      );
+    return Effect.gen(function* () {
+      expect(yield* unlink(false)).toBe(true);
+      expect(removed).toEqual(["user-1/environment-1"]);
+      expect(yield* unlink(true)).toBe(true);
+    });
+  });
+
   it.effect("commits database revocation before deprovisioning the managed endpoint", () => {
     const calls: Array<string> = [];
     const deprovisionTarget = {
@@ -1408,7 +1447,14 @@ describe("relay routing fallback", () => {
                 Layer.mock(ManagedEndpointProvider.ManagedEndpointProvider, {}),
               ),
             ),
-            Layer.provide([layerPublisher, layerSignatures, Layer.mock(HeldHooks.HeldHooks, {})]),
+            Layer.provide([
+              layerPublisher,
+              layerSignatures,
+              Layer.mock(HeldHooks.HeldHooks, {}),
+              Layer.mock(MeshDirectory.MeshDirectory, {}),
+              Layer.mock(EnvironmentLinks.EnvironmentLinks, {}),
+              Layer.succeed(RelayConfiguration.RelayConfiguration, relaySettings),
+            ]),
           ),
         ),
         Layer.provide(layerAuth),

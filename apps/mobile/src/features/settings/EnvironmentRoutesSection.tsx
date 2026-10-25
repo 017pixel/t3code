@@ -37,6 +37,7 @@ const REMOVE_SIZE = 20;
 const ROUTE_ICONS: Record<ConnectionRouteKind, AppSymbolName> = {
   relay: "cloud",
   loopback: "desktopcomputer",
+  captain: "point.3.connected.trianglepath.dotted",
   lan: "wifi",
   tailnet: "point.3.connected.trianglepath.dotted",
   vpn: { ios: "lock.shield", android: "lock" },

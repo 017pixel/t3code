@@ -1,3 +1,4 @@
+import { environmentIdentityBaseUrl } from "@t3tools/client-runtime/connection";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { create } from "zustand";
@@ -329,7 +330,9 @@ export function recordVisitForThread(ref: ScopedThreadRef, url: string, at?: num
   const projectKey = state.projectKeyByThreadKey[threadKey];
   const visitAt = at ?? Date.now();
   const connection = readPreparedConnection(ref.environmentId);
-  const environmentHostname = connection ? new URL(connection.httpBaseUrl).hostname : null;
+  const environmentHostname = connection
+    ? new URL(environmentIdentityBaseUrl(connection)).hostname
+    : null;
   if (!projectKey) {
     useBrowserHistoryStore.setState({
       pendingVisitsByThreadKey: addPendingByThread(state.pendingVisitsByThreadKey, threadKey, {

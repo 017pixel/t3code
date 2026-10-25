@@ -15,6 +15,7 @@ import { AnimatedLegendList } from "@legendapp/list/reanimated";
 import { THREAD_SIDEBAR_ROW_LAYOUT } from "./threadListAnimations";
 import type { MenuAction } from "@react-native-menu/menu";
 import { useAtomValue } from "@effect/atom-react";
+import { meshMachineLabel } from "@t3tools/client-runtime/state/mesh-status";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { LayoutChangeEvent, TextInputInstance } from "react-native";
 import { Platform, StyleSheet, TextInput, View } from "react-native";
@@ -34,6 +35,7 @@ import { useProjects, useNavigationThreadShells } from "../../state/entities";
 import { useThreadSearch } from "../../state/queries";
 import { useThreadListV2ShelfPreferences } from "./use-thread-list-v2-shelf-preferences";
 import { usePendingThreadOrder } from "../../state/thread-order";
+import { meshEnvironment } from "../../state/mesh";
 import { threadListEnvironmentsAtom } from "../../state/server";
 import { usePendingNewTasks, type PendingNewTask } from "../../state/use-pending-new-tasks";
 import { useQueuedThreadKeys } from "../../state/use-thread-outbox";
@@ -282,6 +284,7 @@ function ThreadNavigationSidebarPane(
     return () => clearInterval(id);
   }, []);
   const listEnvironments = useAtomValue(threadListEnvironmentsAtom);
+  const meshMarkers = useAtomValue(meshEnvironment.markersAtom);
   const {
     providersByEnvironmentId,
     machineByEnvironmentId,
@@ -573,10 +576,16 @@ function ThreadNavigationSidebarPane(
             providerInstance={resolveProviderInstance(thread)}
             providers={providersByEnvironmentId.get(thread.environmentId)}
             environmentLabel={
-              Object.keys(savedConnectionsById).length > 1
-                ? (savedConnectionsById[thread.environmentId]?.environmentLabel ?? null)
-                : null
+              item.item.meshChild
+                ? `on ${savedConnectionsById[thread.environmentId]?.environmentLabel ?? "another machine"}`
+                : Object.keys(savedConnectionsById).length > 1
+                  ? (meshMachineLabel(
+                      savedConnectionsById[thread.environmentId]?.environmentLabel,
+                      meshMarkers.get(thread.environmentId),
+                    ) ?? null)
+                  : null
             }
+            meshChild={item.item.meshChild === true}
             environmentMachine={machineByEnvironmentId.get(thread.environmentId)}
             searchMatch={
               // Only rows listed for their messages show one and open at it.

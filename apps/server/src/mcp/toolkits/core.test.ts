@@ -70,6 +70,7 @@ const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadR
 
 const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
   Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+  Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
   Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
 );
 

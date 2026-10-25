@@ -7,6 +7,9 @@ import { SubagentTooltipContent } from "./SubagentTooltipContent";
 import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { environmentThreadDetails } from "../../state/threads";
+import { environmentShell } from "../../state/shell";
+import { buildThreadRouteParams } from "../../threadRoutes";
+import { useNavigate } from "@tanstack/react-router";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { MiddleTruncate } from "../ui/middle-truncate";
 import * as DateTime from "effect/DateTime";
@@ -22,6 +25,7 @@ import {
   type OrchestrationV2Notification,
   type OrchestrationV2TurnItem,
   type OrchestrationV2Subagent,
+  type OrchestrationV2SubagentItemRemote,
   type ProviderInstanceId,
   type ServerProvider,
   type ThreadId,
@@ -190,22 +194,25 @@ export function V2LifecycleRow(props: {
     );
   }
   if (item.type === "subagent") {
-    return (
-      <SubagentTimelineLink
-        parentRef={scopeThreadRef(props.environmentId, item.threadId)}
-        subagentId={item.subagentId}
-        providerInstanceId={item.providerInstanceId}
-        origin={item.origin}
-        status={item.status}
-        driver={item.driver}
-        title={formatSubagentDisplayTitle(item.title ?? "Subagent")}
-        result={item.result}
-        progress={item.progress}
-        startedAt={item.startedAt}
-        completedAt={item.completedAt}
-        threadId={item.childThreadId}
-        onOpenThread={props.onOpenThread}
-      />
+    const link = {
+      parentRef: scopeThreadRef(props.environmentId, item.threadId),
+      subagentId: item.subagentId,
+      providerInstanceId: item.providerInstanceId,
+      origin: item.origin,
+      status: item.status,
+      driver: item.driver,
+      title: formatSubagentDisplayTitle(item.title ?? "Subagent"),
+      result: item.result,
+      progress: item.progress,
+      startedAt: item.startedAt,
+      completedAt: item.completedAt,
+      threadId: item.childThreadId,
+      onOpenThread: props.onOpenThread,
+    };
+    return item.remote === undefined ? (
+      <SubagentTimelineLink {...link} />
+    ) : (
+      <RemoteSubagentTimelineLink {...link} remote={item.remote} />
     );
   }
   return null;
@@ -390,6 +397,45 @@ export function SubagentNotificationLink(props: {
   );
 }
 
+/**
+ * EXPERIMENTAL mesh v1. The task's child runs on another machine. It opens there when this client
+ * is connected to that machine; otherwise the card only names it.
+ */
+function RemoteSubagentTimelineLink({
+  remote,
+  ...props
+}: Parameters<typeof SubagentTimelineLink>[0] & {
+  readonly remote: OrchestrationV2SubagentItemRemote;
+}) {
+  const navigate = useNavigate();
+  const threadId = useAtomValue(
+    environmentThreadDetails.threadAtom(props.parentRef),
+    (thread) =>
+      thread?.projection.subagents.find((agent) => agent.id === props.subagentId)?.remote
+        ?.threadId ?? null,
+  );
+  const connected = useAtomValue(
+    environmentShell.stateValueAtom(remote.environmentId),
+    (state) => state.status === "live",
+  );
+  return (
+    <SubagentTimelineLink
+      {...props}
+      threadId={null}
+      machineLabel={remote.label}
+      {...(threadId === null || !connected
+        ? {}
+        : {
+            onOpen: () =>
+              void navigate({
+                to: "/$environmentId/$threadId",
+                params: buildThreadRouteParams(scopeThreadRef(remote.environmentId, threadId)),
+              }),
+          })}
+    />
+  );
+}
+
 function SubagentTimelineLink(props: {
   readonly parentRef: ScopedThreadRef;
   readonly subagentId: NodeId;
@@ -404,6 +450,10 @@ function SubagentTimelineLink(props: {
   readonly completedAt: DateTime.Utc | null;
   readonly threadId: ThreadId | null;
   readonly onOpenThread: (threadId: ThreadId) => void;
+  /** The machine a remote task runs on. */
+  readonly machineLabel?: string;
+  /** Opens a child the parent environment does not own; replaces `threadId`. */
+  readonly onOpen?: () => void;
   readonly event?: {
     readonly status: OrchestrationV2TurnItem["status"] | null;
     readonly label: string;
@@ -415,6 +465,7 @@ function SubagentTimelineLink(props: {
     (thread) => thread?.projection.subagents.find((agent) => agent.id === props.subagentId) ?? null,
   );
   const threadId = props.threadId;
+  const open = props.onOpen ?? (threadId === null ? undefined : () => props.onOpenThread(threadId));
   const liveStatus = agent?.status ?? props.status;
   const status = props.event ? props.event.status : liveStatus;
   const statusLabel = props.event?.label ?? subagentStatusVisual(liveStatus).label;
@@ -439,7 +490,14 @@ function SubagentTimelineLink(props: {
         status={status ?? undefined}
       />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-xs font-medium text-foreground">{props.title}</span>
+        <span className="flex items-baseline gap-2">
+          <span className="min-w-0 truncate text-xs font-medium text-foreground">
+            {props.title}
+          </span>
+          {props.machineLabel === undefined ? null : (
+            <span className="shrink-0 text-3xs text-muted-foreground">on {props.machineLabel}</span>
+          )}
+        </span>
         <span
           className={cn(
             "block text-2xs leading-relaxed",
@@ -465,7 +523,7 @@ function SubagentTimelineLink(props: {
       <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
         {props.event ? props.event.timestamp : <SubagentElapsed agent={timing} />}
       </span>
-      {threadId !== null ? (
+      {open !== undefined ? (
         <ChevronRightIcon
           aria-hidden
           className="size-3.5 shrink-0 text-muted-foreground/60 transition-colors group-hover/subagent:text-foreground"
@@ -480,7 +538,7 @@ function SubagentTimelineLink(props: {
       <TooltipTrigger
         delay={200}
         render={
-          threadId === null ? (
+          open === undefined ? (
             <div data-v2-item-type="subagent" aria-description={statusLabel} className={className}>
               {content}
             </div>
@@ -490,7 +548,7 @@ function SubagentTimelineLink(props: {
               data-v2-item-type="subagent"
               aria-label={`Open ${props.title}`}
               aria-description={statusLabel}
-              onClick={() => props.onOpenThread(threadId)}
+              onClick={open}
               className={cn(
                 className,
                 "cursor-pointer transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",

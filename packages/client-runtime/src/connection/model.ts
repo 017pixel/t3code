@@ -111,6 +111,8 @@ export class ConnectionTransientError extends Schema.TaggedError<ConnectionTrans
     detail: Schema.String,
     traceId: Schema.optionalKey(Schema.String),
     ...ConnectionFailureFields,
+    /** The WebSocket close code, when the far end closed an open session. */
+    closeCode: Schema.optionalKey(Schema.Number),
   },
 ) {
   override get message(): string {
@@ -152,10 +154,26 @@ export type PreparedHttpAuthorization =
 export interface PreparedConnection {
   readonly environmentId: EnvironmentId;
   readonly label: string;
+  /** Where requests go. On a captain route this is the captain's forwarding path. */
   readonly httpBaseUrl: string;
+  /**
+   * Set only on a captain route: the member's Connect URL. DPoP proofs name it (see
+   * `environmentProofUrl`), and code that needs the member's own host uses it instead of
+   * `httpBaseUrl`, which names the captain.
+   */
+  readonly proofBaseUrl?: string;
+  /** Set only on a captain route: the mesh captain that forwards this connection. */
+  readonly captain?: EnvironmentId;
   readonly socketUrl: string;
   readonly httpAuthorization: PreparedHttpAuthorization | null;
   readonly target: ConnectionTarget;
+}
+
+/** The environment's own base URL, for code that needs its host. Never the captain's. */
+export function environmentIdentityBaseUrl(
+  prepared: Pick<PreparedConnection, "httpBaseUrl" | "proofBaseUrl">,
+): string {
+  return prepared.proofBaseUrl ?? prepared.httpBaseUrl;
 }
 
 export type SupervisorConnectionPhase =

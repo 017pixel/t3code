@@ -5,13 +5,13 @@ import * as Drizzle from "alchemy/Drizzle/Postgres";
 import * as Config from "effect/Config";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
-import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
 import * as Etag from "effect/http/Etag";
+import * as Headers from "effect/http/Headers";
 import * as HttpMiddleware from "effect/http/HttpMiddleware";
 import * as HttpPlatform from "effect/http/HttpPlatform";
 import * as HttpRouter from "effect/http/HttpRouter";
@@ -69,19 +69,9 @@ import * as HookForwarder from "./hooks/HookForwarder.ts";
 import * as HeldHooks from "./hooks/HeldHooks.ts";
 import * as HookInbox from "./hooks/HookInbox.ts";
 import * as HookInboxObject from "./hooks/HookInboxObject.ts";
-
-const layerWebcrypto = Layer.succeed(
-  Crypto.Crypto,
-  Crypto.make({
-    randomBytes: (size) => globalThis.crypto.getRandomValues(new Uint8Array(size)),
-    digest: (algorithm, data) =>
-      Effect.promise(async () => {
-        const input = new Uint8Array(data.length);
-        input.set(data);
-        return new Uint8Array(await globalThis.crypto.subtle.digest(algorithm, input.buffer));
-      }),
-  }),
-);
+import { CloudMintKeyPair } from "./cloudMintKeyPair.ts";
+import * as MeshDirectory from "./mesh/MeshDirectory.ts";
+import * as MeshObject from "./mesh/MeshObject.ts";
 
 const layerHttpPlatformNotSupported = Layer.succeed(HttpPlatform.HttpPlatform, {
   platform: "web",
@@ -103,7 +93,6 @@ const layerRelayApi = Layer.mergeAll(
   RelayHttpApi.layerServerApi,
 );
 
-const CloudMintKeyPair = Alchemy.KeyPair("CloudMintKeyPair");
 const ApnsDeliveryJobSigningSecret = Alchemy.makeRandom("ApnsDeliveryJobSigningSecret", {
   bytes: 32,
 });
@@ -197,6 +186,7 @@ export const layer = Api.make(
       },
     });
     const hookInboxes = yield* HookInboxObject.HookInboxObject;
+    const meshObjects = yield* MeshObject.MeshObject;
 
     const alchemyRuntimeContext: Alchemy.BaseRuntimeContext = yield* Cloudflare.Worker;
 
@@ -241,6 +231,40 @@ export const layer = Api.make(
         hookInboxes.getByName(endpointKey).wake(baseUrl).pipe(inboxCall("wake", endpointKey)),
       clear: ({ endpointKey }) =>
         hookInboxes.getByName(endpointKey).clear().pipe(inboxCall("clear", endpointKey)),
+    });
+
+    const meshCall =
+      <A>(operation: MeshDirectory.MeshDirectoryError["operation"]) =>
+      (effect: Effect.Effect<A, never, Alchemy.RuntimeContext>) =>
+        effect.pipe(
+          Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
+          Effect.catchCause((cause) =>
+            Effect.fail(
+              new MeshDirectory.MeshDirectoryError({ operation, cause: Cause.squash(cause) }),
+            ),
+          ),
+        );
+    const layerMeshDirectory = Layer.succeed(MeshDirectory.MeshDirectory, {
+      openSocket: ({ userId, environmentId, request }) =>
+        meshObjects
+          .getByName(userId)
+          .fetch(
+            request.modify({
+              headers: Headers.setAll(request.headers, {
+                [MeshObject.MESH_SOCKET_ENVIRONMENT_HEADER]: environmentId,
+                [MeshObject.MESH_SOCKET_USER_HEADER]: userId,
+              }),
+            }),
+          )
+          .pipe(
+            Effect.mapError(
+              (cause) => new MeshDirectory.MeshDirectoryError({ operation: "open-socket", cause }),
+            ),
+          ),
+      refuseSocket: MeshObject.refuseSocket,
+      view: (userId) => meshObjects.getByName(userId).view(userId).pipe(meshCall("view")),
+      unlink: ({ userId, environmentId }) =>
+        meshObjects.getByName(userId).unlink(userId, environmentId).pipe(meshCall("unlink")),
     });
 
     const layerRuntime = Layer.empty.pipe(
@@ -288,7 +312,9 @@ export const layer = Api.make(
       Layer.provideMerge(
         ApnsDeliveryQueue.layerCloudflareQueues(apnsDeliveryQueueSender, alchemyRuntimeContext),
       ),
-      Layer.provideMerge(Layer.mergeAll(AgentActivityRows.layer, Devices.layer, layerHookInbox)),
+      Layer.provideMerge(
+        Layer.mergeAll(AgentActivityRows.layer, Devices.layer, layerHookInbox, layerMeshDirectory),
+      ),
       Layer.provideMerge(EnvironmentCredentials.layer),
       Layer.provideMerge(
         Layer.mergeAll(
@@ -307,7 +333,7 @@ export const layer = Api.make(
         ),
       ),
       Layer.provideMerge(Layer.effect(RelayConfiguration.RelayConfiguration, loadSettings)),
-      Layer.provideMerge(layerWebcrypto),
+      Layer.provideMerge(WebCrypto.layerEffectCrypto),
     );
 
     // Fails open: a limiter outage must not drop webhooks the environment would accept.
@@ -467,6 +493,7 @@ export const layer = Api.make(
         Layer.provideMerge(Cloudflare.DNS.ReadWriteDnsHttp),
         Layer.provideMerge(Cloudflare.Workers.RateLimitBinding),
         Layer.provideMerge(HookInboxObject.layer),
+        Layer.provideMerge(MeshObject.layer),
         // Disable the duplicate runtime span; ours applies route/header/token redaction and rejects sender traceparent.
         Layer.provideMerge(
           Alchemy.Telemetry.layer(Layer.succeed(HttpMiddleware.TracerDisabledWhen)(() => true)),

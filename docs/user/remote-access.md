@@ -32,6 +32,31 @@ connection. Pull request diffs and provider settings keep working after the
 previous credential expires. A failed renewal affects that request; it does not
 disconnect an otherwise healthy conversation.
 
+## Mesh
+
+Mesh is experimental and available only to accounts on its allowlist. Machines
+linked to the same T3 Connect account form a mesh. Agents on any machine can find
+and drive threads on the others, and tools that start work, such as
+`t3_thread_launch` and `delegate_task`, take a `machine`. T3 Connect picks one
+machine as the **captain**, and your phone and browser reach every machine through
+it. If the captain stops answering, connections use their other routes until it
+returns or another machine takes over.
+
+**Settings → Connections → Mesh** (**Settings → Environments** on mobile) lists
+each machine as online or offline, marks the captain, and says why a machine
+cannot take part, for example when it needs an update. The list and the captain
+route need this device to be signed in to T3 Connect. A machine linked to more
+than one T3 Connect account cannot join. In the sidebar, a thread that an agent
+on another machine started is listed under the thread that started it, with the
+machine it runs on.
+
+- **Pin**: choose **Pin as captain** on a machine to keep it captain whenever it
+  can serve. A pin on a machine that cannot be captain is ignored, and its row
+  says why. **Unpin captain** returns to automatic choice.
+- **Leave**: choose **Leave mesh** on a machine. The other machines and their agents
+  stop reaching it. Choose **Rejoin** to join again. On a command-line host, run
+  `t3 mesh leave` and `t3 mesh join`.
+
 ## Pair over a LAN or private network
 
 Use direct pairing when the other device can reach the host's network address.

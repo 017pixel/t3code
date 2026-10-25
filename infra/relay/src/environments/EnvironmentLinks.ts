@@ -140,6 +140,11 @@ export class EnvironmentLinks extends Context.Service<
       >,
       EnvironmentLinkEnvironmentLookupPersistenceError
     >;
+    /** Users with an active link proven by this key. More than one means a shared machine. */
+    readonly listActiveUsersForKey: (input: {
+      readonly environmentId: string;
+      readonly environmentPublicKey: string;
+    }) => Effect.Effect<ReadonlyArray<string>, EnvironmentLinkEnvironmentLookupPersistenceError>;
     readonly setHoldWebhooksWhileOffline: (input: {
       readonly environmentId: string;
       readonly environmentPublicKey: string;
@@ -419,6 +424,32 @@ const make = Effect.gen(function* () {
           ),
         );
     }),
+
+    listActiveUsersForKey: Effect.fn("relay.environment_links.list_active_users_for_key")(
+      function* (input) {
+        yield* Effect.annotateCurrentSpan({ "relay.environment_id": input.environmentId });
+        return yield* db
+          .selectDistinct({ userId: relayEnvironmentLinks.userId })
+          .from(relayEnvironmentLinks)
+          .where(
+            and(
+              eq(relayEnvironmentLinks.environmentId, input.environmentId),
+              eq(relayEnvironmentLinks.environmentPublicKey, input.environmentPublicKey),
+              isNull(relayEnvironmentLinks.revokedAt),
+            ),
+          )
+          .pipe(
+            Effect.map((rows) => rows.map((row) => row.userId)),
+            Effect.mapError(
+              (cause) =>
+                new EnvironmentLinkEnvironmentLookupPersistenceError({
+                  environmentId: input.environmentId,
+                  cause,
+                }),
+            ),
+          );
+      },
+    ),
 
     setHoldWebhooksWhileOffline: Effect.fn(
       "relay.environment_links.set_hold_webhooks_while_offline",

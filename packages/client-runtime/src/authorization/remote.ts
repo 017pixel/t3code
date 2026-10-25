@@ -7,6 +7,7 @@ import {
   type AuthEnvironmentScope,
   type AuthWebSocketTicketResult,
   type AuthWebSocketTicketUse,
+  MESH_VIA_PATH,
 } from "@t3tools/contracts";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
 import { hashTelemetryId } from "@t3tools/shared/telemetryId";
@@ -264,10 +265,16 @@ export const issueRemoteDpopWebSocketTicket = Effect.fn(
   );
 });
 
-function rpcSocketUrl(wsBaseUrl: string): URL {
+const CAPTAIN_VIA_BASE_PATH = new RegExp(`${MESH_VIA_PATH}/[^/]+/[^/]+/?$`);
+
+/**
+ * A bare origin and a captain route's forwarding path get `/ws` under their path. Any other path
+ * already names the socket (`wss://<tunnel>/ws` from the relay, or a custom one) and is kept.
+ */
+export function rpcSocketUrl(wsBaseUrl: string): URL {
   const url = new URL(wsBaseUrl);
-  if (url.pathname === "" || url.pathname === "/") {
-    url.pathname = "/ws";
+  if (url.pathname === "/" || CAPTAIN_VIA_BASE_PATH.test(url.pathname)) {
+    url.pathname = `${url.pathname.replace(/\/+$/, "")}/ws`;
   }
   return url;
 }

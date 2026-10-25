@@ -19,6 +19,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AndroidSheetHeader } from "../../components/ui/AndroidScreenHeader";
 import { AppText as Text } from "../../components/ui/AppText";
 import { environmentThreadDetails } from "../../state/threads";
+import { useEnvironmentShellReadiness } from "../../state/shell";
 import { NativeStackScreenOptions, nativeHeaderScrollEdgeEffects } from "../../native/StackHeader";
 import { NativeHeader, NativeScreen } from "../../native/ThemedScreenStack";
 import { SubagentRow } from "./SubagentRow";
@@ -50,15 +51,10 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
   const subagents = turn?.subagents ?? [];
   const hasLiveAgent = (turn?.liveCount ?? 0) > 0;
 
-  const openChildThread = (childThreadId: ThreadId) => {
+  const openChildThread = (childThreadId: ThreadId, environmentId = target.environmentId) => {
     void Haptics.selectionAsync();
     // Replace this leaf sheet so the child enters the workspace stack expected by Home's Back button.
-    navigation.dispatch(
-      StackActions.replace("Thread", {
-        environmentId: target.environmentId,
-        threadId: childThreadId,
-      }),
-    );
+    navigation.dispatch(StackActions.replace("Thread", { environmentId, threadId: childThreadId }));
   };
 
   const content = (
@@ -132,10 +128,11 @@ function AgentRow(props: {
   readonly environmentId: EnvironmentId;
   readonly subagent: OrchestrationV2Subagent;
   readonly tickSeconds: boolean;
-  readonly onOpen: (childThreadId: ThreadId) => void;
+  readonly onOpen: (childThreadId: ThreadId, environmentId?: EnvironmentId) => void;
 }) {
   const { subagent } = props;
   const childThreadId = subagent.childThreadId;
+  if (subagent.remote !== undefined) return <RemoteAgentRow {...props} remote={subagent.remote} />;
 
   const row = (
     <View className="border-b border-border py-3.5">
@@ -163,6 +160,44 @@ function AgentRow(props: {
       accessibilityRole="link"
       accessibilityHint="Opens this agent's thread"
       onPress={() => props.onOpen(childThreadId)}
+      className="active:opacity-70"
+    >
+      {row}
+    </Pressable>
+  );
+}
+
+/** EXPERIMENTAL mesh v1. Opens the child on its machine only while this app is connected to it. */
+function RemoteAgentRow(
+  props: Parameters<typeof AgentRow>[0] & {
+    readonly remote: NonNullable<OrchestrationV2Subagent["remote"]>;
+  },
+) {
+  const { remote } = props;
+  const connected = useEnvironmentShellReadiness(remote.environmentId).status === "live";
+  const threadId = connected ? remote.threadId : null;
+  const row = (
+    <View className="border-b border-border py-3.5">
+      <SubagentRow
+        environmentId={props.environmentId}
+        subagent={props.subagent}
+        canOpenThread={threadId !== null}
+        elapsed={<AgentElapsed subagent={props.subagent} tickSeconds={props.tickSeconds} />}
+      />
+    </View>
+  );
+  if (threadId === null) {
+    return (
+      <View accessible accessibilityHint={`Runs on ${remote.label}. Connect to it to open.`}>
+        {row}
+      </View>
+    );
+  }
+  return (
+    <Pressable
+      accessibilityRole="link"
+      accessibilityHint={`Opens this agent's thread on ${remote.label}`}
+      onPress={() => props.onOpen(threadId, remote.environmentId)}
       className="active:opacity-70"
     >
       {row}

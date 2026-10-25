@@ -52,6 +52,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type ComponentProps,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -474,6 +475,23 @@ export function SortableThreadRow(
   // Keyed by variant so a card/slim switch remounts the row.
   return <SidebarThreadRow key={rowProps.variant} {...rowProps} thread={thread} sortable={bag} />;
 }
+
+/**
+ * A row listed under its parent's row, outside every section, so it takes no part in drag and
+ * drop. Takes the sortable row's props so the sidebar renders both from one call site.
+ */
+export function NestedThreadRow(props: ComponentProps<typeof SortableThreadRow>) {
+  const {
+    sortableId: _sortableId,
+    sortableDisabled: _disabled,
+    contextDrag: _drag,
+    ...rest
+  } = props;
+  const thread =
+    useThreadShell(scopeThreadRef(rest.thread.environmentId, rest.thread.id)) ?? rest.thread;
+  return <SidebarThreadRow key={rest.variant} {...rest} thread={thread} />;
+}
+
 export type SidebarSweepAction = "settle" | "unsettle" | "unsnooze";
 const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
   pin: (
@@ -532,6 +550,10 @@ type SidebarThreadRowProps = {
   environmentLabel: string | null;
   environmentMachine: EnvironmentMachineKind;
   scratchMachineLabel: string | null;
+  /** Set when the row is listed under the thread on another machine that started it. */
+  meshChildMachineLabel?: string | null;
+  /** The thread's machine is offline in the mesh. */
+  machineOffline?: boolean;
   project: EnvironmentProject | null;
   projectDisplayName: string | null;
   providerEntryByInstanceId: ReadonlyMap<string, SidebarProviderEntry>;
@@ -1088,6 +1110,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         className={cn(
           "list-none [content-visibility:auto] [contain-intrinsic-size:auto_36px]",
           sortable?.isDragging && "relative z-20",
+          props.meshChildMachineLabel != null && "pl-4",
         )}
       >
         <Tooltip disabled={sortable?.isDragging}>
@@ -1121,6 +1144,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             </span>
             {draftIndicator}
             {title}
+            {props.meshChildMachineLabel != null ? (
+              <span className="max-w-24 shrink-0 truncate text-xs text-muted-foreground/60">
+                on {props.meshChildMachineLabel}
+              </span>
+            ) : null}
             {pinIndicator}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
@@ -1247,6 +1275,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       className={cn(
         "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_78px]",
         sortable?.isDragging && "relative z-20",
+        props.meshChildMachineLabel != null && "pl-4",
       )}
     >
       <Tooltip disabled={snoozeMenuOpen || sortable?.isDragging}>
@@ -1438,7 +1467,18 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               ) : null}
             </div>
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-secondary-label text-xs">
-              {thread.branch ? (
+              {props.meshChildMachineLabel != null ? (
+                <>
+                  <EnvironmentMachineIcon
+                    aria-hidden
+                    kind={props.environmentMachine}
+                    className="size-3 shrink-0 text-muted-foreground/40"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-muted-foreground/40">
+                    on {props.meshChildMachineLabel}
+                  </span>
+                </>
+              ) : thread.branch ? (
                 <>
                   <ThreadWorktreeIndicator thread={thread} />
                   <span className="flex min-w-0 flex-1 text-muted-foreground/40">
@@ -1475,8 +1515,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 aria-hidden
                 className="pointer-events-none ml-auto inline-flex shrink-0 items-center gap-1"
               >
-                {isRemote && !showsScratchMachine ? (
-                  <span className="inline-flex shrink-0 items-center text-sidebar-muted-foreground/70">
+                {isRemote && !showsScratchMachine && props.meshChildMachineLabel == null ? (
+                  <span className="inline-flex shrink-0 items-center gap-1 text-sidebar-muted-foreground/70">
+                    {props.machineOffline ? <span className="text-2xs">Offline</span> : null}
                     <EnvironmentMachineIcon
                       aria-hidden
                       kind={props.environmentMachine}

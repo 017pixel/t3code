@@ -7,6 +7,7 @@ export * from "./errors.ts";
 export * from "./pullRequestRoutingPermissions.ts";
 export * from "./hostFreeze.ts";
 export * as Connection from "./layer.ts";
+export * as MeshCaptain from "./meshCaptain.ts";
 export * from "./model.ts";
 export * as ConnectionOnboarding from "./onboarding.ts";
 export * from "./presentation.ts";

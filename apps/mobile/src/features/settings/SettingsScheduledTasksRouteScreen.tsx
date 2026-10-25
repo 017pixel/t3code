@@ -51,6 +51,7 @@ import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScroll
 import { SegmentedControl } from "../../components/ui/SegmentedControl";
 import { ThemedSwitch } from "../../components/ui/ThemedSwitch";
 import { webhookAddress } from "@t3tools/client-runtime/webhook-address";
+import { environmentIdentityBaseUrl } from "@t3tools/client-runtime/connection";
 import { tryCopyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { usePreparedConnection } from "../../state/session";
 import { buildModelOptions } from "../../lib/modelOptions";
@@ -1169,8 +1170,11 @@ function WebhookScheduleDetails({
     reportFailure: false,
   });
   const preparedConnection = usePreparedConnection(environmentId);
+  // A webhook address names the member itself, never a captain that forwards to it.
   const httpBaseUrl =
-    preparedConnection._tag === "Some" ? preparedConnection.value.httpBaseUrl : null;
+    preparedConnection._tag === "Some"
+      ? environmentIdentityBaseUrl(preparedConnection.value)
+      : null;
   const webhook = task?.schedule.type === "webhook" ? task.webhook : undefined;
   const resolved = webhook ? webhookAddress(webhook, httpBaseUrl) : null;
   return (

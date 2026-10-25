@@ -6,7 +6,10 @@ import type {
 import { isLoopbackHost, normalizePreviewUrl } from "@t3tools/shared/preview";
 import { isLocalLoopbackHost, isPrivateNetworkHost } from "@t3tools/shared/hostClassification";
 
-import type { ConnectionTarget } from "@t3tools/client-runtime/connection";
+import {
+  type ConnectionTarget,
+  environmentIdentityBaseUrl,
+} from "@t3tools/client-runtime/connection";
 
 import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
 import { isElectron } from "~/env";
@@ -19,10 +22,12 @@ export {
   isPublicFaviconHost,
 } from "@t3tools/shared/hostClassification";
 
+// A captain route's transport host is the captain, so it resolves like a relay route: the
+// member's Connect host is public, and port targets use the member-side preview runtime.
 const readEnvironmentUrl = (environmentId: EnvironmentId): URL => {
   const connection = readPreparedConnection(environmentId);
   if (!connection) throw new Error(`Environment ${environmentId} is not connected.`);
-  return new URL(connection.httpBaseUrl);
+  return new URL(environmentIdentityBaseUrl(connection));
 };
 
 const resolveEnvironmentPortTarget = (

@@ -70,7 +70,11 @@ export function withCreationProvenance(
   provenance: ThreadManagementProvenance,
 ): OrchestrationV2Command {
   switch (command.type) {
-    case "thread.create":
+    case "thread.create": {
+      // Only the server stamps mesh origins; a client's copy is dropped.
+      const { meshOrigin: _meshOrigin, ...created } = command;
+      return { ...created, ...provenance };
+    }
     case "message.dispatch":
     case "thread.fork":
     case "thread.merge_back":
@@ -104,6 +108,10 @@ function existingThreadIdsForCommand(
     case "delegated_task.wake-policy":
     case "delegated_task.completion-delivery.acknowledge":
     case "delegated_task.completion-delivery.dispose":
+    case "delegated_task.remote.request":
+    case "delegated_task.remote.attach":
+    case "delegated_task.remote.progress":
+    case "delegated_task.remote.complete":
       return [command.parentThreadId];
     case "thread.created.record":
       return command.parentThreadId === command.targetThreadId

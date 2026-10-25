@@ -1266,6 +1266,90 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
   );
 
+  it.effect("resolves a launch target with delegate_task's inheritance on this machine", () =>
+    Effect.gen(function* () {
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const inherited = {
+        instanceId: codexInstanceId,
+        model: "gpt-6",
+        options: [
+          { id: "effort", value: "low" },
+          { id: "fastMode", value: true },
+        ],
+      };
+      const resolved = yield* service.resolveLaunchTarget({
+        projectId,
+        inherited,
+        target: { options: [{ id: "effort", value: "high" }] },
+      });
+      assert.deepEqual(resolved.modelSelection, {
+        instanceId: codexInstanceId,
+        model: "gpt-6",
+        options: [
+          { id: "effort", value: "high" },
+          { id: "fastMode", value: true },
+        ],
+      });
+      const invalid = yield* service
+        .resolveLaunchTarget({
+          projectId,
+          inherited,
+          target: { options: [{ id: "effort", value: "max" }] },
+        })
+        .pipe(Effect.flip);
+      assert.equal(invalid.code, "invalid_request");
+      const missing = yield* service
+        .resolveLaunchTarget({ projectId, inherited, target: { model: "gpt-9" } })
+        .pipe(Effect.flip);
+      assert.equal(missing.code, "model_unavailable");
+    }).pipe(
+      Effect.provide(
+        layerOrchestratorService.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+              ServerSettings.layerTest(),
+              providerRegistryLayer([
+                {
+                  ...providerSnapshot({
+                    instanceId: codexInstanceId,
+                    driver: ProviderDriverKind.make("codex"),
+                  }),
+                  models: [
+                    {
+                      slug: "gpt-6",
+                      name: "gpt-6",
+                      isCustom: false,
+                      capabilities: {
+                        optionDescriptors: [
+                          {
+                            id: "effort",
+                            label: "Reasoning",
+                            type: "select",
+                            options: [
+                              { id: "low", label: "Low" },
+                              { id: "high", label: "High" },
+                            ],
+                          },
+                          { id: "fastMode", label: "Fast", type: "boolean" },
+                        ],
+                      },
+                    },
+                  ],
+                },
+              ]),
+              adapterRegistryLayer([codexInstanceId]),
+              Layer.mock(ProjectService.ProjectService)({}),
+              Layer.mock(SecretRequests.SecretRequests)({}),
+              Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
   describe("listed models", () => {
     const opencodeInstanceId = ProviderInstanceId.make("opencode");
     const model = (slug: string, extra: Partial<ServerProvider["models"][number]> = {}) => ({

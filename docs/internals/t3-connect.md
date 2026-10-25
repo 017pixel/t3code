@@ -55,6 +55,10 @@ meet in the
 The relay holds the signing authority for mint requests. DPoP protects an honest
 exchange from credential reuse; it does not make a compromised relay signing
 key harmless. Keep that trust assumption explicit when changing the protocol.
+The same key signs EXPERIMENTAL mesh grants (`t3-mesh-grant+jwt`), which let
+one of a user's machines open a session on another. The grant has its own
+`typ` and scope, so it never passes as a mint request, nor the reverse
+([mesh object](../../packages/shared/src/meshRelayObject.ts)).
 
 Managed tunnels expose only a validated loopback HTTP origin. Link proof checks
 reject forwarded authority headers, and the relay resolves endpoints from its
