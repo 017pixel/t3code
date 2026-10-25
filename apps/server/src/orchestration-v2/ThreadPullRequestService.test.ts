@@ -180,6 +180,95 @@ describe("ThreadPullRequestServiceV2 reads", () => {
     ),
   );
 
+  it.effect(
+    "looks up a branch from the project root when its worktree is no longer a repository",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          // A worktree folder can outlive its .git; git in that folder fails with not_a_repository.
+          const thread = {
+            ...threadShell("emptied-worktree-thread"),
+            branch: "feature/emptied",
+            worktreePath: "/workspace/worktree",
+          };
+          const project: OrchestrationProjectShell = {
+            id: thread.projectId,
+            title: "Project",
+            workspaceRoot: "/workspace/project",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-08-01T00:00:00.000Z",
+            updatedAt: "2026-08-01T00:00:00.000Z",
+          };
+          const activation = yield* Deferred.make<void>();
+          const sweepStarted = yield* Deferred.make<void>();
+          const lookupCwds: Array<string> = [];
+          const dependencies = Layer.mergeAll(
+            Layer.mock(Orchestrator.OrchestratorV2)({
+              streamDomainEvents: Stream.never,
+              getShellSnapshot: () =>
+                Deferred.succeed(sweepStarted, undefined).pipe(
+                  Effect.as({
+                    schemaVersion: 2,
+                    snapshotSequence: 1,
+                    threads: [thread],
+                    archivedThreads: [],
+                  }),
+                ),
+            }),
+            Layer.mock(ProjectStore.ProjectStoreV2)({
+              listShells: () => Effect.succeed([project]),
+              getShell: () => Effect.succeed(Option.some(project)),
+            }),
+            Layer.mock(GitManager.GitManager)({
+              branchPullRequest: (input) =>
+                Effect.sync(() => {
+                  lookupCwds.push(input.cwd);
+                  return null;
+                }),
+            }),
+            Layer.mock(PullRequestService.PullRequestService)({}),
+            Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
+              resolve: () =>
+                Effect.succeed({
+                  canonicalKey: "github.com/acme/project",
+                  locator: {
+                    source: "git-remote" as const,
+                    remoteName: "origin",
+                    remoteUrl: "git@github.com:acme/project.git",
+                  },
+                  provider: SourceControlProviderKind.make("github"),
+                  owner: "acme",
+                  name: "project",
+                }),
+            }),
+            Layer.mock(BackgroundPolicy.BackgroundPolicy)({}),
+            Layer.succeed(ServerActivation.ServerActivation, Deferred.await(activation)),
+            Layer.succeed(
+              Crypto.Crypto,
+              Crypto.make({
+                randomBytes: (size) => new Uint8Array(size).fill(1),
+                digest: (_algorithm, data) => Effect.succeed(data),
+              }),
+            ),
+            // The worktree folder exists but holds nothing, not even .git.
+            FileSystem.layerNoop({
+              exists: (path) => Effect.succeed(path === thread.worktreePath),
+            }),
+          );
+          yield* Effect.gen(function* () {
+            const service = yield* ThreadPullRequestService.make;
+            yield* service.start();
+            yield* Deferred.succeed(activation, undefined);
+            yield* Deferred.await(sweepStarted);
+            yield* service.drain;
+          }).pipe(Effect.provide(dependencies));
+
+          expect(lookupCwds).toEqual([project.workspaceRoot]);
+        }),
+      ),
+  );
+
   it.effect.each([
     { state: "closed", sameBranch: false },
     { state: "merged", sameBranch: false },
