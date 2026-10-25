@@ -1,5 +1,6 @@
 import { parseDelimitedPreview } from "@t3tools/shared/delimitedPreview";
 import { XMLParser } from "fast-xml-parser";
+import { decodeHTMLStrict as decodeEntities } from "entities";
 import { boundedZip } from "./boundedZip";
 import { createWorkerClient } from "./office/worker-rpc";
 import type { WordMethods } from "./office/word-protocol";
@@ -158,8 +159,9 @@ async function render(bytes: ArrayBuffer, kind: DocumentThumbnailKind, ratio: nu
     const decode = (path: string) => new TextDecoder().decode(files.get(path)?.bytes);
     const container = parser.parse(decode("META-INF/container.xml"));
     const root = container.container?.rootfiles?.rootfile;
-    const packagePath = (Array.isArray(root) ? root[0] : root)?.["full-path"];
-    if (typeof packagePath !== "string") throw new Error("No EPUB package.");
+    const encodedPackagePath = (Array.isArray(root) ? root[0] : root)?.["full-path"];
+    if (typeof encodedPackagePath !== "string") throw new Error("No EPUB package.");
+    const packagePath = decodeEntities(encodedPackagePath);
     const metadata = parser.parse(decode(packagePath)).package;
     const items = [metadata.manifest.item].flat();
     const coverId = [metadata.metadata?.meta ?? []]
@@ -173,7 +175,9 @@ async function render(bytes: ArrayBuffer, kind: DocumentThumbnailKind, ratio: nu
       ) ?? items.find((item) => item.id === coverId);
     if (!cover || typeof cover.href !== "string") throw new Error("No EPUB cover.");
     const base = packagePath.slice(0, packagePath.lastIndexOf("/") + 1);
-    const path = new URL(cover.href, `https://epub.invalid/${base}`).pathname.slice(1);
+    const path = new URL(decodeEntities(cover.href), `https://epub.invalid/${base}`).pathname.slice(
+      1,
+    );
     const image = files.get(decodeURIComponent(path));
     if (!image || !/^image\/(png|jpeg|webp|gif)$/.test(cover["media-type"]))
       throw new Error("Unsupported cover.");

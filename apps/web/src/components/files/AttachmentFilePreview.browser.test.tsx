@@ -2761,3 +2761,45 @@ it.each(["epub", "odt", "ipynb"] as const)(
     }
   },
 );
+
+it.each(["&amp;", "&#38;", "&#x26;"])(
+  "resolves %s entities in EPUB thumbnail paths through the worker",
+  async (entity) => {
+    const canvas = new OffscreenCanvas(40, 60);
+    const context = canvas.getContext("2d")!;
+    context.fillStyle = "#f00000";
+    context.fillRect(0, 0, 40, 60);
+    const archive = new JSZip();
+    archive.file(
+      "META-INF/container.xml",
+      `<container><rootfiles><rootfile full-path="OPS${entity}notes/package.opf"/></rootfiles></container>`,
+    );
+    archive.file(
+      "OPS&notes/package.opf",
+      `<package><manifest><item id="cover" properties="cover-image" href="images/cover${entity}title.png" media-type="image/png"/></manifest></package>`,
+    );
+    archive.file(
+      "OPS&notes/images/cover&title.png",
+      await (await canvas.convertToBlob({ type: "image/png" })).arrayBuffer(),
+    );
+    const { loadDocumentThumbnail } = await import("./documentThumbnail");
+    const thumbnail = await loadDocumentThumbnail(`epub-entity-${entity}`, {
+      kind: "epub",
+      file: await archive.generateAsync({ type: "blob" }),
+      source: async () => null,
+      ratio: 2,
+    });
+    expect(thumbnail).not.toBeNull();
+    const bitmap = await createImageBitmap(thumbnail!.blob);
+    try {
+      const output = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const painted = output.getContext("2d")!;
+      painted.drawImage(bitmap, 0, 0);
+      const pixel = painted.getImageData(10, 10, 1, 1).data;
+      expect(pixel[0]).toBeGreaterThan(200);
+      expect(pixel[1]).toBeLessThan(30);
+    } finally {
+      bitmap.close();
+    }
+  },
+);
