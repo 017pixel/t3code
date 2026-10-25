@@ -2980,7 +2980,20 @@ export const make = Effect.gen(function* () {
     },
     {
       capacity: DETAIL_CACHE_CAPACITY,
-      timeToLive: (exit) => (Exit.isSuccess(exit) ? CHECKS_CACHE_TTL : Duration.zero),
+      // Expire from the read's start so checks seeded from a slow detail read keep their age.
+      timeToLive: (exit) =>
+        !Exit.isSuccess(exit)
+          ? Duration.zero
+          : exit.value === null
+            ? CHECKS_CACHE_TTL
+            : Duration.millis(
+                Math.max(
+                  0,
+                  exit.value.observedAt +
+                    Duration.toMillis(CHECKS_CACHE_TTL) -
+                    clock.currentTimeMillisUnsafe(),
+                ),
+              ),
     },
   );
 
@@ -3014,12 +3027,10 @@ export const make = Effect.gen(function* () {
       return detailUncached(refOfCacheKey(key)).pipe(
         Effect.tap(
           Effect.fn("PullRequestService.recordDetailStats")(function* (value: PullRequestDetail) {
-            // GitHub detail includes the same checks; seed only fresh reads at their shorter TTL.
-            const now = yield* Clock.currentTimeMillis;
+            // GitHub detail includes the same checks; the checks TTL counts from their observation.
             if (
               value.provider === "github" &&
               value.observedAt !== undefined &&
-              now - value.observedAt < Duration.toMillis(CHECKS_CACHE_TTL) &&
               !(yield* Cache.has(checksCache, key))
             ) {
               yield* Cache.set(checksCache, key, {
@@ -3037,7 +3048,7 @@ export const make = Effect.gen(function* () {
                 additions: value.additions,
                 deletions: value.deletions,
               },
-              now,
+              yield* Clock.currentTimeMillis,
             );
           }),
         ),
