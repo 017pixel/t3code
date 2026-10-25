@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { createCdpRelayConnection, type CdpRelayTarget } from "./CdpRelay.ts";
+import {
+  createCdpRelayConnection,
+  type CdpRelayConnection,
+  type CdpRelayTarget,
+} from "./CdpRelay.ts";
 
 const makeTarget = (
   send: CdpRelayTarget["send"],
@@ -188,5 +192,44 @@ describe("CDP relay downloads", () => {
     expect(written).toEqual([
       { method: "Browser.downloadWillBegin", params: { guid: "g1", suggestedFilename: "r.csv" } },
     ]);
+  });
+});
+
+describe("CDP relay reconnects", () => {
+  it("reports the page's default execution context to every connection", async () => {
+    // Electron keeps one debugger attached, so Runtime stays enabled after a client drops,
+    // and the native Runtime.enable announces contexts only the first time.
+    let runtimeEnabled = false;
+    let current: CdpRelayConnection | undefined;
+    const context = {
+      context: { id: 1, origin: "null", name: "", auxData: { isDefault: true, frameId: "F" } },
+    };
+    const send = vi.fn(async (method: string) => {
+      if (method === "Runtime.enable" && !runtimeEnabled) {
+        runtimeEnabled = true;
+        current!.event("Runtime.executionContextCreated", context, "");
+      }
+      return {};
+    });
+    const connect = async () => {
+      const written: Array<Record<string, unknown>> = [];
+      current = createCdpRelayConnection(makeTarget(send), (raw) => written.push(JSON.parse(raw)));
+      current.receive(JSON.stringify({ id: 1, method: "Target.setAutoAttach", params: {} }));
+      await settle();
+      current.receive(
+        JSON.stringify({ id: 2, method: "Runtime.enable", sessionId: "t3-preview-page" }),
+      );
+      await settle();
+      return written.filter((m) => m["method"] === "Runtime.executionContextCreated");
+    };
+    const expected = [
+      {
+        method: "Runtime.executionContextCreated",
+        params: context,
+        sessionId: "t3-preview-page",
+      },
+    ];
+    expect(await connect()).toEqual(expected);
+    expect(await connect()).toEqual(expected);
   });
 });
