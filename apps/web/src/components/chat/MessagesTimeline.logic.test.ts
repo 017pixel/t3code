@@ -3948,6 +3948,20 @@ describe("response groups", () => {
     expect(settled(latest).map((row) => row.id)).toContain("ack-b");
   });
 
+  it("keeps the group row when the prompt's first entry is an interrupt request", () => {
+    const entries = goalThread();
+    entries.splice(1, 0, {
+      kind: "event",
+      id: "interrupt",
+      createdAt: time(1),
+      projectedItem: {
+        item: { type: "run_interrupt_request", runId: RunId.make("initial") },
+      } as never,
+    });
+    const ids = settled(entries).map((row) => row.id);
+    expect(ids).toEqual(["prompt", `turn-fold:${groupKey}`, "ack-b"]);
+  });
+
   it("lets find open both the group and the run an entry hides behind", () => {
     const keys = timelineTurnFoldRunIdsByEntryId({
       timelineEntries: goalThread(),

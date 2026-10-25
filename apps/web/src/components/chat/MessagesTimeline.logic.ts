@@ -1917,13 +1917,8 @@ export function deriveMessagesTimelineRows(input: {
       appendActiveWorkRows();
     }
 
-    if (
-      timelineEntry.kind === "event" &&
-      timelineEntry.projectedItem.item.type === "run_interrupt_request"
-    ) {
-      continue;
-    }
-
+    // Fold rows come first: a fold can anchor on an interrupt request, which
+    // shows no row of its own.
     const groupFold = groupFoldsByAnchorEntryId.get(timelineEntry.id);
     if (groupFold) {
       nextRows.push({
@@ -1953,6 +1948,13 @@ export function deriveMessagesTimelineRows(input: {
         label: turnFold.label,
         expanded: foldExpanded(turnFold.foldKeys),
       });
+    }
+
+    if (
+      timelineEntry.kind === "event" &&
+      timelineEntry.projectedItem.item.type === "run_interrupt_request"
+    ) {
+      continue;
     }
 
     if (collapsedEntryIds.has(timelineEntry.id)) {
