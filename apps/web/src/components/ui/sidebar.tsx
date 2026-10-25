@@ -699,6 +699,9 @@ const sidebarMenuButtonVariants = cva(
       variant: {
         default: "font-medium text-sidebar-muted-foreground/80",
         outline: "bg-sidebar-control-surface ring-1 ring-sidebar-border",
+        // Listbox results: the highlight follows the pointer, so it stays neutral; blue marks the current page.
+        option:
+          "font-medium text-sidebar-muted-foreground/80 data-[active=true]:bg-sidebar-row-hover",
       },
     },
   },

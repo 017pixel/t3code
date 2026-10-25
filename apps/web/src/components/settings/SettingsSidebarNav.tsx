@@ -310,6 +310,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                       aria-selected={index === activeResultIndex}
                       tabIndex={-1}
                       size="sm"
+                      variant="option"
                       isActive={index === activeResultIndex}
                       className="h-auto min-h-10 items-start"
                       onMouseMove={() => setActiveResultIndex(index)}
