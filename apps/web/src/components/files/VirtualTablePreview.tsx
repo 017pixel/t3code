@@ -274,21 +274,36 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
   const first = Math.min(maxFirst, Math.floor(position.top / scale / 29)) + headerRows;
   // The final mounted rows keep their measured height and scroll natively.
   const nativeTail = first - headerRows === maxFirst;
-  const scrollModel = useRef({ scale, maxFirst, rowHeight: layout.rowHeight });
+  const scrollModel = useRef({ scale, maxFirst, heights: [] as number[] });
   useLayoutEffect(() => {
     const previous = scrollModel.current;
-    scrollModel.current = { scale, maxFirst, rowHeight: layout.rowHeight };
+    const heights = nativeTail
+      ? Array.from(contentRef.current?.querySelectorAll<HTMLElement>("[data-preview-row]") ?? [])
+          .filter((row) => Number(row.dataset.previewRow) >= first)
+          .map((row) => row.offsetHeight)
+      : [];
+    scrollModel.current = { scale, maxFirst, heights };
     const node = ref.current;
     if (!node || (previous.scale === scale && previous.maxFirst === maxFirst)) return;
     const previousEnd = previous.maxFirst * 29 * previous.scale;
-    const logicalTop =
-      Math.min(previous.maxFirst * 29, node.scrollTop / previous.scale) +
-      (Math.max(0, node.scrollTop - previousEnd) * 29) / previous.rowHeight;
-    node.scrollTop =
-      Math.min(maxFirst * 29, logicalTop) * scale +
-      (Math.max(0, logicalTop - maxFirst * 29) * layout.rowHeight) / 29;
+    let logicalTop = Math.min(previous.maxFirst * 29, node.scrollTop / previous.scale);
+    let remaining = Math.max(0, node.scrollTop - previousEnd);
+    // Native-tail pixels cross rows of different heights before returning to the scaled track.
+    for (const height of previous.heights) {
+      logicalTop += Math.min(1, remaining / height) * 29;
+      remaining = Math.max(0, remaining - height);
+      if (!remaining) break;
+    }
+    let nativeOffset = 0;
+    remaining = Math.max(0, logicalTop / 29 - maxFirst);
+    for (const height of heights) {
+      nativeOffset += Math.min(1, remaining) * height;
+      remaining = Math.max(0, remaining - 1);
+      if (!remaining) break;
+    }
+    node.scrollTop = Math.min(maxFirst * 29, logicalTop) * scale + nativeOffset;
     setTop(node.scrollTop);
-  }, [scale, maxFirst, layout.rowHeight]);
+  });
   useLayoutEffect(() => {
     const node = ref.current;
     if (props.revealLine == null) {
