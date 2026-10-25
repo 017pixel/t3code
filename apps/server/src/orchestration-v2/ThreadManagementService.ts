@@ -60,6 +60,11 @@ import * as ServerSettings from "../serverSettings.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
+// Another agent's message must not invoke skills on the recipient: Claude and Codex expand a
+// currency sign before a name and Claude runs a leading `/name`. A word joiner breaks both, as
+// webhook prompts do, while the recipient still reads the same text.
+const AGENT_SKILL_SYNTAX = /\p{Sc}(?=[a-zA-Z0-9])|^\s*\//gu;
+
 export interface ThreadManagementProvenance {
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
@@ -809,7 +814,10 @@ const make = Effect.gen(function* () {
       messageId: input.messageId,
       ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
       ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
-      text: input.text,
+      text:
+        input.senderThreadId === undefined
+          ? input.text
+          : input.text.replace(AGENT_SKILL_SYNTAX, "$&\u2060"),
       attachments: input.attachments,
       ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
       dispatchMode,
