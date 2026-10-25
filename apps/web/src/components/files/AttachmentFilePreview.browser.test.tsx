@@ -336,10 +336,10 @@ describe("large text preview recovery", () => {
   });
 });
 it.each([
-  ["", "worksheets/./sheet1.xml"],
-  ["x:", "../xl/worksheets/sheet1.xml"],
-  ["", "/xl/worksheets/sheet1.xml"],
-])("preserves %sworksheet metadata with relationship target %s", async (prefix, target) => {
+  ["", "worksheets/./sheet1.xml", false],
+  ["x:", "../xl/worksheets/sheet1.xml", false],
+  ["", "/xl/worksheets/sheet1.xml", true],
+])("preserves %sworksheet metadata with relationship target %s", async (prefix, target, empty) => {
   const { default: JSZip } = await import("jszip");
   const archive = new JSZip();
   const ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -353,10 +353,14 @@ it.each([
   );
   archive.file(
     "xl/worksheets/sheet1.xml",
-    `<${prefix}worksheet xmlns${prefix ? ":x" : ""}="${ns}"><${prefix}dimension ref="XFD1048576"/><${prefix}cols><${prefix}col min="${OFFICE_PREVIEW_MAX_COLUMNS - 1}" max="${OFFICE_PREVIEW_MAX_COLUMNS + 10}" width="20"/><${prefix}col min="${OFFICE_PREVIEW_MAX_COLUMNS + 1}" max="${OFFICE_PREVIEW_MAX_COLUMNS + 30}" hidden="1"/></${prefix}cols><${prefix}sheetData><${prefix}row ht="42" customHeight="1" hidden="1"><${prefix}c r="A50" t="inlineStr"><${prefix}is><${prefix}t>${"value".repeat(1000)}</${prefix}t></${prefix}is></${prefix}c></${prefix}row></${prefix}sheetData><${prefix}mergeCells><${prefix}mergeCell ref="XFD1048576"/></${prefix}mergeCells></${prefix}worksheet>`.replace(
-      /<((?:x:)?(?:col|dimension|mergeCell))\b([^>]*)\/>/g,
-      prefix ? "<$1$2></$1>" : "$&",
-    ),
+    `<${prefix}worksheet xmlns${prefix ? ":x" : ""}="${ns}"><${prefix}dimension ref="XFD1048576"/><${prefix}cols><${prefix}col min="${OFFICE_PREVIEW_MAX_COLUMNS - 1}" max="${OFFICE_PREVIEW_MAX_COLUMNS + 10}" width="20"/><${prefix}col min="${OFFICE_PREVIEW_MAX_COLUMNS + 1}" max="${OFFICE_PREVIEW_MAX_COLUMNS + 30}" hidden="1"/></${prefix}cols><${prefix}sheetData><${prefix}row ht="42" customHeight="1" hidden="1"><${prefix}c r="A50" t="inlineStr"><${prefix}is><${prefix}t>${"value".repeat(1000)}</${prefix}t></${prefix}is></${prefix}c></${prefix}row></${prefix}sheetData><${prefix}mergeCells><${prefix}mergeCell ref="XFD1048576"/></${prefix}mergeCells></${prefix}worksheet>`
+      .replace(/<((?:x:)?(?:col|dimension|mergeCell))\b([^>]*)\/>/g, prefix ? "<$1$2></$1>" : "$&")
+      .replace(/<sheetData>[\s\S]*?<\/sheetData>/, (data) => (empty ? "<sheetData/>" : data))
+      .replace(/="([^"]*)"/g, (attribute, value: string) =>
+        prefix || empty
+          ? ` = '${value.replace(/\d/g, (digit) => `&#${digit.charCodeAt(0)};`)}'`
+          : attribute,
+      ),
   );
   const bytes = await archive.generateAsync({ type: "arraybuffer" });
   const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
@@ -379,11 +383,16 @@ it.each([
       "application/xml",
     );
     expect(sheet.querySelector("parsererror")).toBeNull();
-    const row = sheet.getElementsByTagNameNS(ns, "row")[0]!;
-    expect(row.getAttribute("ht")).toBe("42");
-    expect(row.getAttribute("hidden")).toBe("1");
-    expect(row.getElementsByTagNameNS(ns, "c")[0]!.getAttribute("r")).toBe("A50");
-    expect(row.getElementsByTagNameNS(ns, "t")[0]!.textContent).toHaveLength(4096);
+    const row = sheet.getElementsByTagNameNS(ns, "row")[0];
+    if (empty) expect(row).toBeUndefined();
+    else {
+      expect(row!.getAttribute("ht")).toBe("42");
+      expect(row!.getAttribute("hidden")).toBe("1");
+      expect(row!.getElementsByTagNameNS(ns, "c")[0]!.getAttribute("r")).toBe("A50");
+      expect(row!.getElementsByTagNameNS(ns, "t")[0]!.textContent).toHaveLength(4096);
+    }
+    expect(sheet.getElementsByTagNameNS(ns, "dimension")).toHaveLength(0);
+    expect(sheet.getElementsByTagNameNS(ns, "mergeCell")).toHaveLength(0);
     const columns = sheet.getElementsByTagNameNS(ns, "col");
     expect(columns).toHaveLength(1);
     expect(columns[0]!.getAttribute("min")).toBe(String(OFFICE_PREVIEW_MAX_COLUMNS - 1));
@@ -836,9 +845,17 @@ it.each([false, true])(
       "xl/_rels/workbook.xml.rels",
       '<Relationships><Relationship Id="s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
     );
+    const sharedPath = cdata ? "customStrings.xml" : "sharedStrings.xml";
+    archive.file(
+      "xl/_rels/workbook.xml.rels",
+      (await archive.file("xl/_rels/workbook.xml.rels")!.async("string")).replace(
+        "</Relationships>",
+        `<Relationship Id="strings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="${sharedPath}"/></Relationships>`,
+      ),
+    );
     const content = "x".repeat(32_767);
     archive.file(
-      "xl/sharedStrings.xml",
+      `xl/${sharedPath}`,
       `<sst><si><t>${cdata ? `<![CDATA[${content}]]>` : content}</t></si></sst>`,
     );
     archive.file(
