@@ -73,7 +73,7 @@ export function snapShotShortcutKeyLabels(
 ): readonly string[] {
   if (isModifierPairShortcut(shortcut)) {
     const label = modifierKeyLabel(snapShotShortcutModifierPair(shortcut), platform);
-    return [label, label];
+    return [`Left ${label}`, `Right ${label}`];
   }
 
   const useMetaForMod = isMacPlatform(platform);

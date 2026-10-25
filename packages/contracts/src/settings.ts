@@ -211,7 +211,7 @@ const OTHER_MODIFIER_LABELS: Record<SnapShotModifier, string> = {
 
 export function snapShotModifierPairLabel(modifier: SnapShotModifier, apple: boolean): string {
   const label = (apple ? APPLE_MODIFIER_LABELS : OTHER_MODIFIER_LABELS)[modifier];
-  return `${label} + ${label}`;
+  return `Left ${label} + Right ${label}`;
 }
 const DEFAULT_SNAP_SHOT_SHORTCUT: SnapShotShortcut = {
   kind: "both-shift-keys",
