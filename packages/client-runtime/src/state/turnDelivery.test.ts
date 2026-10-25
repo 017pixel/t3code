@@ -10,7 +10,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
-import { describe, expect, it } from "@effect/vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { AVAILABLE_CONNECTION_STATE, type SupervisorConnectionState } from "../connection/model.ts";
 import type { AtomCommandResult } from "./runtime.ts";
@@ -125,7 +125,8 @@ async function deliverUntilWaiting(harness: ReturnType<typeof setup>, input = IN
   const outcome = await harness.deliveries.deliver(ENVIRONMENT_ID, input, "optimistic row");
   expect(outcome.type).toBe("waiting");
   if (outcome.type !== "waiting") throw new Error(`Expected waiting, got ${outcome.type}.`);
-  return outcome.settled;
+  // Wrapped: an async function returning the promise would wait for it to settle.
+  return { settled: outcome.settled };
 }
 
 describe("turn deliveries", () => {
@@ -155,7 +156,7 @@ describe("turn deliveries", () => {
 
   it("replays the same command and payload once the thread resyncs without the message", async () => {
     const harness = setup([LOST_ACK, ACCEPTED]);
-    const settled = await deliverUntilWaiting(harness);
+    const { settled } = await deliverUntilWaiting(harness);
 
     harness.emitThread(thread("cached"));
     harness.emitThread(thread("synchronizing"));
@@ -168,7 +169,7 @@ describe("turn deliveries", () => {
 
   it("settles without a resend when the resynced thread already holds the message", async () => {
     const harness = setup([LOST_ACK]);
-    const settled = await deliverUntilWaiting(harness);
+    const { settled } = await deliverUntilWaiting(harness);
 
     harness.emitThread(thread("synchronizing"));
     harness.emitThread(
@@ -185,7 +186,7 @@ describe("turn deliveries", () => {
 
   it("settles without a resend when the resynced thread queued the message", async () => {
     const harness = setup([LOST_ACK]);
-    const settled = await deliverUntilWaiting(harness);
+    const { settled } = await deliverUntilWaiting(harness);
 
     harness.emitThread(thread("synchronizing"));
     harness.emitThread(
@@ -205,7 +206,7 @@ describe("turn deliveries", () => {
 
   it("ends once with the rejection when the replay is refused", async () => {
     const harness = setup([LOST_ACK, REJECTED]);
-    const settled = await deliverUntilWaiting(harness);
+    const { settled } = await deliverUntilWaiting(harness);
 
     harness.emitThread(thread("synchronizing"));
     harness.emitThread(thread("live"));
@@ -219,7 +220,7 @@ describe("turn deliveries", () => {
 
   it("stops replaying after a cancel", async () => {
     const harness = setup([LOST_ACK]);
-    const settled = await deliverUntilWaiting(harness);
+    const { settled } = await deliverUntilWaiting(harness);
     const [pending] = harness.deliveries.getSnapshot();
 
     harness.deliveries.cancel(pending!.key);
@@ -237,7 +238,7 @@ describe("turn deliveries", () => {
       acceptReplay = resolve;
     });
     const harness = setup([LOST_ACK, replay]);
-    const settled = await deliverUntilWaiting(harness);
+    const { settled } = await deliverUntilWaiting(harness);
 
     harness.emitThread(thread("synchronizing"));
     harness.emitThread(thread("live"));
@@ -259,7 +260,7 @@ describe("turn deliveries", () => {
 
   it("replays a first message after reconnecting without watching the unborn thread", async () => {
     const harness = setup([LOST_ACK, ACCEPTED]);
-    const settled = await deliverUntilWaiting(harness, LAUNCH);
+    const { settled } = await deliverUntilWaiting(harness, LAUNCH);
 
     harness.emitConnection(connection("connected", 1));
     expect(harness.sent).toHaveLength(1);

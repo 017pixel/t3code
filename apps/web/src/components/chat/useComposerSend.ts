@@ -1273,6 +1273,11 @@ export function useComposerSend(input: ComposerSendInput) {
             detectTrigger: true,
           });
         }
+      } else {
+        setOptimisticUserMessages((existing) => {
+          const next = existing.filter((message) => message.id !== messageIdForSend);
+          return next.length === existing.length ? existing : next;
+        });
       }
       if (failure !== null && !isAtomCommandInterrupted(failure)) {
         const error = squashAtomCommandFailure(failure);

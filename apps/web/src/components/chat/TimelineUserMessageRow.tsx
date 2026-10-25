@@ -3,6 +3,7 @@ import { type MessageId, type ServerProviderSkill, ThreadId } from "@t3tools/con
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { Link } from "@tanstack/react-router";
 import { useQuietThreadShell } from "../../state/entities";
+import { turnDeliveries, usePendingTurnDelivery } from "../../state/turnDeliveries";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
@@ -267,6 +268,25 @@ function UserMessageProjectedStatus({ row }: { row: Extract<TimelineRow, { kind:
       <span className="rounded-full border border-destructive/25 bg-destructive/8 px-1.5 py-0.5 text-3xs font-medium text-destructive">
         {status}
       </span>
+    </div>
+  );
+}
+
+function UserMessageDeliveryStatus({ messageId }: { messageId: MessageId }) {
+  const ctx = use(TimelineRowCtx);
+  const delivery = usePendingTurnDelivery(ctx.activeThreadEnvironmentId, messageId);
+  if (delivery === null) return null;
+  return (
+    <div
+      className="me-1 flex items-center gap-1.5 text-xs text-muted-foreground"
+      data-turn-delivery={delivery.state}
+    >
+      {delivery.state === "waiting" ? "Waiting to send" : "Sending"}
+      {delivery.state === "waiting" ? (
+        <InlineButton tone="muted" onClick={() => turnDeliveries.cancel(delivery.key)}>
+          Cancel
+        </InlineButton>
+      ) : null}
     </div>
   );
 }
@@ -592,6 +612,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
         ) : null}
       </div>
       <UserMessageProjectedStatus row={row} />
+      <UserMessageDeliveryStatus messageId={row.message.id} />
       {!folded || expanded ? (
         <div className="flex w-full max-w-[80%] items-center justify-end pe-1 text-xs tabular-nums opacity-0 transition-opacity duration-200 pointer-coarse:opacity-100 focus-within:opacity-100 group-hover:opacity-100">
           <div className="flex shrink-0 items-center gap-2">
