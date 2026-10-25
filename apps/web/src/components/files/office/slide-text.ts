@@ -29,6 +29,13 @@ const RunStyle = Schema.Struct({
 const Body = Schema.Struct({
   paragraphs: Schema.Array(
     Schema.Struct({
+      properties: Schema.optional(
+        Schema.NullOr(
+          Schema.Struct({
+            defaultRun: Schema.optional(Schema.NullOr(RunStyle)),
+          }),
+        ),
+      ),
       runs: Schema.Array(
         Schema.Struct({
           text: Schema.String,
@@ -126,11 +133,11 @@ export function deckText(bytes: Uint8Array, snapshot: DeckSnapshot): DeckText {
   return Option.match(decodeInspected(inspectPresentation(withoutMedia(bytes))), {
     onNone: () => fromSnapshot(snapshot),
     onSome: (inspected) => {
-      const scheme = inspected.themes?.flatMap((theme) =>
-        theme.theme?.fontScheme ? [theme.theme.fontScheme] : [],
-      )[0];
-      const major = scheme?.majorFont.latin ?? "";
-      const minor = scheme?.minorFont.latin ?? "";
+      const schemes =
+        inspected.themes?.flatMap((theme) =>
+          theme.theme?.fontScheme ? [theme.theme.fontScheme] : [],
+        ) ?? [];
+      const minor = schemes[0]?.minorFont.latin ?? "";
 
       const drawings = [
         ...inspected.slides.flatMap((slide) => slide.drawings),
@@ -147,16 +154,21 @@ export function deckText(bytes: Uint8Array, snapshot: DeckSnapshot): DeckText {
       );
 
       return summarize(
-        [...drawings.flatMap(drawingRuns), ...defaults],
-        (family) => {
-          if (!family || family.startsWith("+mn")) return minor;
-
-          if (family.startsWith("+mj")) return major;
-
-          if (family.startsWith("+")) return "";
-
-          return family;
-        },
+        [...drawings.flatMap(drawingRuns), ...defaults].flatMap((run) => {
+          const family = run.style?.fontFamily;
+          if (!schemes.length || (family && !family.startsWith("+mn") && !family.startsWith("+mj")))
+            return [run];
+          return schemes.map((scheme) => ({
+            ...run,
+            style: {
+              ...run.style,
+              fontFamily: family?.startsWith("+mj")
+                ? scheme.majorFont.latin
+                : scheme.minorFont.latin,
+            },
+          }));
+        }),
+        (family) => (family?.startsWith("+") ? "" : (family ?? "")),
         minor,
         inspected.slides.map((slide) => slide.hidden ?? false),
       );
@@ -300,7 +312,14 @@ function drawingRuns(drawing: Drawing): Run[] {
 
 function bodyRuns(body: typeof Body.Type | null | undefined): Run[] {
   return (body?.paragraphs ?? []).flatMap((paragraph) =>
-    paragraph.runs.map((run) => ({ text: run.text, style: run.properties })),
+    paragraph.runs.map((run) => ({
+      text: run.text,
+      style: {
+        fontFamily: run.properties?.fontFamily ?? paragraph.properties?.defaultRun?.fontFamily,
+        bold: run.properties?.bold ?? paragraph.properties?.defaultRun?.bold,
+        italic: run.properties?.italic ?? paragraph.properties?.defaultRun?.italic,
+      },
+    })),
   );
 }
 

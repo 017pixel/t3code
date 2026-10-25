@@ -78,7 +78,14 @@ export function OfficePages(props: {
       onScroll={() => {
         const root = scroller.current;
         if (!root || !props.onPageChange) return;
-        for (const [index, row] of rows.current) {
+        if (
+          root.scrollHeight > root.clientHeight &&
+          root.scrollTop + root.clientHeight >= root.scrollHeight - 1
+        ) {
+          props.onPageChange(Math.min(mounted, props.pages.length) - 1);
+          return;
+        }
+        for (const [index, row] of [...rows.current].sort(([a], [b]) => a - b)) {
           if (row.offsetTop + row.offsetHeight > root.scrollTop + 24) {
             props.onPageChange(index);
             break;

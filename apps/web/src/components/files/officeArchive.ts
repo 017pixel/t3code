@@ -197,9 +197,20 @@ function boundedWorksheet(xml: string, strings: readonly string[], budget: { rem
   let depth = 0;
   let row = 0;
   let explicitRow = false;
+  let rowTag = "";
   let column = 0;
   let cells = new Map<number, string>();
-  let cell: { start: number; opening: string; selfClosing: boolean } | null = null;
+  let cell: {
+    start: number;
+    opening: string;
+    name: string;
+    prefix: string;
+    selfClosing: boolean;
+    text: string;
+    value: string;
+    reading: string;
+    shared: boolean;
+  } | null = null;
   let truncated = false;
   const coordinate = (ref: string) => {
     const match = /^([A-Z]{1,3})([1-9]\d{0,6})$/.exec(ref);
@@ -235,13 +246,9 @@ function boundedWorksheet(xml: string, strings: readonly string[], budget: { rem
       row = attribute("r") === undefined ? row + 1 : Number(attribute("r"));
       if (!Number.isInteger(row) || row < 1 || row > 1048576)
         throw new Error("This workbook contains invalid row coordinates.");
-      if (row <= OFFICE_PREVIEW_MAX_ROWS)
-        rowTags.set(
-          row,
-          xml
-            .slice(xml.lastIndexOf("<", parser.position - 1), parser.position)
-            .replace(/\/>$/, ">"),
-        );
+      rowTag = xml
+        .slice(xml.lastIndexOf("<", parser.position - 1), parser.position)
+        .replace(/\/>$/, ">");
       column = 0;
       cells = rows.get(row) ?? new Map<number, string>();
       if (row > OFFICE_PREVIEW_MAX_ROWS) truncated = true;
@@ -265,33 +272,29 @@ function boundedWorksheet(xml: string, strings: readonly string[], budget: { rem
         throw new Error("This workbook contains invalid cell metadata.");
       cell = {
         start: parser.position,
-        opening: `<c r="${letters}${row}"${style ? ` s="${style}"` : ""}${type ? ` t="${type}"` : ""}>`,
+        opening: xml
+          .slice(xml.lastIndexOf("<", parser.position - 1), parser.position)
+          .replace(/\/?>$/, `${ref ? "" : ` r="${letters}${row}"`}>`),
+        name: tag.name,
+        prefix: tag.prefix ? `${tag.prefix}:` : "",
         selfClosing: tag.isSelfClosing,
+        text: "",
+        value: "",
+        reading: "",
+        shared: type === "s",
       };
     }
+    if (cell && (tag.local === "t" || tag.local === "v")) cell.reading = tag.local;
+  });
+  parser.on("text", (chunk) => {
+    if (cell?.reading === "t") cell.text += chunk;
+    if (cell?.reading === "v") cell.value += chunk;
   });
   parser.on("closetag", (tag) => {
     if (depth === 4 && tag.local === "c" && cell) {
       const end = cell.selfClosing ? cell.start : xml.lastIndexOf("<", parser.position - 1);
-      const raw = cell.opening + xml.slice(cell.start, end) + "</c>";
-      const cellParser = xmlParser();
-      let text = "";
-      let shared = false;
-      let value = "";
-      let reading = "";
-      cellParser.on("opentag", (tag) => {
-        if (tag.local === "c") shared = tag.attributes.t?.value === "s";
-        if (tag.local === "t" || tag.local === "v") reading = tag.local;
-      });
-      cellParser.on("text", (chunk) => {
-        if (reading === "t") text += chunk;
-        if (reading === "v") value += chunk;
-      });
-      cellParser.on("closetag", (tag) => {
-        if (tag.local === reading) reading = "";
-      });
-      cellParser.write(raw).close();
-      const shown = shared ? (strings[Number(value)] ?? "") : text || value;
+      const raw = cell.opening + xml.slice(cell.start, end) + `</${cell.name}>`;
+      const shown = cell.shared ? (strings[Number(cell.value)] ?? "") : cell.text || cell.value;
       const kept = shown.slice(0, Math.min(4096, budget.remaining));
       budget.remaining -= kept.length;
       if (kept.length < shown.length) {
@@ -300,18 +303,20 @@ function boundedWorksheet(xml: string, strings: readonly string[], budget: { rem
           s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
         cells.set(
           column,
-          cell.opening.replace(/ t="[^"]*"/, "").replace(/>$/, ' t="inlineStr">') +
-            "<is><t>" +
+          cell.opening.replace(/\s+t=(?:"[^"]*"|'[^']*')/, "").replace(/>$/, ' t="inlineStr">') +
+            `<${cell.prefix}is><${cell.prefix}t>` +
             escape(kept) +
-            "</t></is></c>",
+            `</${cell.prefix}t></${cell.prefix}is></${cell.name}>`,
         );
       } else cells.set(column, raw);
       cell = null;
     } else if (depth === 3 && tag.local === "row" && row <= OFFICE_PREVIEW_MAX_ROWS) {
       rows.set(row, cells);
+      rowTags.set(row, rowTag);
     }
     if (depth === 2 && tag.local === "sheetData")
       dataEnd = emptyData ? parser.position : xml.lastIndexOf("<", parser.position - 1);
+    if (cell?.reading === tag.local) cell.reading = "";
     depth--;
   });
   parser.write(xml).close();
@@ -334,12 +339,12 @@ function boundedWorksheet(xml: string, strings: readonly string[], budget: { rem
           return bounded ? tag.replace('ref="' + ref + '"', 'ref="' + bounded + '"') : "";
         },
       )
-      .replace(/<(?:\w+:)?(?:col)\b[^>]*\/?>/g, (tag) =>
-        tag.replace(
-          /\b(min|max)="(\d+)"/g,
-          (_whole, key: string, value: string) => key + '="' + Math.min(50, Number(value)) + '"',
-        ),
-      );
+      .replace(/<(?:\w+:)?(?:col)\b[^>]*\/?>/g, (tag) => {
+        const min = Math.max(1, Number(/\bmin="(\d+)"/.exec(tag)?.[1] ?? 1));
+        const max = Math.min(50, Number(/\bmax="(\d+)"/.exec(tag)?.[1] ?? 16384));
+        if (min > max) return "";
+        return tag.replace(/\bmin="\d+"/, `min="${min}"`).replace(/\bmax="\d+"/, `max="${max}"`);
+      });
   return {
     xml: emptyData
       ? xml
@@ -350,7 +355,7 @@ function boundedWorksheet(xml: string, strings: readonly string[], budget: { rem
               `${rowTags.get(line) ?? `<row r="${line}">`}${[...values]
                 .sort(([a], [b]) => a - b)
                 .map(([, value]) => value)
-                .join("")}</row>`,
+                .join("")}</${/^<([^\s>]+)/.exec(rowTags.get(line) ?? "<row>")![1]}>`,
           )
           .join("")}${metadata(xml.slice(dataEnd))}`,
     truncated,

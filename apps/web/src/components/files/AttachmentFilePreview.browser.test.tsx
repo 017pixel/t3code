@@ -21,6 +21,129 @@ import { OfficeFilePreview } from "./OfficeFilePreview";
 import { MermaidFilePreview } from "./MermaidFilePreview";
 import type { OfficeWorkerResult } from "./officePreviewProtocol";
 
+it.each(["", "x:"])(
+  "preserves %sworksheet namespaces, inferred row metadata, and retained column ranges",
+  async (prefix) => {
+    const { default: JSZip } = await import("jszip");
+    const archive = new JSZip();
+    const ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    archive.file(
+      "xl/workbook.xml",
+      '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet" sheetId="1" r:id="s"/></sheets></workbook>',
+    );
+    archive.file(
+      "xl/_rels/workbook.xml.rels",
+      '<Relationships><Relationship Id="s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+    );
+    archive.file(
+      "xl/worksheets/sheet1.xml",
+      `<${prefix}worksheet xmlns${prefix ? ":x" : ""}="${ns}"><${prefix}cols><${prefix}col min="49" max="60" width="20"/><${prefix}col min="51" max="80" hidden="1"/></${prefix}cols><${prefix}sheetData><${prefix}row ht="42" customHeight="1" hidden="1"><${prefix}c r="A50" t="inlineStr"><${prefix}is><${prefix}t>${"value".repeat(1000)}</${prefix}t></${prefix}is></${prefix}c></${prefix}row></${prefix}sheetData></${prefix}worksheet>`,
+    );
+    const bytes = await archive.generateAsync({ type: "arraybuffer" });
+    const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
+      type: "module",
+    });
+    try {
+      const result = await new Promise<OfficeWorkerResult>((resolve) => {
+        worker.addEventListener(
+          "message",
+          (event: MessageEvent<OfficeWorkerResult>) => resolve(event.data),
+          { once: true },
+        );
+        worker.postMessage({ type: "open", kind: "xlsx", bytes }, [bytes]);
+      });
+      expect(result.type).toBe("xlsx");
+      if (result.type !== "xlsx") throw new Error("Expected bounded workbook");
+      const bounded = await JSZip.loadAsync(result.bytes);
+      const sheet = new DOMParser().parseFromString(
+        await bounded.file("xl/worksheets/sheet1.xml")!.async("string"),
+        "application/xml",
+      );
+      expect(sheet.querySelector("parsererror")).toBeNull();
+      const row = sheet.getElementsByTagNameNS(ns, "row")[0]!;
+      expect(row.getAttribute("ht")).toBe("42");
+      expect(row.getAttribute("hidden")).toBe("1");
+      expect(row.getElementsByTagNameNS(ns, "c")[0]!.getAttribute("r")).toBe("A50");
+      expect(row.getElementsByTagNameNS(ns, "t")[0]!.textContent).toHaveLength(4096);
+      const columns = sheet.getElementsByTagNameNS(ns, "col");
+      expect(columns).toHaveLength(1);
+      expect(columns[0]!.getAttribute("min")).toBe("49");
+      expect(columns[0]!.getAttribute("max")).toBe("50");
+    } finally {
+      worker.terminate();
+    }
+  },
+);
+
+it("reports the final slide at maximum scroll after page visibility changes", async () => {
+  const { OfficePages } = await import("./office/OfficePages");
+  const changed = vi.fn();
+  const container = document.createElement("div");
+  container.style.cssText = "display:flex;flex-direction:column;width:400px;height:400px";
+  await using screen = await render(
+    <OfficePages
+      pages={Array.from({ length: 6 }, () => ({ width: 400, height: 240 }))}
+      label="Slide"
+      paint={async () => undefined}
+      onPageChange={changed}
+      onError={(error) => {
+        throw error;
+      }}
+    />,
+    { container },
+  );
+  const scroller = screen.container.querySelector<HTMLElement>("[data-office-pages]")!;
+  await vi.waitFor(() => expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight));
+  await act(() => {
+    scroller.scrollTop = scroller.scrollHeight;
+  });
+  await vi.waitFor(() => expect(changed).toHaveBeenLastCalledWith(5));
+  await act(() => {
+    scroller.scrollTop = 10;
+  });
+  await vi.waitFor(() => expect(changed).toHaveBeenLastCalledWith(0));
+});
+
+it("preserves merged text across tile clears", async () => {
+  const { paintFrame } = await import("./office/sheet-frame");
+  const canvas = new OffscreenCanvas(400, 80);
+  const context = canvas.getContext("2d")!;
+  paintFrame(
+    context,
+    {
+      viewport: { x: 0, y: 0, width: 400, height: 80 },
+      list: { width: 400, height: 80, commands: [] },
+      tiles: [
+        {
+          x: 0,
+          y: 0,
+          clipX: 0,
+          clipY: 0,
+          list: {
+            width: 208,
+            height: 80,
+            commands: [
+              {
+                op: "text",
+                x: 2,
+                y: 40,
+                text: "MMMMMMMMMMMMMMMMMMMMMMMM",
+                fontSize: 20,
+                color: "#000",
+                clip: { x: 0, y: 0, w: 400, h: 80 },
+              },
+            ],
+          },
+        },
+        { x: 192, y: 0, clipX: 200, clipY: 0, list: { width: 208, height: 80, commands: [] } },
+      ],
+    },
+    { ratio: 1, origin: { x: 0, y: 0 } },
+  );
+  const pixels = context.getImageData(240, 15, 100, 35).data;
+  expect(pixels.some((value, index) => index % 4 === 3 && value > 0)).toBe(true);
+});
+
 it.each([
   "paragraphs",
   "runs",
