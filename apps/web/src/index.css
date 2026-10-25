@@ -281,6 +281,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --color-sidebar-row-hover: var(--sidebar-row-hover);
   --color-sidebar-row-active: var(--sidebar-row-active);
   --color-sidebar-row-selected: var(--sidebar-row-selected);
+  --color-sidebar-row-ring: var(--sidebar-row-ring);
   --color-sidebar-border: var(--contrast-sidebar-border);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -1160,6 +1161,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   /* The current row and settings page carry the accent: blue means "you are here". */
   --sidebar-row-active: color-mix(in oklab, var(--primary) 10%, var(--color-white));
   --sidebar-row-selected: color-mix(in oklab, var(--primary) 7%, var(--color-white));
+  --sidebar-row-ring: color-mix(in oklab, var(--primary) 15%, transparent);
   --sidebar-border: var(--border);
   --sidebar-stage-fade: var(--sidebar);
   --code-background: color-mix(in srgb, var(--card) 90%, var(--background));
@@ -1171,14 +1173,14 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 
   @variant dark {
     color-scheme: dark;
-    /* Raised surfaces (composer, cards) sit one step above the neutral-black
-       canvas and overlays one more, so they read without milky gray fills. */
+    /* Raised surfaces (composer, cards, popovers) sit one step above the
+       neutral-black canvas; menus separate by border and shadow. */
     --background: var(--color-neutral-950);
     --surface-raised: color-mix(in srgb, var(--background) 93%, var(--color-white));
     --foreground: var(--color-neutral-100);
     --card: color-mix(in srgb, var(--background) 93%, var(--color-white));
     --card-foreground: var(--color-neutral-100);
-    --popover: color-mix(in srgb, var(--background) 90%, var(--color-white));
+    --popover: color-mix(in srgb, var(--background) 93%, var(--color-white));
     --popover-foreground: var(--color-neutral-100);
     --primary: oklch(0.571 0.21 264);
     --link: color-mix(in oklab, var(--primary), var(--color-white) 28%);
@@ -1235,6 +1237,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --sidebar-row-hover: var(--color-zinc-25);
   --sidebar-row-active: color-mix(in oklab, var(--primary) 10%, var(--color-white));
   --sidebar-row-selected: color-mix(in oklab, var(--primary) 7%, var(--color-white));
+  --sidebar-row-ring: color-mix(in oklab, var(--primary) 15%, transparent);
   --sidebar-border: var(--color-zinc-200);
   --sidebar-stage-fade: var(--sidebar);
 
@@ -1328,6 +1331,7 @@ html[data-theme-id]:not([data-theme-id=""]) {
   --sidebar-row-hover: var(--app-theme-sidebar-row-hover);
   --sidebar-row-active: var(--app-theme-sidebar-row-active);
   --sidebar-row-selected: var(--app-theme-sidebar-row-selected);
+  --sidebar-row-ring: color-mix(in srgb, var(--contrast-sidebar-border) 70%, transparent);
   --sidebar-border: var(--app-theme-sidebar-border);
   --sidebar-stage-fade: var(--app-theme-sidebar);
   --code-background: var(--app-theme-code-background);
@@ -1528,6 +1532,7 @@ html[data-theme-id] [data-app-sidebar] {
   --sidebar-row-hover: var(--app-theme-sidebar-row-hover);
   --sidebar-row-active: var(--app-theme-sidebar-row-active);
   --sidebar-row-selected: var(--app-theme-sidebar-row-selected);
+  --sidebar-row-ring: color-mix(in srgb, var(--contrast-sidebar-border) 70%, transparent);
   --sidebar-border: var(--app-theme-sidebar-border);
   --sidebar-stage-fade: var(--app-theme-sidebar);
   border-color: color-mix(in srgb, var(--contrast-sidebar-foreground) 10%, transparent);
