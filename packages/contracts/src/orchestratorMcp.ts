@@ -195,7 +195,6 @@ const OrchestratorMcpRunningTaskNext = Schema.Literal(ORCHESTRATOR_MCP_RUNNING_T
 export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   taskId: NodeId,
   childThreadId: ThreadId,
-  link: Schema.optional(Schema.String),
   childRunId: Schema.NullOr(RunId),
   childNodeId: NodeId,
   status: OrchestratorMcpDelegatedTaskStatus,
@@ -280,7 +279,6 @@ export type OrchestratorMcpCreatedThreadStatus = typeof OrchestratorMcpCreatedTh
 
 export const OrchestratorMcpCreatedThread = Schema.Struct({
   threadId: ThreadId,
-  link: Schema.optional(Schema.String),
   runId: Schema.NullOr(RunId),
   status: OrchestratorMcpCreatedThreadStatus,
   title: Schema.String,
@@ -335,7 +333,6 @@ export type OrchestratorMcpThreadPullRequest = typeof OrchestratorMcpThreadPullR
 export const OrchestratorMcpThreadListItem = Schema.Struct({
   threadId: ThreadId,
   title: Schema.String,
-  link: Schema.optional(Schema.String),
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
   status: OrchestratorMcpThreadStatus,
@@ -403,7 +400,6 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
   title: Schema.String,
-  link: Schema.optional(Schema.String),
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
   status: OrchestratorMcpThreadStatus,
@@ -485,7 +481,6 @@ export type OrchestratorMcpThreadSendInput = typeof OrchestratorMcpThreadSendInp
 
 export const OrchestratorMcpThreadSendResult = Schema.Struct({
   threadId: ThreadId,
-  link: Schema.optional(Schema.String),
   messageId: MessageId,
   runId: RunId,
   taskId: Schema.optional(NodeId),
