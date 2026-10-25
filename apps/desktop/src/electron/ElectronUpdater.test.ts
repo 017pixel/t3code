@@ -40,15 +40,22 @@ describe("ElectronUpdater.quitAndInstall", () => {
       autoUpdaterMock.quitAndInstall.mockImplementationOnce(() => {
         autoUpdaterMock.events.emit("error", cause);
       });
+      const errorListener = vi.fn();
       const updater = yield* ElectronUpdater.ElectronUpdater;
 
       const result = yield* Effect.scoped(
-        updater
-          .on("error", () => {})
-          .pipe(
-            Effect.andThen(updater.quitAndInstall({ isSilent: true, isForceRunAfter: true })),
-            Effect.result,
-          ),
+        Effect.gen(function* () {
+          yield* updater.on("error", errorListener);
+          const result = yield* updater
+            .quitAndInstall({ isSilent: true, isForceRunAfter: true })
+            .pipe(Effect.result);
+          // The failure reports the error, so listeners skip it during the call
+          // but still receive the same Error if the updater emits it again later.
+          assert.deepEqual(errorListener.mock.calls, []);
+          autoUpdaterMock.events.emit("error", cause);
+          assert.deepEqual(errorListener.mock.calls, [[cause]]);
+          return result;
+        }),
       );
 
       assert.isTrue(Result.isFailure(result), "quitAndInstall should fail");
