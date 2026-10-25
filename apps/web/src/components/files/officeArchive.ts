@@ -175,8 +175,8 @@ function wordDocuments(
   for (const batch of batches) {
     const section = sections.find((section) => section.body || section.end >= batch.end);
     const document = prefix + batch.content + (section?.xml ?? "") + suffix;
-    length += document.length;
-    markup += document.match(/<(?![!?/])/g)?.length ?? 0;
+    length += batch.content.length;
+    markup += batch.content.match(/<(?![!?/])/g)?.length ?? 0;
     if (length > 3 * 1024 * 1024 || markup > 100_000) {
       truncated = true;
       break;
@@ -195,17 +195,32 @@ function boundedWorksheet(
   const parser = xmlParser();
   const rows = new Map<number, Map<number, string>>();
   const rowTags = new Map<number, string>();
+  const metadataAttributes = new Map<
+    string,
+    { ref: string | undefined; min: string | undefined; max: string | undefined }
+  >();
   let dataStart = 0;
   let dataEnd = 0;
   let emptyData = false;
   let depth = 0;
   let row = 0;
   let explicitRow = false;
+  let rowTag = "";
   let column = 0;
   let maxRow = 0;
   let maxColumn = 0;
   let cells = new Map<number, string>();
-  let cell: { start: number; opening: string; selfClosing: boolean } | null = null;
+  let cell: {
+    start: number;
+    opening: string;
+    name: string;
+    prefix: string;
+    selfClosing: boolean;
+    text: string;
+    value: string;
+    reading: string;
+    shared: boolean;
+  } | null = null;
   let truncated = false;
   const coordinate = (ref: string) => {
     const match = /^([A-Z]{1,3})([1-9]\d{0,6})$/.exec(ref);
@@ -227,6 +242,15 @@ function boundedWorksheet(
     )
       throw new Error("This workbook contains invalid worksheet structure.");
     const attribute = (name: string) => tag.attributes[name]?.value;
+    if (["dimension", "mergeCell", "col"].includes(tag.local))
+      metadataAttributes.set(
+        xml.slice(xml.lastIndexOf("<", parser.position - 1), parser.position),
+        {
+          ref: attribute("ref"),
+          min: attribute("min"),
+          max: attribute("max"),
+        },
+      );
     if (depth === 2 && tag.local === "sheetData") {
       dataStart = parser.position;
       emptyData = tag.isSelfClosing;
@@ -241,13 +265,9 @@ function boundedWorksheet(
       row = attribute("r") === undefined ? row + 1 : Number(attribute("r"));
       if (!Number.isInteger(row) || row < 1 || row > 1048576)
         throw new Error("This workbook contains invalid row coordinates.");
-      if (row <= OFFICE_PREVIEW_MAX_ROWS)
-        rowTags.set(
-          row,
-          xml
-            .slice(xml.lastIndexOf("<", parser.position - 1), parser.position)
-            .replace(/\/>$/, ">"),
-        );
+      rowTag = xml
+        .slice(xml.lastIndexOf("<", parser.position - 1), parser.position)
+        .replace(/\/>$/, ">");
       column = 0;
       cells = rows.get(row) ?? new Map<number, string>();
       if (row > OFFICE_PREVIEW_MAX_ROWS)
@@ -279,33 +299,31 @@ function boundedWorksheet(
         throw new Error("This workbook contains invalid cell metadata.");
       cell = {
         start: parser.position,
-        opening: `<c r="${letters}${row}"${style ? ` s="${style}"` : ""}${type ? ` t="${type}"` : ""}>`,
+        opening: xml
+          .slice(xml.lastIndexOf("<", parser.position - 1), parser.position)
+          .replace(/\/?>$/, `${ref ? "" : ` r="${letters}${row}"`}>`),
+        name: tag.name,
+        prefix: tag.prefix ? `${tag.prefix}:` : "",
         selfClosing: tag.isSelfClosing,
+        text: "",
+        value: "",
+        reading: "",
+        shared: type === "s",
       };
     }
+    if (cell && (tag.local === "t" || tag.local === "v")) cell.reading = tag.local;
   });
+  const readCellText = (chunk: string) => {
+    if (cell?.reading === "t") cell.text += chunk;
+    if (cell?.reading === "v") cell.value += chunk;
+  };
+  parser.on("text", readCellText);
+  parser.on("cdata", readCellText);
   parser.on("closetag", (tag) => {
     if (depth === 4 && tag.local === "c" && cell) {
       const end = cell.selfClosing ? cell.start : xml.lastIndexOf("<", parser.position - 1);
-      const raw = cell.opening + xml.slice(cell.start, end) + "</c>";
-      const cellParser = xmlParser();
-      let text = "";
-      let shared = false;
-      let value = "";
-      let reading = "";
-      cellParser.on("opentag", (tag) => {
-        if (tag.local === "c") shared = tag.attributes.t?.value === "s";
-        if (tag.local === "t" || tag.local === "v") reading = tag.local;
-      });
-      cellParser.on("text", (chunk) => {
-        if (reading === "t") text += chunk;
-        if (reading === "v") value += chunk;
-      });
-      cellParser.on("closetag", (tag) => {
-        if (tag.local === reading) reading = "";
-      });
-      cellParser.write(raw).close();
-      const shown = shared ? (strings[Number(value)] ?? "") : text || value;
+      const raw = cell.opening + xml.slice(cell.start, end) + `</${cell.name}>`;
+      const shown = cell.shared ? (strings[Number(cell.value)] ?? "") : cell.text || cell.value;
       const kept = shown.slice(0, Math.min(4096, budget.remaining));
       budget.remaining -= kept.length;
       if (kept.length < shown.length) {
@@ -314,18 +332,22 @@ function boundedWorksheet(
           s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
         cells.set(
           column,
-          cell.opening.replace(/ t="[^"]*"/, "").replace(/>$/, ' t="inlineStr">') +
-            "<is><t>" +
+          cell.opening
+            .replace(/\s+t\s*=\s*(?:"[^"]*"|'[^']*')/, "")
+            .replace(/>$/, ' t="inlineStr">') +
+            `<${cell.prefix}is><${cell.prefix}t>` +
             escape(kept) +
-            "</t></is></c>",
+            `</${cell.prefix}t></${cell.prefix}is></${cell.name}>`,
         );
       } else cells.set(column, raw);
       cell = null;
     } else if (depth === 3 && tag.local === "row" && row <= OFFICE_PREVIEW_MAX_ROWS) {
       rows.set(row, cells);
+      rowTags.set(row, rowTag);
     }
     if (depth === 2 && tag.local === "sheetData")
       dataEnd = emptyData ? parser.position : xml.lastIndexOf("<", parser.position - 1);
+    if (cell?.reading === tag.local) cell.reading = "";
     depth--;
   });
   parser.write(xml).close();
@@ -345,24 +367,35 @@ function boundedWorksheet(
     return a + ":" + letters + Math.min(OFFICE_PREVIEW_MAX_ROWS, last.line);
   };
   const metadata = (part: string) =>
-    part
-      .replace(
-        /<(?:\w+:)?(?:dimension|mergeCell)\b[^>]*\bref="([^"]*)"[^>]*\/?>/g,
-        (tag, ref: string) => {
-          const bounded = boundRange(ref);
-          return bounded ? tag.replace('ref="' + ref + '"', 'ref="' + bounded + '"') : "";
-        },
-      )
-      .replace(/<(?:\w+:)?(?:col)\b[^>]*\/?>/g, (tag) =>
-        tag.replace(
-          /\b(min|max)="(\d+)"/g,
-          (_whole, key: string, value: string) =>
-            key + '="' + Math.min(OFFICE_PREVIEW_MAX_COLUMNS, Number(value)) + '"',
-        ),
-      );
+    part.replace(
+      /(<((?:\w+:)?(?:dimension|mergeCell|col))\b(?:[^"'<>]|"[^"]*"|'[^']*')*>)(?:\s*<\/\2\s*>)?/g,
+      (tag: string, opening: string) => {
+        const attributes = metadataAttributes.get(opening);
+        if (!attributes) return tag;
+        const replace = (name: string, value: string) => {
+          const pattern = new RegExp(`\\s${name}\\s*=\\s*(?:"[^"]*"|'[^']*')`);
+          tag = pattern.test(tag)
+            ? tag.replace(pattern, ` ${name}="${value}"`)
+            : tag.replace(/\/?>/, (end) => ` ${name}="${value}"${end}`);
+        };
+        if (attributes.ref !== undefined) {
+          const bounded = boundRange(attributes.ref);
+          if (!bounded) return "";
+          replace("ref", bounded);
+        }
+        if (/<(?:\w+:)?col\b/.test(opening)) {
+          const min = Math.max(1, Number(attributes.min ?? 1));
+          const max = Math.min(OFFICE_PREVIEW_MAX_COLUMNS, Number(attributes.max ?? 16384));
+          if (!Number.isInteger(min) || !Number.isInteger(max) || min > max) return "";
+          replace("min", String(min));
+          replace("max", String(max));
+        }
+        return tag;
+      },
+    );
   return {
     xml: emptyData
-      ? xml
+      ? metadata(xml)
       : `${metadata(xml.slice(0, dataStart))}${[...rows]
           .sort(([a], [b]) => a - b)
           .map(
@@ -370,7 +403,7 @@ function boundedWorksheet(
               `${rowTags.get(line) ?? `<row r="${line}">`}${[...values]
                 .sort(([a], [b]) => a - b)
                 .map(([, value]) => value)
-                .join("")}</row>`,
+                .join("")}</${/^<([^\s>]+)/.exec(rowTags.get(line) ?? "<row>")![1]}>`,
           )
           .join("")}${metadata(xml.slice(dataEnd))}`,
     truncated,
@@ -379,14 +412,17 @@ function boundedWorksheet(
 
 async function boundWorkbook(archive: JSZip) {
   const paths = new Map<string, string>();
+  let sharedPath = "xl/sharedStrings.xml";
   const relationships = xmlParser();
   relationships.on("opentag", (tag) => {
-    if (tag.local !== "Relationship" || !tag.attributes.Type?.value.endsWith("/worksheet")) return;
-    const target = tag.attributes.Target?.value ?? "";
-    paths.set(
-      tag.attributes.Id?.value ?? "",
-      target.startsWith("/") ? target.slice(1) : `xl/${target}`,
-    );
+    if (tag.local !== "Relationship") return;
+    const type = tag.attributes.Type?.value;
+    const path = new URL(
+      tag.attributes.Target?.value ?? "",
+      "https://docx.invalid/xl/workbook.xml",
+    ).pathname.slice(1);
+    if (type?.endsWith("/worksheet")) paths.set(tag.attributes.Id?.value ?? "", path);
+    if (type?.endsWith("/sharedStrings")) sharedPath = path;
   });
   relationships
     .write((await archive.file("xl/_rels/workbook.xml.rels")?.async("string")) ?? "")
@@ -403,7 +439,7 @@ async function boundWorkbook(archive: JSZip) {
   });
   workbook.write((await archive.file("xl/workbook.xml")?.async("string")) ?? "").close();
   const strings: string[] = [];
-  const shared = await archive.file("xl/sharedStrings.xml")?.async("string");
+  const shared = await archive.file(sharedPath)?.async("string");
   if (shared) {
     const parser = xmlParser();
     let text = "";
@@ -412,9 +448,11 @@ async function boundWorkbook(archive: JSZip) {
       if (tag.local === "si") text = "";
       if (tag.local === "t") reading = true;
     });
-    parser.on("text", (chunk) => {
+    const readSharedText = (chunk: string) => {
       if (reading) text += chunk;
-    });
+    };
+    parser.on("text", readSharedText);
+    parser.on("cdata", readSharedText);
     parser.on("closetag", (tag) => {
       if (tag.local === "t") reading = false;
       if (tag.local === "si") strings.push(text);
@@ -832,8 +870,8 @@ async function wordExpansion(
   }
   for (const [path, cost] of auxiliaryCosts) {
     if (optional.has(path) && !used.has(path)) continue;
-    bytes += cost.bytes * documents.length;
-    markup += cost.markup * documents.length;
+    bytes += cost.bytes;
+    markup += cost.markup;
   }
   const overBudget =
     bytes > 3 * 1024 * 1024 || markup > 100_000 || media > OFFICE_PREVIEW_MAX_BYTES;
@@ -1015,14 +1053,15 @@ export async function boundedArchive(input: Extract<OfficeWorkerRequest, { type:
       archive.remove(path);
       costs.delete(path);
     }
-    let bytes = 0;
-    let markup = 0;
     let mediaBytes = 0;
     const usedImages = new Set<string>();
     const auxiliary = [...costs.values()].reduce(
       (sum, cost) => ({ bytes: sum.bytes + cost.bytes, markup: sum.markup + cost.markup }),
       { bytes: 0, markup: 0 },
     );
+    // The worker engine parses shared parts once, rather than once per legacy render batch.
+    let bytes = auxiliary.bytes;
+    let markup = auxiliary.markup;
     const documents: string[] = [];
     for (const document of word.documents) {
       const rawCost = wordXmlCost(document, undefined);
@@ -1031,13 +1070,13 @@ export async function boundedArchive(input: Extract<OfficeWorkerRequest, { type:
       const images = extra.media;
       const batchImages = new Set(extra.images);
       if (
-        bytes + cost.bytes + auxiliary.bytes > 3 * 1024 * 1024 ||
-        markup + cost.markup + auxiliary.markup > 100_000 ||
+        bytes + cost.bytes > 3 * 1024 * 1024 ||
+        markup + cost.markup > 100_000 ||
         mediaBytes + images > OFFICE_PREVIEW_MAX_BYTES
       )
         break;
-      bytes += cost.bytes + auxiliary.bytes;
-      markup += cost.markup + auxiliary.markup;
+      bytes += cost.bytes;
+      markup += cost.markup;
       mediaBytes += images;
       for (const path of batchImages) usedImages.add(path);
       documents.push(document);

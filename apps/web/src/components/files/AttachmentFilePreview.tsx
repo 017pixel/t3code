@@ -229,8 +229,7 @@ export function AttachmentFilePreview(props: {
         if (!response.ok) throw new Error("The file could not be loaded. Try again.");
         file = await response.blob();
       }
-      // A Blob keeps cross-origin downloads inside the desktop client instead of
-      // navigating its custom app scheme to an external browser.
+      // Blob downloads keep desktop's custom app scheme from navigating to an external browser.
       const downloadUrl = URL.createObjectURL(file);
       // Scheduled before the click so the URL is revoked even if the click throws.
       setTimeout(() => URL.revokeObjectURL(downloadUrl), 30_000);

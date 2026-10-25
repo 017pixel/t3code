@@ -10,6 +10,7 @@ import {
   safeExternalHyperlink,
   parseHyperlinkLocation,
   type Selection,
+  type CellAddr,
 } from "@betteroffice/xlsx/headless";
 import { FileSurfaceLoading, FileSurfaceNotice } from "../fileSurfaceChrome";
 import { createWorkerClient, SupersededError } from "./worker-rpc";
@@ -33,7 +34,12 @@ import {
 import { externalUrl } from "./links";
 
 type Client = ReturnType<typeof createWorkerClient<SheetMethods>>;
-type Opened = { engine: Client; tabs: readonly SheetTab[]; layout: SheetLayout };
+type Opened = {
+  engine: Client;
+  tabs: readonly SheetTab[];
+  layout: SheetLayout;
+  target?: CellAddr | undefined;
+};
 export default function Spreadsheet(props: {
   bytes: ArrayBuffer;
   onDetails: (text: string) => void;
@@ -69,16 +75,17 @@ export default function Spreadsheet(props: {
       engine.close();
     };
   }, [source, onDetails, onError]);
-  const show = (sheet: number) => {
-    if (!opened || sheet === opened.layout.info.activeSheet) return;
+  const show = (sheet: number, target?: CellAddr) => {
+    if (!opened) return;
     picking.current?.abort();
+    if (sheet === opened.layout.info.activeSheet) return;
     const controller = new AbortController();
     picking.current = controller;
     void opened.engine
       .call("show", { sheet }, { signal: controller.signal })
       .then((layout) => {
         setError("");
-        setOpened({ ...opened, layout });
+        setOpened({ ...opened, layout, target });
       })
       .catch(() => {
         if (!controller.signal.aborted) setError("This sheet could not be opened.");
@@ -92,9 +99,10 @@ export default function Spreadsheet(props: {
         key={opened.layout.info.activeSheet}
         engine={opened.engine}
         layout={opened.layout}
-        onNavigate={(name) => {
+        initialCell={opened.target}
+        onNavigate={(name, cell) => {
           const tab = opened.tabs.find((tab) => tab.name.toLowerCase() === name.toLowerCase());
-          if (tab) show(tab.index);
+          if (tab) show(tab.index, cell);
         }}
       />
       <div
@@ -143,9 +151,10 @@ export default function Spreadsheet(props: {
 function SpreadsheetGrid(props: {
   engine: Client;
   layout: SheetLayout;
-  onNavigate: (sheet: string) => void;
+  initialCell: CellAddr | undefined;
+  onNavigate: (sheet: string, cell: CellAddr) => void;
 }) {
-  const { onNavigate, layout, engine } = props;
+  const { onNavigate, layout, engine, initialCell } = props;
   const scroller = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const spacer = useRef<HTMLDivElement>(null);
@@ -168,7 +177,7 @@ function SpreadsheetGrid(props: {
     const sheet = info.activeSheet;
     const frozen = { rows: info.frozenRows, cols: info.frozenCols };
     const headers = { width: 44, height: headerHeight };
-    let selection: Selection = selectionAt({ row: 0, col: 0 });
+    let selection: Selection = selectionAt(initialCell ?? { row: 0, col: 0 });
     let painted: Painted | undefined;
     let grid: ReturnType<typeof shiftGrid> | undefined;
     let raf = 0;
@@ -176,6 +185,7 @@ function SpreadsheetGrid(props: {
     let sent = 0;
     let received = 0;
     let drag = false;
+    let header: "row" | "column" | "all" | undefined;
     let pressed: { row: number; col: number } | undefined;
     let end: { x: number; y: number } | undefined;
     let left = info.initialScrollX;
@@ -230,7 +240,8 @@ function SpreadsheetGrid(props: {
       const key = JSON.stringify(input);
       if (key !== requested) {
         requested = key;
-        const order = ++sent;
+        sent += 1;
+        const order = sent;
         void engine
           .call("frame", input, { key: "frame", signal: controller.signal })
           .then((reply) => {
@@ -360,6 +371,13 @@ function SpreadsheetGrid(props: {
       const rect = target.getBoundingClientRect();
       const x = event.clientX - rect.left - headers.width;
       const y = event.clientY - rect.top - headers.height;
+      const frame = painted?.frame;
+      if (
+        frame &&
+        ((x >= frame.frozen.width && x < frame.frozen.width + frame.viewport.x - left) ||
+          (y >= frame.frozen.height && y < frame.frozen.height + frame.viewport.y - top))
+      )
+        return;
       const cell = cellAtPoint(
         grid,
         Math.max(0, Math.min(x, root.clientWidth - headers.width - 1)),
@@ -374,7 +392,8 @@ function SpreadsheetGrid(props: {
       root.focus({ preventScroll: true });
       root.setPointerCapture(event.pointerId);
       drag = true;
-      pressed = found.cell;
+      header = found.x < 0 ? (found.y < 0 ? "all" : "row") : found.y < 0 ? "column" : undefined;
+      pressed = header ? undefined : found.cell;
       if (found.x < 0 && found.y < 0)
         select({ anchor: { row: lastCell.row, col: lastCell.col }, focus: { row: 0, col: 0 } });
       else if (found.x < 0)
@@ -392,7 +411,13 @@ function SpreadsheetGrid(props: {
     const pointerMove = (event: PointerEvent) => {
       if (!drag) return;
       const found = hit(event);
-      if (found) select(extendTo(selection, found.cell));
+      if (found && header !== "all")
+        select(
+          extendTo(selection, {
+            row: header === "column" ? 0 : found.cell.row,
+            col: header === "row" ? 0 : found.cell.col,
+          }),
+        );
     };
     const pointerUp = (event: PointerEvent) => {
       drag = false;
@@ -418,7 +443,7 @@ function SpreadsheetGrid(props: {
         link.location && parseHyperlinkLocation(link.location, info.sheetNames[sheet] ?? "");
       if (!internal) return;
       if (internal.sheetName.toLowerCase() !== (info.sheetNames[sheet] ?? "").toLowerCase())
-        navigate.current(internal.sheetName);
+        navigate.current(internal.sheetName, { row: internal.row, col: internal.col });
       else {
         select(at({ row: internal.row, col: internal.col }));
         reveal();
@@ -483,6 +508,10 @@ function SpreadsheetGrid(props: {
     window.addEventListener("resize", schedule);
     resizeArea();
     root.scrollTo({ left, top });
+    if (initialCell) {
+      selection = at(initialCell);
+      reveal();
+    }
     read();
     schedule();
     return () => {
@@ -499,7 +528,7 @@ function SpreadsheetGrid(props: {
       root.removeEventListener("pointerup", pointerUp);
       root.removeEventListener("pointercancel", cancel);
     };
-  }, [engine, layout]);
+  }, [engine, layout, initialCell]);
   return (
     <div className="relative flex min-h-0 flex-1">
       <div
