@@ -3077,12 +3077,17 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 createModelSelection(instanceKey, fallbackModel);
               const rememberedModel =
                 normalizeModelSlug(options?.model, normalizedProvider) ?? stickyBase.model;
+              // Traits for another shown model belong in per-model memory only;
+              // the sticky selection keeps its own model's traits.
+              const appliesToSticky = rememberedModel === stickyBase.model;
               if (providerOpts) {
-                nextStickyMap[instanceKey] = createModelSelection(
-                  instanceKey,
-                  stickyBase.model,
-                  providerOpts,
-                );
+                if (appliesToSticky) {
+                  nextStickyMap[instanceKey] = createModelSelection(
+                    instanceKey,
+                    stickyBase.model,
+                    providerOpts,
+                  );
+                }
                 nextOptionsByModel = {
                   ...state.stickyOptionsByModelByProvider,
                   [instanceKey]: {
@@ -3090,9 +3095,11 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                     [rememberedModel]: providerOpts,
                   },
                 };
-              } else if ((stickyBase.options?.length ?? 0) > 0) {
-                const { options: _, ...rest } = stickyBase;
-                nextStickyMap[instanceKey] = rest as ModelSelection;
+              } else {
+                if (appliesToSticky && (stickyBase.options?.length ?? 0) > 0) {
+                  const { options: _, ...rest } = stickyBase;
+                  nextStickyMap[instanceKey] = rest as ModelSelection;
+                }
                 const rememberedByModel = {
                   ...state.stickyOptionsByModelByProvider[instanceKey],
                 };

@@ -1673,6 +1673,38 @@ describe("composerDraftStore per-model sticky options", () => {
     );
   });
 
+  it("keeps the sticky model's own traits when traits change on another shown model", () => {
+    const store = useComposerDraftStore.getState();
+    store.setStickyModelSelection(
+      modelSelection(CODEX_DRIVER, "gpt-5.3-codex", { reasoningEffort: "xhigh" }),
+    );
+
+    store.setProviderModelOptions(
+      threadRef,
+      CODEX_DRIVER,
+      toSelections({ reasoningEffort: "low" }),
+      { instanceId: CODEX_INSTANCE, model: "gpt-5.4", persistSticky: true },
+    );
+    expect(useComposerDraftStore.getState().stickyModelSelectionByProvider[CODEX_INSTANCE]).toEqual(
+      modelSelection(CODEX_DRIVER, "gpt-5.3-codex", { reasoningEffort: "xhigh" }),
+    );
+    expect(
+      useComposerDraftStore.getState().stickyOptionsByModelByProvider[CODEX_INSTANCE]?.["gpt-5.4"],
+    ).toEqual(toSelections({ reasoningEffort: "low" }));
+
+    store.setProviderModelOptions(threadRef, CODEX_DRIVER, null, {
+      instanceId: CODEX_INSTANCE,
+      model: "gpt-5.4",
+      persistSticky: true,
+    });
+
+    const state = useComposerDraftStore.getState();
+    expect(state.stickyModelSelectionByProvider[CODEX_INSTANCE]).toEqual(
+      modelSelection(CODEX_DRIVER, "gpt-5.3-codex", { reasoningEffort: "xhigh" }),
+    );
+    expect(state.stickyOptionsByModelByProvider[CODEX_INSTANCE]?.["gpt-5.4"]).toBeUndefined();
+  });
+
   it("seeds per-model memory from a persisted sticky selection on upgrade", () => {
     const persistApi = useComposerDraftStore.persist as unknown as {
       getOptions: () => {
