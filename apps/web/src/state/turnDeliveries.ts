@@ -1,4 +1,3 @@
-import { AVAILABLE_CONNECTION_STATE } from "@t3tools/client-runtime/connection";
 import { EMPTY_ENVIRONMENT_THREAD_STATE } from "@t3tools/client-runtime/state/threads";
 import {
   createTurnDeliveries,
@@ -9,9 +8,10 @@ import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
 import { useSyncExternalStore } from "react";
 
-import { environmentCatalog } from "../connection/catalog";
+import { revokeUserMessagePreviewUrls } from "../components/ChatView.logic";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import type { ChatMessage } from "../types";
+import { environmentShell } from "./shell";
 import { environmentThreadStateAtom, threadEnvironment } from "./threads";
 import { runOrchestrationCommand } from "./use-orchestration-command";
 
@@ -30,13 +30,11 @@ export const turnDeliveries = createTurnDeliveries<unknown, unknown, ChatMessage
         listener(Option.getOrElse(AsyncResult.value(result), () => EMPTY_ENVIRONMENT_THREAD_STATE)),
       { immediate: true },
     ),
-  observeConnection: (environmentId, listener) =>
-    appAtomRegistry.subscribe(
-      environmentCatalog.stateAtom(environmentId),
-      (result) =>
-        listener(Option.getOrElse(AsyncResult.value(result), () => AVAILABLE_CONNECTION_STATE)),
-      { immediate: true },
-    ),
+  observeShell: (environmentId, listener) =>
+    appAtomRegistry.subscribe(environmentShell.stateValueAtom(environmentId), listener, {
+      immediate: true,
+    }),
+  releaseDisplay: revokeUserMessagePreviewUrls,
 });
 
 const EMPTY: ReadonlyArray<PendingTurnDelivery<ChatMessage>> = [];

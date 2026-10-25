@@ -275,7 +275,7 @@ function UserMessageProjectedStatus({ row }: { row: Extract<TimelineRow, { kind:
 function UserMessageDeliveryStatus({ messageId }: { messageId: MessageId }) {
   const ctx = use(TimelineRowCtx);
   const delivery = usePendingTurnDelivery(ctx.activeThreadEnvironmentId, messageId);
-  if (delivery === null) return null;
+  if (delivery === null || delivery.state === "delivered") return null;
   return (
     <div
       className="me-1 flex items-center gap-1.5 text-xs text-muted-foreground"

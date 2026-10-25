@@ -1,5 +1,6 @@
 import {
   AuthOrchestrationOperateScope,
+  CommandId,
   type EnvironmentId,
   type ModelSelection,
   type ProviderInteractionMode,
@@ -20,7 +21,7 @@ import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { truncate } from "@t3tools/shared/String";
 import { useNavigate } from "@tanstack/react-router";
 import type { Dispatch, SetStateAction } from "react";
-import { newMessageId, newThreadId } from "~/lib/utils";
+import { newMessageId, newThreadId, randomUUID } from "~/lib/utils";
 import { useComposerDraftStore } from "../../composerDraftStore";
 import type { ComposerHandleRef } from "../../composerHandleContext";
 import type { buildMessageContext } from "../../lib/composerContextRecords";
@@ -31,6 +32,8 @@ import {
 import type { LatestProposedPlanState } from "../../session-logic";
 import { readEnvironmentScope } from "../../state/session";
 import { threadEnvironment } from "../../state/threads";
+import { turnDeliveries } from "../../state/turnDeliveries";
+import type { TurnDeliveryFailure } from "@t3tools/client-runtime/state/turn-delivery";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import type { ChatMessage } from "../../types";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -76,7 +79,8 @@ interface PlanFollowUpSendInput extends PlanSendBase {
 
 /**
  * Answers a proposed plan on this thread: refine it in plan mode, or implement it here
- * (which links the turn to the plan). Resolves whether the turn started.
+ * (which links the turn to the plan). Resolves whether the turn started or is waiting to send;
+ * `restoreUnsent` runs if a waiting one is later refused or cancelled.
  */
 export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
   const {
@@ -97,9 +101,6 @@ export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
     anchorNewTurn,
     persistThreadSettingsForNextTurn,
   } = input;
-  const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
-    reportFailure: false,
-  });
   const setComposerDraftInteractionMode = useComposerDraftStore(
     (store) => store.setInteractionMode,
   );
@@ -109,10 +110,12 @@ export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
     text,
     context,
     interactionMode: nextInteractionMode,
+    restoreUnsent,
   }: {
     text: string;
     context?: ReturnType<typeof buildMessageContext>;
     interactionMode: "default" | "plan";
+    restoreUnsent: () => void;
   }) {
     if (
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
@@ -155,19 +158,29 @@ export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
       messageIdForSend,
     );
 
-    setOptimisticUserMessages((existing) => [
-      ...existing,
-      {
-        id: messageIdForSend,
-        role: "user",
-        text: outgoingMessageText,
-        ...(context ? { context } : {}),
-        runId: null,
-        createdAt: messageCreatedAt,
-        updatedAt: messageCreatedAt,
-        streaming: false,
-      },
-    ]);
+    const optimisticMessage: ChatMessage = {
+      id: messageIdForSend,
+      role: "user",
+      text: outgoingMessageText,
+      ...(context ? { context } : {}),
+      runId: null,
+      createdAt: messageCreatedAt,
+      updatedAt: messageCreatedAt,
+      streaming: false,
+    };
+    setOptimisticUserMessages((existing) => [...existing, optimisticMessage]);
+    const dropOptimisticMessage = () =>
+      setOptimisticUserMessages((existing) =>
+        existing.filter((message) => message.id !== messageIdForSend),
+      );
+    const reportFailure = (failure: TurnDeliveryFailure) => {
+      if (isAtomCommandInterrupted(failure)) return;
+      const error = squashAtomCommandFailure(failure);
+      setThreadError(
+        threadIdForSend,
+        error instanceof Error ? error.message : "Failed to send plan follow-up.",
+      );
+    };
 
     const settingsResult = await persistThreadSettingsForNextTurn({
       threadId: threadIdForSend,
@@ -176,8 +189,9 @@ export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
       runtimeMode,
       interactionMode: nextInteractionMode,
     });
-    let failure: AtomCommandResult<unknown, unknown> | null =
+    let failure: TurnDeliveryFailure | null =
       settingsResult._tag === "Failure" ? settingsResult : null;
+    let cancelled = false;
 
     if (failure === null) {
       setComposerDraftInteractionMode(
@@ -185,9 +199,10 @@ export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
         nextInteractionMode,
       );
 
-      const startResult = await startThreadTurn({
+      const outcome = await turnDeliveries.deliver(
         environmentId,
-        input: {
+        {
+          commandId: CommandId.make(randomUUID()),
           threadId: threadIdForSend,
           message: {
             messageId: messageIdForSend,
@@ -210,26 +225,28 @@ export function usePlanFollowUpSend(input: PlanFollowUpSendInput) {
             : {}),
           createdAt: messageCreatedAt,
         },
-      });
-      failure = startResult._tag === "Failure" ? startResult : null;
+        () => optimisticMessage,
+      );
+      if (outcome.type === "rejected") failure = outcome.failure;
+      if (outcome.type === "cancelled") cancelled = true;
+      if (outcome.type === "waiting") {
+        void outcome.settled.then((end) => {
+          if (end.type === "delivered") return;
+          dropOptimisticMessage();
+          if (end.type === "rejected") reportFailure(end.failure);
+          restoreUnsent();
+        });
+      }
     }
 
-    if (failure === null) {
+    if (failure === null && !cancelled) {
       sendInFlightRef.current = false;
       resetLocalDispatch();
       return true;
     }
 
-    setOptimisticUserMessages((existing) =>
-      existing.filter((message) => message.id !== messageIdForSend),
-    );
-    if (!isAtomCommandInterrupted(failure)) {
-      const error = squashAtomCommandFailure(failure);
-      setThreadError(
-        threadIdForSend,
-        error instanceof Error ? error.message : "Failed to send plan follow-up.",
-      );
-    }
+    dropOptimisticMessage();
+    if (failure !== null) reportFailure(failure);
     sendInFlightRef.current = false;
     resetLocalDispatch();
     return false;

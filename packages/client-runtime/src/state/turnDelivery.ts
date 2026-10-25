@@ -3,7 +3,6 @@ import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
 
-import type { SupervisorConnectionState } from "../connection/model.ts";
 import { isRetryableDeliveryFailure } from "../errors/transport.ts";
 import type { StartThreadTurnInput } from "../operations/commands.ts";
 import {
@@ -11,6 +10,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "./runtime.ts";
+import type { EnvironmentShellState } from "./shell.ts";
 import type { EnvironmentThreadState } from "./threadState.ts";
 
 export type TurnDeliveryInput = StartThreadTurnInput & { readonly commandId: CommandId };
@@ -33,11 +33,12 @@ export interface PendingTurnDelivery<M> {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly messageId: MessageId;
-  readonly state: "waiting" | "retrying";
+  /** `delivered` rows stay until the thread shows the message, since they may be its only copy. */
+  readonly state: "waiting" | "retrying" | "delivered";
   readonly display: M;
 }
 
-interface TurnDeliveryDependencies<A, E> {
+interface TurnDeliveryDependencies<A, E, M> {
   readonly send: (
     environmentId: EnvironmentId,
     input: TurnDeliveryInput,
@@ -49,24 +50,29 @@ interface TurnDeliveryDependencies<A, E> {
     listener: (state: EnvironmentThreadState) => void,
   ) => () => void;
   /** Must call the listener with the current state before returning. */
-  readonly observeConnection: (
+  readonly observeShell: (
     environmentId: EnvironmentId,
-    listener: (state: SupervisorConnectionState) => void,
+    listener: (state: EnvironmentShellState) => void,
   ) => () => void;
+  /** Frees a display made by `deliver`'s factory once no pending row shows it. */
+  readonly releaseDisplay: (display: M) => void;
 }
 
 interface Entry<A, M> {
-  readonly pending: Omit<PendingTurnDelivery<M>, "state">;
+  readonly key: string;
+  readonly environmentId: EnvironmentId;
   readonly input: TurnDeliveryInput;
-  readonly launch: boolean;
-  state: "sending" | "waiting";
-  failedOnce: boolean;
+  readonly createDisplay: () => M;
+  /** Made on the first lost acknowledgement, so a send that lands at once owns nothing. */
+  display: M | null;
+  /** Observing a thread that does not exist yet would park its state as deleted. */
+  unborn: boolean;
+  state: "sending" | "waiting" | "delivered";
   cancelRequested: boolean;
-  /** The thread left live sync since the last dispatch. */
+  /** The thread, or for an unborn one the shell, left live sync since the last dispatch. */
   resynced: boolean;
   thread: EnvironmentThreadState | null;
-  connection: SupervisorConnectionState | null;
-  dispatchGeneration: number;
+  shell: EnvironmentShellState | null;
   settle: (end: TurnDeliveryEnd<A>) => void;
   stopObserving: Array<() => void>;
 }
@@ -91,58 +97,114 @@ function threadHoldsUserMessage(state: EnvironmentThreadState, messageId: Messag
   });
 }
 
+function shellHoldsThread(state: EnvironmentShellState, threadId: ThreadId): boolean {
+  return Option.match(state.snapshot, {
+    onNone: () => false,
+    onSome: (snapshot) =>
+      snapshot.threads.some((thread) => thread.id === threadId) ||
+      snapshot.archivedThreads.some((thread) => thread.id === threadId),
+  });
+}
+
 /**
  * Keeps a send whose acknowledgement was lost until the thread resyncs on a later session, then
  * settles it when the server already holds the message or replays the same command otherwise.
  * Waiting happens here, outside the thread's serial command lane, so Stop is never held behind it.
  */
-export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, E>) {
+export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, E, M>) {
   const entries = new Map<string, Entry<A, M>>();
   const listeners = new Set<() => void>();
   let snapshot: ReadonlyArray<PendingTurnDelivery<M>> = [];
 
   const publish = () => {
     snapshot = [...entries.values()].flatMap((entry) =>
-      entry.failedOnce
-        ? [
+      entry.display === null
+        ? []
+        : [
             {
-              ...entry.pending,
-              state: entry.state === "waiting" ? ("waiting" as const) : ("retrying" as const),
+              key: entry.key,
+              environmentId: entry.environmentId,
+              threadId: entry.input.threadId,
+              messageId: entry.input.message.messageId,
+              state: entry.state === "sending" ? ("retrying" as const) : entry.state,
+              display: entry.display,
             },
-          ]
-        : [],
+          ],
     );
     for (const listener of listeners) listener();
   };
 
-  const finish = (entry: Entry<A, M>, end: TurnDeliveryEnd<A>) => {
-    if (entries.get(entry.pending.key) !== entry) return;
-    entries.delete(entry.pending.key);
+  const remove = (entry: Entry<A, M>) => {
+    if (entries.get(entry.key) !== entry) return;
+    entries.delete(entry.key);
     for (const stop of entry.stopObserving) stop();
-    if (entry.failedOnce) publish();
-    entry.settle(end);
+    entry.stopObserving = [];
+    if (entry.display === null) return;
+    publish();
+    deps.releaseDisplay(entry.display);
   };
 
-  // A launch's thread may not exist yet, and its command receipt makes a replay safe.
-  const readyToReplay = (entry: Entry<A, M>) =>
-    entry.launch
-      ? entry.connection?.phase === "connected" &&
-        entry.connection.generation > entry.dispatchGeneration
-      : entry.resynced && entry.thread?.status === "live";
+  const observeThread = (entry: Entry<A, M>) => {
+    entry.stopObserving.push(
+      deps.observeThread(entry.environmentId, entry.input.threadId, (state) => {
+        entry.thread = state;
+        if (state.status !== "live") entry.resynced = true;
+        evaluate(entry);
+      }),
+    );
+  };
 
-  const evaluate = (entry: Entry<A, M>) => {
-    if (entry.state !== "waiting") return;
-    if (!entry.launch && entry.thread?.status === "deleted") {
-      finish(entry, {
-        type: "rejected",
-        failure: AsyncResult.failure(Cause.fail(new Error("The thread was deleted."))),
-      });
+  const finish = (entry: Entry<A, M>, end: TurnDeliveryEnd<A>) => {
+    if (entries.get(entry.key) !== entry) return;
+    entry.settle(end);
+    if (end.type !== "delivered" || entry.display === null) {
+      remove(entry);
       return;
     }
-    if (!readyToReplay(entry)) return;
-    if (!entry.launch && threadHoldsUserMessage(entry.thread!, entry.pending.messageId)) {
-      finish(entry, { type: "delivered", value: null });
+    entry.state = "delivered";
+    publish();
+    if (entry.unborn) {
+      // Acknowledged, so the thread exists now.
+      entry.unborn = false;
+      observeThread(entry);
       return;
+    }
+    evaluate(entry);
+  };
+
+  const evaluate = (entry: Entry<A, M>) => {
+    const messageId = entry.input.message.messageId;
+    if (entry.state === "delivered") {
+      if (
+        entry.thread !== null &&
+        (entry.thread.status === "deleted" || threadHoldsUserMessage(entry.thread, messageId))
+      ) {
+        remove(entry);
+      }
+      return;
+    }
+    if (entry.state !== "waiting") return;
+    if (entry.unborn) {
+      if (!entry.resynced || entry.shell?.status !== "live") return;
+      if (shellHoldsThread(entry.shell, entry.input.threadId)) {
+        // The launch committed; its pending uploads may have expired, so reconcile, never replay.
+        entry.unborn = false;
+        observeThread(entry);
+        return;
+      }
+    } else {
+      if (entry.thread?.status === "deleted") {
+        finish(entry, {
+          type: "rejected",
+          failure: AsyncResult.failure(Cause.fail(new Error("The thread was deleted."))),
+        });
+        return;
+      }
+      if (!entry.resynced || entry.thread?.status !== "live") return;
+      if (threadHoldsUserMessage(entry.thread, messageId)) {
+        finish(entry, { type: "delivered", value: null });
+        return;
+      }
     }
     void dispatch(entry).then((end) => {
       if (end !== null) finish(entry, end);
@@ -152,9 +214,8 @@ export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, 
   const dispatch = async (entry: Entry<A, M>): Promise<TurnDeliveryEnd<A> | null> => {
     entry.state = "sending";
     entry.resynced = false;
-    entry.dispatchGeneration = entry.connection?.generation ?? 0;
-    if (entry.failedOnce) publish();
-    const result = await deps.send(entry.pending.environmentId, entry.input);
+    if (entry.display !== null) publish();
+    const result = await deps.send(entry.environmentId, entry.input);
     if (result._tag === "Success") return { type: "delivered", value: result.value };
     const retryable =
       isAtomCommandInterrupted(result) ||
@@ -162,7 +223,7 @@ export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, 
     if (entry.cancelRequested) return { type: "cancelled" };
     if (!retryable) return { type: "rejected", failure: result };
     entry.state = "waiting";
-    entry.failedOnce = true;
+    entry.display ??= entry.createDisplay();
     publish();
     evaluate(entry);
     return null;
@@ -171,7 +232,7 @@ export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, 
   const deliver = async (
     environmentId: EnvironmentId,
     input: TurnDeliveryInput,
-    display: M,
+    createDisplay: () => M,
   ): Promise<TurnDeliveryOutcome<A>> => {
     const key = turnDeliveryKey(environmentId, input.threadId, input.message.messageId);
     let settle!: (end: TurnDeliveryEnd<A>) => void;
@@ -179,43 +240,36 @@ export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, 
       settle = resolve;
     });
     const entry: Entry<A, M> = {
-      pending: {
-        key,
-        environmentId,
-        threadId: input.threadId,
-        messageId: input.message.messageId,
-        display,
-      },
+      key,
+      environmentId,
       input,
-      // Observing a thread that does not exist yet would park its state as deleted.
-      launch: input.bootstrap?.createThread !== undefined,
+      createDisplay,
+      display: null,
+      unborn: input.bootstrap?.createThread !== undefined,
       state: "sending",
-      failedOnce: false,
       cancelRequested: false,
       resynced: false,
       thread: null,
-      connection: null,
-      dispatchGeneration: 0,
+      shell: null,
       settle,
       stopObserving: [],
     };
     const previous = entries.get(key);
-    if (previous !== undefined) finish(previous, { type: "cancelled" });
+    if (previous !== undefined) {
+      previous.settle({ type: "cancelled" });
+      remove(previous);
+    }
     entries.set(key, entry);
-    entry.stopObserving.push(
-      deps.observeConnection(environmentId, (state) => {
-        entry.connection = state;
-        evaluate(entry);
-      }),
-    );
-    if (!entry.launch) {
+    if (entry.unborn) {
       entry.stopObserving.push(
-        deps.observeThread(environmentId, input.threadId, (state) => {
-          entry.thread = state;
-          if (state.status !== "live") entry.resynced = true;
+        deps.observeShell(environmentId, (state) => {
+          entry.shell = state;
+          if (entry.unborn && state.status !== "live") entry.resynced = true;
           evaluate(entry);
         }),
       );
+    } else {
+      observeThread(entry);
     }
     const end = await dispatch(entry);
     if (end === null) return { type: "waiting", settled };
@@ -226,7 +280,7 @@ export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, 
   /** Stops local delivery only; a command the server already committed stays committed. */
   const cancel = (key: string) => {
     const entry = entries.get(key);
-    if (entry === undefined) return;
+    if (entry === undefined || entry.state === "delivered") return;
     if (entry.state === "waiting") {
       finish(entry, { type: "cancelled" });
       return;

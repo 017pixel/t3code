@@ -26,6 +26,7 @@ import { newThreadId } from "~/lib/utils";
 import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
+  composerDraftHasUserContent,
   useComposerDraftStore,
   DraftId,
 } from "../../composerDraftStore";
@@ -252,24 +253,44 @@ export async function rewindToMessage(input: {
 }
 
 /**
- * Writes a failed send's composer contents back into its draft. Returns the
- * restored images, which are fresh copies so their preview URLs outlive the
- * optimistic row that held the originals.
+ * Writes an unsent message's composer contents back into its draft, after any newer draft
+ * started meanwhile. Images are fresh copies, so their previews outlive the optimistic row.
  */
 export function restoreComposerDraft(
   draftTarget: ScopedThreadRef | DraftId,
   snapshot: ComposerSendSnapshot,
-): ComposerImageAttachment[] {
+): void {
   const store = useComposerDraftStore.getState();
-  const images = snapshot.images.map(cloneComposerImageForRetry);
-  store.setPrompt(draftTarget, snapshot.messageText);
-  store.addImages(draftTarget, images);
-  store.addFiles(draftTarget, snapshot.files);
-  store.setTerminalContexts(draftTarget, snapshot.terminalContexts);
-  store.setPreviewAnnotations(draftTarget, snapshot.previewAnnotations);
-  store.setReviewComments(draftTarget, snapshot.reviewComments);
-  store.setThreadContexts(draftTarget, snapshot.threadContexts);
-  return images;
+  const current = store.getComposerDraft(draftTarget);
+  const newer = composerDraftHasUserContent(current) ? current : null;
+  store.setPrompt(
+    draftTarget,
+    newer === null
+      ? snapshot.messageText
+      : snapshot.messageText.length === 0
+        ? newer.prompt
+        : `${newer.prompt.trimEnd()}\n\n${snapshot.messageText}`,
+  );
+  store.addImages(draftTarget, snapshot.images.map(cloneComposerImageForRetry), {
+    allowDuplicates: true,
+  });
+  store.addFiles(draftTarget, snapshot.files, { allowDuplicates: true });
+  store.setTerminalContexts(draftTarget, [
+    ...(newer?.terminalContexts ?? []),
+    ...snapshot.terminalContexts,
+  ]);
+  store.setPreviewAnnotations(draftTarget, [
+    ...(newer?.previewAnnotations ?? []),
+    ...snapshot.previewAnnotations,
+  ]);
+  store.setReviewComments(draftTarget, [
+    ...(newer?.reviewComments ?? []),
+    ...snapshot.reviewComments,
+  ]);
+  store.setThreadContexts(draftTarget, [
+    ...(newer?.threadContexts ?? []),
+    ...snapshot.threadContexts,
+  ]);
 }
 
 export interface MultipleModelTarget {

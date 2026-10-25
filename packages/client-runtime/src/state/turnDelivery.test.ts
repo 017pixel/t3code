@@ -5,6 +5,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -12,8 +13,8 @@ import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
 import { describe, expect, it } from "vite-plus/test";
 
-import { AVAILABLE_CONNECTION_STATE, type SupervisorConnectionState } from "../connection/model.ts";
 import type { AtomCommandResult } from "./runtime.ts";
+import { EMPTY_SHELL_STATE, type EnvironmentShellState } from "./shell.ts";
 import { EMPTY_ENVIRONMENT_THREAD_STATE, type EnvironmentThreadState } from "./threadState.ts";
 import { createTurnDeliveries, type TurnDeliveryInput } from "./turnDelivery.ts";
 
@@ -62,12 +63,25 @@ const REJECTED: SendResult = AsyncResult.failure(
 );
 const ACCEPTED: SendResult = AsyncResult.success({ sequence: 7 });
 
-function connection(
-  phase: SupervisorConnectionState["phase"],
-  generation: number,
-): SupervisorConnectionState {
-  return { ...AVAILABLE_CONNECTION_STATE, phase, generation };
+function shell(
+  status: EnvironmentShellState["status"],
+  threadIds: ReadonlyArray<ThreadId> = [],
+): EnvironmentShellState {
+  return {
+    ...EMPTY_SHELL_STATE,
+    status,
+    snapshot: Option.some({
+      threads: threadIds.map((id) => ({ id })),
+      archivedThreads: [],
+    } as unknown as OrchestrationV2ShellSnapshot),
+  };
 }
+
+const HELD = thread("live", {
+  messages: [
+    { id: MESSAGE_ID, role: "user" } as OrchestrationV2ThreadProjection["messages"][number],
+  ],
+});
 
 function thread(
   status: EnvironmentThreadState["status"],
@@ -85,12 +99,17 @@ function thread(
   };
 }
 
-function setup(results: ReadonlyArray<SendResult | Promise<SendResult>>) {
+function setup(
+  results: ReadonlyArray<SendResult | Promise<SendResult>>,
+  initialThread = thread("live"),
+) {
   const queue = [...results];
   const sent: Array<TurnDeliveryInput> = [];
   let threadListener: ((state: EnvironmentThreadState) => void) | null = null;
-  let connectionListener: ((state: SupervisorConnectionState) => void) | null = null;
+  let shellListener: ((state: EnvironmentShellState) => void) | null = null;
   let threadObservations = 0;
+  let displaysMade = 0;
+  const released: Array<string> = [];
   const deliveries = createTurnDeliveries<{ sequence: number }, unknown, string>({
     send: async (_environmentId, input) => {
       sent.push(input);
@@ -99,30 +118,39 @@ function setup(results: ReadonlyArray<SendResult | Promise<SendResult>>) {
     observeThread: (_environmentId, _threadId, listener) => {
       threadObservations += 1;
       threadListener = listener;
-      listener(thread("live"));
+      listener(initialThread);
       return () => {
         threadListener = null;
       };
     },
-    observeConnection: (_environmentId, listener) => {
-      connectionListener = listener;
-      listener(connection("connected", 1));
+    observeShell: (_environmentId, listener) => {
+      shellListener = listener;
+      listener(shell("live"));
       return () => {
-        connectionListener = null;
+        shellListener = null;
       };
+    },
+    releaseDisplay: (display) => {
+      released.push(display);
     },
   });
   return {
     deliveries,
     sent,
+    released,
     threadObservations: () => threadObservations,
+    displaysMade: () => displaysMade,
+    makeDisplay: () => {
+      displaysMade += 1;
+      return "optimistic row";
+    },
     emitThread: (state: EnvironmentThreadState) => threadListener?.(state),
-    emitConnection: (state: SupervisorConnectionState) => connectionListener?.(state),
+    emitShell: (state: EnvironmentShellState) => shellListener?.(state),
   };
 }
 
 async function deliverUntilWaiting(harness: ReturnType<typeof setup>, input = INPUT) {
-  const outcome = await harness.deliveries.deliver(ENVIRONMENT_ID, input, "optimistic row");
+  const outcome = await harness.deliveries.deliver(ENVIRONMENT_ID, input, harness.makeDisplay);
   expect(outcome.type).toBe("waiting");
   if (outcome.type !== "waiting") throw new Error(`Expected waiting, got ${outcome.type}.`);
   // Wrapped: an async function returning the promise would wait for it to settle.
@@ -164,7 +192,23 @@ describe("turn deliveries", () => {
 
     expect(await settled).toEqual({ type: "delivered", value: { sequence: 7 } });
     expect(harness.sent).toEqual([INPUT, INPUT]);
+  });
+
+  it("keeps an acknowledged replay on screen until the thread shows the message", async () => {
+    const harness = setup([LOST_ACK, ACCEPTED]);
+    const { settled } = await deliverUntilWaiting(harness);
+
+    harness.emitThread(thread("synchronizing"));
+    harness.emitThread(thread("live"));
+    await settled;
+
+    expect(harness.deliveries.getSnapshot()).toEqual([
+      expect.objectContaining({ state: "delivered", display: "optimistic row" }),
+    ]);
+    expect(harness.released).toEqual([]);
+    harness.emitThread(HELD);
     expect(harness.deliveries.getSnapshot()).toEqual([]);
+    expect(harness.released).toEqual(["optimistic row"]);
   });
 
   it("settles without a resend when the resynced thread already holds the message", async () => {
@@ -172,16 +216,11 @@ describe("turn deliveries", () => {
     const { settled } = await deliverUntilWaiting(harness);
 
     harness.emitThread(thread("synchronizing"));
-    harness.emitThread(
-      thread("live", {
-        messages: [
-          { id: MESSAGE_ID, role: "user" } as OrchestrationV2ThreadProjection["messages"][number],
-        ],
-      }),
-    );
+    harness.emitThread(HELD);
 
     expect(await settled).toEqual({ type: "delivered", value: null });
     expect(harness.sent).toHaveLength(1);
+    expect(harness.deliveries.getSnapshot()).toEqual([]);
   });
 
   it("settles without a resend when the resynced thread queued the message", async () => {
@@ -216,6 +255,7 @@ describe("turn deliveries", () => {
     harness.emitThread(thread("live"));
     expect(harness.sent).toHaveLength(2);
     expect(harness.deliveries.getSnapshot()).toEqual([]);
+    expect(harness.released).toEqual(["optimistic row"]);
   });
 
   it("stops replaying after a cancel", async () => {
@@ -230,6 +270,7 @@ describe("turn deliveries", () => {
     expect(await settled).toEqual({ type: "cancelled" });
     expect(harness.sent).toHaveLength(1);
     expect(harness.deliveries.getSnapshot()).toEqual([]);
+    expect(harness.released).toEqual(["optimistic row"]);
   });
 
   it("keeps a replay the server accepted even when cancelled while it was in flight", async () => {
@@ -252,23 +293,38 @@ describe("turn deliveries", () => {
 
   it("returns a rejection right away without holding the send", async () => {
     const harness = setup([REJECTED]);
-    const outcome = await harness.deliveries.deliver(ENVIRONMENT_ID, INPUT, "optimistic row");
+    const outcome = await harness.deliveries.deliver(ENVIRONMENT_ID, INPUT, harness.makeDisplay);
 
     expect(outcome).toEqual({ type: "rejected", failure: REJECTED });
     expect(harness.deliveries.getSnapshot()).toEqual([]);
+    expect(harness.displaysMade()).toBe(0);
   });
 
-  it("replays a first message after reconnecting without watching the unborn thread", async () => {
+  it("replays a first message once the resynced shell lacks its thread, without watching it", async () => {
     const harness = setup([LOST_ACK, ACCEPTED]);
     const { settled } = await deliverUntilWaiting(harness, LAUNCH);
 
-    harness.emitConnection(connection("connected", 1));
+    harness.emitShell(shell("live"));
     expect(harness.sent).toHaveLength(1);
-    harness.emitConnection(connection("connecting", 2));
-    harness.emitConnection(connection("connected", 2));
+    harness.emitShell(shell("synchronizing"));
+    harness.emitShell(shell("live"));
 
     expect(await settled).toEqual({ type: "delivered", value: { sequence: 7 } });
     expect(harness.sent).toEqual([LAUNCH, LAUNCH]);
+    expect(harness.threadObservations()).toBe(1);
+  });
+
+  it("settles a launch the resynced shell already holds without replaying it", async () => {
+    const harness = setup([LOST_ACK], EMPTY_ENVIRONMENT_THREAD_STATE);
+    const { settled } = await deliverUntilWaiting(harness, LAUNCH);
     expect(harness.threadObservations()).toBe(0);
+
+    harness.emitShell(shell("synchronizing"));
+    harness.emitShell(shell("live", [THREAD_ID]));
+    harness.emitThread(HELD);
+
+    expect(await settled).toEqual({ type: "delivered", value: null });
+    expect(harness.sent).toEqual([LAUNCH]);
+    expect(harness.deliveries.getSnapshot()).toEqual([]);
   });
 });

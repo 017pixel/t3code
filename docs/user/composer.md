@@ -86,8 +86,8 @@ device until you sign back into the same account.
 
 On web and desktop, a message sent as the connection drops shows **Waiting to send**. When the
 thread reconnects, T3 Code sends it once, or keeps it if the server already received it. Cancel
-stops the send and restores the message to an empty composer. It can't unsend a message the
-server already received.
+stops the send and puts the message back in the composer, after anything you typed since. It
+can't unsend a message the server already received.
 
 ## Custom models
 

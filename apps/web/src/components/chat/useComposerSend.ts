@@ -2,18 +2,19 @@ import {
   mergeDirectPreviewAnnotation,
   resolveBackgroundDraftWorkspaceOptions,
   shouldDockDraftHeroForSubmission,
-  restorePlanFollowUpComposer,
   buildExpiredTerminalContextToastCopy,
   deriveComposerSendState,
   revokeUserMessagePreviewUrls,
   boundAttachmentIds,
   formatOutgoingPrompt,
   optimisticMessageAttachments,
+  cloneComposerImageForRetry,
   planComposerTurn,
   sendTitleFallbackLabels,
   snapshotComposerSend,
   withMessageContext,
   makeThreadErrorSetter,
+  type ComposerSendSnapshot,
 } from "../ChatView.logic";
 import { isUsageLimitsCommand } from "@t3tools/shared/usageLimits";
 import {
@@ -334,14 +335,6 @@ export function useComposerSend(input: ComposerSendInput) {
     reportFailure: false,
   });
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
-  const setComposerDraftTerminalContexts = useComposerDraftStore(
-    (store) => store.setTerminalContexts,
-  );
-  const setComposerDraftPreviewAnnotations = useComposerDraftStore(
-    (store) => store.setPreviewAnnotations,
-  );
-  const setComposerDraftReviewComments = useComposerDraftStore((store) => store.setReviewComments);
-  const setComposerDraftThreadContexts = useComposerDraftStore((store) => store.setThreadContexts);
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
   const sendToMultipleModels = useMultipleModelSend({
     environmentId,
@@ -385,6 +378,27 @@ export function useComposerSend(input: ComposerSendInput) {
     pendingApprovalsRef.current = pendingApprovals;
     respondingRequestIdsRef.current = respondingRequestIds;
   }, [pendingApprovals, respondingRequestIds]);
+
+  /** Puts an unsent message back in its composer after any newer draft, so neither is lost. */
+  const restoreUnsentComposer = (
+    draftTarget: typeof composerDraftTarget,
+    sentRouteThreadKey: string,
+    snapshot: ComposerSendSnapshot,
+  ) => {
+    restoreComposerDraft(draftTarget, snapshot);
+    const restored = useComposerDraftStore.getState().getComposerDraft(draftTarget);
+    if (restored && currentRouteThreadKeyRef.current === sentRouteThreadKey) {
+      promptRef.current = restored.prompt;
+      composerImagesRef.current = restored.images;
+      composerFilesRef.current = restored.files;
+      composerTerminalContextsRef.current = restored.terminalContexts;
+      composerRef.current?.resetCursorState({
+        cursor: collapseExpandedComposerCursor(restored.prompt, restored.prompt.length),
+        prompt: restored.prompt,
+        detectTrigger: true,
+      });
+    }
+  };
 
   const onSend = async (
     e?: { preventDefault: () => void },
@@ -668,11 +682,18 @@ export function useComposerSend(input: ComposerSendInput) {
       if (composerRef.current?.validateProviderInput(outgoingFollowUpText) === false) {
         return;
       }
-      const followUpPromptSnapshot = promptRef.current;
-      const followUpTerminalContexts = [...sendableComposerTerminalContexts];
-      const followUpReviewComments = [...composerReviewComments];
-      const followUpPreviewAnnotations = [...composerPreviewAnnotations];
-      const followUpThreadContexts = [...composerThreadContexts];
+      const followUpSnapshot: ComposerSendSnapshot = {
+        images: [],
+        files: [],
+        attachments: [],
+        terminalContexts: [...sendableComposerTerminalContexts],
+        previewAnnotations: [...composerPreviewAnnotations],
+        reviewComments: [...composerReviewComments],
+        threadContexts: [...composerThreadContexts],
+        messageText: promptRef.current,
+      };
+      const restoreFollowUp = () =>
+        restoreUnsentComposer(composerDraftTarget, routeThreadKey, followUpSnapshot);
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
@@ -685,29 +706,10 @@ export function useComposerSend(input: ComposerSendInput) {
           threadContexts: composerThreadContexts,
         }),
         interactionMode: followUp.interactionMode,
+        restoreUnsent: restoreFollowUp,
       });
       if (!followUpSent) {
-        promptRef.current = followUpPromptSnapshot;
-        composerTerminalContextsRef.current = [...followUpTerminalContexts];
-        restorePlanFollowUpComposer({
-          snapshot: {
-            prompt: followUpPromptSnapshot,
-            terminalContexts: followUpTerminalContexts,
-            reviewComments: followUpReviewComments,
-            previewAnnotations: followUpPreviewAnnotations,
-            threadContexts: followUpThreadContexts,
-          },
-          writePrompt: (prompt) => setComposerDraftPrompt(composerDraftTarget, prompt),
-          writeTerminalContexts: (contexts) =>
-            setComposerDraftTerminalContexts(composerDraftTarget, [...contexts]),
-          writeReviewComments: (comments) =>
-            setComposerDraftReviewComments(composerDraftTarget, [...comments]),
-          writePreviewAnnotations: (annotations) =>
-            setComposerDraftPreviewAnnotations(composerDraftTarget, [...annotations]),
-          writeThreadContexts: (records) =>
-            setComposerDraftThreadContexts(composerDraftTarget, [...records]),
-          resetCursor: (options) => composerRef.current?.resetCursorState(options),
-        });
+        restoreFollowUp();
       } else if (
         submissionIntent === "background" &&
         currentRouteThreadKeyRef.current === routeThreadKey
@@ -1248,37 +1250,15 @@ export function useComposerSend(input: ComposerSendInput) {
         );
         clearBackgroundDraftSubmissionByRef(scopeThreadRef(environmentId, threadIdForSend));
       }
-      if (
-        !composerDraftHasUserContent(
-          useComposerDraftStore.getState().getComposerDraft(composerDraftTarget),
-        )
-      ) {
-        setOptimisticUserMessages((existing) => {
-          const removed = existing.filter((message) => message.id === messageIdForSend);
-          for (const message of removed) {
-            revokeUserMessagePreviewUrls(message);
-          }
-          const next = existing.filter((message) => message.id !== messageIdForSend);
-          return next.length === existing.length ? existing : next;
-        });
-        const retryComposerImages = restoreComposerDraft(composerDraftTarget, sendSnapshot);
-        if (currentRouteThreadKeyRef.current === routeThreadKey) {
-          promptRef.current = messageTextForSend;
-          composerImagesRef.current = retryComposerImages;
-          composerFilesRef.current = composerFilesSnapshot;
-          composerTerminalContextsRef.current = composerTerminalContextsSnapshot;
-          composerRef.current?.resetCursorState({
-            cursor: collapseExpandedComposerCursor(messageTextForSend, messageTextForSend.length),
-            prompt: messageTextForSend,
-            detectTrigger: true,
-          });
+      setOptimisticUserMessages((existing) => {
+        const removed = existing.filter((message) => message.id === messageIdForSend);
+        for (const message of removed) {
+          revokeUserMessagePreviewUrls(message);
         }
-      } else {
-        setOptimisticUserMessages((existing) => {
-          const next = existing.filter((message) => message.id !== messageIdForSend);
-          return next.length === existing.length ? existing : next;
-        });
-      }
+        const next = existing.filter((message) => message.id !== messageIdForSend);
+        return next.length === existing.length ? existing : next;
+      });
+      restoreUnsentComposer(composerDraftTarget, routeThreadKey, sendSnapshot);
       if (failure !== null && !isAtomCommandInterrupted(failure)) {
         const error = squashAtomCommandFailure(failure);
         setThreadError(
@@ -1373,7 +1353,20 @@ export function useComposerSend(input: ComposerSendInput) {
           ...(bootstrap ? { bootstrap } : {}),
           createdAt: messageCreatedAt,
         },
-        optimisticMessage,
+        // Its own previews, since this view revokes the row's when it switches threads.
+        () =>
+          optimisticAttachments.length === 0
+            ? optimisticMessage
+            : {
+                ...optimisticMessage,
+                attachments: optimisticMessageAttachments(
+                  composerAttachmentsSnapshot.map((attachment) =>
+                    attachment.type === "image"
+                      ? cloneComposerImageForRetry(attachment)
+                      : attachment,
+                  ),
+                ),
+              },
       );
       if (backgroundThreadRef) {
         try {

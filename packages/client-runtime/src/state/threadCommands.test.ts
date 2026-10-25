@@ -25,10 +25,10 @@ import * as Scope from "effect/Scope";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { Atom, AtomRegistry } from "effect/reactivity";
 
-import { AVAILABLE_CONNECTION_STATE } from "../connection/model.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { RpcSession } from "../rpc/session.ts";
+import { EMPTY_SHELL_STATE } from "./shell.ts";
 import { createThreadEnvironmentAtoms } from "./threadCommands.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
 import { EMPTY_ENVIRONMENT_THREAD_STATE, type EnvironmentThreadState } from "./threadState.ts";
@@ -476,10 +476,11 @@ describe("turn delivery across a lost acknowledgement", () => {
           listener(threadState("live"));
           return () => threadListeners.delete(listener);
         },
-        observeConnection: (_environmentId, listener) => {
-          listener({ ...AVAILABLE_CONNECTION_STATE, phase: "connected", generation: 1 });
+        observeShell: (_environmentId, listener) => {
+          listener(EMPTY_SHELL_STATE);
           return () => {};
         },
+        releaseDisplay: () => {},
       });
       const emitThread = (status: EnvironmentThreadState["status"]) => {
         for (const listener of threadListeners) listener(threadState(status));
@@ -500,7 +501,7 @@ describe("turn delivery across a lost acknowledgement", () => {
           interactionMode: "default",
           dispatchMode: "start",
         },
-        "optimistic row",
+        () => "optimistic row",
       );
       const first = yield* Queue.take(h.requests);
       expect(first.command).toMatchObject({
@@ -536,6 +537,19 @@ describe("turn delivery across a lost acknowledgement", () => {
         type: "delivered",
         value: { sequence: 3 },
       });
+      expect(deliveries.getSnapshot()).toEqual([
+        expect.objectContaining({ messageId: "send-message", state: "delivered" }),
+      ]);
+      for (const listener of threadListeners) {
+        listener({
+          ...threadState("live"),
+          data: Option.some({
+            messages: [{ id: "send-message", role: "user" }],
+            runs: [],
+            turnItems: [],
+          } as never),
+        });
+      }
       expect(deliveries.getSnapshot()).toEqual([]);
     }),
   );
