@@ -1,17 +1,10 @@
 #!/usr/bin/env node
 // @effect-diagnostics nodeBuiltinImport:off
 /**
- * Replays small fake threads against Claude Sonnet 5.5 or GPT-6.1 Sol to check T3 Code's MCP
- * tools. A captured harness request supplies the system prompt, reminders, and native tools.
- * T3's instructions, tool schemas, and delegated task prompt come from this checkout, so running
- * two branches A/B tests an instruction rewrite. Shell, file, and web tools are answered by a
- * cheap model that plays the machine; nothing runs on the host.
- *
- * Cases load from `mcp-tool-use-cases/*.jsonl` beside this script, or from `--cases` files.
- *
- *   node scripts/evaluate-mcp-tool-use.ts --template <capture.json> --out <dir> [--cases <file.jsonl>]...
- *   node scripts/evaluate-mcp-tool-use.ts --template <capture.json> --dry-run [--case <id>[,<id>]]
- *   node scripts/evaluate-mcp-tool-use.ts --model gpt-6.1-sol --out <dir>
+ * Replays small fake threads on Sonnet 5.5 or GPT-6.1 Sol to check T3's MCP tool use. A captured
+ * harness request supplies the system prompt and native tools; T3's copy comes from this checkout.
+ * A cheap model plays the shell, so nothing runs on the host. Usage: `--template <capture>
+ * --out <dir>`, `--model gpt-6.1-sol`, `--dry-run`, `--case <id>`, `--cases <file.jsonl>`.
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeOS from "node:os";
@@ -34,10 +27,7 @@ import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import { taskPrompt } from "../src/mcp/OrchestratorMcpService.ts";
 import { ORCHESTRATOR_MCP_RUNNING_TASK_NEXT } from "@t3tools/contracts";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
-import {
-  buildCodexAdditionalContext,
-  buildCodexDeveloperInstructions,
-} from "../src/provider/CodexDeveloperInstructions.ts";
+import { buildCodexAdditionalContext } from "../src/provider/CodexDeveloperInstructions.ts";
 import { AttachmentToolkit } from "../src/mcp/toolkits/attachment/tools.ts";
 import { DeviceToolkit } from "../src/mcp/toolkits/device/tools.ts";
 import { EnvironmentToolkit } from "../src/mcp/toolkits/environment/tools.ts";
@@ -439,6 +429,7 @@ const buildCodexBase = (
     role,
     content: [{ type: "input_text", text: value }],
   });
+  // The captured <collaboration_mode> message stays: Codex supplies its own mode text natively.
   const input = template.input.flatMap((item) => {
     const content = contentText(item);
     if (content.includes("<t3_code_")) return [];
@@ -446,8 +437,6 @@ const buildCodexBase = (
       const env = /<environment_context>[\s\S]*?<\/environment_context>/.exec(content)?.[0];
       return env ? [message(clean(options.keepUserInstructions ? content : env), "user")] : [];
     }
-    if (content.includes("<collaboration_mode>"))
-      return [message(buildCodexDeveloperInstructions("default"))];
     return [JSON.parse(clean(JSON.stringify(item))) as Block];
   });
   const context = buildCodexAdditionalContext(
@@ -693,7 +682,6 @@ const DEFAULT_CAPABILITIES = {
     { providerInstanceId: "grok", models: ["grok-4.7"].map(codexModel) },
   ],
 };
-const PROJECT_ID = "22222222-2222-4222-8222-222222222222";
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const DEFAULT_THREAD = {
   title: "Fix the flaky reconnect test",
