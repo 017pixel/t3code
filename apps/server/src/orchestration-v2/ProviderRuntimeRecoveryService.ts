@@ -17,6 +17,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
+import { CLAUDE_STEER_UNCONFIRMED_TITLE, isClaudeSteerNotice } from "./ClaudeSteerNotice.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -149,7 +150,16 @@ const cancelledItem = (
 ): OrchestrationV2ThreadProjection["turnItems"][number] =>
   item.type === "secret_request" && item.secretStatus === "pending"
     ? { ...item, status: "cancelled", secretStatus: "cancelled", completedAt: now, updatedAt: now }
-    : { ...item, status: "cancelled", completedAt: now, updatedAt: now };
+    : isClaudeSteerNotice(item)
+      ? {
+          ...item,
+          status: "cancelled",
+          title: CLAUDE_STEER_UNCONFIRMED_TITLE,
+          message: "T3 Code restarted before Claude confirmed it read this steer.",
+          completedAt: now,
+          updatedAt: now,
+        }
+      : { ...item, status: "cancelled", completedAt: now, updatedAt: now };
 
 function latestStartedRun(
   projection: ProjectionStore.ProjectionRuntimeRecoveryState,
