@@ -41,6 +41,10 @@ export async function boundedZip(
     ) {
       const locator = offset - 20;
       const record = locator - 56;
+      // JSZip uses the last locator, including signatures inside the archive comment.
+      for (let candidate = bytes.byteLength - 4; candidate > locator; candidate--)
+        if (view.getUint32(candidate, true) === 0x07064b50)
+          throw new Error("Unsupported ZIP64 directory.");
       if (
         record < 0 ||
         view.getUint32(locator, true) !== 0x07064b50 ||

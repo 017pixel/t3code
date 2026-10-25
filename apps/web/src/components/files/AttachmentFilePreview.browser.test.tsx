@@ -330,6 +330,21 @@ describe("bounded binary previews", () => {
     redirect.setBigUint64(end + 104, BigInt(end), true);
     await expect(boundedZip(redirected.buffer)).rejects.toThrow("Unsupported ZIP64 directory");
 
+    const commented = new Uint8Array(extended.length + 20);
+    commented.set(extended);
+    const comment = new DataView(commented.buffer);
+    comment.setUint16(extended.length - 2, 20, true);
+    comment.setUint32(extended.length, 0x07064b50, true);
+    comment.setBigUint64(extended.length + 8, BigInt(end), true);
+    comment.setUint32(extended.length + 16, 1, true);
+    const load = vi.spyOn(JSZip, "loadAsync");
+    try {
+      await expect(boundedZip(commented.buffer)).rejects.toThrow("Unsupported ZIP64 directory");
+      expect(load).not.toHaveBeenCalled();
+    } finally {
+      load.mockRestore();
+    }
+
     const many = new JSZip();
     for (let i = 0; i < 2049; i++) many.file(`file-${i}`, "");
     const crowded = await many.generateAsync({ type: "arraybuffer" });
@@ -662,9 +677,11 @@ describe("large text preview recovery", () => {
     await vi.waitFor(checkVisible);
   });
 
-  it.each([5, 100, 10_000])(
-    "preserves the source row when indexing grows beyond %i lines",
-    async (count) => {
+  it.each(
+    [5, 100, 10_000].flatMap((count) => [false, true].map((mixed) => [count, mixed] as const)),
+  )(
+    "preserves the source row when indexing grows beyond %i lines (mixed heights: %s)",
+    async (count, mixed) => {
       const view = (count: number) => (
         <div style={{ display: "flex", height: 400, width: 600 }}>
           <VirtualTablePreview
@@ -675,7 +692,8 @@ describe("large text preview recovery", () => {
             wrap
             getRows={(page) =>
               Array.from({ length: 32 }, (_, i) => [
-                `line-${page * 32 + i + 1} ` + "wrapped source text ".repeat(20),
+                `line-${page * 32 + i + 1} ` +
+                  "wrapped source text ".repeat(mixed ? 5 + (i % 4) * 20 : 20),
               ])
             }
           />
@@ -685,7 +703,7 @@ describe("large text preview recovery", () => {
       const viewport = () => screen.container.querySelector<HTMLElement>('[tabindex="0"]')!;
       await vi.waitFor(() => expect(viewport()?.scrollHeight).toBeGreaterThan(400));
       await act(() => {
-        viewport().scrollTop = 1200;
+        viewport().scrollTop = count === 100 ? 100 * 29 - 400 + 1200 : 1200;
         viewport().dispatchEvent(new Event("scroll", { bubbles: true }));
       });
       const visibleRow = () =>
@@ -705,7 +723,7 @@ describe("large text preview recovery", () => {
               viewport().getBoundingClientRect().top -
               offset,
           ),
-        ).toBeLessThan(5);
+        ).toBeLessThan(Math.max(5, visibleRow().offsetHeight / 29 + 1));
       });
     },
   );
@@ -748,6 +766,98 @@ describe("large text preview recovery", () => {
     await vi.waitFor(() => expect(load).toHaveBeenCalledWith(0));
   });
 });
+it.each(["<w:body/>", "<w:body></w:body>"])(
+  "opens an empty Word document with %s",
+  async (body) => {
+    const { default: JSZip } = await import("jszip");
+    const { prepareOffice } = await import("./officeArchive");
+    const archive = new JSZip().file(
+      "word/document.xml",
+      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${body}</w:document>`,
+    );
+    const prepared = await prepareOffice(
+      await archive.generateAsync({ type: "arraybuffer" }),
+      "docx",
+    );
+    const result = await JSZip.loadAsync(prepared.bytes);
+    const xml = new DOMParser().parseFromString(
+      await result.file("word/document.xml")!.async("string"),
+      "application/xml",
+    );
+    expect(xml.querySelector("parsererror")).toBeNull();
+    expect(
+      xml.getElementsByTagNameNS(
+        "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        "body",
+      ),
+    ).toHaveLength(1);
+  },
+);
+
+it("rejects oversized embedded images before decoding pixels and retains ordinary images", async () => {
+  const { officeImageBitmap } = await import("./office/image-bitmap");
+  const canvas = new OffscreenCanvas(2, 3);
+  canvas.getContext("2d");
+  const blob = await canvas.convertToBlob({ type: "image/png" });
+  const bytes = await blob.arrayBuffer();
+  new DataView(bytes).setUint32(16, 12000);
+  new DataView(bytes).setUint32(20, 12000);
+  const decode = vi.spyOn(globalThis, "createImageBitmap");
+  try {
+    await expect(officeImageBitmap(new Blob([bytes]))).rejects.toThrow("pixel limit");
+    expect(decode).not.toHaveBeenCalled();
+    const bitmap = await officeImageBitmap(blob);
+    expect([bitmap.width, bitmap.height]).toEqual([2, 3]);
+    bitmap.close();
+  } finally {
+    decode.mockRestore();
+  }
+});
+
+it.each(["utf-16le", "utf-16be", "windows-1252"])(
+  "preserves %s Office XML and safe hyperlink targets",
+  async (encoding) => {
+    const { default: JSZip } = await import("jszip");
+    const { prepareOffice } = await import("./officeArchive");
+    const archive = new JSZip();
+    const encode = (text: string) => {
+      const xml = `<?xml version="1.0" encoding="${encoding}"?>${text}`;
+      if (encoding === "windows-1252") return Uint8Array.from(xml, (char) => char.charCodeAt(0));
+      const bytes = new Uint8Array(2 + xml.length * 2);
+      const view = new DataView(bytes.buffer);
+      const little = encoding === "utf-16le";
+      view.setUint16(0, 0xfeff, little);
+      for (let i = 0; i < xml.length; i++) view.setUint16(2 + i * 2, xml.charCodeAt(i), little);
+      return bytes;
+    };
+    archive.file(
+      "word/document.xml",
+      encode(
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>café</w:t></w:r></w:p></w:body></w:document>',
+      ),
+    );
+    archive.file(
+      "word/_rels/document.xml.rels",
+      encode(
+        `<Relationships>${["https://example.com/page", "http://example.com", "mailto:maria@example.com", "javascript:alert(1)", "file:///tmp/private"].map((target, i) => `<Relationship Id="r${i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" TargetMode="External" Target="${target}"/>`).join("")}</Relationships>`,
+      ),
+    );
+    const prepared = await prepareOffice(
+      await archive.generateAsync({ type: "arraybuffer" }),
+      "docx",
+    );
+    const result = await JSZip.loadAsync(prepared.bytes);
+    expect(await result.file("word/document.xml")!.async("string")).toContain("café");
+    const links = await result.file("word/_rels/document.xml.rels")!.async("string");
+    expect(links).toContain('encoding="UTF-8"');
+    expect(links).toContain("https://example.com/page");
+    expect(links).toContain("http://example.com");
+    expect(links).toContain("mailto:maria@example.com");
+    expect(links).not.toContain("javascript:");
+    expect(links).not.toContain("file:");
+  },
+);
+
 it.each([
   ["", "worksheets/./sheet1.xml", false],
   ["x:", "../xl/worksheets/sheet1.xml", false],
@@ -2272,6 +2382,74 @@ it("renders PDF thumbnails and navigates, searches, zooms, and selects PDF pages
     URL.revokeObjectURL(url);
   }
 });
+it("mounts a bounded set of saved notebook outputs as the reader scrolls", async () => {
+  const notebook = {
+    nbformat: 4,
+    metadata: {},
+    cells: Array.from({ length: 20 }, (_, cell) => ({
+      cell_type: "code",
+      source: [],
+      metadata: {},
+      outputs: Array.from({ length: 100 }, (_, output) => ({
+        output_type: "display_data",
+        data: { "text/html": `<p>saved ${cell}-${output}</p>` },
+      })),
+    })),
+  };
+  const file = new Blob([JSON.stringify(notebook)]);
+  await using screen = await render(
+    <div style={{ display: "flex", height: 400, width: 600 }}>
+      <AttachmentFilePreview
+        name="observations.ipynb"
+        mimeType="application/json"
+        sizeBytes={file.size}
+        file={file}
+      />
+    </div>,
+  );
+  await vi.waitFor(() =>
+    expect(screen.container.querySelectorAll("iframe").length).toBeGreaterThan(0),
+  );
+  expect(screen.container.querySelectorAll("iframe").length).toBeLessThanOrEqual(16);
+  const first = screen.container.querySelector("iframe")!;
+  expect(first.srcdoc).toContain("saved 0-0");
+  const viewport = screen.container.querySelector<HTMLElement>(".scrollbar-gutter-both")!;
+  await act(() => {
+    viewport.scrollTop = viewport.scrollHeight;
+  });
+  await vi.waitFor(() => {
+    expect(
+      [...screen.container.querySelectorAll("iframe")].some((frame) =>
+        frame.srcdoc.includes("saved 19-99"),
+      ),
+    ).toBe(true);
+    expect(first.isConnected).toBe(false);
+  });
+  expect(screen.container.querySelectorAll("iframe").length).toBeLessThanOrEqual(16);
+  await act(() => {
+    viewport.scrollTop = 0;
+  });
+  await vi.waitFor(() =>
+    expect(screen.container.querySelector("iframe")?.srcdoc).toContain("saved 0-0"),
+  );
+});
+
+it.each([
+  [String.raw`{\rtf1\uc1\u945{\b bold}Hello}`, "αboldHello"],
+  [String.raw`{\rtf1\uc1{\u945}Hello}`, "αHello"],
+  [
+    String.raw`{\rtf1\ansi{\fonttbl{\f0\fcharset204 Cyrillic;}{\f1\fcharset0 Latin;}}\f0\'c0{\f1\'c0}\'c1}`,
+    "АÀБ",
+  ],
+  [String.raw`{\rtf1\ansi\deff1{\fonttbl{\f1\fcharset204 Cyrillic;}}\'c0\plain\'c1}`, "АБ"],
+])("retains RTF grouped Unicode and font text in %s", async (source, expected) => {
+  const { openRtf } = await import("./extendedDocumentPreview");
+  const result = openRtf(new TextEncoder().encode(source).buffer);
+  if (result.type !== "document") throw new Error("Expected rich text document");
+  const html = result.pages.map((page) => page.html).join("");
+  expect(new DOMParser().parseFromString(html, "text/html").body.textContent).toBe(expected);
+});
+
 it.each(["rtf", "epub", "ods"] as const)(
   "preserves %s document text through the worker and attachment viewer",
   async (kind) => {
