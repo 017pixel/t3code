@@ -214,6 +214,8 @@ type ThreadFeedEntryContent =
       readonly createdAt: string;
       readonly runId: RunId | null;
       readonly activities: ReadonlyArray<ThreadFeedActivity>;
+      /** The checkpoint of a run with no answer to carry it; read for group stats only. */
+      readonly runCheckpoint?: ThreadCheckpointSummary;
     }
   | {
       readonly type: "work-toggle";
@@ -240,6 +242,8 @@ type ThreadFeedEntryContent =
       readonly runId: RunId;
       /** Toggling the row opens or closes all of these. */
       readonly foldKeys: ReadonlyArray<RunId>;
+      /** The run whose changed-files stat this row may show; null for a group or pre-steer row. */
+      readonly checkpointRunId: RunId | null;
       readonly label: string;
       readonly expanded: boolean;
     }
@@ -363,6 +367,7 @@ function cachedRunFoldRow(
     cached.createdAt === fold.createdAt &&
     cached.label === fold.label &&
     cached.expanded === fold.expanded &&
+    cached.checkpointRunId === fold.checkpointRunId &&
     cached.foldKeys.join("\0") === fold.foldKeys.join("\0")
   ) {
     return cached;
@@ -1134,6 +1139,8 @@ interface ThreadFeedRunFold {
   foldKeys: ReadonlyArray<RunId>;
   /** Set when a multi-segment response group owns this fold; its collapsed row hides this one. */
   groupKey: RunId | null;
+  /** The run whose checkpoint this row shows: only its last segment's row claims it. */
+  readonly checkpointRunId: RunId | null;
   readonly createdAt: string;
   readonly hiddenEntryIds: ReadonlySet<string>;
   label: string;
@@ -1157,7 +1164,11 @@ interface ThreadFeedGroupFold {
   readonly label: string;
   /** Runs whose checkpoint belongs here. A steer-split run's belongs to the later group. */
   readonly checkpointRunIds: ReadonlyArray<RunId>;
+  /** Stopped or failed runs: the group's diff cannot end at their checkpoint. */
+  readonly unfinishedRunIds: ReadonlySet<RunId>;
 }
+
+const PARTIAL_GROUP_PREFIX = "group:partial:";
 
 function isSteerMessage(message: ThreadFeedMessage): boolean {
   return message.inputIntent === "steer" || message.inputIntent === "promoted_queued_to_steer";
@@ -1179,7 +1190,9 @@ function feedEntryAlwaysVisibleInFold(entry: ThreadFeedEntry): boolean {
       (isContextCompactionActivityGroup(entry) ||
         entry.activities.some(
           (activity) =>
-            activity.prominent ||
+            // A failed error is prominent too, but an earlier run's failure
+            // folds away; the group row counts it instead.
+            (activity.prominent && activity.projectedItem.item.type !== "error") ||
             activity.workEntry.questionAnswer !== undefined ||
             activity.projectedItem.item.type === "handoff" ||
             // A child still working outlives its settled launching run;
@@ -1204,7 +1217,8 @@ export function messageFoldRunIds(
   for (const entry of feed) {
     if (entry.type === "message" && entry.message.role === "user") {
       if (entry.id === entryId) return [];
-      const runId = entry.message.runId;
+      const runId: RunId | null =
+        entry.message.runId ?? (isSteerMessage(entry.message) ? runlessKey : null);
       if (isSteerMessage(entry.message)) {
         if (runId !== null && runsWithOutput.has(runId)) {
           groupKey = RunId.make(responseGroupKey(entry.id));
@@ -1218,8 +1232,8 @@ export function messageFoldRunIds(
       }
       continue;
     }
-    const runId = feedEntryRunId(entry);
-    if (runId !== null) runsWithOutput.add(runId);
+    const runId = feedEntryRunId(entry) ?? runlessKey;
+    if (runId !== null && !isNotificationEntry(entry)) runsWithOutput.add(runId);
     if (entry.type === "message" && entry.id === entryId) {
       const ownRunId = entry.message.runId ?? runlessKey;
       const runKey = ownRunId === null ? null : (steerKeyByRun.get(ownRunId) ?? ownRunId);
@@ -1241,15 +1255,17 @@ function deriveThreadFeedRunFolds(
   const interruptedRunIds = new Set<RunId>();
   const failedRunIds = new Set(feedFailedRunIds);
   const promptIndexByRunId = new Map<RunId, number>();
+  // Prompts and wake notifications both open a run, so a resumed subagent
+  // card left above either keeps folding with the run it started in.
   for (const [index, entry] of feed.entries()) {
-    if (
-      entry.type !== "message" ||
-      entry.message.role !== "user" ||
-      isSteerMessage(entry.message)
-    ) {
-      continue;
-    }
-    const runId = entry.message.runId;
+    const runId =
+      entry.type === "message" && entry.message.role === "user"
+        ? isSteerMessage(entry.message)
+          ? null
+          : entry.message.runId
+        : isNotificationEntry(entry)
+          ? feedEntryRunId(entry)
+          : null;
     if (runId != null && !promptIndexByRunId.has(runId)) promptIndexByRunId.set(runId, index);
   }
 
@@ -1269,7 +1285,8 @@ function deriveThreadFeedRunFolds(
   }
   interface Response {
     readonly key: RunId;
-    readonly startedAt: string;
+    /** Null when the history window opens after the prompt. */
+    readonly startedAt: string | null;
     readonly segments: Segment[];
   }
   interface RunGroup {
@@ -1296,6 +1313,17 @@ function deriveThreadFeedRunFolds(
     responses.push(response);
     return response;
   };
+  let firstPromptIndex: number | null = null;
+  let partialResponse: Response | null = null;
+  const openPartialResponse = (segment: { key: RunId }): Response => {
+    const partial = {
+      key: RunId.make(`${PARTIAL_GROUP_PREFIX}${segment.key}`),
+      startedAt: null,
+      segments: [],
+    };
+    responses.unshift(partial);
+    return partial;
+  };
   let runlessKey: RunId | null = null;
   let responseKey: RunId | null = null;
   let response: Response | null = null;
@@ -1305,7 +1333,8 @@ function deriveThreadFeedRunFolds(
       if (isSteerMessage(entry.message)) {
         const steerRunId = entry.message.runId ?? responseKey;
         const group = steerRunId === null ? undefined : groupsByRunId.get(steerRunId);
-        if (group !== undefined && group.entries.length > 0) {
+        // A wake's notification is not output yet; a steer right after it stays put.
+        if (group !== undefined && group.entries.some((entry) => !isNotificationEntry(entry))) {
           // Back-to-back steers split once, after the last of them.
           if (group.steerSegments.at(-1)?.startIndex === group.entries.length) {
             group.steerSegments.pop();
@@ -1323,9 +1352,13 @@ function deriveThreadFeedRunFolds(
       pendingUserBoundary = entry.message.createdAt;
       runlessKey = entry.message.runId == null ? RunId.make(`runless:${entry.id}`) : null;
       responseKey = entry.message.runId ?? runlessKey;
-      if (messageStartsResponseGroup(entry.message)) response = openResponse(entry);
+      if (messageStartsResponseGroup(entry.message)) {
+        response = openResponse(entry);
+        firstPromptIndex ??= index;
+      }
       continue;
     }
+    if (isNotificationEntry(entry)) responseKey = feedEntryRunId(entry) ?? responseKey;
     const ownRunId =
       entry.type === "message" && entry.message.role === "assistant"
         ? (entry.message.runId ?? runlessKey)
@@ -1403,7 +1436,14 @@ function deriveThreadFeedRunFolds(
         fold: null,
       };
       segments.push(segment);
-      slice.response?.segments.push(segment);
+      // A history window can open mid-response, so runs before the first
+      // loaded prompt fold together under a group with no known start.
+      const owner =
+        slice.response ??
+        (segment.firstIndex < (firstPromptIndex ?? Infinity)
+          ? (partialResponse ??= openPartialResponse(segment))
+          : null);
+      owner?.segments.push(segment);
     }
   }
 
@@ -1424,8 +1464,9 @@ function deriveThreadFeedRunFolds(
   };
   const segmentStopped = (segment: Segment) =>
     segment.lastOfRun &&
-    latestRun?.runId === segment.runId &&
-    (latestRun.status === "interrupted" || latestRun.status === "cancelled");
+    (interruptedRunIds.has(segment.runId) ||
+      (latestRun?.runId === segment.runId &&
+        (latestRun.status === "interrupted" || latestRun.status === "cancelled")));
 
   for (const segment of segments) {
     if (segment.unfolded) continue;
@@ -1445,6 +1486,7 @@ function deriveThreadFeedRunFolds(
       runId: segment.key,
       foldKeys: [segment.key],
       groupKey: null,
+      checkpointRunId: segment.lastOfRun ? segment.runId : null,
       createdAt: firstHiddenEntry.createdAt,
       hiddenEntryIds,
       label: responseGroupFoldLabel({
@@ -1478,7 +1520,7 @@ function deriveThreadFeedRunFolds(
     const live = ordered.some((segment) => segment.live);
     const end = live ? null : ordered.map(segmentEnd).reduce<string | null>(maxIsoTimestamp, null);
     const label = responseGroupFoldLabel({
-      durationMs: end === null ? null : computeElapsedMs(startedAt, end),
+      durationMs: end === null || startedAt === null ? null : computeElapsedMs(startedAt, end),
       updates: ordered.filter((segment) => segment.startedByNotification).length,
       failed: new Set(
         ordered
@@ -1492,7 +1534,8 @@ function deriveThreadFeedRunFolds(
       live,
     });
     if (ordered.length === 1) {
-      if (last.fold) {
+      // A lone run with no loaded prompt keeps its own timing.
+      if (last.fold && startedAt !== null) {
         last.fold.label = label;
         last.fold.foldKeys = [last.key, key];
       }
@@ -1533,6 +1576,16 @@ function deriveThreadFeedRunFolds(
       checkpointRunIds: ordered
         .filter((segment) => segment.lastOfRun)
         .map((segment) => segment.runId),
+      unfinishedRunIds: new Set(
+        ordered
+          .map((segment) => segment.runId)
+          .filter(
+            (runId) =>
+              failedRunIds.has(runId) ||
+              interruptedRunIds.has(runId) ||
+              (latestRun?.runId === runId && latestRun.status !== "completed"),
+          ),
+      ),
     });
   }
   return { runFolds, groupFolds };
@@ -1600,7 +1653,11 @@ function feedEntryRunId(entry: ThreadFeedEntry): RunId | null {
 }
 
 function isResponseStartEntry(entry: ThreadFeedEntry | undefined): boolean {
-  return entry?.type === "message" && messageStartsResponseGroup(entry.message);
+  return (
+    entry?.type === "message" &&
+    messageStartsResponseGroup(entry.message) &&
+    !isSteerMessage(entry.message)
+  );
 }
 
 /**
@@ -1726,12 +1783,16 @@ export function deriveThreadFeedPresentation(
     }
   }
   const collapsedGroupKeys = new Set<RunId>();
+  const openTrailingFoldKeys = new Set<RunId>();
   for (const group of groupFoldsByAnchorId.values()) {
     if (expandedRunIds.has(group.key)) continue;
     collapsedGroupKeys.add(group.key);
     for (const entryId of group.hiddenEntryIds) collapsedEntryIds.add(entryId);
     if (group.trailingFold && !foldExpanded(group.trailingFold.foldKeys)) {
       for (const entryId of group.trailingFold.hiddenEntryIds) collapsedEntryIds.add(entryId);
+    } else if (group.trailingFold) {
+      // A latest run opened on its own keeps its row, so it can be closed again.
+      openTrailingFoldKeys.add(group.trailingFold.runId);
     }
   }
   for (let sourceIndex = 0; sourceIndex < sourceFeed.length; sourceIndex += 1) {
@@ -1758,6 +1819,7 @@ export function deriveThreadFeedPresentation(
         cachedRunFoldRow(groupFoldRowsCache, entry, {
           runId: groupFold.key,
           foldKeys: [groupFold.key],
+          checkpointRunId: null,
           createdAt: groupFold.createdAt,
           label: groupFold.label,
           expanded: !collapsedGroupKeys.has(groupFold.key),
@@ -1765,11 +1827,17 @@ export function deriveThreadFeedPresentation(
       );
     }
     const fold = foldsByAnchorId.get(entry.id);
-    if (fold && (fold.groupKey === null || !collapsedGroupKeys.has(fold.groupKey))) {
+    if (
+      fold &&
+      (fold.groupKey === null ||
+        !collapsedGroupKeys.has(fold.groupKey) ||
+        openTrailingFoldKeys.has(fold.runId))
+    ) {
       result.push(
         cachedRunFoldRow(runFoldRowsCache, entry, {
           runId: fold.runId,
           foldKeys: fold.foldKeys,
+          checkpointRunId: fold.checkpointRunId,
           createdAt: fold.createdAt,
           label: fold.label,
           expanded: foldExpanded(fold.foldKeys),
@@ -1845,20 +1913,28 @@ export function deriveThreadFeedPresentation(
   }
   // A response group's row carries one stat for all of its runs, so their
   // answers drop their own.
-  const groupCheckpointRunIds = new Map<RunId, ReadonlyArray<RunId>>();
-  for (const group of groupFoldsByAnchorId.values()) {
-    groupCheckpointRunIds.set(group.key, group.checkpointRunIds);
+  const groupFoldByKey = new Map<RunId, ThreadFeedGroupFold>();
+  for (const group of groupFoldsByAnchorId.values()) groupFoldByKey.set(group.key, group);
+  // A wake that only ran tools has no answer to carry its checkpoint, but it
+  // still belongs in its group's stat and diff range.
+  const groupCheckpointByRunId = new Map(checkpointByRunId);
+  for (const entry of sourceFeed) {
+    if (entry.type === "activity-group" && entry.runCheckpoint) {
+      groupCheckpointByRunId.set(entry.runCheckpoint.runId, entry.runCheckpoint);
+    }
   }
   const groupCoveredRunIds = new Set<RunId>();
   for (let index = tailStart; index < result.length; index += 1) {
     const row = result[index]!;
-    const runIds = row.type === "run-fold" ? groupCheckpointRunIds.get(row.runId) : undefined;
-    if (runIds === undefined) continue;
+    const group = row.type === "run-fold" ? groupFoldByKey.get(row.runId) : undefined;
+    if (group === undefined) continue;
+    const runIds = group.checkpointRunIds;
     const merged = mergeResponseGroupCheckpoints(
       runIds.flatMap((runId) => {
-        const summary = checkpointByRunId.get(runId);
+        const summary = groupCheckpointByRunId.get(runId);
         return summary === undefined ? [] : [summary];
       }),
+      group.unfinishedRunIds,
     );
     for (const runId of runIds) groupCoveredRunIds.add(runId);
     if (merged) result[index] = { ...row, checkpointSummary: merged };
@@ -1866,13 +1942,14 @@ export function deriveThreadFeedPresentation(
   const workRowByRunId = new Map<RunId, number>();
   for (let index = tailStart; index < result.length; index += 1) {
     const row = result[index]!;
+    const checkpointRunId =
+      row.type === "run-fold" ? row.checkpointRunId : row.type === "work-toggle" ? row.runId : null;
     if (
-      (row.type === "run-fold" || row.type === "work-toggle") &&
-      row.runId !== null &&
-      checkpointByRunId.has(row.runId) &&
-      (row.type === "run-fold" || !workRowByRunId.has(row.runId))
+      checkpointRunId !== null &&
+      checkpointByRunId.has(checkpointRunId) &&
+      (row.type === "run-fold" || !workRowByRunId.has(checkpointRunId))
     ) {
-      workRowByRunId.set(row.runId, index);
+      workRowByRunId.set(checkpointRunId, index);
     }
   }
   for (const [runId, index] of workRowByRunId) {
@@ -2618,6 +2695,27 @@ export function buildThreadFeed(
             feedLength: prefix.length + groupedLength,
           }),
   );
+  const answerlessCheckpointByRun = new Map(
+    (options?.checkpointSummaries ?? [])
+      .filter(
+        (checkpoint) => checkpoint.status === "ready" && checkpoint.assistantMessageId === null,
+      )
+      .map((checkpoint) => [checkpoint.runId, checkpoint]),
+  );
+  for (
+    let index = grouped.length - 1;
+    index >= 0 && answerlessCheckpointByRun.size > 0;
+    index -= 1
+  ) {
+    const entry = grouped[index]!;
+    const runCheckpoint =
+      entry.type === "activity-group" && entry.runId !== null
+        ? answerlessCheckpointByRun.get(entry.runId)
+        : undefined;
+    if (entry.type !== "activity-group" || runCheckpoint === undefined) continue;
+    answerlessCheckpointByRun.delete(runCheckpoint.runId);
+    grouped[index] = { ...entry, runCheckpoint };
+  }
   const feed = prefix.length === 0 ? grouped : prefix.concat(grouped);
   if (cache) {
     cache.feedBuild =

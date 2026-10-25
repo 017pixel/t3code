@@ -1020,12 +1020,16 @@ interface ResponseGroupFold {
   finalMessageId: MessageId | null;
   /** Runs whose checkpoint belongs here. A steer-split run's belongs to the later group. */
   checkpointRunIds: ReadonlyArray<RunId>;
+  /** Stopped or failed runs: the group's diff cannot end at their checkpoint. */
+  unfinishedRunIds: ReadonlySet<RunId>;
 }
 
 interface TimelineFolds {
   turnFolds: ReadonlyMap<string, TurnFold>;
   groupFolds: ReadonlyMap<string, ResponseGroupFold>;
 }
+
+const PARTIAL_GROUP_PREFIX = "group:partial:";
 
 function timelineEntryAlwaysVisibleInFold(
   entry: TimelineEntry,
@@ -1088,7 +1092,8 @@ function deriveTurnFolds(input: {
   }
   interface Response {
     key: RunId;
-    startedAt: string;
+    /** Null when the history window opens after the prompt. */
+    startedAt: string | null;
     segments: Segment[];
   }
   interface TurnGroup {
@@ -1120,6 +1125,17 @@ function deriveTurnFolds(input: {
     responses.push(response);
     return response;
   };
+  let firstPromptIndex: number | null = null;
+  let partialResponse: Response | null = null;
+  const openPartialResponse = (segment: { key: RunId }): Response => {
+    const partial = {
+      key: RunId.make(`${PARTIAL_GROUP_PREFIX}${segment.key}`),
+      startedAt: null,
+      segments: [],
+    };
+    responses.unshift(partial);
+    return partial;
+  };
 
   // Key runless responses per prompt to prevent V2 runs unfolding imported turns.
   let runlessKey: RunId | null = null;
@@ -1145,6 +1161,7 @@ function deriveTurnFolds(input: {
       responseKey = boundaryRunId ?? runlessKey;
       if (entry.kind === "message" && messageStartsResponseGroup(entry.message)) {
         response = openResponse(entry);
+        firstPromptIndex ??= index;
       }
       continue;
     }
@@ -1234,7 +1251,14 @@ function deriveTurnFolds(input: {
         fold: null,
       };
       segments.push(segment);
-      slice.response?.segments.push(segment);
+      // A history window can open mid-response, so runs before the first
+      // loaded prompt fold together under a group with no known start.
+      const owner =
+        slice.response ??
+        (segment.firstIndex < (firstPromptIndex ?? Infinity)
+          ? (partialResponse ??= openPartialResponse(segment))
+          : null);
+      owner?.segments.push(segment);
     }
   }
 
@@ -1256,8 +1280,8 @@ function deriveTurnFolds(input: {
   };
   const segmentStopped = (segment: Segment) =>
     segment.lastOfRun &&
-    input.latestRun?.runId === segment.runId &&
-    input.latestRun.status === "interrupted";
+    (interruptedRunIds.has(segment.runId) ||
+      (input.latestRun?.runId === segment.runId && input.latestRun.status === "interrupted"));
 
   for (const segment of segments) {
     if (segment.unfolded) continue;
@@ -1312,7 +1336,7 @@ function deriveTurnFolds(input: {
     const live = ordered.some((segment) => segment.live);
     const end = live ? null : ordered.map(segmentEnd).reduce(maxIsoTimestamp, null);
     const label = responseGroupFoldLabel({
-      durationMs: end === null ? null : computeElapsedMs(startedAt, end),
+      durationMs: end === null || startedAt === null ? null : computeElapsedMs(startedAt, end),
       updates: ordered.filter((segment) => segment.notificationEntryId !== null).length,
       failed: new Set(
         ordered
@@ -1326,7 +1350,8 @@ function deriveTurnFolds(input: {
       live,
     });
     if (ordered.length === 1) {
-      if (last.fold) {
+      // A lone run with no loaded prompt keeps its own timing.
+      if (last.fold && startedAt !== null) {
         last.fold.label = label;
         last.fold.foldKeys = [last.key, key];
       }
@@ -1344,10 +1369,19 @@ function deriveTurnFolds(input: {
     if (!last.unfolded && last.notificationEntryId !== null) {
       hiddenEntryIds.add(last.notificationEntryId);
     }
-    // A wake that only ran tools has no answer of its own; the last one stays.
-    const finalEntry = ordered.findLast(
-      (segment) => !segment.live && segment.terminalEntry,
-    )?.terminalEntry;
+    // The newest settled answer stays, even when the latest wake only ran
+    // tools. Output from an attempt a steer replaced counts only if complete.
+    const finalEntry = ordered
+      .filter((segment) => !segment.live)
+      .flatMap((segment) => segment.entries)
+      .findLast(
+        (entry): entry is Extract<TimelineEntry, { kind: "message" }> =>
+          entry.kind === "message" &&
+          entry.message.role === "assistant" &&
+          !entry.message.streaming &&
+          (entry.attempt?.status !== "superseded" ||
+            input.completeSupersededReplyEntryIds.has(entry.id)),
+      );
     if (finalEntry) hiddenEntryIds.delete(finalEntry.id);
     const trailingFold = last.unfolded ? null : last.fold;
     if (hiddenEntryIds.size === 0 && trailingFold === null) continue;
@@ -1358,7 +1392,7 @@ function deriveTurnFolds(input: {
     groupFolds.set(first.anchorEntryId, {
       key,
       anchorEntryId: first.anchorEntryId,
-      createdAt: startedAt,
+      createdAt: startedAt ?? first.startedAt,
       hiddenEntryIds,
       trailingFold,
       label,
@@ -1366,6 +1400,16 @@ function deriveTurnFolds(input: {
       checkpointRunIds: ordered
         .filter((segment) => segment.lastOfRun)
         .map((segment) => segment.runId),
+      unfinishedRunIds: new Set(
+        ordered
+          .map((segment) => segment.runId)
+          .filter(
+            (runId) =>
+              failedRunIds.has(runId) ||
+              interruptedRunIds.has(runId) ||
+              (input.latestRun?.runId === runId && input.latestRun.status !== "completed"),
+          ),
+      ),
     });
   }
 
@@ -1634,16 +1678,23 @@ export function deriveMessagesTimelineRows(input: {
     }
   }
   const groupTurnDiffSummaryByMessageId = new Map<MessageId, TurnDiffSummary>();
+  const openTrailingFoldKeys = new Set<RunId>();
   for (const group of groupFoldsByAnchorEntryId.values()) {
+    if (input.expandedRunIds?.has(group.key)) continue;
+    collapsedGroupKeys.add(group.key);
+    // Collapsed, the answer's card covers the whole group; open, each run shows its own.
     if (group.finalMessageId !== null) {
       const runIds = new Set(group.checkpointRunIds);
       const merged = mergeResponseGroupCheckpoints(
         input.turnDiffSummaries.filter((summary) => runIds.has(summary.runId)),
+        group.unfinishedRunIds,
       );
       if (merged) groupTurnDiffSummaryByMessageId.set(group.finalMessageId, merged);
     }
-    if (input.expandedRunIds?.has(group.key)) continue;
-    collapsedGroupKeys.add(group.key);
+    // A latest run opened on its own keeps its row, so it can be closed again.
+    if (group.trailingFold && foldExpanded(group.trailingFold.foldKeys)) {
+      openTrailingFoldKeys.add(group.trailingFold.runId);
+    }
     for (const entryId of group.hiddenEntryIds) collapsedEntryIds.add(entryId);
     if (group.trailingFold && !foldExpanded(group.trailingFold.foldKeys)) {
       for (const entryId of group.trailingFold.hiddenEntryIds) collapsedEntryIds.add(entryId);
@@ -1879,7 +1930,12 @@ export function deriveMessagesTimelineRows(input: {
     }
 
     const turnFold = foldsByAnchorEntryId.get(timelineEntry.id);
-    if (turnFold && (turnFold.groupKey === null || !collapsedGroupKeys.has(turnFold.groupKey))) {
+    if (
+      turnFold &&
+      (turnFold.groupKey === null ||
+        !collapsedGroupKeys.has(turnFold.groupKey) ||
+        openTrailingFoldKeys.has(turnFold.runId))
+    ) {
       nextRows.push({
         kind: "turn-fold",
         id: `turn-fold:${turnFold.runId}`,
@@ -2391,20 +2447,10 @@ export interface MessagesTimelineRowsProjection {
 }
 
 /**
- * Runless (imported V1) turns and work after a steer fold under synthetic
- * keys, so the entry's own run id is not enough to open them.
+ * Every fold key an entry hides behind: its run's fold and its response
+ * group's. Runless (imported V1) turns and work after a steer fold under
+ * synthetic keys, so the entry's own run id is not enough to open them.
  */
-export function timelineEntryTurnFoldRunId(
-  input: Pick<
-    MessagesTimelineRowsInput,
-    "timelineEntries" | "latestRun" | "isWorking" | "runlessWorkActive" | "runningRunId"
-  >,
-  entryId: string,
-): RunId | null {
-  return timelineTurnFoldRunIdsByEntryId(input).get(entryId)?.[0] ?? null;
-}
-
-/** Every fold key an entry hides behind: its run's fold and its response group's. */
 export function timelineTurnFoldRunIdsByEntryId(
   input: Pick<
     MessagesTimelineRowsInput,
@@ -2419,7 +2465,9 @@ export function timelineTurnFoldRunIdsByEntryId(
   };
   const { turnFolds, groupFolds } = deriveTimelineTurnFolds(input);
   for (const fold of turnFolds.values()) {
-    for (const entryId of fold.hiddenEntryIds) add(entryId, fold.runId);
+    for (const entryId of fold.hiddenEntryIds) {
+      for (const key of fold.foldKeys) add(entryId, key);
+    }
   }
   for (const group of groupFolds.values()) {
     for (const entryId of group.hiddenEntryIds) add(entryId, group.key);

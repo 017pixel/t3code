@@ -175,27 +175,37 @@ export const make = Effect.gen(function* () {
             );
       // Capture compares against the preceding scope ordinal, even when that
       // checkpoint belongs to a stopped run or has no run. A wider range starts
-      // at its `from` turn even when that run stopped; when ordinals skip
-      // (queued runs, rewinds), at the parent of the range's first checkpoint.
-      const rangeStartCheckpoint =
+      // the same way from its first included checkpoint: at the `from` turn
+      // when that is in the same scope (even if its run stopped), otherwise at
+      // that checkpoint's parent, since run ordinals skip (queued runs, rewinds).
+      const firstIncludedCheckpoint =
         input.fromTurnCount === input.toTurnCount - 1
-          ? parentOf(toCheckpoint)
-          : (projection.checkpoints.find(
-              (checkpoint) =>
-                checkpoint.status === "ready" && checkpoint.appRunOrdinal === input.fromTurnCount,
-            ) ??
-            parentOf(
-              projection.checkpoints
-                .filter(
+          ? toCheckpoint
+          : projection.checkpoints
+              .filter(
+                (checkpoint) =>
+                  checkpoint.status === "ready" &&
+                  checkpoint.appRunOrdinal !== null &&
+                  checkpoint.appRunOrdinal > input.fromTurnCount &&
+                  checkpoint.appRunOrdinal <= input.toTurnCount,
+              )
+              .toSorted((left, right) => (left.appRunOrdinal ?? 0) - (right.appRunOrdinal ?? 0))[0];
+      const rangeStartCheckpoint =
+        firstIncludedCheckpoint === undefined
+          ? undefined
+          : ((input.fromTurnCount === input.toTurnCount - 1
+              ? undefined
+              : projection.checkpoints.find(
                   (checkpoint) =>
                     checkpoint.status === "ready" &&
-                    checkpoint.appRunOrdinal !== null &&
-                    checkpoint.appRunOrdinal > input.fromTurnCount &&
-                    checkpoint.appRunOrdinal <= input.toTurnCount,
-                )
-                .toSorted(
-                  (left, right) => (left.appRunOrdinal ?? 0) - (right.appRunOrdinal ?? 0),
-                )[0],
+                    checkpoint.scopeId === firstIncludedCheckpoint.scopeId &&
+                    checkpoint.appRunOrdinal === input.fromTurnCount,
+                )) ??
+            projection.checkpoints.find(
+              (checkpoint) =>
+                checkpoint.status === "ready" &&
+                checkpoint.scopeId === firstIncludedCheckpoint.scopeId &&
+                checkpoint.ordinalWithinScope === firstIncludedCheckpoint.ordinalWithinScope - 1,
             ));
 
       const firstScope =

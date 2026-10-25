@@ -1,7 +1,11 @@
 import { RunId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { mergeResponseGroupCheckpoints, responseGroupFoldLabel } from "./responseGroups.ts";
+import {
+  mergeResponseGroupCheckpoints,
+  messageStartsResponseGroup,
+  responseGroupFoldLabel,
+} from "./responseGroups.ts";
 import type { ThreadCheckpointSummary } from "./threadCheckpoints.ts";
 
 const summary = (
@@ -42,10 +46,31 @@ describe("mergeResponseGroupCheckpoints", () => {
     });
   });
 
+  it("ends the range at the last completed run while still counting a stopped run's files", () => {
+    const stopped = summary(6, [{ path: "late.ts", kind: "modified", additions: 3, deletions: 0 }]);
+    const merged = mergeResponseGroupCheckpoints(
+      [summary(5, [{ path: "a.ts", kind: "modified", additions: 1, deletions: 0 }]), stopped],
+      new Set([stopped.runId]),
+    );
+    expect(merged).toMatchObject({ checkpointTurnCount: 5, rangeFromTurnCount: 4 });
+    expect(merged?.files.map((file) => file.path)).toEqual(["a.ts", "late.ts"]);
+  });
+
   it("returns a lone ready checkpoint unchanged, and nothing without one", () => {
     const only = summary(3, [{ path: "a.ts", kind: "modified", additions: 1, deletions: 0 }]);
     expect(mergeResponseGroupCheckpoints([only, summary(4, [], "error")])).toBe(only);
     expect(mergeResponseGroupCheckpoints([summary(4, [], "missing")])).toBeNull();
+  });
+});
+
+describe("messageStartsResponseGroup", () => {
+  it("starts at any prompt, including an agent's, but not at T3 Code's idle compaction", () => {
+    expect(messageStartsResponseGroup({ role: "user", text: "Go", createdBy: "agent" })).toBe(true);
+    expect(messageStartsResponseGroup({ role: "user", text: "/compact" })).toBe(true);
+    expect(
+      messageStartsResponseGroup({ role: "user", text: "/compact", idleCompaction: "onReturn" }),
+    ).toBe(false);
+    expect(messageStartsResponseGroup({ role: "assistant", text: "Done" })).toBe(false);
   });
 });
 

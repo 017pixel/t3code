@@ -17,7 +17,10 @@ import {
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
-import { deriveThreadCheckpointSummaries } from "@t3tools/client-runtime/state/thread-checkpoints";
+import {
+  deriveThreadCheckpointSummaries,
+  type ThreadCheckpointSummary,
+} from "@t3tools/client-runtime/state/thread-checkpoints";
 import { getReviewSectionIdForCheckpoint } from "../features/review/reviewModel";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
@@ -1328,7 +1331,7 @@ describe("retained v2 feed presentation", () => {
     const presented = deriveThreadFeedPresentation(
       feed,
       null,
-      new Set([runId, RunId.make("other-run")]),
+      new Set([RunId.make(`group:partial:${runId}`), runId, RunId.make("other-run")]),
     );
     const groups = presented.flatMap((entry) =>
       entry.type === "activity-group" && entry.activities[0]?.projectedItem.item.type === "subagent"
@@ -1866,5 +1869,142 @@ describe("streamed feed updates", () => {
       );
     expect(showsDelegation(steps[2]!)).toBe(true);
     expect(showsDelegation(steps[3]!)).toBe(false);
+  });
+});
+
+describe("response groups", () => {
+  const at = (second: number) => `2026-06-20T00:00:${String(second).padStart(2, "0")}.000Z`;
+  const inRun = (run: string, item: OrchestrationV2TurnItem): OrchestrationV2TurnItem => ({
+    ...item,
+    runId: RunId.make(run),
+  });
+  const prompt = (run: string, id: string, second: number, extra: object = {}) =>
+    inRun(run, {
+      ...userMessage(at(second)),
+      id: TurnItemId.make(id),
+      messageId: MessageId.make(id),
+      ...extra,
+    } as OrchestrationV2TurnItem);
+  const step = (run: string, id: string, second: number) =>
+    inRun(run, { ...command(at(second)), id: TurnItemId.make(id) });
+  const answer = (run: string, id: string, second: number) =>
+    inRun(run, {
+      ...assistantMessage(at(second)),
+      id: TurnItemId.make(id),
+      messageId: MessageId.make(id),
+    });
+  const wake = (run: string, id: string, second: number) =>
+    inRun(run, {
+      ...base(id, at(second), 0),
+      type: "notification",
+      source: { kind: "background_task" },
+      outcome: "completed",
+      summary: "Background task finished",
+    });
+  const checkpoint = (
+    run: string,
+    turnCount: number,
+    answerId: string | null,
+    path: string,
+  ): ThreadCheckpointSummary => ({
+    runId: RunId.make(run),
+    checkpointTurnCount: turnCount,
+    checkpointRef: `refs/t3/${run}` as ThreadCheckpointSummary["checkpointRef"],
+    status: "ready",
+    files: [{ path, kind: "modified", additions: 1, deletions: 0 }],
+    assistantMessageId: answerId === null ? null : MessageId.make(answerId),
+    completedAt: at(turnCount),
+  });
+  const completed = (run: string, startedAt: number, completedAt: number) => ({
+    runId: RunId.make(run),
+    status: "completed" as const,
+    startedAt: at(startedAt),
+    completedAt: at(completedAt),
+  });
+  const ids = (rows: ReadonlyArray<ThreadFeedEntry>) => rows.map((entry) => entry.id);
+
+  it("splits a steered run into two responses, with its stat on the later row", () => {
+    const run = "steered";
+    const feed = buildThreadFeed(
+      [
+        prompt(run, "prompt", 0),
+        step(run, "before", 1),
+        answer(run, "intro", 2),
+        prompt(run, "steer", 3, { inputIntent: "steer" }),
+        step(run, "after", 4),
+        answer(run, "final", 5),
+      ].map((item, position) => projected(item, position)),
+      { checkpointSummaries: [checkpoint(run, 1, "final", "a.ts")] },
+    );
+    const rows = deriveThreadFeedPresentation(feed, completed(run, 0, 5), new Set());
+    const steerRow = `run-fold:${run}:steer:steer`;
+    expect(ids(rows)).toEqual(["prompt", `run-fold:${run}`, "intro", "steer", steerRow, "final"]);
+    expect(rows.find((entry) => entry.id === `run-fold:${run}`)?.checkpointSummary).toBeUndefined();
+    expect(rows.find((entry) => entry.id === steerRow)?.checkpointSummary).toMatchObject({
+      runId: run,
+    });
+  });
+
+  it("folds runs before the first loaded prompt, and counts a tools-only wake's files", () => {
+    const feed = buildThreadFeed(
+      [
+        step("initial", "launch", 1),
+        answer("initial", "launched", 5),
+        wake("wake-a", "wake-a-notice", 20),
+        step("wake-a", "read-a", 21),
+      ].map((item, position) => projected(item, position)),
+      {
+        checkpointSummaries: [
+          checkpoint("initial", 4, "launched", "a.ts"),
+          checkpoint("wake-a", 5, null, "b.ts"),
+        ],
+      },
+    );
+    const rows = deriveThreadFeedPresentation(feed, completed("wake-a", 20, 22), new Set());
+    expect(ids(rows)).toEqual(["run-fold:group:partial:initial", "launched"]);
+    expect(rows[0]).toMatchObject({
+      label: "Worked · 1 update",
+      checkpointSummary: {
+        checkpointTurnCount: 5,
+        rangeFromTurnCount: 3,
+        files: [{ path: "a.ts" }, { path: "b.ts" }],
+      },
+    });
+  });
+
+  it("matches a fresh build when an idle compaction lands inside a response", () => {
+    const compact = prompt("compaction", "compact", 30, {
+      text: "/compact",
+      createdBy: "agent",
+      creationSource: "server",
+    });
+    const steps = [
+      [prompt("initial", "prompt", 0), step("initial", "launch", 1), answer("initial", "ok", 5)],
+      [compact],
+      [wake("wake-a", "wake-a-notice", 40), step("wake-a", "read-a", 41)],
+      [answer("wake-a", "ack-a", 45)],
+    ];
+    const cache = createThreadFeedCache();
+    const items: OrchestrationV2ProjectedTurnItem[] = [];
+    for (const [index, added] of steps.entries()) {
+      for (const item of added) items.push(projected(item, items.length));
+      const latestRun = completed(index < 2 ? "initial" : "wake-a", 0, 45);
+      const cached = deriveThreadFeedPresentation(
+        buildThreadFeed(items, { cache }),
+        latestRun,
+        new Set(),
+        new Set(),
+        null,
+        false,
+        cache,
+      );
+      const fresh = deriveThreadFeedPresentation(buildThreadFeed(items), latestRun, new Set());
+      expect(ids(cached), `step ${index}`).toEqual(ids(fresh));
+    }
+    expect(
+      ids(
+        deriveThreadFeedPresentation(buildThreadFeed(items), completed("wake-a", 0, 45), new Set()),
+      ),
+    ).toContain("run-fold:group:prompt");
   });
 });

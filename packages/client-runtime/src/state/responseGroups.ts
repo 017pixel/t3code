@@ -1,4 +1,4 @@
-import { idleCompactionOf } from "@t3tools/contracts";
+import { idleCompactionOf, type RunId } from "@t3tools/contracts";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 
 import type { ThreadCheckpointSummary } from "./threadCheckpoints.ts";
@@ -9,10 +9,10 @@ import type { ThreadCheckpointSummary } from "./threadCheckpoints.ts";
  * timeline folds a whole group behind one row, so a long `/goal` thread reads
  * as prompt -> fold -> latest answer.
  *
- * Every user-role message starts a group, including steers and prompts another
- * agent sent. Wakes arrive as notification items, not user messages, so they
- * join the current group. Idle `/compact` is T3 Code's own housekeeping and
- * joins it too.
+ * Every prompt starts a group, including prompts another agent sent. A steer
+ * starts one only once its run has output (back-to-back steers start one).
+ * Wakes arrive as notification items, not user messages, so they join the
+ * current group. Idle `/compact` is T3 Code's own housekeeping and joins it too.
  */
 export function messageStartsResponseGroup(
   message: Parameters<typeof idleCompactionOf>[0],
@@ -62,15 +62,18 @@ export function responseGroupFoldLabel(input: ResponseGroupLabelInput): string {
  * deltas, so summing them counts lines touched; a file added and then removed
  * inside the group still shows its churn while the range diff shows nothing.
  * `rangeFromTurnCount` makes "Open diff" span the group instead of one run.
+ * The server diffs only to a completed run's checkpoint, so the range ends at
+ * the last run not in `unfinishedRunIds` (stopped or failed).
  */
 export function mergeResponseGroupCheckpoints(
   summaries: ReadonlyArray<ThreadCheckpointSummary>,
+  unfinishedRunIds: ReadonlySet<RunId> = new Set(),
 ): ThreadCheckpointSummary | null {
   const ready = summaries
     .filter((summary) => summary.status === "ready")
     .sort((left, right) => left.checkpointTurnCount - right.checkpointTurnCount);
   const first = ready[0];
-  const last = ready.at(-1);
+  const last = ready.findLast((summary) => !unfinishedRunIds.has(summary.runId)) ?? ready.at(-1);
   if (first === undefined || last === undefined) return null;
   if (ready.length === 1) return first;
 

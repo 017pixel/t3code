@@ -27,7 +27,6 @@ import {
   computeStableMessagesTimelineRows,
   computeMessageDurationStart,
   deriveMessagesTimelineRows,
-  timelineEntryTurnFoldRunId,
   timelineTurnFoldRunIdsByEntryId,
   deriveMessagesTimelineRowsWithState,
   shouldCollapseUserMessage,
@@ -2101,15 +2100,15 @@ describe("deriveMessagesTimelineRows", () => {
       message("imported-answer", "assistant", 8),
     ];
     const foldInput = { timelineEntries, latestRun: null, isWorking: false };
-    const foldRunId = timelineEntryTurnFoldRunId(foldInput, "imported-update");
-    expect(foldRunId).not.toBeNull();
+    const foldRunId = timelineTurnFoldRunIdsByEntryId(foldInput).get("imported-update")?.[0];
+    expect(foldRunId).toBeDefined();
     const foldRow = deriveMessagesTimelineRows({
       ...foldInput,
       turnDiffSummaries: [],
       supportsConversationRollback: false,
     }).find((row) => row.kind === "turn-fold");
     expect(foldRow?.kind === "turn-fold" ? foldRow.runId : null).toBe(foldRunId);
-    expect(timelineEntryTurnFoldRunId(foldInput, "imported-answer")).toBeNull();
+    expect(timelineTurnFoldRunIdsByEntryId(foldInput).get("imported-answer")).toBeUndefined();
     const expanded = deriveMessagesTimelineRows({
       ...foldInput,
       expandedRunIds: new Set([foldRunId!]),
@@ -3337,9 +3336,14 @@ describe("linked timeline resources", () => {
         event("d", "subagent"),
         event("e", "subagent", RunId.make("other-run")),
       ],
-      expandedRunIds: new Set([runId, RunId.make("other-run")]),
+      expandedRunIds: new Set([
+        RunId.make(`group:partial:${runId}`),
+        runId,
+        RunId.make("other-run"),
+      ]),
     });
     expect(rows.map((row) => row.id)).toEqual([
+      `turn-fold:group:partial:${runId}`,
       "turn-fold:resource-run",
       "a",
       "c",
@@ -3347,7 +3351,7 @@ describe("linked timeline resources", () => {
       "turn-fold:other-run",
       "e",
     ]);
-    expect(rows[1]).toMatchObject({ subagents: [{ item: { id: "a" } }, { item: { id: "b" } }] });
+    expect(rows[2]).toMatchObject({ subagents: [{ item: { id: "a" } }, { item: { id: "b" } }] });
   });
 
   it.each([
@@ -3556,7 +3560,7 @@ describe("linked timeline resources", () => {
 });
 
 it.each([true, false])(
-  "keeps completed responses folded across notification wakes, working=%s",
+  "folds wakes before the first loaded prompt under one group, working=%s",
   (isWorking) => {
     const time = (second: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, second)).toISOString();
     const work = (id: string, run: string, second: number, notification = false) => ({
@@ -3608,16 +3612,22 @@ it.each([true, false])(
       turnDiffSummaries: [],
       supportsConversationRollback: false,
     });
+    // The window opened after the prompt, so the group has no start to time from.
     const ids = rows.map((row) => row.id);
-    expect(ids).toContain("turn-fold:initial");
+    const group = "turn-fold:group:partial:initial";
+    expect(rows[0]).toMatchObject({
+      id: group,
+      label: isWorking ? "Working · 2 updates" : "Worked · 2 updates",
+    });
+    if (!isWorking) {
+      expect(ids).toEqual([group, "ack-b"]);
+      return;
+    }
     expect(ids).not.toContain("launch-tools");
-    expect(ids).toContain("turn-fold:wake-a");
-    expect(ids.indexOf("notification-a")).toBeLessThan(ids.indexOf("turn-fold:wake-a"));
-    expect(ids.indexOf("turn-fold:wake-a")).toBeLessThan(ids.indexOf("ack-a"));
-    const boundary = isWorking ? "working-indicator-row" : "turn-fold:wake-b";
-    expect(ids).toContain(boundary);
-    expect(ids.indexOf("notification-b")).toBeLessThan(ids.indexOf(boundary));
-    if (isWorking) expect(rows.find((row) => row.id === boundary)?.createdAt).toBe(time(40));
+    expect(ids).not.toContain("notification-a");
+    expect(ids.indexOf("ack-a")).toBeLessThan(ids.indexOf("notification-b"));
+    expect(ids.indexOf("notification-b")).toBeLessThan(ids.indexOf("working-indicator-row"));
+    expect(rows.find((row) => row.id === "working-indicator-row")?.createdAt).toBe(time(40));
   },
 );
 
@@ -3854,6 +3864,62 @@ describe("response groups", () => {
         { path: "b.ts", kind: "added", additions: 5, deletions: 0 },
       ],
     });
+  });
+
+  it("ends the group's diff at its last completed run and drops the merged card when open", () => {
+    const summary = (run: string, turnCount: number, path: string) =>
+      ({
+        runId: RunId.make(run),
+        checkpointTurnCount: turnCount,
+        checkpointRef: `refs/t3/${run}` as never,
+        status: "ready",
+        files: [{ path, kind: "modified", additions: 1, deletions: 0 }],
+        assistantMessageId: run === "wake-b" ? MessageId.make("ack-b") : null,
+        completedAt: time(turnCount),
+      }) satisfies TurnDiffSummary;
+    const turnDiffSummaries = [
+      summary("initial", 4, "a.ts"),
+      summary("wake-a", 5, "b.ts"),
+      summary("wake-b", 6, "c.ts"),
+    ];
+    const card = (rows: ReadonlyArray<MessagesTimelineRow>) => {
+      const final = rows.find((row) => row.id === "ack-b");
+      return final?.kind === "message" ? final.assistantTurnDiffSummary : undefined;
+    };
+    // The stopped wake's checkpoint cannot end a diff, but its files still count.
+    expect(card(settled(goalThread(), { status: "interrupted", turnDiffSummaries }))).toMatchObject(
+      {
+        checkpointTurnCount: 5,
+        rangeFromTurnCount: 3,
+        files: [{ path: "a.ts" }, { path: "b.ts" }, { path: "c.ts" }],
+      },
+    );
+    const open = settled(goalThread(), { expandedRunIds: new Set([groupKey]), turnDiffSummaries });
+    expect(card(open)).toBe(turnDiffSummaries[2]);
+  });
+
+  it("keeps the latest run's row while it is open under a collapsed group", () => {
+    const ids = settled(goalThread(), { expandedRunIds: new Set([RunId.make("wake-b")]) }).map(
+      (row) => row.id,
+    );
+    expect(ids).toEqual(["prompt", `turn-fold:${groupKey}`, "turn-fold:wake-b", "read-b", "ack-b"]);
+  });
+
+  it("never shows a partial reply from a replaced attempt as the group's answer", () => {
+    const entries = goalThread({ lastWakeAnswers: false });
+    const partial = answer("partial-b", "wake-b", 43);
+    entries.push({
+      ...partial,
+      attempt: {
+        id: "attempt-b" as never,
+        runId: RunId.make("wake-b"),
+        status: "superseded",
+        completedAt: time(44),
+      } as never,
+    });
+    const ids = settled(entries).map((row) => row.id);
+    expect(ids).toContain("ack-a");
+    expect(ids).not.toContain("partial-b");
   });
 
   it("lets find open both the group and the run an entry hides behind", () => {

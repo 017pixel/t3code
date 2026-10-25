@@ -204,6 +204,15 @@ it.effect.each([false, true])(
         runs: [...projection.runs, { id: fourthRunId, ordinal: 4, status: "completed" as const }],
         checkpoints: [
           ...projection.checkpoints,
+          // The stopped run's work in another scope must not start the range.
+          {
+            scopeId: secondScopeId,
+            runId: secondRunId,
+            ordinalWithinScope: 3,
+            appRunOrdinal: 2,
+            status: "ready" as const,
+            ref: CheckpointRef.make("refs/t3/test/tool/stopped"),
+          },
           {
             scopeId: firstScopeId,
             runId: fourthRunId,
