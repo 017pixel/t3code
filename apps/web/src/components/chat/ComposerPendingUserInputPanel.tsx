@@ -191,6 +191,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
           isCollapsed ? "Show the question and its options" : "Hide the question and its options"
         }
         data-pending-user-input-toggle={isCollapsed ? "collapsed" : "expanded"}
+        className="px-2"
       >
         <ComposerBanner.Content>
           <span className="shrink-0 font-medium text-muted-foreground">
@@ -202,7 +203,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
             </span>
           ) : null}
         </ComposerBanner.Content>
-        <ComposerBanner.Actions>
+        <ComposerBanner.Actions className="gap-0">
           {prompt.questions.length > 1 ? (
             <ComposerBanner.Count>
               {questionIndex + 1}/{prompt.questions.length}
@@ -233,16 +234,13 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
       </CollapsibleTrigger>
       <CollapsiblePanel>
         <ComposerBanner.Scroll>
-          <ComposerBanner.Body className="ps-2 pb-1 wrap-anywhere sm:ps-1.5">
+          <ComposerBanner.Body className="ps-4 pe-2 pb-1 wrap-anywhere sm:ps-3.5">
             <ChatMarkdown
               text={activeQuestion.question}
               cwd={cwd}
               threadRef={threadRef}
               className="text-foreground/85"
             />
-            {activeQuestion.multiSelect ? (
-              <p className="mt-1 text-secondary-label text-xs">Select one or more options.</p>
-            ) : null}
             {/* Rows span the header row's width so the radios align with the question text and the shortcut column sits under the dismiss button. */}
             <div className="-ms-2 mt-2 space-y-0.5 sm:-ms-1.5">
               {activeQuestion.options.map((option, index) => {
