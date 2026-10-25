@@ -1,10 +1,11 @@
+import { Button } from "../../components/ui/Button";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { AsyncResult } from "effect/reactivity";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { useEffect, useState } from "react";
-import { Pressable, View } from "react-native";
+import { View } from "react-native";
 import { AppText as Text } from "../../components/ui/AppText";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -23,9 +24,7 @@ export function UsageLimitRecoveryCard({
   const canSchedule =
     resetAt !== null &&
     Date.parse(resetAt) > Date.parse(thread.latestRun?.completedAt ?? thread.updatedAt);
-  // Whether the reset already passed is state a timer flips at resetAt: the
-  // compiler caches render output on its inputs, so reading the clock during
-  // render would leave the snooze button enabled after the reset.
+  // Use timer-driven state; the compiler can cache render-time clock reads and leave Snooze enabled after reset.
   const resetAtMs = resetAt === null ? null : Date.parse(resetAt);
   const [resetPassedFor, setResetPassedFor] = useState<number | null>(null);
   const resetPassed = resetAtMs !== null && resetPassedFor === resetAtMs;
@@ -93,26 +92,18 @@ export function UsageLimitRecoveryCard({
       </Text>
       {canSchedule ? (
         <View className="flex-row flex-wrap gap-2">
-          <Pressable
-            accessibilityRole="button"
+          <Button
+            label={scheduled ? "Cancel auto-resume" : "Resume at reset"}
+            tone="secondary"
             disabled={pending}
             onPress={() => void toggle("resume")}
-            className="self-start rounded-lg bg-subtle px-3 py-2 active:opacity-70"
-          >
-            <Text className="text-sm text-foreground">
-              {scheduled ? "Cancel auto-resume" : "Resume at reset"}
-            </Text>
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
+          />
+          <Button
+            label={snoozed ? "Wake now" : "Snooze until reset"}
+            tone="secondary"
             disabled={pending || (!snoozed && resetPassed)}
             onPress={() => void toggle("snooze")}
-            className="self-start rounded-lg bg-subtle px-3 py-2 active:opacity-70"
-          >
-            <Text className="text-sm text-foreground">
-              {snoozed ? "Wake now" : "Snooze until reset"}
-            </Text>
-          </Pressable>
+          />
         </View>
       ) : null}
       {error ? (

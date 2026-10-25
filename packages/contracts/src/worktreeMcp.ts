@@ -2,12 +2,7 @@ import * as Schema from "effect/Schema";
 
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
-/**
- * The server picks the location in its managed worktrees folder.
- * Changing the thread's workspace detaches the live provider session, so the
- * current turn ends shortly after the handoff is recorded; the conversation
- * continues inside the worktree on the thread's next run.
- */
+/** Uses the managed worktree folder; handoff detaches the provider, ending this turn and resuming there next run. */
 export const WorktreeMcpHandoffInput = Schema.Struct({
   branch: TrimmedNonEmptyString.annotate({
     description: "Branch name to create for the worktree (e.g. 'feature/my-change').",
@@ -21,7 +16,7 @@ export const WorktreeMcpHandoffInput = Schema.Struct({
   startFromOrigin: Schema.optional(
     Schema.Boolean.annotate({
       description:
-        "Fetch origin and start the worktree branch from the remote-tracking commit of baseRef instead of the local ref. Defaults to the server's 'new worktrees start from origin' setting.",
+        "Fetch the remote baseRef belongs to and start the worktree branch from its remote-tracking commit instead of the local ref. Defaults to the server's 'new worktrees start from remote' setting.",
     }),
   ),
   runSetupScript: Schema.optional(

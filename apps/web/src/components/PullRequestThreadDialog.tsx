@@ -21,6 +21,7 @@ import { getSourceControlPresentation } from "~/sourceControlPresentation";
 import { useEnvironmentQuery } from "~/state/query";
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { vcsEnvironment } from "~/state/vcs";
+import { offHeadPullRequestCheckoutToast } from "./pullRequest/pullRequestCheckoutToast";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -33,6 +34,7 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { Spinner } from "./ui/spinner";
+import { toastManager } from "./ui/toast";
 
 interface PullRequestThreadDialogProps {
   open: boolean;
@@ -112,7 +114,6 @@ export function PullRequestThreadDialog({
       cwd,
       reference: parsedReference,
     })?.pullRequest ?? null;
-  // The prepare action keys on this scope object, so it only ever reaches the hook.
   const preparePullRequestThreadAction = usePreparePullRequestThreadAction({ environmentId, cwd });
   const canOperateThread = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
 
@@ -171,6 +172,9 @@ export function PullRequestThreadDialog({
       branch: result.value.branch,
       worktreePath: result.value.worktreePath,
     });
+    if (!result.value.isOnPullRequestHead) {
+      toastManager.add(offHeadPullRequestCheckoutToast(terminology));
+    }
     onOpenChange(false);
   };
 

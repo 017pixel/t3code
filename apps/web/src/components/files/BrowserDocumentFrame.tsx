@@ -34,8 +34,6 @@ import { readLocalApi } from "~/localApi";
 import { cn } from "~/lib/utils";
 import { primaryServerKeybindingsAtom, serverEnvironment } from "~/state/server";
 
-const PDF_VIEWER_FRAGMENT = "#toolbar=0&view=FitH";
-
 /**
  * The page reports the keys, and a page script can report any key it likes,
  * so only commands that change what the reader sees are here, never one that
@@ -65,8 +63,7 @@ export const isPdfPreviewFile = (path: string): boolean =>
 
 /**
  * HTML runs in a sandboxed frame with an opaque origin, so a page cannot reach
- * the app's session or storage. The built-in PDF viewer needs an unsandboxed
- * frame; a PDF runs no scripts.
+ * the app's session or storage. PDFs use the browser's native viewer.
  */
 export function BrowserDocumentFrame(props: {
   readonly src: string;
@@ -74,49 +71,53 @@ export function BrowserDocumentFrame(props: {
   readonly pdf: boolean;
   readonly htmlRender?: boolean;
   readonly threadRef?: ScopedThreadRef | undefined;
+  /** Stable resource identity and revision; defaults to src for callers that reload on URL changes. */
+  readonly documentKey?: string | undefined;
 }) {
-  const className = "min-h-0 flex-1 border-0 bg-white";
+  const key = props.documentKey ?? props.src;
   return props.pdf ? (
-    // oxlint-disable-next-line react/iframe-missing-sandbox -- the built-in PDF viewer needs an unsandboxed frame.
-    <iframe
+    <embed
       key={props.src}
-      src={`${props.src}${PDF_VIEWER_FRAGMENT}`}
+      src={props.src}
+      type="application/pdf"
       title={props.title}
-      className={className}
+      className="min-h-0 w-full flex-1 border-0"
     />
   ) : props.htmlRender ? (
     <HtmlRenderDocument
-      key={props.src}
+      key={key}
       src={props.src}
       title={props.title}
       threadRef={props.threadRef}
       className="min-h-0 flex-1"
     />
   ) : (
+    <FileDocument key={key} src={props.src} title={props.title} />
+  );
+}
+
+// URL renewals must not discard form input or scroll; a new key mounts a fresh document.
+function FileDocument(props: { readonly src: string; readonly title: string }) {
+  const [src] = useState(props.src);
+  return (
     <iframe
-      key={props.src}
-      src={props.src}
+      src={src}
       title={props.title}
-      className={className}
+      className="min-h-0 flex-1 border-0 bg-white"
       sandbox="allow-scripts allow-forms allow-popups allow-downloads"
     />
   );
 }
 
-/**
- * The first URL is kept for the frame's lifetime: signed asset URLs re-mint
- * while it stays mounted, and a new src would reload the page.
- */
+/** Keep the initial URL while mounted; re-signing must not reload the page. */
 export function HtmlRenderDocument(props: {
   readonly src: string;
   readonly title: string;
   readonly className?: string;
   readonly threadRef?: ScopedThreadRef | undefined;
   readonly onContentHeight?: (height: number) => void;
-  /** Reports the image viewer opening and closing, so a virtualized row can stay mounted. */
+  /** Reports fullscreen changes so virtualized rows can stay mounted. */
   readonly onFullscreenChange?: ((fullscreen: boolean) => void) | undefined;
-  /** Called when the page has loaded. */
-  readonly onLoad?: () => void;
 }) {
   const theme = useHtmlRenderTheme();
   const frameRef = useRef<HTMLIFrameElement>(null);
@@ -131,10 +132,8 @@ export function HtmlRenderDocument(props: {
   const environmentKeybindings = useAtomValue(
     serverEnvironment.configValueAtom(props.threadRef?.environmentId ?? null),
   )?.keybindings;
-  // The app resolves a replayed key in its live context, so every allowed
-  // binding counts whatever its `when`, and a key that any binding gives to
-  // another command stays with the page. Only Cmd/Ctrl chords: a printable key
-  // would type into the composer instead.
+  // Replay only Cmd/Ctrl chords exclusive to allowed commands regardless of when; live resolution could
+  // otherwise type in the composer.
   const mac = isMacPlatform(navigator.platform);
   const resolve = (shortcut: KeybindingShortcut): HtmlRenderShortcut => ({
     key: shortcut.key,
@@ -163,10 +162,8 @@ export function HtmlRenderDocument(props: {
     );
   };
   useEffect(postShortcuts, [blocked, shortcuts]);
-  // The page reports the key and code, and a page script can report any pair,
-  // so a key that could match another command's binding is never replayed. A
-  // named key (Backspace, Enter) must be the shortcut's own, since some app
-  // handlers read `event.key` directly.
+  // Pages can forge key/code pairs; reject pairs matching other bindings and require named keys to match the
+  // shortcut.
   const isShortcut = useEffectEvent(
     (key: NonNullable<ReturnType<typeof readHtmlRenderKeyDown>>) => {
       const matches = (shortcut: HtmlRenderShortcut) =>
@@ -203,10 +200,8 @@ export function HtmlRenderDocument(props: {
     }
     void openLink(url, { event: modifiers }).catch((cause: unknown) => console.error(cause));
   });
-  // It asks the client, which opens the link only while this frame has focus
-  // and the reader has just used the app. A page can take focus by script, so
-  // this stops opens on load, not a page that waits for the reader's next click
-  // or key.
+  // Require frame focus and recent app use to block opens on load; scripts can still wait for the reader's
+  // next input.
   useEffect(() => {
     const openLink = (event: MessageEvent) => {
       const frame = frameRef.current;
@@ -247,7 +242,6 @@ export function HtmlRenderDocument(props: {
     window.addEventListener("message", replayKey);
     return () => window.removeEventListener("message", replayKey);
   }, []);
-  // A clicked page image opens in the same viewer as chat images, gated like a link.
   useEffect(() => {
     const openImage = (event: MessageEvent) => {
       const frame = frameRef.current;
@@ -273,8 +267,7 @@ export function HtmlRenderDocument(props: {
     return () => onFullscreenChange?.(false);
   }, [expandedImage, onFullscreenChange]);
   const { onContentHeight } = props;
-  // A page posts its height once per change, so listen from the commit that
-  // inserts the frame; a passive effect could run after a fast page's first post.
+  // Listen at commit because a fast page may post its initial height before passive effects run.
   useLayoutEffect(() => {
     if (onContentHeight === undefined) return;
     const resize = (event: MessageEvent) => {
@@ -300,11 +293,8 @@ export function HtmlRenderDocument(props: {
           // Covers a theme change that landed while the page was loading.
           postTheme();
           postShortcuts();
-          props.onLoad?.();
         }}
-        // A frame whose color scheme differs from its document's paints an opaque
-        // canvas, so the blank document a frame starts with would flash white in
-        // dark mode. Once the page is in, its prefers-color-scheme follows the app.
+        // Match the blank document's scheme to avoid dark-mode white flashes, then follow the app after load.
         className={cn("border-0 scheme-light", props.className)}
         style={loaded ? { colorScheme: theme.appearance } : undefined}
       />

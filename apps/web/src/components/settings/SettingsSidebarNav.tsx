@@ -9,6 +9,7 @@ import {
 } from "react";
 import {
   ArchiveIcon,
+  FlaskConicalIcon,
   BlocksIcon,
   BotIcon,
   createLucideIcon,
@@ -87,6 +88,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/source-control": GitBranchIcon,
   "/settings/storage": HardDriveIcon,
   "/settings/connections": Link2Icon,
+  "/settings/beta": FlaskConicalIcon,
   "/settings/archived": ArchiveIcon,
 };
 
@@ -104,7 +106,7 @@ const SETTINGS_NAV_ITEMS: ReadonlyArray<{
 
 function SettingsSectionIcon({ to }: { to: SettingsPath }) {
   const Icon = SETTINGS_SECTION_ICONS[to];
-  return <Icon className="mt-0.5 size-3.5 shrink-0 text-sidebar-muted-foreground/60" />;
+  return <Icon className="size-3.5 h-5 shrink-0 text-sidebar-muted-foreground/60" />;
 }
 
 export function SettingsSidebarNav({ pathname }: { pathname: string }) {

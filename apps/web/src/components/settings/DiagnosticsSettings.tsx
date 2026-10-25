@@ -812,8 +812,7 @@ export function DiagnosticsSettingsPanel() {
   const isInitialLoading = isPending && data === null;
   const isProcessInitialLoading = isProcessPending && processData === null;
   const isResourceInitialLoading = isResourcePending && resourceData === null;
-  // The export form waits for each environment's first tables so a search target below them
-  // stays in view. Later loads, such as a new resource window, must not remount it and drop drafts.
+  // Wait for initial tables to stabilize search targets; later loads must preserve export drafts.
   const [exportFormEnvironmentId, setExportFormEnvironmentId] =
     useState<typeof environmentId>(null);
   if (
@@ -979,13 +978,13 @@ export function DiagnosticsSettingsPanel() {
           <div className="space-y-2 border-t border-border/60 px-4 py-3 text-xs text-muted-foreground sm:px-5">
             {processDiagnosticsError ? (
               <div className="flex items-start gap-2 text-destructive">
-                <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+                <AlertTriangleIcon className="size-3.5 h-lh shrink-0" />
                 <span>{processDiagnosticsError.message}</span>
               </div>
             ) : null}
             {processError ? (
               <div className="flex items-start gap-2 text-destructive">
-                <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+                <AlertTriangleIcon className="size-3.5 h-lh shrink-0" />
                 <span>{processError}</span>
               </div>
             ) : null}
@@ -1051,13 +1050,13 @@ export function DiagnosticsSettingsPanel() {
           <div className="space-y-2 border-t border-border/60 px-4 py-3 text-xs text-muted-foreground sm:px-5">
             {processResourceError ? (
               <div className="flex items-start gap-2 text-destructive">
-                <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+                <AlertTriangleIcon className="size-3.5 h-lh shrink-0" />
                 <span>{processResourceError.message}</span>
               </div>
             ) : null}
             {resourceError ? (
               <div className="flex items-start gap-2 text-destructive">
-                <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+                <AlertTriangleIcon className="size-3.5 h-lh shrink-0" />
                 <span>{resourceError}</span>
               </div>
             ) : null}
@@ -1134,7 +1133,7 @@ export function DiagnosticsSettingsPanel() {
           <div className="space-y-2 border-t border-border/60 px-4 py-3 text-xs text-muted-foreground sm:px-5">
             {openLogsDirectoryError ? (
               <div className="flex items-start gap-2 text-destructive">
-                <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+                <AlertTriangleIcon className="size-3.5 h-lh shrink-0" />
                 <span>{openLogsDirectoryError}</span>
               </div>
             ) : null}
@@ -1145,7 +1144,7 @@ export function DiagnosticsSettingsPanel() {
                   traceDiagnosticsPartialFailure ? "text-warning-foreground" : "text-destructive",
                 )}
               >
-                <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+                <AlertTriangleIcon className="size-3.5 h-lh shrink-0" />
                 <span>
                   {traceDiagnosticsPartialFailure
                     ? `Some trace files could not be read, so diagnostics may be incomplete. ${traceDiagnosticsError.message}`
@@ -1155,7 +1154,7 @@ export function DiagnosticsSettingsPanel() {
             ) : null}
             {error ? (
               <div className="flex items-start gap-2 text-destructive">
-                <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+                <AlertTriangleIcon className="size-3.5 h-lh shrink-0" />
                 <span>{error}</span>
               </div>
             ) : null}

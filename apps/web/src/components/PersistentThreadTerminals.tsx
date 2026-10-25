@@ -24,6 +24,7 @@ import { useKnownTerminalSessions } from "../state/terminalSessions";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useThreadTerminalActions } from "./terminal/useThreadTerminalActions";
 import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
+import { resolveTerminalWorktreePath } from "./ChatView.logic";
 
 /** Where a drawer or panel opens new terminals when a script run overrides the thread's own. */
 export type PersistentTerminalLaunchContext = {
@@ -31,7 +32,6 @@ export type PersistentTerminalLaunchContext = {
   readonly worktreePath: string | null;
 };
 
-/** Same terminal ids (order ignored) — avoids reconcile when only server session ordering differs. */
 function terminalIdListsEqual(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) {
     return false;
@@ -49,11 +49,7 @@ function terminalIdListsEqual(left: readonly string[], right: readonly string[])
   return true;
 }
 
-/**
- * Server knows about fewer sessions than the client, but every server id still exists locally.
- * Typical right after `terminal.open`: known-session list lags; reconciling would drop the new id
- * and later re-add it as a separate group (no split layout).
- */
+/** Server sessions lag terminal.open; reconciling strict subsets would discard new split layouts. */
 function serverTerminalIdsStrictSubsetOfClient(
   serverIds: readonly string[],
   clientIds: readonly string[],
@@ -80,6 +76,7 @@ interface PersistentThreadTerminalDrawerProps {
   threadRef: { environmentId: EnvironmentId; threadId: ThreadId };
   threadId: ThreadId;
   active: boolean;
+  composerHeight: number;
   launchContext: PersistentTerminalLaunchContext | null;
   focusRequestId: number;
   splitShortcutLabel: string | undefined;
@@ -94,6 +91,7 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
   threadRef,
   threadId,
   active,
+  composerHeight,
   launchContext,
   focusRequestId,
   splitShortcutLabel,
@@ -267,6 +265,7 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
           runtimeEnv={runtimeEnv}
           visible={visible}
           height={terminalUiState.terminalHeight}
+          composerHeight={composerHeight}
           // Known-session order is MRU and changes on focus; persisted store order keeps sidebar labels stable.
           terminalIds={canOperateTerminal ? terminalUiState.terminalIds : serverOrderedTerminalIds}
           activeTerminalId={terminalUiState.activeTerminalId}
@@ -346,8 +345,11 @@ export const PersistentThreadTerminalPanel = memo(function PersistentThreadTermi
   const activeSummary =
     knownTerminalSessions?.find((session) => session.target.terminalId === surface.activeTerminalId)
       ?.state.summary ?? null;
-  const worktreePath =
-    launchContext?.worktreePath ?? activeSummary?.worktreePath ?? threadWorktreePath;
+  const worktreePath = resolveTerminalWorktreePath({
+    launchContext,
+    summary: activeSummary,
+    threadWorktreePath,
+  });
   const cwd =
     launchContext?.cwd ??
     activeSummary?.cwd ??
@@ -363,8 +365,11 @@ export const PersistentThreadTerminalPanel = memo(function PersistentThreadTermi
         .summary ?? null;
     terminalLabelsById.set(terminalId, resolveTerminalSessionLabel(terminalId, summary));
     if (!project) continue;
-    const terminalWorktreePath =
-      launchContext?.worktreePath ?? summary?.worktreePath ?? threadWorktreePath;
+    const terminalWorktreePath = resolveTerminalWorktreePath({
+      launchContext,
+      summary,
+      threadWorktreePath,
+    });
     terminalLaunchLocationsById.set(terminalId, {
       cwd:
         launchContext?.cwd ??

@@ -96,40 +96,39 @@ export const hashBundle = Effect.fn("hashBundle")(function* (root: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const entries: string[] = [];
-  const visit = (
+  const visit = Effect.fn("mobile-native-client.visit")(function* (
     relative: string,
-  ): Effect.Effect<void, FileSystemError, FileSystem.FileSystem | Crypto.Crypto> =>
-    Effect.gen(function* () {
-      const names = (yield* fs.readDirectory(path.join(root, relative))).sort((a, b) =>
-        a.localeCompare(b, "en"),
+  ): Effect.fn.Return<void, FileSystemError, FileSystem.FileSystem | Crypto.Crypto> {
+    const names = (yield* fs.readDirectory(path.join(root, relative))).sort((a, b) =>
+      a.localeCompare(b, "en"),
+    );
+    for (const name of names) {
+      const key = path.join(relative, name);
+      const absolute = path.join(root, key);
+      // FileSystem.stat follows links; readLink distinguishes them without following a cycle.
+      const link = yield* fs.readLink(absolute).pipe(
+        Effect.catchIf(
+          (error) => isNotLink(error.reason.cause),
+          () => Effect.succeed(null),
+        ),
       );
-      for (const name of names) {
-        const key = path.join(relative, name);
-        const absolute = path.join(root, key);
-        // FileSystem.stat follows links; readLink distinguishes them without following a cycle.
-        const link = yield* fs.readLink(absolute).pipe(
-          Effect.catchIf(
-            (error) => isNotLink(error.reason.cause),
-            () => Effect.succeed(null),
-          ),
-        );
-        if (link !== null) {
-          entries.push(`link:${key}:${link}`);
-          continue;
-        }
-        const info = yield* fs.stat(absolute);
-        if (info.type === "Directory") {
-          entries.push(`directory:${key}`);
-          yield* visit(key);
-        } else {
-          const chunks = yield* fs.stream(absolute, { chunkSize: 65536 }).pipe(
-            Stream.mapEffect((chunk) => digest(chunk)),
-            Stream.runCollect,
-          );
-          entries.push(`file:${key}:${yield* digest(chunks.join("\n"))}`);
-        }
+      if (link !== null) {
+        entries.push(`link:${key}:${link}`);
+        continue;
       }
-    });
+      const info = yield* fs.stat(absolute);
+      if (info.type === "Directory") {
+        entries.push(`directory:${key}`);
+        yield* visit(key);
+      } else {
+        const chunks = yield* fs.stream(absolute, { chunkSize: 65536 }).pipe(
+          Stream.mapEffect((chunk) => digest(chunk)),
+          Stream.runCollect,
+        );
+        entries.push(`file:${key}:${yield* digest(chunks.join("\n"))}`);
+      }
+    }
+  });
   yield* visit("");
   return yield* digest(entries.map((entry) => `${entry.length}:${entry}`).join(""));
 });
@@ -284,13 +283,7 @@ export const installedBinary = Effect.fn("installedBinary")(function* (
   return yield* digest(hashes.sort().join("\n"));
 });
 
-/**
- * Run `expo prebuild --clean` without losing `android/.gradle` (task history) and
- * `android/app/.cxx` (native compile outputs). Both invalidate by input, so a clean
- * rebuild only redoes changed work. `app/build` stays out: its autolinking and JS
- * bundle tasks do not declare every input. Each step is best-effort, because a lost
- * cache costs one slower build and must never cost the build.
- */
+/** Preserve input-invalidated Gradle/.cxx caches; exclude app/build because its tasks omit inputs. Ignore cache failures. */
 export const prebuildAndroid = Effect.fn("nativeClient.prebuildAndroid")(function* <E, R>(
   mobile: string,
   prebuild: Effect.Effect<void, E, R>,
@@ -298,8 +291,7 @@ export const prebuildAndroid = Effect.fn("nativeClient.prebuildAndroid")(functio
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const android = path.join(mobile, "android");
-  // A sibling of android/ keeps the renames on one filesystem. It is gitignored, and a
-  // run killed mid-prebuild leaves it for the next run to clear.
+  // Sibling renames stay on one filesystem; interrupted runs leave this gitignored cache for next-run cleanup.
   const saved = path.join(mobile, ".android-cache");
   const caches = [".gradle", "app/.cxx"];
   const clear = fs.remove(saved, { recursive: true, force: true }).pipe(Effect.ignore);
