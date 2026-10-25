@@ -1157,8 +1157,9 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --sidebar-muted-foreground: var(--muted-foreground);
   --sidebar-control-surface: var(--color-zinc-100);
   --sidebar-row-hover: var(--color-zinc-25);
-  --sidebar-row-active: var(--color-white);
-  --sidebar-row-selected: var(--color-white);
+  /* The current row and settings page carry the accent: blue means "you are here". */
+  --sidebar-row-active: color-mix(in oklab, var(--primary) 10%, var(--color-white));
+  --sidebar-row-selected: color-mix(in oklab, var(--primary) 7%, var(--color-white));
   --sidebar-border: var(--border);
   --sidebar-stage-fade: var(--sidebar);
   --code-background: color-mix(in srgb, var(--card) 90%, var(--background));
@@ -1205,8 +1206,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     --sidebar: color-mix(in srgb, var(--background) 97%, var(--color-white));
     --sidebar-control-surface: var(--muted);
     --sidebar-row-hover: var(--accent);
-    --sidebar-row-active: var(--accent);
-    --sidebar-row-selected: var(--muted);
+    --sidebar-row-active: color-mix(in oklab, var(--primary) 24%, transparent);
+    --sidebar-row-selected: color-mix(in oklab, var(--primary) 14%, transparent);
     --sidebar-stage-fade: var(--sidebar);
     --terminal-cursor: rgb(180 203 255);
     --terminal-selection-background: rgb(180 203 255 / 25%);
@@ -1214,8 +1215,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 }
 
 /* Keep both sidebar implementations (default and legacy) on the same quiet
-   zinc hierarchy: zinc-50 navigation, zinc-25 hover, and white selected/raised
-   surfaces. */
+   zinc hierarchy: zinc-50 navigation, zinc-25 hover, white raised surfaces,
+   and accent-tinted current rows. */
 [data-app-sidebar] {
   --background: var(--color-zinc-25);
   --foreground: var(--color-zinc-900);
@@ -1232,8 +1233,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --sidebar-muted-foreground: var(--color-zinc-500);
   --sidebar-control-surface: var(--color-zinc-100);
   --sidebar-row-hover: var(--color-zinc-25);
-  --sidebar-row-active: var(--color-white);
-  --sidebar-row-selected: var(--color-white);
+  --sidebar-row-active: color-mix(in oklab, var(--primary) 10%, var(--color-white));
+  --sidebar-row-selected: color-mix(in oklab, var(--primary) 7%, var(--color-white));
   --sidebar-border: var(--color-zinc-200);
   --sidebar-stage-fade: var(--sidebar);
 
@@ -1253,8 +1254,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     --sidebar-muted-foreground: var(--muted-foreground);
     --sidebar-control-surface: var(--muted);
     --sidebar-row-hover: color-mix(in srgb, var(--contrast-foreground) 8%, transparent);
-    --sidebar-row-active: color-mix(in srgb, var(--contrast-foreground) 11%, transparent);
-    --sidebar-row-selected: color-mix(in srgb, var(--contrast-foreground) 7%, transparent);
+    --sidebar-row-active: color-mix(in oklab, var(--primary) 24%, transparent);
+    --sidebar-row-selected: color-mix(in oklab, var(--primary) 14%, transparent);
     --sidebar-border: var(--border);
     --sidebar-stage-fade: var(--card);
   }
