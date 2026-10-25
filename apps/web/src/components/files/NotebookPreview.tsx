@@ -1,6 +1,6 @@
 /* oxlint-disable react/no-array-index-key -- Notebook cells and outputs retain their saved source order. */
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Root, RootContent } from "mdast";
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { Button } from "~/components/ui/button";
@@ -46,6 +46,48 @@ export default function NotebookPreview(props: {
   readonly sizeBytes?: number | undefined;
 }) {
   const [visible, setVisible] = useState(20);
+  const scroll = useRef<HTMLDivElement>(null);
+  const [outputView, setOutputView] = useState(() => ({
+    mounted: new Set<string>(),
+    heights: new Map<string, number>(),
+  }));
+  const outputCount = props.notebook.cells
+    .slice(0, visible)
+    .reduce((count, cell) => count + cell.outputs.length, 0);
+  useEffect(() => {
+    const root = scroll.current;
+    if (!root || !outputCount) return;
+    const candidates = new Map<Element, string>();
+    let active: Element[] = [];
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting)
+            candidates.set(entry.target, (entry.target as HTMLElement).dataset.notebookOutput!);
+          else candidates.delete(entry.target);
+        }
+        // Bound browsing contexts even when a cell contains hundreds of tiny HTML outputs.
+        const next = [...candidates.keys()].slice(0, 16);
+        const measured = active
+          .filter((node) => !next.includes(node))
+          .map(
+            (node) =>
+              [
+                (node as HTMLElement).dataset.notebookOutput!,
+                node.getBoundingClientRect().height,
+              ] as const,
+          );
+        active = next;
+        setOutputView((old) => ({
+          mounted: new Set(next.map((node) => candidates.get(node)!)),
+          heights: new Map([...old.heights, ...measured]),
+        }));
+      },
+      { root, rootMargin: "160px" },
+    );
+    for (const node of root.querySelectorAll("[data-notebook-output]")) observer.observe(node);
+    return () => observer.disconnect();
+  }, [outputCount]);
   return (
     <>
       <div
@@ -58,7 +100,7 @@ export default function NotebookPreview(props: {
           : ""}
       </div>
       <FileSurfaceNotice>Saved outputs only. Code is never executed.</FileSurfaceNotice>
-      <div className="scrollbar-gutter-both min-h-0 flex-1 overflow-auto">
+      <div ref={scroll} className="scrollbar-gutter-both min-h-0 flex-1 overflow-auto">
         <div className="mx-auto max-w-4xl space-y-5 px-5 py-6">
           {props.notebook.cells.slice(0, visible).map((cell, index) => (
             <section
@@ -84,8 +126,18 @@ export default function NotebookPreview(props: {
                 />
               ) : null}
               {cell.outputs.map((output, outputIndex) => (
-                <div key={outputIndex} className="border-t border-border/60">
-                  {output.kind === "html" ? (
+                <div
+                  key={outputIndex}
+                  data-notebook-output={`${index}-${outputIndex}`}
+                  className="border-t border-border/60"
+                  style={{
+                    minHeight: outputView.mounted.has(`${index}-${outputIndex}`)
+                      ? undefined
+                      : (outputView.heights.get(`${index}-${outputIndex}`) ?? 80),
+                  }}
+                >
+                  {!outputView.mounted.has(`${index}-${outputIndex}`) ? null : output.kind ===
+                    "html" ? (
                     <DocumentPages
                       html={output.text}
                       name={`Cell ${index + 1} HTML output`}

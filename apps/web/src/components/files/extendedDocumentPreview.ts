@@ -426,8 +426,12 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
     italic: false,
     underline: false,
     uc: 1,
+    font: 0,
+    fontTable: false,
     decoder: new TextDecoder("windows-1252"),
   };
+  const fonts = new Map<number, TextDecoder>();
+  let defaultFont = 0;
   const stack: (typeof state)[] = [];
   let html = "";
   const pages: { title: string; html: string }[] = [];
@@ -444,7 +448,9 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
   let encodedLength = 0;
   const flush = () => {
     if (encodedLength) {
-      run += escape(state.decoder.decode(encoded.subarray(0, encodedLength)));
+      run += escape(
+        (fonts.get(state.font) ?? state.decoder).decode(encoded.subarray(0, encodedLength)),
+      );
       encodedLength = 0;
     }
     if (completedLength + html.length + run.length > 8 * 1024 * 1024)
@@ -475,10 +481,12 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
     const char = source[i++];
     if (char === "{") {
       flush();
+      fallback = 0;
       if (stack.length > 100) throw new Error("This rich text document is nested too deeply.");
       stack.push({ ...state });
     } else if (char === "}") {
       flush();
+      fallback = 0;
       const parent = stack.pop();
       if (!parent) throw new Error("This rich text document is damaged.");
       state = parent;
@@ -511,9 +519,36 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
       i += match[0].length;
       const word = match[1];
       const arg = match[2] === undefined ? 1 : Number(match[2]);
-      if (
+      if (word === "fonttbl") {
+        state.fontTable = true;
+        state.skip = true;
+      } else if (word === "deff") state.font = defaultFont = arg;
+      else if (word === "f") state.font = arg;
+      else if (word === "fcharset" && state.fontTable) {
+        const label = (
+          {
+            0: state.decoder.encoding,
+            1: state.decoder.encoding,
+            77: "macintosh",
+            128: "shift_jis",
+            129: "euc-kr",
+            134: "gbk",
+            136: "big5",
+            161: "windows-1253",
+            162: "windows-1254",
+            163: "windows-1258",
+            177: "windows-1255",
+            178: "windows-1256",
+            186: "windows-1257",
+            204: "windows-1251",
+            222: "windows-874",
+            238: "windows-1250",
+            255: "ibm866",
+          } as Record<number, string>
+        )[arg];
+        if (label) fonts.set(state.font, new TextDecoder(label));
+      } else if (
         [
-          "fonttbl",
           "colortbl",
           "stylesheet",
           "info",
@@ -559,7 +594,8 @@ export function openRtf(bytes: ArrayBuffer): OfficeWorkerResult {
       else if (word === "i") state.italic = arg !== 0;
       else if (word === "ul") state.underline = arg !== 0;
       else if (word === "ulnone") state.underline = false;
-      else if (word === "plain") state = { ...state, bold: false, italic: false, underline: false };
+      else if (word === "plain")
+        state = { ...state, bold: false, italic: false, underline: false, font: defaultFont };
       else if (word === "uc") state.uc = Math.max(0, Math.min(10, arg));
       else if (word === "u") {
         fallback = 0;

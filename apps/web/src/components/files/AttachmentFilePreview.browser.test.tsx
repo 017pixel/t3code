@@ -2110,6 +2110,74 @@ it("toggles a Mermaid attachment between diagram and source through the lazy pre
   expect(screen.container.querySelector('[role="alert"]')).toBeNull();
 });
 
+it("mounts a bounded set of saved notebook outputs as the reader scrolls", async () => {
+  const notebook = {
+    nbformat: 4,
+    metadata: {},
+    cells: Array.from({ length: 20 }, (_, cell) => ({
+      cell_type: "code",
+      source: [],
+      metadata: {},
+      outputs: Array.from({ length: 100 }, (_, output) => ({
+        output_type: "display_data",
+        data: { "text/html": `<p>saved ${cell}-${output}</p>` },
+      })),
+    })),
+  };
+  const file = new Blob([JSON.stringify(notebook)]);
+  await using screen = await render(
+    <div style={{ display: "flex", height: 400, width: 600 }}>
+      <AttachmentFilePreview
+        name="observations.ipynb"
+        mimeType="application/json"
+        sizeBytes={file.size}
+        file={file}
+      />
+    </div>,
+  );
+  await vi.waitFor(() =>
+    expect(screen.container.querySelectorAll("iframe").length).toBeGreaterThan(0),
+  );
+  expect(screen.container.querySelectorAll("iframe").length).toBeLessThanOrEqual(16);
+  const first = screen.container.querySelector("iframe")!;
+  expect(first.srcdoc).toContain("saved 0-0");
+  const viewport = screen.container.querySelector<HTMLElement>(".scrollbar-gutter-both")!;
+  await act(() => {
+    viewport.scrollTop = viewport.scrollHeight;
+  });
+  await vi.waitFor(() => {
+    expect(
+      [...screen.container.querySelectorAll("iframe")].some((frame) =>
+        frame.srcdoc.includes("saved 19-99"),
+      ),
+    ).toBe(true);
+    expect(first.isConnected).toBe(false);
+  });
+  expect(screen.container.querySelectorAll("iframe").length).toBeLessThanOrEqual(16);
+  await act(() => {
+    viewport.scrollTop = 0;
+  });
+  await vi.waitFor(() =>
+    expect(screen.container.querySelector("iframe")?.srcdoc).toContain("saved 0-0"),
+  );
+});
+
+it.each([
+  [String.raw`{\rtf1\uc1\u945{\b bold}Hello}`, "αboldHello"],
+  [String.raw`{\rtf1\uc1{\u945}Hello}`, "αHello"],
+  [
+    String.raw`{\rtf1\ansi{\fonttbl{\f0\fcharset204 Cyrillic;}{\f1\fcharset0 Latin;}}\f0\'c0{\f1\'c0}\'c1}`,
+    "АÀБ",
+  ],
+  [String.raw`{\rtf1\ansi\deff1{\fonttbl{\f1\fcharset204 Cyrillic;}}\'c0\plain\'c1}`, "АБ"],
+])("retains RTF grouped Unicode and font text in %s", async (source, expected) => {
+  const { openRtf } = await import("./extendedDocumentPreview");
+  const result = openRtf(new TextEncoder().encode(source).buffer);
+  if (result.type !== "document") throw new Error("Expected rich text document");
+  const html = result.pages.map((page) => page.html).join("");
+  expect(new DOMParser().parseFromString(html, "text/html").body.textContent).toBe(expected);
+});
+
 it.each(["rtf", "epub", "ods"] as const)(
   "preserves %s document text through the worker and attachment viewer",
   async (kind) => {
