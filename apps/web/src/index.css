@@ -1331,14 +1331,14 @@ html[data-theme-id]:not([data-theme-id=""]) {
   --sidebar-row-hover: var(--app-theme-sidebar-row-hover);
   --sidebar-row-active: var(--app-theme-sidebar-row-active);
   --sidebar-row-selected: var(--app-theme-sidebar-row-selected);
-  --sidebar-row-ring: color-mix(in oklab, var(--primary) 30%, transparent);
+  --sidebar-row-ring: color-mix(in oklab, var(--primary) 35%, transparent);
 
   /* Light theme row fills can sit near white, so the current row also takes
      the theme's action color. */
   @variant light {
     --sidebar-row-active: color-mix(
       in oklab,
-      var(--primary) 16%,
+      var(--primary) 20%,
       var(--app-theme-sidebar-row-active)
     );
   }
@@ -1542,14 +1542,14 @@ html[data-theme-id] [data-app-sidebar] {
   --sidebar-row-hover: var(--app-theme-sidebar-row-hover);
   --sidebar-row-active: var(--app-theme-sidebar-row-active);
   --sidebar-row-selected: var(--app-theme-sidebar-row-selected);
-  --sidebar-row-ring: color-mix(in oklab, var(--primary) 30%, transparent);
+  --sidebar-row-ring: color-mix(in oklab, var(--primary) 35%, transparent);
 
   /* Light theme row fills can sit near white, so the current row also takes
      the theme's action color. */
   @variant light {
     --sidebar-row-active: color-mix(
       in oklab,
-      var(--primary) 16%,
+      var(--primary) 20%,
       var(--app-theme-sidebar-row-active)
     );
   }
