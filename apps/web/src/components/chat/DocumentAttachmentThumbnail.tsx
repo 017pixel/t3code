@@ -67,7 +67,7 @@ export function DocumentAttachmentThumbnail(props: {
   }, [kind, file.sizeBytes]);
   useEffect(() => {
     if (!visible || !kind || file.sizeBytes > DOCUMENT_THUMBNAIL_MAX_BYTES) return;
-    let cancelled = false;
+    const controller = new AbortController();
     let objectUrl: string | undefined;
     const ratio = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
     const key = JSON.stringify([
@@ -80,21 +80,25 @@ export function DocumentAttachmentThumbnail(props: {
     ]);
     void thumbnailLoader()
       .then(({ loadDocumentThumbnail }) =>
-        loadDocumentThumbnail(key, {
-          kind,
-          file: file.file ?? null,
-          source: () => source(),
-          ratio,
-        }),
+        loadDocumentThumbnail(
+          key,
+          {
+            kind,
+            file: file.file ?? null,
+            source: () => source(),
+            ratio,
+          },
+          controller.signal,
+        ),
       )
       .then((result) => {
-        if (cancelled || !result) return;
+        if (controller.signal.aborted || !result) return;
         objectUrl = URL.createObjectURL(result.blob);
         setThumbnail({ src: objectUrl, label: result.label, identity, file: file.file });
       })
       .catch(() => undefined);
     return () => {
-      cancelled = true;
+      controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [

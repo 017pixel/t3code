@@ -2266,7 +2266,57 @@ it("paints and caches a bounded CSV thumbnail without opening the viewer", async
   ).toBeNull();
 });
 
-it("renders PDF thumbnails and navigates, searches, zooms, and selects PDF pages", async () => {
+it("cancels orphaned thumbnail work while retaining shared subscribers", async () => {
+  const { loadDocumentThumbnail } = await import("./documentThumbnail");
+  let releaseSource!: (url: string | null) => void;
+  const held = new Promise<string | null>((resolve) => {
+    releaseSource = resolve;
+  });
+  const source = vi.fn(() => held);
+  const input = { kind: "csv" as const, source, ratio: 1 };
+  const controllers = Array.from({ length: 4 }, () => new AbortController());
+  const terminate = vi.spyOn(Worker.prototype, "terminate");
+  try {
+    const first = loadDocumentThumbnail("cancel-shared", input, controllers[0]!.signal);
+    const shared = loadDocumentThumbnail("cancel-shared", input, controllers[1]!.signal);
+    const second = loadDocumentThumbnail("cancel-second", input, controllers[2]!.signal);
+    const queuedSource = vi.fn(async () => "data:text/csv,a,b");
+    const queued = loadDocumentThumbnail(
+      "cancel-queued",
+      { ...input, source: queuedSource },
+      controllers[3]!.signal,
+    );
+    controllers[3]!.abort();
+    expect(await queued).toBeNull();
+    expect(queuedSource).not.toHaveBeenCalled();
+    controllers[0]!.abort();
+    expect(await first).toBeNull();
+    expect(terminate).not.toHaveBeenCalled();
+    const replacement = loadDocumentThumbnail("cancel-replacement", {
+      ...input,
+      file: new Blob(["Team,Status\nNorth,Ready"]),
+    });
+    controllers[1]!.abort();
+    expect(await shared).toBeNull();
+    expect((await replacement)?.label).toBe("1 row");
+    expect(terminate).toHaveBeenCalled();
+    controllers[2]!.abort();
+    expect(await second).toBeNull();
+    expect(source).toHaveBeenCalledTimes(2);
+    expect(
+      await loadDocumentThumbnail("cancel-shared", {
+        ...input,
+        file: new Blob(["Team,Status\nNorth,Ready"]),
+      }),
+    ).not.toBeNull();
+  } finally {
+    for (const controller of controllers) controller.abort();
+    releaseSource(null);
+    terminate.mockRestore();
+  }
+});
+
+it("renders PDF thumbnails and navigates, searches, zooms, and selects mixed-height PDF pages", async () => {
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Count 3 /Kids [3 0 R 5 0 R 7 0 R] >>",
@@ -2276,9 +2326,9 @@ it("renders PDF thumbnails and navigates, searches, zooms, and selects PDF pages
     "Delivery milestones",
     "Budget and risks",
   ].entries()) {
-    const text = `/GS1 gs BT /F1 24 Tf 30 700 Td ${index === 0 ? "(Quarter) Tj /F2 24 Tf (ly outlook) Tj" : `(${title}) Tj`} ET`;
+    const text = `/GS1 gs BT /F1 24 Tf 30 ${index === 0 ? 70 : 700} Td ${index === 0 ? "(Quarter) Tj /F2 24 Tf (ly outlook) Tj" : `(${title}) Tj`} ET`;
     objects.push(
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate ${index === 2 ? 90 : 0} /Resources << /Font << /F1 9 0 R /F2 10 0 R >> /ExtGState << /GS1 << /TR << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 2 >> >> >> >> /Contents ${4 + index * 2} 0 R >>`,
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 ${index === 0 ? 140 : 792}] /Rotate ${index === 2 ? 90 : 0} /Resources << /Font << /F1 9 0 R /F2 10 0 R >> /ExtGState << /GS1 << /TR << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 2 >> >> >> >> /Contents ${4 + index * 2} 0 R >>`,
       `<< /Length ${text.length} >>\nstream\n${text}\nendstream`,
     );
   }
@@ -2348,10 +2398,9 @@ it("renders PDF thumbnails and navigates, searches, zooms, and selects PDF pages
       ).toEqual(["Quarter", "ly outlook"]);
     });
     await screen.getByRole("searchbox", { name: "Find in PDF" }).fill("Budget");
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("3 / 3 pages"));
     await screen.getByRole("button", { name: "Zoom in", exact: true }).click();
-    await vi.waitFor(() => expect(screen.container.textContent).toContain("3 / 3 pages"), {
-      timeout: 15_000,
-    });
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("3 / 3 pages"));
     await vi.waitFor(() => {
       const span = Array.from(screen.container.querySelectorAll("[data-pdf-text-layer] span")).find(
         (node) => node.textContent === "Budget and risks",
@@ -2374,6 +2423,8 @@ it("renders PDF thumbnails and navigates, searches, zooms, and selects PDF pages
       expect(getComputedStyle(span!).userSelect).toBe("text");
       selection.removeAllRanges();
     });
+    await screen.getByRole("button", { name: "Fit width", exact: true }).click();
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("3 / 3 pages"));
     await screen.getByRole("searchbox", { name: "Find in PDF" }).fill(" ");
     await vi.waitFor(() =>
       expect(screen.container.querySelector('[role="status"]')?.textContent).toBe("0/0"),

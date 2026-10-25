@@ -130,6 +130,7 @@ export default function PdfViewer(props: { src: string; title: string }) {
   const [match, setMatch] = useState(0);
   const scroll = useRef<HTMLDivElement>(null);
   const find = useRef<HTMLInputElement>(null);
+  const zoomAnchor = useRef<{ page: number; offset: number; width: number } | null>(null);
   useEffect(() => {
     const controller = new AbortController();
     let disposed = false;
@@ -184,15 +185,10 @@ export default function PdfViewer(props: { src: string; title: string }) {
     for (const ratio of ratios) result.push(result[result.length - 1]! + width * ratio + 16);
     return result;
   })();
-  const current = ratios.reduce((best, ratio, index) => {
-    const visibleHeight = (page: number, pageRatio: number) =>
-      Math.max(
-        0,
-        Math.min(offsets[page]! + width * pageRatio, scrollTop + viewport.height) -
-          Math.max(offsets[page]!, scrollTop),
-      );
-    return visibleHeight(index, ratio) > visibleHeight(best, ratios[best]!) + 1 ? index : best;
-  }, 0);
+  const current = Math.max(
+    0,
+    ratios.findIndex((_, index) => offsets[index + 1]! > scrollTop + 17),
+  );
   const visible = ratios.flatMap((ratio, index) =>
     offsets[index + 1]! >= scrollTop - viewport.height &&
     offsets[index]! <= scrollTop + viewport.height * 2
@@ -212,6 +208,25 @@ export default function PdfViewer(props: { src: string; title: string }) {
   const showPage = (index: number) => {
     scroll.current?.scrollTo({ top: Math.max(0, (offsets[index] ?? 16) - 16) });
   };
+  const changeZoom = (value: number | null) => {
+    zoomAnchor.current = {
+      page: current,
+      offset: (scroll.current?.scrollTop ?? 0) - (offsets[current]! - 16),
+      width,
+    };
+    setZoom(value);
+  };
+  useLayoutEffect(() => {
+    const anchor = zoomAnchor.current;
+    if (!anchor || anchor.width === width) return;
+    zoomAnchor.current = null;
+    scroll.current?.scrollTo({
+      top: offsets[anchor.page]! - 16 + (anchor.offset * width) / anchor.width,
+    });
+  });
+  useLayoutEffect(() => {
+    if (matches.length) jumpToPage(matches[0]!);
+  }, [matches]);
   useEffect(() => {
     if (!pdf || !query.trim()) {
       // oxlint-disable-next-line react/set-state-in-effect -- A blank query cancels the previous search.
@@ -226,10 +241,14 @@ export default function PdfViewer(props: { src: string; title: string }) {
       setMatch(0);
       void (async () => {
         const found: number[] = [];
+        const sizes: number[] = [];
         let size = 0;
         for (let index = 0; index < pdf.numPages; index++) {
           if (cancelled) return;
-          const content = await (await pdf.getPage(index + 1)).getTextContent();
+          const page = await pdf.getPage(index + 1);
+          const pageSize = page.getViewport({ scale: 1 });
+          sizes.push(pageSize.height / pageSize.width);
+          const content = await page.getTextContent();
           const text = content.items
             .map((item) => ("str" in item ? item.str + (item.hasEOL ? "\n" : "") : ""))
             .join("");
@@ -241,8 +260,8 @@ export default function PdfViewer(props: { src: string; title: string }) {
           if (text.toLowerCase().includes(query.toLowerCase())) found.push(index);
         }
         if (cancelled) return;
+        setRatios(sizes);
         setMatches(found);
-        if (found.length) jumpToPage(found[0]!);
       })()
         .catch((cause: unknown) => {
           if (!cancelled)
@@ -280,7 +299,7 @@ export default function PdfViewer(props: { src: string; title: string }) {
         <FileSurfaceAction
           label="Zoom out"
           disabled={scale <= 0.25}
-          onPress={() => setZoom(Math.max(0.25, scale - 0.25))}
+          onPress={() => changeZoom(Math.max(0.25, scale - 0.25))}
         >
           <MinusIcon className="size-3.5" />
         </FileSurfaceAction>
@@ -290,14 +309,14 @@ export default function PdfViewer(props: { src: string; title: string }) {
         <FileSurfaceAction
           label="Zoom in"
           disabled={scale >= 3}
-          onPress={() => setZoom(Math.min(3, scale + 0.25))}
+          onPress={() => changeZoom(Math.min(3, scale + 0.25))}
         >
           <PlusIcon className="size-3.5" />
         </FileSurfaceAction>
         <FileSurfaceAction
           label="Fit width"
           onPress={() => {
-            setZoom(null);
+            changeZoom(null);
             scroll.current?.scrollTo({ left: 0 });
           }}
         >
@@ -366,7 +385,13 @@ export default function PdfViewer(props: { src: string; title: string }) {
         ) : !pdf ? (
           <FileSurfaceLoading />
         ) : (
-          <div className="relative" style={{ height: offsets.at(-1), minWidth: width + 32 }}>
+          <div
+            className="relative"
+            style={{
+              height: `max(${offsets.at(-1) ?? 0}px, calc(100% + ${(offsets.at(-2) ?? 16) - 16}px))`,
+              minWidth: width + 32,
+            }}
+          >
             {visible.map(({ index, ratio }) => (
               <div
                 key={index}
