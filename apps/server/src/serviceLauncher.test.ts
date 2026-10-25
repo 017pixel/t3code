@@ -213,6 +213,43 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
     }),
   );
 
+  it.effect("bounds an oversized boot-service.log that the service manager still appends to", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-log-" });
+      const statePath = path.join(root, "runtime", "service-state.json");
+      const logPath = path.join(root, "userdata", "logs", "boot-service.log");
+      const seededSize = 17 * 1024 * 1024;
+      yield* writeFakeRuntime(
+        fs,
+        path,
+        path.join(root, "runtime", "versions", "1.0.0"),
+        "setInterval(() => {}, 1_000);\n",
+      );
+      yield* Effect.promise(() =>
+        writeServiceState(statePath, {
+          protocol: SERVICE_LAUNCHER_PROTOCOL,
+          activeVersion: "1.0.0",
+        }),
+      );
+      yield* fs.makeDirectory(path.dirname(logPath), { recursive: true });
+      yield* writeSparseFile(logPath, seededSize);
+      // systemd `StandardOutput=append:` and launchd keep this descriptor open across the launcher's life.
+      const serviceManagerWriter = yield* fs.open(logPath, { flag: "a" });
+
+      const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)));
+      const running = launcher.run();
+      yield* Effect.promise(() => launcher.stop("SIGTERM"));
+      yield* Effect.promise(() => running);
+      yield* serviceManagerWriter.writeAll(new TextEncoder().encode("Listening\n"));
+
+      const size = Number((yield* fs.stat(logPath)).size);
+      assert.isBelow(size, seededSize);
+      assert.isTrue((yield* fs.readFileString(logPath)).endsWith("Listening\n"));
+    }),
+  );
+
   it.effect("stays idle instead of exiting when another server owns the T3 home", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
