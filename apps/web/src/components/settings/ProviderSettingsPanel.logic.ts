@@ -83,16 +83,6 @@ function resolveSessionOperateAccess(input: {
   return sessionGrantsScope(input.session, AuthProvidersManageScope) ? "granted" : "denied";
 }
 
-export function resolvePrimaryOperateAccess(input: {
-  readonly isPrimary: boolean;
-  readonly hasDesktopBridge: boolean;
-  readonly session: SessionGrantInput | null;
-  readonly isPending: boolean;
-  readonly hasError: boolean;
-}): ProviderOperateAccess {
-  return resolveSessionOperateAccess(input);
-}
-
 export function resolveRemoteOperateAccess(input: {
   readonly session: SessionGrantInput | null;
   readonly isPending: boolean;
