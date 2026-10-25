@@ -2,6 +2,7 @@ import { useAuth, useClerk } from "@clerk/react";
 import { ManagedRelay, setManagedRelaySession } from "@t3tools/client-runtime/relay";
 import {
   reportAtomCommandResult,
+  runAtomCommand,
   settleAsyncResult,
   settlePromise,
 } from "@t3tools/client-runtime/state/runtime";
@@ -11,7 +12,6 @@ import { useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
 import { environmentCatalog } from "../connection/catalog";
 import { runtime } from "../lib/runtime";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { useAtomCommand } from "../state/use-atom-command";
 import { resolveRelayClerkTokenOptions } from "./publicConfig";
 
 export function deactivateManagedRelayAuthentication(): void {
@@ -45,10 +45,6 @@ export function ManagedRelayAuthProvider({ children }: { readonly children: Reac
     },
   );
   const signedOutByClerkApi = !(isSignedIn && userId) && clerkApiAnswered;
-  const removeRelayEnvironments = useAtomCommand(environmentCatalog.removeRelayEnvironments, {
-    reportFailure: false,
-    reportDefect: false,
-  });
   const observedAccountRef = useRef<string | null | undefined>(undefined);
   const accountTransitionRef = useRef<Promise<void> | null>(null);
 
@@ -68,7 +64,12 @@ export function ManagedRelayAuthProvider({ children }: { readonly children: Reac
       const previousTransition = accountTransitionRef.current ?? Promise.resolve();
       accountTransitionRef.current = previousTransition.then(async () => {
         const results = await Promise.all([
-          removeRelayEnvironments(),
+          // This provider mounts above AppAtomRegistryProvider, so a context-bound command would
+          // clear a registry the rendered app never reads.
+          runAtomCommand(appAtomRegistry, environmentCatalog.removeRelayEnvironments, undefined, {
+            reportFailure: false,
+            reportDefect: false,
+          }),
           settleAsyncResult(() =>
             runtime.runPromiseExit(
               ManagedRelay.ManagedRelayClient.pipe(
@@ -115,7 +116,7 @@ export function ManagedRelayAuthProvider({ children }: { readonly children: Reac
     return () => {
       cancelled = true;
     };
-  }, [getToken, isLoaded, isSignedIn, removeRelayEnvironments, signedOutByClerkApi, userId]);
+  }, [getToken, isLoaded, isSignedIn, signedOutByClerkApi, userId]);
 
   useEffect(() => () => deactivateManagedRelayAuthentication(), []);
 

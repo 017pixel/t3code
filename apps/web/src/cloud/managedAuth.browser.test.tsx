@@ -38,9 +38,9 @@ vi.mock(import("@clerk/react"), async (original) => ({
   useAuth: (() => ({ ...testState.auth, getToken: testState.getToken })) as never,
   useClerk: (() => testState.clerk) as never,
 }));
-vi.mock(import("../state/use-atom-command"), async (original) => ({
+vi.mock(import("@t3tools/client-runtime/state/runtime"), async (original) => ({
   ...(await original()),
-  useAtomCommand: (() => testState.removeRelayEnvironments) as never,
+  runAtomCommand: ((registry: unknown) => testState.removeRelayEnvironments(registry)) as never,
 }));
 vi.mock(import("../lib/runtime"), async (original) => ({
   ...(await original()),
@@ -149,6 +149,8 @@ describe("ManagedRelayAuthProvider", () => {
     ]);
 
     await vi.waitFor(() => expect(testState.removeRelayEnvironments).toHaveBeenCalledTimes(1));
+    // The provider renders outside AppAtomRegistryProvider, yet the app reads this registry.
+    expect(testState.removeRelayEnvironments).toHaveBeenCalledWith(appAtomRegistry);
     expect(activeAccount()).toBeNull();
   });
 
