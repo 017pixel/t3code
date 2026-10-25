@@ -12,6 +12,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   RunId,
+  type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
 import { SKILL_MENTION_PATTERN } from "@t3tools/shared/composerInlineTokens";
@@ -27,6 +28,7 @@ import * as Stream from "effect/Stream";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { planClaudeSkillDispatch } from "../provider/Drivers/ClaudeSkillDispatch.ts";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
@@ -455,6 +457,8 @@ it.effect.each([
   { text: `${SHELL_TEXT} Use $technical-writing now.`, mode: "steer", agent: true },
   { text: SHELL_TEXT, mode: "auto", agent: true },
   { text: "/tmp/report.txt holds the output. SUFFIX", mode: "steer", agent: true },
+  { text: 'Keep "$TECH_DIR" and use ($technical-writing).', mode: "auto", agent: true },
+  { text: "See [$technical-writing](/skills/writing/SKILL.md).", mode: "steer", agent: true },
   { text: "PREFIX: $technical-writing mid-sentence. SUFFIX", mode: "auto", agent: false },
 ] as const)(
   "sendToThread with agent=$agent mode=$mode keeps skill dispatch only for the user: $text",
@@ -502,6 +506,14 @@ it.effect.each([
         ),
         Layer.provide(ServerSettings.layerTest()),
         Layer.provide(layerReceiptsTest),
+        Layer.provide(
+          ProviderRegistryMock.layer([
+            {
+              instanceId: ProviderInstanceId.make("codex"),
+              skills: [{ name: "technical-writing", path: "/skills/technical-writing" }],
+            } as unknown as ServerProvider,
+          ]),
+        ),
       );
       const service = yield* ThreadManagementService.ThreadManagementService.pipe(
         Effect.provide(layerTest),
@@ -528,15 +540,17 @@ it.effect.each([
       const [providerText = ""] = sentTexts;
       const skills = new Map([["technical-writing", { path: "/skills/technical-writing" }]]);
       // Claude: a currency-sign mention becomes `/name`, and a leading `/name` runs natively.
-      // Codex: the same mention pattern is rewritten to `$name`, which Codex expands.
+      // Codex: the same mention pattern is rewritten to `$name`, and Codex expands `$name` even
+      // inside punctuation or a `[$name](path)` link.
       const dispatchesSkill =
         planClaudeSkillDispatch(providerText, skills) !== undefined ||
         /^\s*\/technical-writing(?:\s|$)/u.test(providerText) ||
-        [...providerText.matchAll(SKILL_MENTION_PATTERN)].length > 0;
+        [...providerText.matchAll(SKILL_MENTION_PATTERN)].length > 0 ||
+        providerText.includes("$technical-writing");
       expect(dispatchesSkill).toBe(!agent && text.includes("technical-writing"));
       // Only a word joiner right after the skill's sigil or leading slash may change.
       expect(providerText).toBe(
-        agent ? text.replace(/([\p{Sc}/])(technical-writing)/u, "$1\u2060$2") : text,
+        agent ? text.replace(/([\p{Sc}/])(technical-writing)/gu, "$1\u2060$2") : text,
       );
     }),
 );

@@ -57,21 +57,25 @@ import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
-// Another agent's message must not invoke skills on the recipient: Claude and Codex expand a
-// skill mention and Claude runs a leading `/name`. A word joiner breaks both, as webhook prompts
-// do, while the recipient still reads the same text. Quoted `"$HOME"`, amounts like `$20`, and
-// paths like `/tmp/out.txt` are not skill tokens and stay byte-identical.
+// Another agent's message must not invoke the recipient's skills. A word joiner breaks mention
+// tokens and a leading `/name`; Codex also reads `$name` inside punctuation or `[$name](path)`,
+// so known skill names are broken there too. Shell vars, amounts, and paths stay byte-identical.
 const LEADING_SLASH_COMMAND = /^\s*\/(?=[^\s/]+(?:\s|$))/u;
+const CODEX_SKILL_MENTION = /\$([a-zA-Z0-9_:-]+)/gu;
 
-function breakAgentSkillSyntax(text: string): string {
+function breakAgentSkillSyntax(text: string, skillNames: ReadonlySet<string>): string {
   return text
     .replace(
       SKILL_MENTION_PATTERN,
       (match, _prefix: string, name: string) => `${match.slice(0, -name.length)}\u2060${name}`,
+    )
+    .replace(CODEX_SKILL_MENTION, (match, name: string) =>
+      skillNames.has(name) ? `$\u2060${name}` : match,
     )
     .replace(LEADING_SLASH_COMMAND, "$&\u2060");
 }
@@ -551,6 +555,23 @@ const make = Effect.gen(function* () {
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+  const providerRegistry = yield* Effect.serviceOption(ProviderRegistry.ProviderRegistry);
+
+  const recipientSkillNames = (instanceId: ProviderInstanceId) =>
+    Option.match(providerRegistry, {
+      onNone: () => Effect.succeed(new Set<string>()),
+      onSome: (registry) =>
+        registry.getProviders.pipe(
+          Effect.map((providers) => {
+            const provider = providers.find((candidate) => candidate.instanceId === instanceId);
+            return new Set(
+              [provider?.skills ?? [], ...(provider?.workspaceSnapshots ?? []).map((s) => s.skills)]
+                .flat()
+                .map((skill) => skill.name),
+            );
+          }),
+        ),
+    });
 
   const assertProviderInstanceEnabled: ThreadManagementServiceShape["assertProviderInstanceEnabled"] =
     (input) =>
@@ -825,7 +846,15 @@ const make = Effect.gen(function* () {
       messageId: input.messageId,
       ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
       ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
-      text: input.senderThreadId === undefined ? input.text : breakAgentSkillSyntax(input.text),
+      text:
+        input.senderThreadId === undefined
+          ? input.text
+          : breakAgentSkillSyntax(
+              input.text,
+              yield* recipientSkillNames(
+                input.modelSelection?.instanceId ?? target.thread.modelSelection.instanceId,
+              ),
+            ),
       attachments: input.attachments,
       ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
       dispatchMode,
