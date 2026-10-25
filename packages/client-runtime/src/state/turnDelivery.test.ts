@@ -108,6 +108,7 @@ function setup(
   let threadListener: ((state: EnvironmentThreadState) => void) | null = null;
   let shellListener: ((state: EnvironmentShellState) => void) | null = null;
   let threadObservations = 0;
+  let activeObservers = 0;
   let displaysMade = 0;
   const released: Array<string> = [];
   const deliveries = createTurnDeliveries<{ sequence: number }, unknown, string>({
@@ -117,16 +118,20 @@ function setup(
     },
     observeThread: (_environmentId, _threadId, listener) => {
       threadObservations += 1;
+      activeObservers += 1;
       threadListener = listener;
       listener(initialThread);
       return () => {
+        activeObservers -= 1;
         threadListener = null;
       };
     },
     observeShell: (_environmentId, listener) => {
+      activeObservers += 1;
       shellListener = listener;
       listener(shell("live"));
       return () => {
+        activeObservers -= 1;
         shellListener = null;
       };
     },
@@ -139,6 +144,7 @@ function setup(
     sent,
     released,
     threadObservations: () => threadObservations,
+    activeObservers: () => activeObservers,
     displaysMade: () => displaysMade,
     makeDisplay: () => {
       displaysMade += 1;
@@ -326,5 +332,17 @@ describe("turn deliveries", () => {
     expect(await settled).toEqual({ type: "delivered", value: null });
     expect(harness.sent).toEqual([LAUNCH]);
     expect(harness.deliveries.getSnapshot()).toEqual([]);
+  });
+
+  it("stops watching a committed launch whose thread already shows the message", async () => {
+    const harness = setup([LOST_ACK], HELD);
+    const { settled } = await deliverUntilWaiting(harness, LAUNCH);
+
+    harness.emitShell(shell("synchronizing"));
+    harness.emitShell(shell("live", [THREAD_ID]));
+
+    expect(await settled).toEqual({ type: "delivered", value: null });
+    expect(harness.deliveries.getSnapshot()).toEqual([]);
+    expect(harness.activeObservers()).toBe(0);
   });
 });

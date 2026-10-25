@@ -255,14 +255,24 @@ export async function rewindToMessage(input: {
 /**
  * Writes an unsent message's composer contents back into its draft, after any newer draft
  * started meanwhile. Images are fresh copies, so their previews outlive the optimistic row.
+ * Returns false, changing nothing, when its attachments would not fit beside the newer draft.
  */
 export function restoreComposerDraft(
   draftTarget: ScopedThreadRef | DraftId,
   snapshot: ComposerSendSnapshot,
-): void {
+): boolean {
   const store = useComposerDraftStore.getState();
   const current = store.getComposerDraft(draftTarget);
   const newer = composerDraftHasUserContent(current) ? current : null;
+  if (
+    (newer?.images.length ?? 0) +
+      (newer?.files.length ?? 0) +
+      snapshot.images.length +
+      snapshot.files.length >
+    PROVIDER_SEND_TURN_MAX_ATTACHMENTS
+  ) {
+    return false;
+  }
   store.setPrompt(
     draftTarget,
     newer === null
@@ -291,6 +301,7 @@ export function restoreComposerDraft(
     ...(newer?.threadContexts ?? []),
     ...snapshot.threadContexts,
   ]);
+  return true;
 }
 
 export interface MultipleModelTarget {

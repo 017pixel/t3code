@@ -144,8 +144,15 @@ export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, 
     deps.releaseDisplay(entry.display);
   };
 
+  /** The first callback runs before `stop` exists and may already have removed the entry. */
+  const keepObserving = (entry: Entry<A, M>, stop: () => void) => {
+    if (entries.get(entry.key) === entry) entry.stopObserving.push(stop);
+    else stop();
+  };
+
   const observeThread = (entry: Entry<A, M>) => {
-    entry.stopObserving.push(
+    keepObserving(
+      entry,
       deps.observeThread(entry.environmentId, entry.input.threadId, (state) => {
         entry.thread = state;
         if (state.status !== "live") entry.resynced = true;
@@ -261,7 +268,8 @@ export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, 
     }
     entries.set(key, entry);
     if (entry.unborn) {
-      entry.stopObserving.push(
+      keepObserving(
+        entry,
         deps.observeShell(environmentId, (state) => {
           entry.shell = state;
           if (entry.unborn && state.status !== "live") entry.resynced = true;

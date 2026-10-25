@@ -4,6 +4,7 @@ import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-mes
 import { Link } from "@tanstack/react-router";
 import { useQuietThreadShell } from "../../state/entities";
 import { turnDeliveries, usePendingTurnDelivery } from "../../state/turnDeliveries";
+import { unsentMessages, useUnsentMessage } from "../../state/unsentMessages";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
@@ -272,9 +273,34 @@ function UserMessageProjectedStatus({ row }: { row: Extract<TimelineRow, { kind:
   );
 }
 
+function UserMessageUnsentStatus({ messageId }: { messageId: MessageId }) {
+  const ctx = use(TimelineRowCtx);
+  const environmentId = ctx.activeThreadEnvironmentId;
+  const [blocked, setBlocked] = useState(false);
+  return (
+    <div
+      className="me-1 flex items-center gap-1.5 text-xs text-muted-foreground"
+      data-unsent-message
+    >
+      {blocked ? "Not sent. Make room for its attachments in the composer first." : "Not sent"}
+      <InlineButton
+        tone="muted"
+        onClick={() => setBlocked(!unsentMessages.restore(environmentId, messageId))}
+      >
+        Restore to composer
+      </InlineButton>
+      <InlineButton tone="muted" onClick={() => unsentMessages.discard(environmentId, messageId)}>
+        Discard
+      </InlineButton>
+    </div>
+  );
+}
+
 function UserMessageDeliveryStatus({ messageId }: { messageId: MessageId }) {
   const ctx = use(TimelineRowCtx);
   const delivery = usePendingTurnDelivery(ctx.activeThreadEnvironmentId, messageId);
+  const unsent = useUnsentMessage(ctx.activeThreadEnvironmentId, messageId);
+  if (unsent !== null) return <UserMessageUnsentStatus messageId={messageId} />;
   if (delivery === null || delivery.state === "delivered") return null;
   return (
     <div

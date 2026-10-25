@@ -24,6 +24,7 @@ import {
   type EnvironmentId,
   type ModelSelection,
   type PreviewAnnotationPayload,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   type ThreadId,
   ProviderInteractionMode,
   RuntimeMode,
@@ -87,6 +88,7 @@ import {
 import { environmentServerConfigsAtom } from "../../state/server";
 import { threadEnvironment } from "../../state/threads";
 import { turnDeliveries } from "../../state/turnDeliveries";
+import { unsentMessages } from "../../state/unsentMessages";
 import type { TurnDeliveryFailure } from "@t3tools/client-runtime/state/turn-delivery";
 import { runMobileComposerTransition } from "./draftHeroTransition";
 import { useClientSettingsHydrated, useEnvironmentSettings } from "../../hooks/useSettings";
@@ -379,13 +381,16 @@ export function useComposerSend(input: ComposerSendInput) {
     respondingRequestIdsRef.current = respondingRequestIds;
   }, [pendingApprovals, respondingRequestIds]);
 
-  /** Puts an unsent message back in its composer after any newer draft, so neither is lost. */
+  /**
+   * Puts an unsent message back in its composer after any newer draft, so neither is lost.
+   * Returns false, changing nothing, when its attachments do not fit there.
+   */
   const restoreUnsentComposer = (
     draftTarget: typeof composerDraftTarget,
     sentRouteThreadKey: string,
     snapshot: ComposerSendSnapshot,
-  ) => {
-    restoreComposerDraft(draftTarget, snapshot);
+  ): boolean => {
+    if (!restoreComposerDraft(draftTarget, snapshot)) return false;
     const restored = useComposerDraftStore.getState().getComposerDraft(draftTarget);
     if (restored && currentRouteThreadKeyRef.current === sentRouteThreadKey) {
       promptRef.current = restored.prompt;
@@ -398,6 +403,7 @@ export function useComposerSend(input: ComposerSendInput) {
         detectTrigger: true,
       });
     }
+    return true;
   };
 
   const onSend = async (
@@ -1133,6 +1139,18 @@ export function useComposerSend(input: ComposerSendInput) {
           ? { inputIntent: "steer" as const }
           : {}),
     };
+    // Its own previews, since this view revokes the row's when it switches threads.
+    const detachedOptimisticMessage = (): ChatMessage =>
+      optimisticAttachments.length === 0
+        ? optimisticMessage
+        : {
+            ...optimisticMessage,
+            attachments: optimisticMessageAttachments(
+              composerAttachmentsSnapshot.map((attachment) =>
+                attachment.type === "image" ? cloneComposerImageForRetry(attachment) : attachment,
+              ),
+            ),
+          };
     setOptimisticUserMessages((existing) => [...existing, optimisticMessage]);
     setThreadError(threadIdForSend, null);
     if (expiredTerminalContextCount > 0) {
@@ -1239,15 +1257,13 @@ export function useComposerSend(input: ComposerSendInput) {
     };
     // `failure` is null when the user cancelled a send that was waiting on a reconnect.
     const restoreUnsentDraft = (failure: TurnDeliveryFailure | null) => {
+      let restoredThreadId = threadIdForSend;
       if (isLocalDraftThread && draftId && draftThread) {
-        restoreFailedDraftThread(
-          draftId,
-          draftThread,
-          // A cancelled launch may still have committed, so its draft must not reuse the thread id.
-          failure === null || wasBootstrapThreadDeleted(squashAtomCommandFailure(failure))
-            ? newThreadId()
-            : threadIdForSend,
-        );
+        // A cancelled launch may still have committed, so its draft must not reuse the thread id.
+        if (failure === null || wasBootstrapThreadDeleted(squashAtomCommandFailure(failure))) {
+          restoredThreadId = newThreadId();
+        }
+        restoreFailedDraftThread(draftId, draftThread, restoredThreadId);
         clearBackgroundDraftSubmissionByRef(scopeThreadRef(environmentId, threadIdForSend));
       }
       setOptimisticUserMessages((existing) => {
@@ -1258,7 +1274,23 @@ export function useComposerSend(input: ComposerSendInput) {
         const next = existing.filter((message) => message.id !== messageIdForSend);
         return next.length === existing.length ? existing : next;
       });
-      restoreUnsentComposer(composerDraftTarget, routeThreadKey, sendSnapshot);
+      const restore = () =>
+        restoreUnsentComposer(composerDraftTarget, routeThreadKey, sendSnapshot);
+      if (!restore()) {
+        unsentMessages.keep({
+          environmentId,
+          threadId: restoredThreadId,
+          display: detachedOptimisticMessage(),
+          restore,
+        });
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Unsent message kept in its thread",
+            description: `Its attachments would put the composer over its ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS}-attachment limit. Make room, then restore it from the thread.`,
+          }),
+        );
+      }
       if (failure !== null && !isAtomCommandInterrupted(failure)) {
         const error = squashAtomCommandFailure(failure);
         setThreadError(
@@ -1353,20 +1385,7 @@ export function useComposerSend(input: ComposerSendInput) {
           ...(bootstrap ? { bootstrap } : {}),
           createdAt: messageCreatedAt,
         },
-        // Its own previews, since this view revokes the row's when it switches threads.
-        () =>
-          optimisticAttachments.length === 0
-            ? optimisticMessage
-            : {
-                ...optimisticMessage,
-                attachments: optimisticMessageAttachments(
-                  composerAttachmentsSnapshot.map((attachment) =>
-                    attachment.type === "image"
-                      ? cloneComposerImageForRetry(attachment)
-                      : attachment,
-                  ),
-                ),
-              },
+        detachedOptimisticMessage,
       );
       if (backgroundThreadRef) {
         try {

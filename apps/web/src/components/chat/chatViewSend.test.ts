@@ -1,4 +1,4 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, PROVIDER_SEND_TURN_MAX_ATTACHMENTS, ThreadId } from "@t3tools/contracts";
 import { expect, it } from "vite-plus/test";
 
 import { useComposerDraftStore } from "../../composerDraftStore";
@@ -40,4 +40,33 @@ it("restores an unsent message after a newer draft without replacing it", () => 
   const draft = store.getComposerDraft(target);
   expect(draft?.prompt).toBe("Newer draft\n\nUnsent message");
   expect(draft?.images.map((attachment) => attachment.id)).toEqual(["newer", "unsent"]);
+});
+
+it("leaves a full newer draft untouched when the unsent attachments do not fit", () => {
+  useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
+  const store = useComposerDraftStore.getState();
+  store.setPrompt(target, "Newer draft");
+  store.addImages(
+    target,
+    Array.from({ length: PROVIDER_SEND_TURN_MAX_ATTACHMENTS }, (_, index) =>
+      image(`newer-${index}`),
+    ),
+  );
+  const unsent = snapshotComposerSend({
+    prompt: "Unsent message",
+    images: [image("unsent")],
+    files: [],
+    terminalContexts: [],
+    sendableTerminalContexts: [],
+    previewAnnotations: [],
+    reviewComments: [],
+    threadContexts: [],
+  });
+
+  expect(restoreComposerDraft(target, unsent)).toBe(false);
+
+  const draft = store.getComposerDraft(target);
+  expect(draft?.prompt).toBe("Newer draft");
+  expect(draft?.images).toHaveLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS);
+  expect(unsent.images.map((attachment) => attachment.id)).toEqual(["unsent"]);
 });
