@@ -198,13 +198,14 @@ describe("CDP relay downloads", () => {
 describe("CDP relay reconnects", () => {
   it("reports the page's default execution context to every connection", async () => {
     // Electron keeps one debugger attached, so Runtime stays enabled after a client drops,
-    // and the native Runtime.enable announces contexts only the first time.
+    // and the native Runtime.enable announces contexts again only after Runtime.disable.
     let runtimeEnabled = false;
     let current: CdpRelayConnection | undefined;
     const context = {
       context: { id: 1, origin: "null", name: "", auxData: { isDefault: true, frameId: "F" } },
     };
     const send = vi.fn(async (method: string) => {
+      if (method === "Runtime.disable") runtimeEnabled = false;
       if (method === "Runtime.enable" && !runtimeEnabled) {
         runtimeEnabled = true;
         current!.event("Runtime.executionContextCreated", context, "");
