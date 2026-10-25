@@ -3,6 +3,8 @@ import "vite-plus/test/config";
 
 const reactTests = [
   "src/lib/filePreview.test.ts",
+  "src/features/diffs/nativeReviewDiffSurface.test.tsx",
+  "src/features/pull-requests/usePullRequestDiff.test.tsx",
   "src/components/ui/Dialog.android.test.tsx",
   "src/features/settings/SettingsServerControlsRouteScreen.test.tsx",
   "src/features/settings/components/BranchNamingSettings.test.tsx",
