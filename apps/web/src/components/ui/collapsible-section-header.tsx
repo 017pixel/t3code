@@ -33,12 +33,20 @@ export function CollapsibleSectionHeader({
       className={cn(
         "flex h-8 w-full cursor-pointer items-center gap-2 rounded-md text-left text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
         variant === "row"
-          ? "gap-2.5 rounded-lg px-2.5 text-[13px] text-foreground/80 hover:bg-black/[0.035] dark:hover:bg-white/[0.08]"
+          ? "gap-2.5 rounded-lg border border-transparent px-2.5 text-[13px] text-foreground/80 hover:bg-black/[0.035] dark:hover:bg-white/[0.08]"
           : cn(variant === "panel" ? "ps-2 pe-2.5" : "px-2", tones[tone].label),
       )}
     >
       {icon}
-      <span className="shrink-0">{children}</span>
+      <span
+        className={cn(
+          "shrink-0",
+          // Same cap-height trim as the panel's other row labels, so they share a baseline.
+          variant === "row" && "[text-box:trim-both_cap_alphabetic]",
+        )}
+      >
+        {children}
+      </span>
       <span
         aria-hidden
         // A collapsed header with a trailing count drops its rule so it doesn't read as a leader.
