@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  commitBrowserViewportChange,
-  subscribeBrowserViewportChange,
-} from "./browserViewportActions";
+import type { PreviewViewportSetting } from "@t3tools/contracts";
+
+import { queueBrowserViewportCommit } from "./browserViewportActions";
 
 describe("browserViewportActions", () => {
   it("commits viewport changes in order for each tab", async () => {
@@ -16,31 +15,26 @@ describe("browserViewportActions", () => {
       markFirstStarted = resolve;
     });
     const calls: Array<number> = [];
-    const unsubscribe = subscribeBrowserViewportChange("tab-serial", async (setting) => {
+    const resize = async (setting: PreviewViewportSetting) => {
       if (setting._tag === "fill") return;
       calls.push(setting.width);
       if (setting.width === 800) {
         markFirstStarted?.();
         await firstPending;
       }
-    });
+    };
 
-    const first = commitBrowserViewportChange("tab-serial", {
-      _tag: "freeform",
-      width: 800,
-      height: 600,
-    });
-    const second = commitBrowserViewportChange("tab-serial", {
-      _tag: "freeform",
-      width: 900,
-      height: 700,
-    });
+    const first = queueBrowserViewportCommit("tab-serial", () =>
+      resize({ _tag: "freeform", width: 800, height: 600 }),
+    );
+    const second = queueBrowserViewportCommit("tab-serial", () =>
+      resize({ _tag: "freeform", width: 900, height: 700 }),
+    );
     await firstStarted;
     expect(calls).toEqual([800]);
 
     releaseFirst?.();
     await Promise.all([first, second]);
     expect(calls).toEqual([800, 900]);
-    unsubscribe();
   });
 });

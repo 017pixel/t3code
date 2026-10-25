@@ -95,34 +95,40 @@ vi.mock(import("~/previewStateStore"), async (original) => ({
   useThreadPreviewState: (() => ({
     activeTabId: "tab-1",
     serverEpoch: mocks.serverEpoch,
-    desktopByTabId: {
-      "tab-1": {
-        hasWebContents: true,
-        canGoBack: false,
-        canGoForward: false,
-        loading: mocks.loading,
-        zoomFactor: 1,
-        pictureInPicture: mocks.pictureInPicture,
-        colorScheme: "system",
-        audioMuted: false,
-        audible: false,
-        controller: "none",
-      },
-    },
+    desktopByTabId: Object.fromEntries(
+      ["tab-1", "tab-2"].map((tabId) => [
+        tabId,
+        {
+          hasWebContents: true,
+          canGoBack: false,
+          canGoForward: false,
+          loading: mocks.loading,
+          zoomFactor: 1,
+          pictureInPicture: mocks.pictureInPicture,
+          colorScheme: "system",
+          audioMuted: false,
+          audible: false,
+          controller: "none",
+        },
+      ]),
+    ),
     recentlySeenUrls: [],
     sessions: mocks.showEmptyState
       ? {}
-      : {
-          "tab-1": {
-            threadId: "thread-1",
-            tabId: "tab-1",
-            runtime: mocks.nativeServerTab ? "server" : "desktop",
-            navStatus: { _tag: "Success", url: "http://example.com/", title: "Example" },
-            canGoBack: false,
-            canGoForward: false,
-            updatedAt: "2026-07-13T00:00:00.000Z",
-          },
-        },
+      : Object.fromEntries(
+          ["tab-1", "tab-2"].map((tabId) => [
+            tabId,
+            {
+              threadId: "thread-1",
+              tabId,
+              runtime: mocks.nativeServerTab ? "server" : "desktop",
+              navStatus: { _tag: "Success", url: "http://example.com/", title: "Example" },
+              canGoBack: false,
+              canGoForward: false,
+              updatedAt: "2026-07-13T00:00:00.000Z",
+            },
+          ]),
+        ),
   })) as never,
 }));
 vi.mock(import("~/state/environments"), async (original) => ({
@@ -168,11 +174,14 @@ const TEST_THREAD_REF = {
 } as const;
 const TEST_RUNTIME_TAB_ID = previewRuntimeTabId(TEST_THREAD_REF, null, "tab-1");
 
-function view(onSendAnnotation?: ComponentProps<typeof PreviewView>["onSendAnnotation"]) {
+function view(
+  onSendAnnotation?: ComponentProps<typeof PreviewView>["onSendAnnotation"],
+  tabId = "tab-1",
+) {
   return (
     <PreviewView
       threadRef={TEST_THREAD_REF}
-      tabId="tab-1"
+      tabId={tabId}
       visible
       {...(onSendAnnotation ? { onSendAnnotation } : {})}
     />
@@ -201,6 +210,7 @@ function setup() {
   mocks.readEnvironmentScope.mockReset().mockReturnValue(true);
   mocks.setAnnotationSendEnabled.mockReset().mockResolvedValue(undefined);
   mocks.pickElement.mockReset();
+  mocks.cancelPickElement.mockReset().mockResolvedValue(undefined);
   mocks.pictureInPicture = false;
   mocks.showEmptyState = false;
   mocks.loading = false;
@@ -270,5 +280,32 @@ describe("PreviewView", () => {
     await vi.waitFor(() => expect(onSendAnnotation).toHaveBeenCalledWith(sent, null));
     expect(mocks.addPreviewAnnotation).toHaveBeenCalledWith(TEST_THREAD_REF, sent);
     expect(mocks.addImage).not.toHaveBeenCalled();
+  });
+
+  it("does not show a pick cancelled by a tab switch as active on return", async () => {
+    setup();
+    let cancelPick: (() => void) | undefined;
+    mocks.pickElement.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          cancelPick = () => resolve(null);
+        }),
+    );
+    mocks.cancelPickElement.mockImplementation(async () => {
+      cancelPick?.();
+      return undefined;
+    });
+    await using screen = await render(view());
+    await userEvent.click(page.getByRole("button", { name: "Annotate preview" }));
+    await expect.element(page.getByRole("button", { name: "Cancel annotation" })).toBeVisible();
+
+    await screen.rerender(view(undefined, "tab-2"));
+    expect(mocks.cancelPickElement).toHaveBeenCalledWith(TEST_RUNTIME_TAB_ID);
+    await expect.element(page.getByRole("button", { name: "Annotate preview" })).toBeVisible();
+
+    await screen.rerender(view(undefined, "tab-1"));
+    await expect
+      .element(page.getByRole("button", { name: "Annotate preview" }))
+      .toHaveAttribute("aria-pressed", "false");
   });
 });

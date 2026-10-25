@@ -97,7 +97,6 @@ vi.mock("~/state/queries", () => ({
   useProjectPathSearch: vi.fn(),
 }));
 
-import { useWorkspaceMutationRefresh } from "~/hooks/useWorkspaceMutationRefresh";
 import { useProjectEntriesQuery, useProjectFileQuery } from "./projectFilesQueryState";
 
 const environmentId = EnvironmentId.make("environment-1");
@@ -177,35 +176,31 @@ describe("project query refresh", () => {
     atomHooks.registry = registry;
     let renderedContents: string | null = null;
 
-    const render = (mutationId: string | null) => {
+    const render = () => {
       reactHooks.beginRender();
       const query = useProjectFileQuery(environmentId, "/repo", "src/preview.ts");
       expect(query.readError).toBeNull();
       renderedContents = query.data?.contents ?? null;
-      useWorkspaceMutationRefresh({
-        mutationId,
-        refresh: query.refresh,
-        resourceKey: "file:environment-1:/repo:src/preview.ts",
-      });
+      return query;
     };
 
     try {
-      render(null);
+      const query = render();
       await flushEffects();
       expect(requests).toHaveLength(1);
 
-      render("mutation-1");
+      query.refresh();
       await flushEffects();
       expect(requests).toHaveLength(2);
 
       requests[1]!.resolve(file("fresh"));
       await flushEffects();
-      render("mutation-1");
+      render();
       expect(renderedContents).toBe("fresh");
 
       requests[0]!.resolve(file("stale"));
       await flushEffects();
-      render("mutation-1");
+      render();
       expect(renderedContents).toBe("fresh");
     } finally {
       unmount();

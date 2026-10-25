@@ -49,7 +49,6 @@ export interface ServerBrowserHandle {
 }
 
 const RESIZE_THROTTLE_MS = 150;
-const ACCESS_RETRY_MS = 10_000;
 // Reuse nearby probes when a slow link would return the tap's answer after it ends.
 const PROBE_REUSE_PX = 24;
 const PROBE_REUSE_MS = 10_000;
@@ -161,7 +160,6 @@ export function ServerBrowserSurface(props: {
     pdfUrl = null,
     ref,
   } = props;
-  const access = usePreviewStreamAccess(environmentId);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const keySentRef = useRef(false);
@@ -169,7 +167,6 @@ export function ServerBrowserSurface(props: {
   const viewportRef = useRef<PreviewStreamViewport | null>(null);
   const sizeRef = useRef<{ width: number; height: number } | null>(null);
   const hasFrameRef = useRef(false);
-  const controlRef = useRef<PreviewStreamControl | null>(null);
   const [control, setControl] = useState<PreviewStreamControl | null>(null);
   const [promptText, setPromptText] = useState("");
   const [fileChooser, setFileChooser] = useState<PreviewStreamFileChooser | null>(null);
@@ -189,6 +186,7 @@ export function ServerBrowserSurface(props: {
   };
   const unauthorizedRef = useRef(0);
   const [accessDenied, setAccessDenied] = useState(false);
+  const access = usePreviewStreamAccess(environmentId, { retry: visible && !accessDenied });
   const [hostSetup, setHostSetup] = useState<PreviewStreamHostSetup | null>(null);
   const pendingMoveRef = useRef<MouseInput | null>(null);
   const pendingWheelRef = useRef<WheelInput | null>(null);
@@ -262,8 +260,7 @@ export function ServerBrowserSurface(props: {
   const pagePoint = (clientX: number, clientY: number, clamp: boolean): PagePoint | null => {
     const canvas = canvasRef.current;
     const viewport = viewportRef.current;
-    if (!canvas || !viewport || !hasFrameRef.current || controlRef.current?.controller !== "you")
-      return null;
+    if (!canvas || !viewport || !hasFrameRef.current || control?.controller !== "you") return null;
     const rect = canvas.getBoundingClientRect();
     const fit = Math.min(rect.width / canvas.width, rect.height / canvas.height);
     const width = canvas.width * fit;
@@ -310,8 +307,115 @@ export function ServerBrowserSurface(props: {
   );
 
   useEffect(() => {
-    const element = canvasRef.current?.parentElement;
-    if (!element) return;
+    const canvas = canvasRef.current;
+    if (!visible || accessDenied || hostSetup || !access || !cap || !canvas) return;
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    // The connection's own copy for its callbacks; render and handlers read `control`.
+    let connectionControl: PreviewStreamControl | null = null;
+    const painter = createPreviewFramePainter(canvas, () => {
+      if (hasFrameRef.current) return;
+      hasFrameRef.current = true;
+      firstFrame();
+    });
+    const client = createPreviewStreamClient(
+      { access, threadId, tabId, maxWidth: cap.width, maxHeight: cap.height },
+      {
+        onFrame: (jpeg) => {
+          unauthorizedRef.current = 0;
+          painter.paint(jpeg);
+        },
+        onProbe: (result) => {
+          if (connectionControl?.controller !== "you") return;
+          lastProbeRef.current = { ...result, at: performance.now() };
+          const probe = probeRef.current;
+          if (!probe || probe.x !== result.x || probe.y !== result.y) return;
+          probe.editable = result.editable;
+          probe.answered = true;
+          if (!probe.tapped) return;
+          probeRef.current = null;
+          if (result.editable) inputRef.current?.focus({ preventScroll: true });
+          else inputRef.current?.blur();
+        },
+        onPointer: (pointer) => {
+          const placed = placeAgentCursor(pointer, canvasRef.current, viewportRef.current);
+          if (placed) setAgentCursor(placed);
+        },
+        onClipboard: (text) => void copyPageText(text),
+        onDownload: offerDownload,
+        onPopup: popupOpened,
+        onFileChooser: setFileChooser,
+        onViewport: (viewport) => {
+          viewportRef.current = viewport;
+          viewportChanged(viewport);
+        },
+        onControl: (next) => {
+          const previous = connectionControl;
+          connectionControl = next;
+          setControl(next);
+          controlChanged(next);
+          if (
+            next.dialog?.message !== previous?.dialog?.message ||
+            next.dialog?.defaultValue !== previous?.dialog?.defaultValue
+          )
+            setPromptText(next.dialog?.defaultValue ?? "");
+          if (next.controller !== "you") {
+            clearInput();
+          } else if (previous?.controller !== "you") {
+            const size = sizeRef.current;
+            if (followSize && size) client.send({ type: "resize", ...size });
+          }
+        },
+        onConnectedChange: (connected) => {
+          if (connected) return;
+          setFileChooser(null);
+          connectionControl = null;
+          setControl(null);
+          controlChanged(null);
+          clearInput();
+        },
+        onHostSetup: setHostSetup,
+        onUnauthorized: () => {
+          const refusals = ++unauthorizedRef.current;
+          if (refusals >= MAX_UNAUTHORIZED_REFUSALS) {
+            inputRef.current?.blur();
+            setAccessDenied(true);
+            return;
+          }
+          refreshTimer = setTimeout(
+            () => refreshPreviewStreamAccess(environmentId),
+            refusals === 1 ? 0 : 1_000 * 2 ** (refusals - 1),
+          );
+        },
+      },
+    );
+    clientRef.current = client;
+    return () => {
+      painter.stop();
+      if (refreshTimer !== null) clearTimeout(refreshTimer);
+      client.stop();
+      if (clientRef.current === client) clientRef.current = null;
+      setControl(null);
+      controlChanged(null);
+      clearInput();
+    };
+  }, [
+    access,
+    accessDenied,
+    cap,
+    clearInput,
+    environmentId,
+    followSize,
+    hostSetup,
+    tabId,
+    threadId,
+    visible,
+  ]);
+
+  // The canvas wrapper's size drives the stream; the canvas owns wheel input and the input frame.
+  const attachCanvas = (canvas: HTMLCanvasElement | null) => {
+    canvasRef.current = canvas;
+    const element = canvas?.parentElement;
+    if (!canvas || !element) return;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let capTimer: ReturnType<typeof setTimeout> | null = null;
     const growCap = () => {
@@ -347,126 +451,6 @@ export function ServerBrowserSurface(props: {
       if (timer !== null) return;
       timer = setTimeout(measure, sizeRef.current === null ? 0 : RESIZE_THROTTLE_MS);
     });
-    return () => {
-      stopObserving();
-      if (timer !== null) clearTimeout(timer);
-      if (capTimer !== null) clearTimeout(capTimer);
-    };
-  }, [followSize]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!visible || accessDenied || hostSetup || !access || !cap || !canvas) return;
-    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-    const painter = createPreviewFramePainter(canvas, () => {
-      if (hasFrameRef.current) return;
-      hasFrameRef.current = true;
-      firstFrame();
-    });
-    const client = createPreviewStreamClient(
-      { access, threadId, tabId, maxWidth: cap.width, maxHeight: cap.height },
-      {
-        onFrame: (jpeg) => {
-          unauthorizedRef.current = 0;
-          painter.paint(jpeg);
-        },
-        onProbe: (result) => {
-          if (controlRef.current?.controller !== "you") return;
-          lastProbeRef.current = { ...result, at: performance.now() };
-          const probe = probeRef.current;
-          if (!probe || probe.x !== result.x || probe.y !== result.y) return;
-          probe.editable = result.editable;
-          probe.answered = true;
-          if (!probe.tapped) return;
-          probeRef.current = null;
-          if (result.editable) inputRef.current?.focus({ preventScroll: true });
-          else inputRef.current?.blur();
-        },
-        onPointer: (pointer) => {
-          const placed = placeAgentCursor(pointer, canvasRef.current, viewportRef.current);
-          if (placed) setAgentCursor(placed);
-        },
-        onClipboard: (text) => void copyPageText(text),
-        onDownload: offerDownload,
-        onPopup: popupOpened,
-        onFileChooser: setFileChooser,
-        onViewport: (viewport) => {
-          viewportRef.current = viewport;
-          viewportChanged(viewport);
-        },
-        onControl: (next) => {
-          const previous = controlRef.current;
-          controlRef.current = next;
-          setControl(next);
-          controlChanged(next);
-          if (
-            next.dialog?.message !== previous?.dialog?.message ||
-            next.dialog?.defaultValue !== previous?.dialog?.defaultValue
-          )
-            setPromptText(next.dialog?.defaultValue ?? "");
-          if (next.controller !== "you") {
-            clearInput();
-          } else if (previous?.controller !== "you") {
-            const size = sizeRef.current;
-            if (followSize && size) client.send({ type: "resize", ...size });
-          }
-        },
-        onConnectedChange: (connected) => {
-          if (connected) return;
-          setFileChooser(null);
-          controlRef.current = null;
-          setControl(null);
-          controlChanged(null);
-          clearInput();
-        },
-        onHostSetup: setHostSetup,
-        onUnauthorized: () => {
-          const refusals = ++unauthorizedRef.current;
-          if (refusals >= MAX_UNAUTHORIZED_REFUSALS) {
-            inputRef.current?.blur();
-            setAccessDenied(true);
-            return;
-          }
-          refreshTimer = setTimeout(
-            () => refreshPreviewStreamAccess(environmentId),
-            refusals === 1 ? 0 : 1_000 * 2 ** (refusals - 1),
-          );
-        },
-      },
-    );
-    clientRef.current = client;
-    return () => {
-      painter.stop();
-      if (refreshTimer !== null) clearTimeout(refreshTimer);
-      client.stop();
-      if (clientRef.current === client) clientRef.current = null;
-      controlRef.current = null;
-      setControl(null);
-      controlChanged(null);
-      clearInput();
-    };
-  }, [
-    access,
-    accessDenied,
-    cap,
-    clearInput,
-    environmentId,
-    followSize,
-    hostSetup,
-    tabId,
-    threadId,
-    visible,
-  ]);
-
-  useEffect(() => {
-    if (!visible || accessDenied || access !== null) return;
-    const timer = setInterval(() => refreshPreviewStreamAccess(environmentId), ACCESS_RETRY_MS);
-    return () => clearInterval(timer);
-  }, [access, accessDenied, environmentId, visible]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
     // Registered natively: React's wheel listener is passive and cannot stop the panel scrolling.
     const onWheel = (event: WheelEvent) => {
       const point = pagePoint(event.clientX, event.clientY, false);
@@ -481,18 +465,19 @@ export function ServerBrowserSurface(props: {
       queueWheel(point, event.deltaX * unit, event.deltaY * unit, previewStreamModifiers(event));
     };
     canvas.addEventListener("wheel", onWheel, { passive: false });
-    return () => canvas.removeEventListener("wheel", onWheel);
-  }, [pagePoint, queueWheel]);
-
-  useEffect(
-    () => () => {
+    return () => {
+      canvasRef.current = null;
+      stopObserving();
+      if (timer !== null) clearTimeout(timer);
+      if (capTimer !== null) clearTimeout(capTimer);
+      canvas.removeEventListener("wheel", onWheel);
       if (inputFrameRef.current !== null) cancelAnimationFrame(inputFrameRef.current);
-    },
-    [],
-  );
+      inputFrameRef.current = null;
+    };
+  };
 
   const handlePointer = (event: PointerEvent<HTMLCanvasElement>) => {
-    if (controlRef.current?.controller !== "you") return;
+    if (control?.controller !== "you") return;
     const { type, pointerId, clientX, clientY } = event;
     const cancelled = type === "pointercancel";
     const touch = touchRef.current;
@@ -641,7 +626,7 @@ export function ServerBrowserSurface(props: {
   };
 
   const handleKey = (action: "down" | "up", event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (controlRef.current?.controller !== "you") return;
+    if (control?.controller !== "you") return;
     keySentRef.current = false;
     if (
       event.nativeEvent.isComposing ||
@@ -739,7 +724,7 @@ export function ServerBrowserSurface(props: {
           />
         ) : null}
         <canvas
-          ref={canvasRef}
+          ref={attachCanvas}
           className="block size-full touch-none object-contain"
           onPointerDown={handlePointer}
           onPointerMove={handlePointer}

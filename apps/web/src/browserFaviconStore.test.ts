@@ -2,11 +2,22 @@ import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-vi.mock("~/state/entities", () => ({ useQuietThreadShell: () => null }));
-vi.mock("~/state/session", () => ({ usePreparedConnection: () => ({ _tag: "None" }) }));
+const metadata = vi.hoisted(() => ({
+  projectId: null as string | null,
+  httpBaseUrl: null as string | null,
+}));
+
+vi.mock("~/state/entities", () => ({
+  useQuietThreadShell: () => null,
+  readThreadShell: () => (metadata.projectId ? { projectId: metadata.projectId } : null),
+}));
+vi.mock("~/state/session", () => ({
+  usePreparedConnection: () => ({ _tag: "None" }),
+  readPreparedConnection: () =>
+    metadata.httpBaseUrl ? { httpBaseUrl: metadata.httpBaseUrl } : null,
+}));
 
 import {
-  flushPendingFaviconsForThread,
   lookupFavicon,
   recordFaviconForProject,
   recordFaviconForThread,
@@ -26,7 +37,11 @@ const favicon = (pageUrl: string, capturedAt: number, dataUrl = PNG) => ({
 });
 
 describe("browser favicon store", () => {
-  beforeEach(resetBrowserFaviconsForTests);
+  beforeEach(() => {
+    resetBrowserFaviconsForTests();
+    metadata.projectId = null;
+    metadata.httpBaseUrl = null;
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -67,18 +82,16 @@ describe("browser favicon store", () => {
     ).toBeNull();
   });
 
-  it("retains multiple origins until project and connection metadata hydrate", () => {
-    expect(
-      recordFaviconForThread(threadRef, favicon("http://localhost:3000/", 1), null, undefined),
-    ).toBe(false);
-    expect(
-      recordFaviconForThread(threadRef, favicon("http://localhost:5173/", 2), null, undefined),
-    ).toBe(false);
+  it("retains origins until the thread's project is known, then lands them with the next capture", () => {
+    expect(recordFaviconForThread(threadRef, favicon("http://localhost:3000/", 1))).toBe(false);
+    expect(recordFaviconForThread(threadRef, favicon("http://localhost:5173/", 2))).toBe(false);
     expect(
       Object.keys(Object.values(useBrowserFaviconStore.getState().pendingByThreadKey)[0] ?? {}),
     ).toHaveLength(2);
 
-    expect(flushPendingFaviconsForThread(threadRef, projectRef, "192.168.64.2")).toBe(true);
+    metadata.projectId = "project-1";
+    metadata.httpBaseUrl = "http://192.168.64.2:3773";
+    expect(recordFaviconForThread(threadRef, favicon("http://localhost:5173/", 3))).toBe(true);
     expect(Object.keys(useBrowserFaviconStore.getState().byKey).toSorted()).toEqual([
       "env-1:project-1 http://localhost:3000",
       "env-1:project-1 http://localhost:5173",
@@ -87,25 +100,13 @@ describe("browser favicon store", () => {
   });
 
   it("persists unambiguous loopback captures while the environment is offline", () => {
-    expect(
-      recordFaviconForThread(
-        threadRef,
-        favicon("http://localhost:3000/", 1),
-        projectRef,
-        undefined,
-      ),
-    ).toBe(true);
+    metadata.projectId = "project-1";
+    expect(recordFaviconForThread(threadRef, favicon("http://localhost:3000/", 1))).toBe(true);
     expect(useBrowserFaviconStore.getState().byKey).toEqual({
       "env-1:project-1 http://localhost:3000": { dataUrl: PNG, capturedAt: 1 },
     });
 
-    recordFaviconForThread(
-      threadRef,
-      favicon("http://192.168.64.2:5173/", 2),
-      projectRef,
-      undefined,
-    );
-    expect(flushPendingFaviconsForThread(threadRef, projectRef, undefined)).toBe(false);
+    expect(recordFaviconForThread(threadRef, favicon("http://192.168.64.2:5173/", 2))).toBe(false);
     expect(Object.values(useBrowserFaviconStore.getState().pendingByThreadKey)[0]).toBeDefined();
   });
 

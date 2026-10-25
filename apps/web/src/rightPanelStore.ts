@@ -8,6 +8,7 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
 import { useClosedViewStore } from "./closedViewStore";
+import { useDiffPanelStore } from "./diffPanelStore";
 import { resolveStorage } from "./lib/storage";
 import type { ThreadPanelPresentation } from "./rightPanelLayout";
 import type { ChatFileAttachment } from "./types";
@@ -100,11 +101,17 @@ export interface ThreadPanelVisibility {
   popoverOpen: boolean;
 }
 
+export type DiffOpenSelection =
+  | { readonly scope: "branch" | "unstaged" }
+  | { readonly turnId: RunId; readonly filePath?: string | undefined };
+
 interface RightPanelStoreState {
   byThreadKey: Record<string, ThreadRightPanelState>;
+  // Compat shim for the base ChatView until the web-chat-view layer.
   pendingMaximizeThreadKey: string | null;
   requestMaximize: (ref: ScopedThreadRef) => void;
   consumeMaximizeRequest: (ref: ScopedThreadRef) => boolean;
+  reconcileFileSurfaces: (ref: ScopedThreadRef, workspaceAvailable: boolean) => void;
   threadPanelVisibilityByThreadKey: Record<string, ThreadPanelVisibility>;
   userActionRevisionByThreadKey: Record<string, number>;
   closeRevisionByThreadKey: Record<string, number>;
@@ -122,6 +129,8 @@ interface RightPanelStoreState {
     ref: ScopedThreadRef,
     kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request">,
   ) => void;
+  /** Opens the diff panel on the branch diff unless the caller picks a scope or turn. */
+  openDiff: (ref: ScopedThreadRef, selection?: DiffOpenSelection) => void;
   openDevice: (ref: ScopedThreadRef, target: DeviceTabTarget, automatic?: boolean) => void;
   renameDevice: (ref: ScopedThreadRef, surfaceId: string, title: string) => void;
   openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
@@ -172,9 +181,18 @@ interface RightPanelStoreState {
     tabIds: readonly string[],
     hiddenTabIds?: ReadonlySet<string>,
   ) => void;
-  reconcileFileSurfaces: (ref: ScopedThreadRef, workspaceAvailable: boolean) => void;
+  /** Reconciles every thread's file tabs; `null` means the thread's workspace is not known yet. */
+  reconcileAllFileSurfaces: (workspaceAvailable: (ref: ScopedThreadRef) => boolean | null) => void;
   show: (ref: ScopedThreadRef) => void;
   close: (ref: ScopedThreadRef) => void;
+  /**
+   * Closes the panel, first moving focus out of `panel` to `returnFocusTo`
+   * so the panel never goes inert while it holds focus.
+   */
+  collapse: (
+    ref: ScopedThreadRef,
+    options: { readonly panel: Element | null; readonly returnFocusTo: HTMLElement | null },
+  ) => void;
   setMaximized: (ref: ScopedThreadRef, maximized: boolean) => void;
   toggleVisibility: (ref: ScopedThreadRef) => void;
   toggle: (
@@ -371,6 +389,21 @@ const updateThread = (
   }
 
   return { byThreadKey, threadPanelVisibilityByThreadKey };
+};
+
+const withoutWorkspaceFileSurfaces = (current: ThreadRightPanelState): ThreadRightPanelState => {
+  const surfaces = current.surfaces.filter(
+    (surface) =>
+      surface.kind !== "files" && (surface.kind !== "file" || surface.attachment !== undefined),
+  );
+  if (surfaces.length === current.surfaces.length) return current;
+  const activeStillExists = surfaces.some((surface) => surface.id === current.activeSurfaceId);
+  return {
+    ...current,
+    isOpen: surfaces.length > 0 ? current.isOpen : false,
+    surfaces,
+    activeSurfaceId: activeStillExists ? current.activeSurfaceId : (surfaces.at(-1)?.id ?? null),
+  };
 };
 
 const automaticUpdate = (
@@ -586,6 +619,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
   persist(
     (set, get) => ({
       byThreadKey: {},
+      // Compat shim for the base ChatView until the web-chat-view layer.
       pendingMaximizeThreadKey: null,
       requestMaximize: (ref) => set({ pendingMaximizeThreadKey: scopedThreadKey(ref) }),
       consumeMaximizeRequest: (ref) => {
@@ -593,6 +627,12 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
         set({ pendingMaximizeThreadKey: null });
         return true;
       },
+      reconcileFileSurfaces: (ref, workspaceAvailable) =>
+        set((state) =>
+          automaticUpdate(state, scopedThreadKey(ref), (current) =>
+            workspaceAvailable ? current : withoutWorkspaceFileSurfaces(current),
+          ),
+        ),
       threadPanelVisibilityByThreadKey: {},
       userActionRevisionByThreadKey: {},
       closeRevisionByThreadKey: {},
@@ -648,6 +688,12 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             return upsertSurface(current, singletonSurface(kind));
           }),
         ),
+      openDiff: (ref, selection = { scope: "branch" }) => {
+        const diffPanel = useDiffPanelStore.getState();
+        if ("turnId" in selection) diffPanel.selectTurn(ref, selection.turnId, selection.filePath);
+        else diffPanel.selectGitScope(ref, selection.scope);
+        get().open(ref, "diff");
+      },
       openDevice: (ref, target, automatic = false) =>
         set((state) =>
           (automatic ? automaticUpdate : userAction)(state, scopedThreadKey(ref), (current) => {
@@ -981,29 +1027,17 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             };
           }),
         ),
-      reconcileFileSurfaces: (ref, workspaceAvailable) =>
-        set((state) =>
-          automaticUpdate(state, scopedThreadKey(ref), (current) => {
-            if (workspaceAvailable) return current;
-            const surfaces = current.surfaces.filter(
-              (surface) =>
-                surface.kind !== "files" &&
-                (surface.kind !== "file" || surface.attachment !== undefined),
-            );
-            if (surfaces.length === current.surfaces.length) return current;
-            const activeStillExists = surfaces.some(
-              (surface) => surface.id === current.activeSurfaceId,
-            );
-            return {
-              ...current,
-              isOpen: surfaces.length > 0 ? current.isOpen : false,
-              surfaces,
-              activeSurfaceId: activeStillExists
-                ? current.activeSurfaceId
-                : (surfaces.at(-1)?.id ?? null),
-            };
-          }),
-        ),
+      reconcileAllFileSurfaces: (workspaceAvailable) =>
+        set((state) => {
+          let next: RightPanelStoreData = state;
+          for (const [threadKey, thread] of Object.entries(state.byThreadKey)) {
+            if (withoutWorkspaceFileSurfaces(thread) === thread) continue;
+            const ref = parseScopedThreadKey(threadKey);
+            if (ref === null || workspaceAvailable(ref) !== false) continue;
+            next = updateThread(next, threadKey, withoutWorkspaceFileSurfaces);
+          }
+          return next;
+        }),
       show: (ref) =>
         set((state) =>
           userAction(state, scopedThreadKey(ref), (current) =>
@@ -1016,6 +1050,11 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             current.isOpen ? { ...current, isOpen: false } : current,
           ),
         ),
+      collapse: (ref, { panel, returnFocusTo }) => {
+        const focused = panel?.ownerDocument.activeElement;
+        if (panel && focused && panel.contains(focused)) returnFocusTo?.focus();
+        get().close(ref);
+      },
       setMaximized: (ref, maximized) =>
         set((state) =>
           automaticUpdate(state, scopedThreadKey(ref), (current) => {

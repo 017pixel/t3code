@@ -57,6 +57,7 @@ import {
 } from "~/hooks/useSettings";
 import { reconcilePreviewServerSessions, resetPreviewStateForTests } from "~/previewStateStore";
 import { AppAtomRegistryProvider } from "~/rpc/atomRegistry";
+import { useBrowserSurfaceStore } from "./browserSurfaceStore";
 import { ElectronBrowserHost } from "./ElectronBrowserHost";
 
 const threadRef = scopeThreadRef(
@@ -74,6 +75,7 @@ const snapshot = (tabId: string, updatedAt: string): PreviewSessionSnapshot => (
 });
 
 function setup(): Disposable {
+  useBrowserSurfaceStore.setState({ byTabId: {}, activityByTabId: {} });
   __resetClientSettingsPersistenceForTests();
   mocks.getClientSettings.mockReset().mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
   mocks.setClientSettings.mockReset().mockResolvedValue(undefined);
@@ -159,5 +161,40 @@ describe("ElectronBrowserHost", () => {
     const after = webviews();
     expect(after).toHaveLength(2);
     expect(after.every((node, index) => node.isSameNode(before[index]!))).toBe(true);
+  });
+
+  it("presents the guest's laid-out viewport, and follows a viewport change", async () => {
+    using _state = setup();
+    const sessionAt = (width: number, height: number, revision: number) =>
+      reconcilePreviewServerSessions(threadRef, {
+        sessions: [
+          {
+            ...snapshot("tab_9", "2026-01-01T00:00:01.000Z"),
+            viewport: { _tag: "freeform", width, height },
+          },
+        ],
+        serverEpoch: "server-a",
+        revision,
+      });
+    sessionAt(390, 844, 1);
+    // Electron's own stylesheet makes a webview a box; plain Chrome leaves it inline.
+    const electronWebviewStyle = document.createElement("style");
+    electronWebviewStyle.textContent = "webview { display: flex; position: absolute; }";
+    using _style = { [Symbol.dispose]: () => electronWebviewStyle.remove() };
+    document.head.append(electronWebviewStyle);
+    await using screen = await renderHost();
+
+    const webview = screen.container.querySelector("webview")!;
+    const runtimeTabId = webview.getAttribute("data-preview-tab")!;
+    const presentedSize = () => {
+      const content = useBrowserSurfaceStore.getState().byTabId[runtimeTabId]?.content;
+      return content
+        ? { width: content.width, height: content.height, scale: content.scale }
+        : null;
+    };
+    await vi.waitFor(() => expect(presentedSize()).toEqual({ width: 390, height: 844, scale: 1 }));
+
+    await act(async () => sessionAt(800, 600, 2));
+    await vi.waitFor(() => expect(presentedSize()).toEqual({ width: 800, height: 600, scale: 1 }));
   });
 });

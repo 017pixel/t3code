@@ -5,6 +5,11 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
 
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
+import {
+  onPreviewSessionsChanged,
+  readThreadPreviewState,
+  type ThreadPreviewState,
+} from "~/previewStateStore";
 import { readPreparedConnection } from "~/state/session";
 
 import { isLocalLoopbackHost, normalizeHostname } from "./browser/browserTargetResolver";
@@ -144,13 +149,11 @@ const PENDING_MAX_PER_THREAD = 10;
 const PENDING_MAX_THREADS = 20;
 
 type PendingVisit = { url: string; at: number; environmentHostname: string | null };
-type PendingTitle = { url: string; title: string; environmentHostname: string | null | undefined };
 
 interface BrowserHistoryStoreState {
   byProjectKey: Record<string, BrowserHistoryEntry[]>;
   projectKeyByThreadKey: Record<string, string>;
   pendingVisitsByThreadKey: Record<string, PendingVisit[]>;
-  pendingTitlesByThreadKey: Record<string, PendingTitle[]>;
   recordVisit: (
     projectKey: string,
     url: string,
@@ -189,7 +192,6 @@ export const useBrowserHistoryStore = create<BrowserHistoryStoreState>()(
       byProjectKey: {},
       projectKeyByThreadKey: {},
       pendingVisitsByThreadKey: {},
-      pendingTitlesByThreadKey: {},
       recordVisit: (projectKey, url, at, options) => {
         const normalized = normalizeHistoryUrl(url);
         if (!normalized) return;
@@ -245,35 +247,19 @@ export const useBrowserHistoryStore = create<BrowserHistoryStoreState>()(
         const threadKey = scopedThreadKey(ref);
         const state = get();
         const pendingVisits = state.pendingVisitsByThreadKey[threadKey];
-        const pendingTitles = state.pendingTitlesByThreadKey[threadKey];
-        if (
-          state.projectKeyByThreadKey[threadKey] === projectKey &&
-          !pendingVisits &&
-          !pendingTitles
-        ) {
-          return;
-        }
+        if (state.projectKeyByThreadKey[threadKey] === projectKey && !pendingVisits) return;
         const nextPendingVisits = { ...state.pendingVisitsByThreadKey };
-        const nextPendingTitles = { ...state.pendingTitlesByThreadKey };
         delete nextPendingVisits[threadKey];
-        delete nextPendingTitles[threadKey];
         set({
           projectKeyByThreadKey: { ...state.projectKeyByThreadKey, [threadKey]: projectKey },
           pendingVisitsByThreadKey: nextPendingVisits,
-          pendingTitlesByThreadKey: nextPendingTitles,
         });
         for (const visit of pendingVisits ?? [])
           get().recordVisit(projectKey, visit.url, visit.at, {
             insertOrdered: true,
             environmentHostname: visit.environmentHostname,
           });
-        for (const pendingTitle of pendingTitles ?? [])
-          get().setTitleForUrl(
-            projectKey,
-            pendingTitle.url,
-            pendingTitle.title,
-            pendingTitle.environmentHostname,
-          );
+        recordPreviewTitles(ref, readThreadPreviewState(ref));
       },
     }),
     {
@@ -302,7 +288,6 @@ export function mergeBrowserHistoryState(
     ...migrated,
     projectKeyByThreadKey: migratePersistedThreadProjectKeys(persistedState, migrated.byProjectKey),
     pendingVisitsByThreadKey: {},
-    pendingTitlesByThreadKey: {},
   };
 }
 
@@ -341,28 +326,33 @@ export function recordVisitForThread(ref: ScopedThreadRef, url: string, at?: num
     return;
   }
   state.recordVisit(projectKey, url, visitAt, { environmentHostname });
+  // A page can settle before the address bar records its visit.
+  recordPreviewTitles(ref, readThreadPreviewState(ref));
 }
 
-export function setTitleForThreadUrl(
-  ref: ScopedThreadRef,
-  url: string,
-  title: string,
-  environmentHostname?: string | null,
-): void {
-  const threadKey = scopedThreadKey(ref);
+/**
+ * Titles only update entries already in the thread's project history, so they
+ * are applied both when a page settles and when its visit is recorded.
+ */
+function recordPreviewTitles(ref: ScopedThreadRef, preview: ThreadPreviewState): void {
   const state = useBrowserHistoryStore.getState();
-  const projectKey = state.projectKeyByThreadKey[threadKey];
-  if (!projectKey) {
-    useBrowserHistoryStore.setState({
-      pendingTitlesByThreadKey: addPendingByThread(state.pendingTitlesByThreadKey, threadKey, {
-        url,
-        title,
-        environmentHostname,
-      }),
-    });
-    return;
+  const projectKey = state.projectKeyByThreadKey[scopedThreadKey(ref)];
+  if (!projectKey || !state.byProjectKey[projectKey]?.length) return;
+  const connection = readPreparedConnection(ref.environmentId);
+  const environmentHostname = connection ? new URL(connection.httpBaseUrl).hostname : null;
+  for (const session of Object.values(preview.sessions)) {
+    const status = session.navStatus;
+    if (status._tag !== "Success" || !status.title) continue;
+    state.setTitleForUrl(projectKey, status.url, status.title, environmentHostname);
   }
-  state.setTitleForUrl(projectKey, url, title, environmentHostname);
+}
+
+let previewTitlesStarted = false;
+
+export function startPreviewTitleRecording(): void {
+  if (previewTitlesStarted) return;
+  previewTitlesStarted = true;
+  onPreviewSessionsChanged(recordPreviewTitles);
 }
 
 export function removeUrlForThread(ref: ScopedThreadRef, url: string): void {
@@ -392,7 +382,10 @@ export function resetBrowserHistoryForTests(): void {
     byProjectKey: {},
     projectKeyByThreadKey: {},
     pendingVisitsByThreadKey: {},
-    pendingTitlesByThreadKey: {},
   });
   useBrowserHistoryStore.persist.clearStorage();
 }
+
+// Compat shim: appInit starts this from the app-bootstrap layer. Until then the
+// store starts it so preview titles keep being recorded.
+startPreviewTitleRecording();

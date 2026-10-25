@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, type PreviewSessionSnapshot, ThreadId } from "@t3tools/contracts";
 
 const { readPreparedConnection } = vi.hoisted(() => ({
   readPreparedConnection: vi.fn<() => { httpBaseUrl: string } | null>(() => null),
@@ -16,10 +16,11 @@ import {
   normalizeHistoryUrl,
   recordVisitForThread,
   resetBrowserHistoryForTests,
-  setTitleForThreadUrl,
+  startPreviewTitleRecording,
   upsertHistoryEntry,
   useBrowserHistoryStore,
 } from "./browserHistoryStore";
+import { applyPreviewServerSnapshot, resetPreviewStateForTests } from "./previewStateStore";
 
 function entry(overrides: Partial<BrowserHistoryEntry> = {}): BrowserHistoryEntry {
   return { url: "http://localhost:3000/", lastVisitedAt: 1000, ...overrides };
@@ -108,24 +109,54 @@ const threadRef = {
   threadId: ThreadId.make("thread-1"),
 };
 
-describe("useBrowserHistoryStore", () => {
-  beforeEach(() => {
-    resetBrowserHistoryForTests();
-  });
+let settledAt = 0;
 
-  it("sets titles update-only via the thread helper", () => {
+function settle(url: string, title: string): void {
+  settledAt += 1;
+  const snapshot: PreviewSessionSnapshot = {
+    threadId: threadRef.threadId,
+    tabId: "tab_a",
+    navStatus: { _tag: "Success", url, title },
+    canGoBack: false,
+    canGoForward: false,
+    updatedAt: new Date(settledAt).toISOString(),
+  };
+  applyPreviewServerSnapshot(threadRef, snapshot);
+}
+
+function resetStores(): void {
+  resetBrowserHistoryForTests();
+  resetPreviewStateForTests();
+  startPreviewTitleRecording();
+}
+
+describe("useBrowserHistoryStore", () => {
+  beforeEach(resetStores);
+
+  it("titles only pages already in history when they settle", () => {
     useBrowserHistoryStore.getState().registerThreadProject(threadRef, "proj-a");
-    setTitleForThreadUrl(threadRef, "http://a.test/", "Should not create");
+    settle("http://a.test/", "Should not create");
     expect(useBrowserHistoryStore.getState().byProjectKey).toEqual({});
     recordVisitForThread(threadRef, "http://a.test/#/settings", 1);
-    setTitleForThreadUrl(threadRef, "http://a.test/#/settings", "My App");
+    settle("http://a.test/#/settings", "My App");
     expect(useBrowserHistoryStore.getState().byProjectKey["proj-a"]?.[0]?.title).toBe("My App");
+  });
+
+  it("titles a visit recorded after its page already settled", () => {
+    useBrowserHistoryStore.getState().registerThreadProject(threadRef, "proj-a");
+    recordVisitForThread(threadRef, "http://other.test/", 1);
+    settle("http://a.test/", "My App");
+    recordVisitForThread(threadRef, "http://a.test/", 2);
+    expect(useBrowserHistoryStore.getState().byProjectKey["proj-a"]?.[0]).toMatchObject({
+      url: "http://a.test/",
+      title: "My App",
+    });
   });
 
   it("sets a title against a settled url that differs from the stored one only by a trailing slash", () => {
     useBrowserHistoryStore.getState().registerThreadProject(threadRef, "proj-a");
     recordVisitForThread(threadRef, "http://a.test/community", 1);
-    setTitleForThreadUrl(threadRef, "http://a.test/community/", "Community");
+    settle("http://a.test/community/", "Community");
     expect(useBrowserHistoryStore.getState().byProjectKey["proj-a"]?.[0]).toMatchObject({
       url: "http://a.test/community",
       title: "Community",
@@ -133,7 +164,7 @@ describe("useBrowserHistoryStore", () => {
 
     useBrowserHistoryStore.setState({ byProjectKey: {} });
     recordVisitForThread(threadRef, "http://a.test/community/", 1);
-    setTitleForThreadUrl(threadRef, "http://a.test/community", "Community");
+    settle("http://a.test/community", "Community");
     expect(useBrowserHistoryStore.getState().byProjectKey["proj-a"]?.[0]).toMatchObject({
       url: "http://a.test/community/",
       title: "Community",
@@ -143,7 +174,8 @@ describe("useBrowserHistoryStore", () => {
   it("matches a requested localhost URL to the resolved environment host", () => {
     useBrowserHistoryStore.getState().registerThreadProject(threadRef, "proj-a");
     recordVisitForThread(threadRef, "http://localhost:5173/app", 1);
-    setTitleForThreadUrl(threadRef, "http://192.168.64.2:5173/app", "Local App", "192.168.64.2");
+    readPreparedConnection.mockReturnValue({ httpBaseUrl: "http://192.168.64.2:3773" });
+    settle("http://192.168.64.2:5173/app", "Local App");
     expect(useBrowserHistoryStore.getState().byProjectKey["proj-a"]?.[0]?.title).toBe("Local App");
   });
 
@@ -167,9 +199,7 @@ describe("useBrowserHistoryStore", () => {
 });
 
 describe("pendingVisitsByThreadKey", () => {
-  beforeEach(() => {
-    resetBrowserHistoryForTests();
-  });
+  beforeEach(resetStores);
 
   it("queues a visit recorded before registration and drains it in order on registration", () => {
     recordVisitForThread(threadRef, "http://a.test/", 1);
@@ -201,21 +231,18 @@ describe("pendingVisitsByThreadKey", () => {
   });
 });
 
-describe("pendingTitlesByThreadKey", () => {
-  beforeEach(() => {
-    resetBrowserHistoryForTests();
-  });
+describe("titles before registration", () => {
+  beforeEach(resetStores);
 
-  it("buffers a title set before registration and applies it once the matching visit drains", () => {
+  it("applies a settled page's title once the matching visit drains", () => {
     recordVisitForThread(threadRef, "http://a.test/", 1);
-    setTitleForThreadUrl(threadRef, "http://a.test/", "My App");
+    settle("http://a.test/", "My App");
     expect(useBrowserHistoryStore.getState().byProjectKey).toEqual({});
 
     useBrowserHistoryStore.getState().registerThreadProject(threadRef, "proj-a");
 
     const entries = useBrowserHistoryStore.getState().byProjectKey["proj-a"];
     expect(entries?.[0]).toMatchObject({ url: "http://a.test/", title: "My App" });
-    expect(useBrowserHistoryStore.getState().pendingTitlesByThreadKey).toEqual({});
   });
 });
 
@@ -238,6 +265,5 @@ describe("mergeBrowserHistoryState", () => {
     expect(typeof merged.recordVisit).toBe("function");
     expect(merged.projectKeyByThreadKey).toEqual({ good: "b" });
     expect(merged.pendingVisitsByThreadKey).toEqual({});
-    expect(merged.pendingTitlesByThreadKey).toEqual({});
   });
 });

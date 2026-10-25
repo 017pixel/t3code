@@ -1,9 +1,10 @@
 import type { DesktopPreviewPointerEvent } from "@t3tools/contracts";
 import { MousePointer2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { useBrowserPointerStore } from "~/browser/browserPointerStore";
 import { useBrowserSurfaceStore } from "~/browser/browserSurfaceStore";
+import { useDeadlinePassed } from "~/hooks/useDeadline";
 
 import { agentBrowserCursorOpacity, type BrowserController } from "./agentBrowserCursorLogic";
 
@@ -63,13 +64,16 @@ export function AgentCursorMark(props: {
   readonly controller: BrowserController;
 }) {
   const { phase, sequence, left, top, controller } = props;
-  const [inactiveSequence, setInactiveSequence] = useState<number | null>(null);
-  const active = inactiveSequence !== sequence;
-
-  useEffect(() => {
-    const timeout = window.setTimeout(() => setInactiveSequence(sequence), CURSOR_ACTIVE_MS);
-    return () => window.clearTimeout(timeout);
-  }, [sequence]);
+  // Local receive time, not the event's createdAt: server-browser events carry
+  // a remote clock.
+  const [sequenceStart, setSequenceStart] = useState(() => ({ sequence, atMs: Date.now() }));
+  let startedAtMs = sequenceStart.atMs;
+  if (sequenceStart.sequence !== sequence) {
+    const next = { sequence, atMs: Date.now() };
+    setSequenceStart(next);
+    startedAtMs = next.atMs;
+  }
+  const active = !useDeadlinePassed(startedAtMs + CURSOR_ACTIVE_MS);
 
   return (
     <div

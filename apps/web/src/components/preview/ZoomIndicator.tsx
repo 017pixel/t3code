@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 
+import { useDeadlinePassed } from "~/hooks/useDeadline";
 import { cn } from "~/lib/utils";
 
 const HIDE_AFTER_MS = 1500;
@@ -10,26 +11,19 @@ interface Props {
 }
 
 export function ZoomIndicator({ zoomFactor }: Props) {
-  const [visible, setVisible] = useState(false);
-  const lastFactorRef = useRef(zoomFactor);
-  const timerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (Math.abs(lastFactorRef.current - zoomFactor) < ZOOM_EPSILON) return;
-    lastFactorRef.current = zoomFactor;
-    setVisible(true);
-    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-    timerRef.current = window.setTimeout(() => {
-      setVisible(false);
-      timerRef.current = null;
-    }, HIDE_AFTER_MS);
-    return () => {
-      if (timerRef.current !== null) {
-        window.clearTimeout(timerRef.current);
-        timerRef.current = null;
-      }
-    };
-  }, [zoomFactor]);
+  // The first factor is not a change, so it never shows the indicator.
+  const [shown, setShown] = useState<{ factor: number; atMs: number | null }>({
+    factor: zoomFactor,
+    atMs: null,
+  });
+  let shownAtMs = shown.atMs;
+  if (Math.abs(shown.factor - zoomFactor) >= ZOOM_EPSILON) {
+    const next = { factor: zoomFactor, atMs: Date.now() };
+    setShown(next);
+    shownAtMs = next.atMs;
+  }
+  const hidden = useDeadlinePassed(shownAtMs === null ? null : shownAtMs + HIDE_AFTER_MS);
+  const visible = shownAtMs !== null && !hidden;
 
   const percent = `${Math.round(zoomFactor * 100)}%`;
 
