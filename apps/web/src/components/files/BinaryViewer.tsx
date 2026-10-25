@@ -335,7 +335,7 @@ export default function BinaryViewer(props: {
                       {formatAttachmentSize(item.size)}
                     </td>
                     <td className="w-28 border-b border-border/60 px-3 py-2 text-right whitespace-nowrap text-muted-foreground">
-                      {item.modified ? new Date(item.modified).toLocaleDateString() : "—"}
+                      {item.modified ? new Date(item.modified).toLocaleDateString() : "-"}
                     </td>
                   </tr>
                 ))}
