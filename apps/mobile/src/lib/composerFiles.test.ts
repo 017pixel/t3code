@@ -536,19 +536,25 @@ describe("composer file attachments", () => {
       },
     );
 
-    it("fits a large PNG with the photo picker renderer and sends the fitted bytes", async () => {
+    it.each([false, true])("fits a large PNG with oversized output: %s", async (oversized) => {
       const header = Buffer.alloc(24);
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header);
       header.write("IHDR", 12);
       header.writeUInt32BE(4000, 16);
       header.writeUInt32BE(3000, 20);
-      mocks.readBase64.mockResolvedValue(header.toString("base64"));
+      const original = header.toString("base64");
+      mocks.readBase64.mockResolvedValue(original);
       const resize = vi.fn();
       const renderAsync = vi.fn(async () => ({
         width: 4000,
         height: 3000,
         release: vi.fn(),
-        saveAsync: vi.fn(async () => ({ uri: "file:///cache/fitted.png", base64: "YWJj" })),
+        saveAsync: vi.fn(async () => ({
+          uri: "file:///cache/fitted.png",
+          base64: oversized
+            ? Buffer.alloc(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES + 1).toString("base64")
+            : "YWJj",
+        })),
       }));
       mocks.manipulate.mockImplementation(() => {
         const context = {
@@ -573,9 +579,11 @@ describe("composer file attachments", () => {
           expect.objectContaining({
             type: "image",
             mimeType: "image/png",
-            sizeBytes: 3,
-            dataUrl: "data:image/png;base64,YWJj",
-            previewUri: "file:///cache/fitted.png",
+            sizeBytes: oversized ? header.length : 3,
+            dataUrl: `data:image/png;base64,${oversized ? original : "YWJj"}`,
+            previewUri: oversized
+              ? `data:image/png;base64,${original}`
+              : "file:///cache/fitted.png",
           }),
         ],
         error: null,

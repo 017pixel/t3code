@@ -82,7 +82,10 @@ export function composerStripAttachments(
   attachments: ReadonlyArray<DraftComposerAttachment>,
 ): ReadonlyArray<DraftComposerAttachment> {
   return attachments.filter(
-    (attachment) => isComposerImageAttachment(attachment) || videoMimeType(attachment) !== null,
+    (attachment) =>
+      attachment.type === "image" ||
+      imageMimeType(attachment) !== null ||
+      videoMimeType(attachment) !== null,
   );
 }
 
@@ -314,11 +317,16 @@ export async function pickComposerFiles(input: {
       try {
         const { File } = await import("expo-file-system");
         const original = await new File(attachment.fileUri).base64();
-        const fitted = await fitComposerImage({
+        const candidate = await fitComposerImage({
           uri: attachment.fileUri,
           mimeType,
           base64: original,
         });
+        const fitted =
+          candidate !== null &&
+          estimateBase64ByteSize(candidate.base64) <= PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
+            ? candidate
+            : null;
         const base64 = fitted?.base64 ?? original;
         const sizeBytes = estimateBase64ByteSize(base64);
         if (sizeBytes <= 0 || sizeBytes > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
