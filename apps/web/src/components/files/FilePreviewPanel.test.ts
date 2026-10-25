@@ -174,6 +174,22 @@ describe("document preview contents", () => {
     expect(html).not.toContain("https:");
   });
 
+  it("preserves rich text page breaks and formatting without splitting hidden destinations", () => {
+    const result = openRtf(
+      bytes(String.raw`{\rtf1\b First\page Second\b0{\*\unknown \page hidden}\page Third\page}`),
+    );
+    if (result.type !== "document") throw new Error("Expected document");
+    expect(result.navigation).toBe("page");
+    expect(result.pages.map((page) => page.html)).toEqual([
+      "<p><strong>First</strong></p>",
+      "<p><strong>Second</strong></p>",
+      "<p>Third</p>",
+    ]);
+    expect(() => openRtf(bytes(String.raw`{\rtf1 ` + String.raw`\page`.repeat(501) + "}"))).toThrow(
+      "500 pages",
+    );
+  });
+
   it("decodes declared rich text code pages for raw bytes and escaped byte runs", () => {
     const input = new TextEncoder().encode(
       String.raw`{\rtf1\ansi\ansicpg1251 A \'c0\par\ansicpg932\'82\'a0}`,

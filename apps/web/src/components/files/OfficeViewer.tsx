@@ -1,4 +1,5 @@
 /* oxlint-disable react/no-array-index-key -- Spreadsheet rows and columns retain their source positions. */
+import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import type { OfficePreviewKind } from "@t3tools/shared/filePreview";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
@@ -208,6 +209,7 @@ export default function OfficeViewer(props: {
   > | null>(null);
   const [workbook, setWorkbook] = useState<Workbook | null>(null);
   const [count, setCount] = useState(0);
+  const [fileSize, setFileSize] = useState(props.sizeBytes);
   const [page, setPage] = useState(0);
   const [slide, setSlide] = useState<Slide | null>(null);
   const workerRef = useRef<Worker | null>(null);
@@ -288,8 +290,10 @@ export default function OfficeViewer(props: {
     });
     void readOfficeFile(props.src, controller.signal)
       .then((bytes) => {
-        if (!controller.signal.aborted)
+        if (!controller.signal.aborted) {
+          setFileSize(bytes.byteLength);
           worker.postMessage({ type: "open", kind: props.kind, bytes }, [bytes]);
+        }
       })
       .catch((cause: unknown) =>
         fail(cause instanceof Error ? cause.message : "Could not read this file."),
@@ -328,12 +332,17 @@ export default function OfficeViewer(props: {
   if (notebook)
     return (
       <Suspense fallback={<FileSurfaceLoading />}>
-        <NotebookPreview notebook={notebook} />
+        <NotebookPreview notebook={notebook} sizeBytes={fileSize} />
       </Suspense>
     );
   const sheet = workbook?.sheets[page];
   const documentPage = previewDocument?.pages[page];
   const navigation = workbook ? "sheet" : (previewDocument?.navigation ?? "slide");
+  const documentCount = previewDocument?.pages.length ?? 0;
+  const documentDetails =
+    navigation === "chapter"
+      ? `Chapter ${page + 1} of ${documentCount}`
+      : `${documentCount} ${navigation}${documentCount === 1 ? "" : "s"}`;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {count > 0 ? (
@@ -399,6 +408,18 @@ export default function OfficeViewer(props: {
           </FileSurfaceAction>
         </div>
       ) : null}
+      {props.kind === "ods" && sheet ? (
+        <div
+          className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-1 border-b border-border/60 px-3 py-2 text-xs text-muted-foreground tabular-nums"
+          role="status"
+        >
+          Sheet {page + 1} of {count} · {sheet.rowCount.toLocaleString()} rows ·{" "}
+          {sheet.columns.toLocaleString()} columns
+          {fileSize !== undefined
+            ? ` · ${fileSize === 0 ? "0 bytes" : formatAttachmentSize(fileSize)}`
+            : ""}
+        </div>
+      ) : null}
       {documentPage ? (
         <>
           {props.kind !== "epub" ? (
@@ -408,9 +429,9 @@ export default function OfficeViewer(props: {
           ) : null}
           <Suspense fallback={<FileSurfaceLoading />}>
             <DocumentPages
-              key={page}
               html={documentPage.html}
               name={`${props.name}: ${documentPage.title}`}
+              details={`${documentDetails}${fileSize !== undefined ? ` · ${fileSize === 0 ? "0 bytes" : formatAttachmentSize(fileSize)}` : ""}`}
             />
           </Suspense>
         </>
