@@ -357,6 +357,34 @@ describe("large text preview recovery", () => {
     await vi.waitFor(() => expect(load).toHaveBeenCalledWith(0));
   });
 });
+it.each(["<w:body/>", "<w:body></w:body>"])(
+  "opens an empty Word document with %s",
+  async (body) => {
+    const { default: JSZip } = await import("jszip");
+    const { prepareOffice } = await import("./officeArchive");
+    const archive = new JSZip().file(
+      "word/document.xml",
+      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${body}</w:document>`,
+    );
+    const prepared = await prepareOffice(
+      await archive.generateAsync({ type: "arraybuffer" }),
+      "docx",
+    );
+    const result = await JSZip.loadAsync(prepared.bytes);
+    const xml = new DOMParser().parseFromString(
+      await result.file("word/document.xml")!.async("string"),
+      "application/xml",
+    );
+    expect(xml.querySelector("parsererror")).toBeNull();
+    expect(
+      xml.getElementsByTagNameNS(
+        "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        "body",
+      ),
+    ).toHaveLength(1);
+  },
+);
+
 it("rejects oversized embedded images before decoding pixels and retains ordinary images", async () => {
   const { officeImageBitmap } = await import("./office/image-bitmap");
   const canvas = new OffscreenCanvas(2, 3);

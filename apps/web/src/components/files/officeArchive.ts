@@ -147,7 +147,7 @@ function wordDocuments(
   parser.on("opentag", (tag) => {
     names.push(tag.name);
     if (names.length === 2 && tag.local === "body") {
-      prefix = xml.slice(0, parser.position);
+      prefix = xml.slice(0, parser.position).replace(/\/>$/, ">");
       suffix = `</${tag.name}></${names[0]}>`;
       boundary = batchStart = parser.position;
     } else if (prefix && names.length > 2) {
