@@ -217,11 +217,11 @@ const childCase: McpToolUseCase = {
 };
 
 it("rebuilds the template from this checkout and sends a child T3's task prompt", () => {
-  const base = buildBase(template, { keepUserInstructions: false });
+  const base = buildBase(template, { model: "claude-sonnet-5-5", keepUserInstructions: false });
   const system = base.system.map((block) => String(block.text));
   assert.deepEqual(system.slice(0, 2), [
     "You are Claude Code.",
-    `Main prompt.\n - Primary working directory: /home/user/app\n\n${t3SystemAppend()}`,
+    `Main prompt.\n - Primary working directory: /home/user/app\n\n${t3SystemAppend("claude-sonnet-5-5")}`,
   ]);
   assert.equal(base.environment.cwd, "/home/user/app");
   assert.include(system[2], "model named Sonnet 5.5. The exact model ID is claude-sonnet-5-5.");
@@ -230,7 +230,11 @@ it("rebuilds the template from this checkout and sends a child T3's task prompt"
   assert.notInclude(deferred, "mcp__t3-code__retired_tool");
   // A delegated child is never offered the tools T3 hides from subagents.
   assert.include(deferred, "mcp__t3-code__watch_pull_request");
-  const child = buildBase(template, { keepUserInstructions: false, subagent: true });
+  const child = buildBase(template, {
+    model: "claude-sonnet-5-5",
+    keepUserInstructions: false,
+    subagent: true,
+  });
   assert.notInclude(String(child.system[2]?.text), "mcp__t3-code__watch_pull_request");
   assert.notInclude(
     child.t3.map((tool) => tool.name),
@@ -247,7 +251,10 @@ it("rebuilds the template from this checkout and sends a child T3's task prompt"
 });
 
 it("answers simple mocked commands itself and gives the simulator the sample's history", () => {
-  const sample = makeSample(childCase, buildBase(template, { keepUserInstructions: false }));
+  const sample = makeSample(
+    childCase,
+    buildBase(template, { model: "claude-sonnet-5-5", keepUserInstructions: false }),
+  );
   assert.equal(mockOutput(sample, "gh pr create --fill"), "https://github.com/acme/app/pull/124");
   assert.isUndefined(mockOutput(sample, "git push && gh pr create --fill"));
   assert.isUndefined(mockOutput(sample, "git status"));

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // @effect-diagnostics nodeBuiltinImport:off
 /**
- * Replays small fake threads on Sonnet 5.5 or GPT-6.1 Sol to check T3's MCP tool use. A captured
+ * Replays small fake threads on a Claude or Codex model to check T3's MCP tool use. A captured
  * harness request supplies the system prompt and native tools; T3's copy comes from this checkout.
  * A cheap model plays the shell, so nothing runs on the host. Usage: `--template <capture>
- * --out <dir>`, `--model gpt-6.1-sol`, `--dry-run`, `--case <id>`, `--cases <file.jsonl>`.
+ * --out <dir>`, `--model <id in MODELS>`, `--dry-run`, `--case <id>`, `--cases <file.jsonl>`.
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeOS from "node:os";
@@ -46,9 +46,17 @@ import {
   CLAUDE_PROVIDER,
   makeClaudeQueryOptions,
 } from "../src/orchestration-v2/Adapters/ClaudeAdapterV2.ts";
-const MODEL = "claude-sonnet-5-5";
-const SOL = "gpt-6.1-sol";
-type Model = typeof MODEL | typeof SOL;
+/** Agent models by id, with the display name a harness gives them. */
+const MODELS = {
+  "claude-sonnet-5-5": "Sonnet 5.5",
+  "claude-opus-5-5": "Opus 5.5",
+  "gpt-6.1-sol": "GPT-6.1 Sol",
+  "gpt-6-astra": "GPT-6 Astra",
+} as const;
+type Model = keyof typeof MODELS;
+/** GPT models replay a Codex capture through CLIProxyAPI, the rest a Claude Code capture. */
+const isCodex = (model: Model): model is Extract<Model, `gpt-${string}`> =>
+  model.startsWith("gpt-");
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 // USD per million tokens. Cache writes use the 5-minute rate.
 const PRICES = {
@@ -300,9 +308,9 @@ const visibleT3Tools = (subagent: boolean) =>
   subagent ? t3Tools.filter((tool) => !hiddenFromSubagents.has(tool.name)) : t3Tools;
 
 /** Text T3 appends to Claude Code's system prompt. Delegated children get the same text. */
-export const t3SystemAppend = () => {
+export const t3SystemAppend = (model: Model) => {
   const { systemPrompt } = makeClaudeQueryOptions({
-    modelSelection: { instanceId: ProviderInstanceId.make(CLAUDE_PROVIDER), model: MODEL },
+    modelSelection: { instanceId: ProviderInstanceId.make(CLAUDE_PROVIDER), model },
     nativeThreadId: "mcp-tool-use-eval",
     resume: false,
     cwd: null,
@@ -319,12 +327,12 @@ export const t3SystemAppend = () => {
  * descriptions and schemas (loaded on demand here, sent up front by harnesses without
  * deferred tools). Tokens are estimated at 4 characters each.
  */
-const t3ContextReport = (model: Model = MODEL) => {
+const t3ContextReport = (model: Model) => {
   const size = (chars: number) => `${chars} chars (~${Math.round(chars / 4)} tokens)`;
   const descriptions = t3Tools.reduce((sum, tool) => sum + valueText(tool.description).length, 0);
   const schemas = JSON.stringify(t3Tools).length;
   return [
-    `- T3 context: system text ${size((model === SOL ? JSON.stringify(buildCodexAdditionalContext({ model: SOL }, { browser: true, device: true })) : t3SystemAppend()).length)}`,
+    `- T3 context: system text ${size((isCodex(model) ? JSON.stringify(buildCodexAdditionalContext({ model }, { browser: true, device: true })) : t3SystemAppend(model)).length)}`,
     `tool descriptions ${size(descriptions)}`,
     `full tool schemas ${size(schemas)} across ${t3Tools.length} tools.`,
   ].join(", ");
@@ -356,7 +364,11 @@ const NATIVE_SCHEMAS: Readonly<Record<string, Omit<ApiTool, "name">>> = {
 /** Rebuilds the parts of a captured request that every case shares. */
 export const buildBase = (
   template: typeof MessagesRequest.Type,
-  options: { readonly keepUserInstructions: boolean; readonly subagent?: boolean },
+  options: {
+    readonly model: Model;
+    readonly keepUserInstructions: boolean;
+    readonly subagent?: boolean;
+  },
 ) => {
   const t3 = visibleT3Tools(options.subagent === true);
   const firstAssistant = template.messages.findIndex((message) => message.role === "assistant");
@@ -373,8 +385,9 @@ export const buildBase = (
   }
   const nativeDeferred = deferredList.split("\n").filter((name) => name && !isT3Name(name));
   const names = [...nativeDeferred, ...t3.map((tool) => tool.name)].toSorted().join("\n");
-  const append = t3SystemAppend();
-  const sonnet = `You are powered by the model named Sonnet 5.5. The exact model ID is ${MODEL}.`;
+  const { model } = options;
+  const append = t3SystemAppend(model);
+  const modelLine = `You are powered by the model named ${MODELS[model]}. The exact model ID is ${model}.`;
   const joined = systemTexts.join("\n");
   // The capture's home directory names its user. Cases use `/home/user` paths instead.
   const cwd = /Primary working directory: (\S+)/.exec(joined)?.[1] ?? "/home/user/app";
@@ -386,7 +399,7 @@ export const buildBase = (
     const at = value.indexOf(RUNTIME_MARKER);
     return anonymize(at === -1 ? value : value.slice(0, at) + append)
       .replace(DEFERRED_LIST, (_, header: string) => `${header}${names}\n`)
-      .replace(MODEL_LINE, sonnet)
+      .replace(MODEL_LINE, modelLine)
       .replace(IDENTITY, NEUTRAL_IDENTITY);
   });
   const [first] = template.messages;
@@ -403,6 +416,7 @@ export const buildBase = (
   const nativeSchema = (name: string) =>
     NATIVE_SCHEMAS[name] ?? { description: name, input_schema: open };
   return {
+    model,
     system: system.map(text),
     reminders: reminders.filter((_, i) => i !== gitStatusAt).map((value) => text(anonymize(value))),
     gitStatusAt: gitStatusAt === -1 ? reminders.length : gitStatusAt,
@@ -425,6 +439,7 @@ type Base = ReturnType<typeof buildBase> & { readonly codex?: typeof ResponsesRe
 const buildCodexBase = (
   template: typeof ResponsesRequest.Type,
   options: {
+    readonly model: Model;
     readonly keepUserInstructions: boolean;
     readonly effort?: string | undefined;
     readonly subagent?: boolean;
@@ -458,7 +473,7 @@ const buildCodexBase = (
     return [JSON.parse(clean(JSON.stringify(item))) as Block];
   });
   const context = buildCodexAdditionalContext(
-    { model: SOL, reasoningEffort: effort },
+    { model: options.model, reasoningEffort: effort },
     { browser: true, device: true },
   );
   input.push(
@@ -476,6 +491,7 @@ const buildCodexBase = (
   if (!nativeTools.some((tool) => tool.name === "exec"))
     throw new Error("Codex template needs code-mode exec.");
   return {
+    model: options.model,
     system: [],
     reminders: [],
     gitStatusAt: 0,
@@ -684,23 +700,21 @@ export const buildMessages = ({ testCase, base, tools }: Sample) => {
 // Results for T3 tools a case does not mock. The model ids are public in this repo's catalog.
 const claudeModel = (id: string) => ({ id, options: [{ id: "effort", values: EFFORTS }] });
 const codexModel = (id: string) => ({ id, options: [{ id: "reasoningEffort", values: EFFORTS }] });
-const DEFAULT_CAPABILITIES = {
-  inheritedProviderInstanceId: "claudeAgent",
-  inheritedModel: MODEL,
-  // Mirrors the real catalog's main models, so a case's named model is not missing by accident.
-  providers: [
-    {
-      providerInstanceId: "claudeAgent",
-      models: ["claude-opus-5-5", MODEL, "claude-fable-5-1", "claude-haiku-5-5"].map(claudeModel),
-    },
-    {
-      providerInstanceId: "codex",
-      models: ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"].map(codexModel),
-    },
-    { providerInstanceId: "muse", models: ["muse-wonder-full", "muse-wonder"].map(codexModel) },
-    { providerInstanceId: "grok", models: ["grok-4.7"].map(codexModel) },
-  ],
-};
+// Mirrors the real catalog's main models, so a case's named model is not missing by accident.
+const PROVIDERS = [
+  {
+    providerInstanceId: "claudeAgent",
+    models: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-5-5"].map(
+      claudeModel,
+    ),
+  },
+  {
+    providerInstanceId: "codex",
+    models: ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"].map(codexModel),
+  },
+  { providerInstanceId: "muse", models: ["muse-wonder-full", "muse-wonder"].map(codexModel) },
+  { providerInstanceId: "grok", models: ["grok-4.7"].map(codexModel) },
+];
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const DEFAULT_THREAD = {
   title: "Fix the flaky reconnect test",
@@ -741,8 +755,9 @@ const t3Default = (sample: Sample, name: string, input: Readonly<Record<string, 
   switch (name) {
     case "orchestrator_capabilities":
       return {
-        ...DEFAULT_CAPABILITIES,
-        ...(sample.base.codex ? { inheritedProviderInstanceId: "codex", inheritedModel: SOL } : {}),
+        inheritedProviderInstanceId: "claudeAgent",
+        inheritedModel: sample.base.model,
+        providers: PROVIDERS,
       };
     case "delegate_task": {
       const n = sample.nextTask++;
@@ -755,9 +770,8 @@ const t3Default = (sample: Sample, name: string, input: Readonly<Record<string, 
         workState: "working",
         hasPendingChildRuns: false,
         providerInstanceId:
-          target.providerInstanceId ??
-          (sample.base.codex ? "codex" : DEFAULT_CAPABILITIES.inheritedProviderInstanceId),
-        model: target.model ?? (sample.base.codex ? SOL : DEFAULT_CAPABILITIES.inheritedModel),
+          target.providerInstanceId ?? (sample.base.codex ? "codex" : "claudeAgent"),
+        model: target.model ?? sample.base.model,
         summary: null,
         hasPendingQuestion: false,
         pendingApproval: null,
@@ -854,13 +868,18 @@ const withProductFields = (name: string, value: unknown): unknown => {
   }
 };
 
-const capabilities = (sample: Sample, value: unknown) =>
-  sample.base.codex && isRecord(value)
+/** Cases mock a Claude caller, so the inherited fields follow the model under test. */
+const capabilities = ({ base }: Sample, value: unknown) =>
+  isRecord(value)
     ? {
         ...value,
-        inheritedProviderInstanceId: "codex",
-        inheritedModel: SOL,
-        inheritedOptions: [{ id: "reasoningEffort", value: sample.base.codex.reasoning.effort }],
+        inheritedModel: base.model,
+        ...(base.codex
+          ? {
+              inheritedProviderInstanceId: "codex",
+              inheritedOptions: [{ id: "reasoningEffort", value: base.codex.reasoning.effort }],
+            }
+          : {}),
       }
     : value;
 
@@ -1140,7 +1159,7 @@ export const failedEarly = (expect: McpToolUseCase["expect"], run: SampleRun) =>
   gradeSample(expect, run).some((check) => !check.pass && SETTLED.test(check.check));
 
 const requestBody = ({ base, tools }: Sample, effort: string, messages: unknown) => ({
-  model: MODEL,
+  model: base.model,
   max_tokens: 16_000,
   thinking: { type: "adaptive", display: "summarized" },
   output_config: { effort },
@@ -1154,7 +1173,7 @@ const requestBody = ({ base, tools }: Sample, effort: string, messages: unknown)
 });
 
 const codexRequest = (base: Base, input: ReadonlyArray<Block>) => ({
-  model: SOL,
+  model: base.model,
   stream: true,
   store: false,
   parallel_tool_calls: true,
@@ -1366,8 +1385,8 @@ const runSample = Effect.fn("evaluateMcpToolUse.runSample")(function* (
   const said: Array<string> = [];
   const usage = emptyUsage();
   let stopReason = "max_steps";
-  // Sol's code-mode cells take more model calls, so a case's own budget grows for it too.
-  const extra = config.model === SOL ? 4 : 0;
+  // Codex's code-mode cells take more model calls, so a case's own budget grows for it too.
+  const extra = isCodex(config.model) ? 4 : 0;
   const maxSteps = testCase.maxSteps === undefined ? config.maxSteps : testCase.maxSteps + extra;
   for (let step = 0; step < maxSteps; step++) {
     const response = input
@@ -1473,10 +1492,11 @@ const groups = <A>(rows: ReadonlyArray<A>, key: (row: A) => string) =>
   [...Map.groupBy(rows, key)].toSorted(([left], [right]) => left.localeCompare(right));
 
 const USAGE_KEYS = ["input", "output", "cacheWrite", "cacheRead"] as const;
-/** Token totals and their cost in USD at one model's prices. */
-const spend = (usages: ReadonlyArray<Usage>, model: PricedModel) => {
+/** Token totals and their cost in USD at one model's prices. Proxy runs have no price. */
+const spend = (usages: ReadonlyArray<Usage>, model: PricedModel | undefined) => {
   const total = (key: keyof Usage) => usages.reduce((sum, usage) => sum + usage[key], 0);
-  const cost = USAGE_KEYS.reduce((sum, key) => sum + total(key) * PRICES[model][key], 0) / 1e6;
+  const price = (key: keyof Usage) => (model ? PRICES[model][key] : 0);
+  const cost = USAGE_KEYS.reduce((sum, key) => sum + total(key) * price(key), 0) / 1e6;
   return { cost, tokens: USAGE_KEYS.map((key) => `${key} ${total(key)}`).join(", ") };
 };
 
@@ -1486,9 +1506,10 @@ const summarize = (
   options: { readonly header: string; readonly shellModel: PricedModel; readonly model: Model },
   before?: Map<string, number>,
 ) => {
+  const codex = isCodex(options.model);
   const agent = spend(
     rows.map((row) => row.usage),
-    MODEL,
+    codex ? undefined : options.model,
   );
   const shell = spend(
     rows.map((row) => row.shellUsage),
@@ -1515,12 +1536,12 @@ const summarize = (
     "# MCP tool-use eval\n",
     `- ${options.header}`,
     `- Pass: ${percent(passRate(rows))} of ${rows.length} samples. Samples that failed to run count as failures.`,
-    options.model === SOL
+    codex
       ? "- Cost: not applicable (subscription through proxy)."
       : `- Estimated cost $${cost.toFixed(2)}, $${(cost / rows.length).toFixed(3)} per sample.`,
-    `- Agent tokens: ${agent.tokens}${options.model === SOL ? "." : ` ($${agent.cost.toFixed(2)}).`}`,
+    `- Agent tokens: ${agent.tokens}${codex ? "." : ` ($${agent.cost.toFixed(2)}).`}`,
     `- Shell simulator (${options.shellModel}) tokens: ${shell.tokens} (API-price estimate $${shell.cost.toFixed(2)}).`,
-    ...(options.model === SOL
+    ...(codex
       ? [
           "- Code-mode tools use case mocks and a simulated machine. Native subagent prompts and asynchronous notifications are approximate.",
         ]
@@ -1539,7 +1560,7 @@ const PositiveIntOrZero = Schema.FiniteFromString.check(
   Schema.isGreaterThanOrEqualTo(0),
 );
 const Flags = Schema.Struct({
-  model: Schema.Literals([MODEL, SOL]),
+  model: Schema.Literals(Object.keys(MODELS) as Array<Model>),
   template: Schema.String,
   cases: Schema.optional(Schema.Array(Schema.String)),
   out: Schema.optional(Schema.String),
@@ -1569,7 +1590,7 @@ const string = { type: "string" } as const;
 const main = Effect.gen(function* () {
   const { values } = NodeUtil.parseArgs({
     options: {
-      model: { ...string, default: MODEL },
+      model: { ...string, default: "claude-sonnet-5-5" },
       template: string,
       cases: { ...string, multiple: true },
       out: string,
@@ -1578,7 +1599,7 @@ const main = Effect.gen(function* () {
       // Unset: 2 samples per case, and a 3rd when those 2 disagree.
       samples: string,
       concurrency: { ...string, default: "4" },
-      // Unset: 6 for Claude, 10 for Sol, whose code-mode cells take more steps.
+      // Unset: 6 for Claude, 10 for Codex, whose code-mode cells take more steps.
       "max-steps": string,
       effort: string,
       "shell-model": { ...string, default: "claude-haiku-5-5" },
@@ -1615,7 +1636,8 @@ const main = Effect.gen(function* () {
       .map((name) => path.join(casesDir, name));
   const cases = (yield* Effect.forEach(caseFiles, (file) => readJsonl(file, decodeCase))).flat();
   const wanted = flags.case?.flatMap((ids) => ids.split(","));
-  const harness = flags.model === SOL ? "codex" : "claude";
+  const codex = isCodex(flags.model);
+  const harness = codex ? "codex" : "claude";
   const selected = cases.filter(
     ({ id, setup }) =>
       (wanted === undefined || wanted.includes(id)) &&
@@ -1627,15 +1649,16 @@ const main = Effect.gen(function* () {
     path.join(
       NodeOS.homedir(),
       ".t3/scratch/mcp-eval/templates",
-      flags.model === SOL ? "codex-raw.json" : "claude-raw.json",
+      codex ? "codex-raw.json" : "claude-raw.json",
     );
   const template = yield* fs.readFileString(templatePath);
   const keepUserInstructions = flags["user-instructions"] === "keep";
   const buildFor = (subagent: boolean): Effect.Effect<Base, Schema.SchemaError> =>
-    flags.model === SOL
+    codex
       ? decodeCodexCapture(template).pipe(
           Effect.map((capture) =>
             buildCodexBase(capture.request.provider_native, {
+              model: flags.model,
               keepUserInstructions,
               effort: flags.effort,
               subagent,
@@ -1644,7 +1667,11 @@ const main = Effect.gen(function* () {
         )
       : decodeCapture(template).pipe(
           Effect.map((capture) =>
-            buildBase(capture.request.provider_native, { keepUserInstructions, subagent }),
+            buildBase(capture.request.provider_native, {
+              model: flags.model,
+              keepUserInstructions,
+              subagent,
+            }),
           ),
         );
   const base = yield* buildFor(false);
@@ -1666,7 +1693,7 @@ const main = Effect.gen(function* () {
   }
   const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
   const out = flags.out;
-  if ((!apiKey && flags.model !== SOL) || out === undefined) {
+  if ((!apiKey && !codex) || out === undefined) {
     const message =
       "Set ANTHROPIC_API_KEY and pass --out <directory>. ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL are never used.";
     return yield* Effect.die(new Error(message));
@@ -1674,9 +1701,9 @@ const main = Effect.gen(function* () {
   const config: Config = {
     apiKey,
     model: flags.model,
-    ...(flags.model === SOL ? { proxy: proxyConfig() } : {}),
+    ...(codex ? { proxy: proxyConfig() } : {}),
     effort,
-    maxSteps: flags["max-steps"] ?? (flags.model === SOL ? 10 : 6),
+    maxSteps: flags["max-steps"] ?? (codex ? 10 : 6),
     shellModel: flags["shell-model"],
   };
   const previous =
