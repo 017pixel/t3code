@@ -152,6 +152,80 @@ describe("v2 thread shell lists", () => {
     registry.dispose();
   });
 
+  it.each([{ blocking: true }, { blocking: false }])(
+    "leaves a subagent question (blocking: $blocking) to its running or queued parent",
+    ({ blocking }) => {
+      const { registry, threads, snapshotAtom } = makeHarness();
+      const parentRunId = RunId.make("parent-run");
+      const runningParent: OrchestrationV2ThreadShell = {
+        ...v2ThreadShell,
+        latestRunId: parentRunId,
+        activeRunId: parentRunId,
+        status: "running",
+        activityRunStatus: "running",
+      };
+      const child: OrchestrationV2ThreadShell = {
+        ...v2ThreadShell,
+        id: ThreadId.make("delegated"),
+        creationSource: "mcp",
+        status: "running",
+        activityRunStatus: "running",
+        lineage: {
+          ...v2ThreadShell.lineage,
+          parentThreadId: v2ThreadShell.id,
+          relationshipToParent: "subagent",
+        },
+        pendingRuntimeRequest: {
+          id: RuntimeRequestId.make("question"),
+          kind: "user_input",
+          createdAt: v2Now,
+          blocking,
+        },
+      };
+      const parent = threads.threadShellAtom({ environmentId, threadId: v2ThreadShell.id });
+      const inputs = threads.childThreadInputsAtom({ environmentId, threadId: v2ThreadShell.id });
+      const disposeParent = registry.mount(parent);
+      const disposeInputs = registry.mount(inputs);
+      const setThreads = (...shells: OrchestrationV2ThreadShell[]) =>
+        registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: shells });
+      const expectAsking = (asking: boolean) => {
+        expect(registry.get(parent)?.pendingSubagentRequest).toBe(asking ? "user_input" : null);
+        expect(registry.get(inputs).map((thread) => thread.id)).toEqual(asking ? [child.id] : []);
+      };
+
+      setThreads(runningParent, child);
+      expectAsking(false);
+      setThreads(
+        { ...runningParent, activeRunId: null, status: "queued", activityRunStatus: null },
+        child,
+      );
+      expectAsking(false);
+
+      // Only a blocked child needs a person once no parent turn can answer.
+      setThreads(
+        { ...runningParent, activeRunId: null, status: "completed", activityRunStatus: null },
+        child,
+      );
+      expectAsking(blocking);
+
+      // The parent cannot grant approvals, so they reach a person even mid-run.
+      setThreads(runningParent, {
+        ...child,
+        pendingRuntimeRequest: {
+          id: RuntimeRequestId.make("approval"),
+          kind: "command",
+          createdAt: v2Now,
+          blocking: true,
+        },
+      });
+      expect(registry.get(parent)?.pendingSubagentRequest).toBe("approval");
+      expect(registry.get(inputs).map((thread) => thread.id)).toEqual([child.id]);
+      disposeInputs();
+      disposeParent();
+      registry.dispose();
+    },
+  );
+
   it("brings a parent back from Working while a nested subagent waits for approval", () => {
     const { registry, threads, snapshotAtom } = makeHarness();
     const child = {
