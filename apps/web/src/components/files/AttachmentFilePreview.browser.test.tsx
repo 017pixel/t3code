@@ -19,7 +19,7 @@ vi.mock(import("./ReadOnlySourcePreview"), () => ({
 import { AttachmentFilePreview } from "./AttachmentFilePreview";
 import { OfficeFilePreview } from "./OfficeFilePreview";
 import { MermaidFilePreview } from "./MermaidFilePreview";
-import type { OfficeWorkerResult } from "./officePreviewProtocol";
+import { OFFICE_PREVIEW_MAX_COLUMNS, type OfficeWorkerResult } from "./officePreviewProtocol";
 
 it.each([
   ["", "worksheets/./sheet1.xml"],
@@ -39,7 +39,10 @@ it.each([
   );
   archive.file(
     "xl/worksheets/sheet1.xml",
-    `<${prefix}worksheet xmlns${prefix ? ":x" : ""}="${ns}"><${prefix}cols><${prefix}col min="49" max="60" width="20"/><${prefix}col min="51" max="80" hidden="1"/></${prefix}cols><${prefix}sheetData><${prefix}row ht="42" customHeight="1" hidden="1"><${prefix}c r="A50" t="inlineStr"><${prefix}is><${prefix}t>${"value".repeat(1000)}</${prefix}t></${prefix}is></${prefix}c></${prefix}row></${prefix}sheetData></${prefix}worksheet>`,
+    `<${prefix}worksheet xmlns${prefix ? ":x" : ""}="${ns}"><${prefix}dimension ref="XFD1048576"/><${prefix}cols><${prefix}col min="${OFFICE_PREVIEW_MAX_COLUMNS - 1}" max="${OFFICE_PREVIEW_MAX_COLUMNS + 10}" width="20"/><${prefix}col min="${OFFICE_PREVIEW_MAX_COLUMNS + 1}" max="${OFFICE_PREVIEW_MAX_COLUMNS + 30}" hidden="1"/></${prefix}cols><${prefix}sheetData><${prefix}row ht="42" customHeight="1" hidden="1"><${prefix}c r="A50" t="inlineStr"><${prefix}is><${prefix}t>${"value".repeat(1000)}</${prefix}t></${prefix}is></${prefix}c></${prefix}row></${prefix}sheetData><${prefix}mergeCells><${prefix}mergeCell ref="XFD1048576"/></${prefix}mergeCells></${prefix}worksheet>`.replace(
+      /<((?:x:)?(?:col|dimension|mergeCell))\b([^>]*)\/>/g,
+      prefix ? "<$1$2></$1>" : "$&",
+    ),
   );
   const bytes = await archive.generateAsync({ type: "arraybuffer" });
   const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
@@ -69,8 +72,8 @@ it.each([
     expect(row.getElementsByTagNameNS(ns, "t")[0]!.textContent).toHaveLength(4096);
     const columns = sheet.getElementsByTagNameNS(ns, "col");
     expect(columns).toHaveLength(1);
-    expect(columns[0]!.getAttribute("min")).toBe("49");
-    expect(columns[0]!.getAttribute("max")).toBe("50");
+    expect(columns[0]!.getAttribute("min")).toBe(String(OFFICE_PREVIEW_MAX_COLUMNS - 1));
+    expect(columns[0]!.getAttribute("max")).toBe(String(OFFICE_PREVIEW_MAX_COLUMNS));
   } finally {
     worker.terminate();
   }
@@ -506,78 +509,90 @@ it.each([
   }
 });
 
-it("bounds shared-string text per cell and across sheets in the worker and viewer", async () => {
-  const { default: JSZip } = await import("jszip");
-  const archive = new JSZip();
-  archive.file(
-    "xl/workbook.xml",
-    '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="one" sheetId="1" r:id="s"/><sheet name="two" sheetId="2" r:id="s"/></sheets></workbook>',
-  );
-  archive.file(
-    "xl/_rels/workbook.xml.rels",
-    '<Relationships><Relationship Id="s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
-  );
-  archive.file("xl/sharedStrings.xml", `<sst><si><t>${"x".repeat(32_767)}</t></si></sst>`);
-  archive.file(
-    "xl/worksheets/sheet1.xml",
-    `<worksheet><sheetData>${Array.from({ length: 500 }, (_, i) => `<row r="${i + 1}">${Array.from({ length: 50 }, (_, j) => `<c r="${j < 26 ? String.fromCharCode(65 + j) : "A" + String.fromCharCode(65 + j - 26)}${i + 1}" t="s"><v>0</v></c>`).join("")}</row>`).join("")}</sheetData></worksheet>`,
-  );
-  const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
-  const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
-    type: "module",
-  });
-  try {
-    const result = await new Promise<OfficeWorkerResult>((resolve) => {
-      worker.addEventListener(
-        "message",
-        (event: MessageEvent<OfficeWorkerResult>) => resolve(event.data),
-        { once: true },
+it.each([false, true])(
+  "bounds shared-string text including CDATA %s per cell and across sheets in the worker and viewer",
+  async (cdata) => {
+    const { default: JSZip } = await import("jszip");
+    const archive = new JSZip();
+    archive.file(
+      "xl/workbook.xml",
+      '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="one" sheetId="1" r:id="s"/><sheet name="two" sheetId="2" r:id="s"/></sheets></workbook>',
+    );
+    archive.file(
+      "xl/_rels/workbook.xml.rels",
+      '<Relationships><Relationship Id="s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+    );
+    const content = "x".repeat(32_767);
+    archive.file(
+      "xl/sharedStrings.xml",
+      `<sst><si><t>${cdata ? `<![CDATA[${content}]]>` : content}</t></si></sst>`,
+    );
+    archive.file(
+      "xl/worksheets/sheet1.xml",
+      `<worksheet><sheetData>${Array.from({ length: 500 }, (_, i) => `<row r="${i + 1}">${Array.from({ length: 50 }, (_, j) => `<c r="${j < 26 ? String.fromCharCode(65 + j) : "A" + String.fromCharCode(65 + j - 26)}${i + 1}" t="s"><v>${cdata ? "<![CDATA[0]]>" : "0"}</v></c>`).join("")}</row>`).join("")}</sheetData></worksheet>`.replace(
+        '<c r="A1" t="s"><v><![CDATA[0]]></v></c>',
+        `<c r="A1" t="inlineStr"><is><t><![CDATA[${content}]]></t></is></c>`,
+      ),
+    );
+    const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
+    const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
+      type: "module",
+    });
+    try {
+      const result = await new Promise<OfficeWorkerResult>((resolve) => {
+        worker.addEventListener(
+          "message",
+          (event: MessageEvent<OfficeWorkerResult>) => resolve(event.data),
+          { once: true },
+        );
+        void file
+          .arrayBuffer()
+          .then((bytes) => worker.postMessage({ type: "open", kind: "xlsx", bytes }, [bytes]));
+      });
+      expect(result.type).toBe("xlsx");
+      if (result.type !== "xlsx") throw new Error("Expected bounded workbook");
+      const bounded = await JSZip.loadAsync(result.bytes);
+      const sheet = new DOMParser().parseFromString(
+        await bounded.file("xl/worksheets/sheet1.xml")!.async("string"),
+        "application/xml",
       );
-      void file
-        .arrayBuffer()
-        .then((bytes) => worker.postMessage({ type: "open", kind: "xlsx", bytes }, [bytes]));
-    });
-    expect(result.type).toBe("xlsx");
-    if (result.type !== "xlsx") throw new Error("Expected bounded workbook");
-    const bounded = await JSZip.loadAsync(result.bytes);
-    const sheet = new DOMParser().parseFromString(
-      await bounded.file("xl/worksheets/sheet1.xml")!.async("string"),
-      "application/xml",
-    );
-    const cells = [...sheet.getElementsByTagName("t")].map((cell) => cell.textContent ?? "");
-    expect(cells.reduce((total, cell) => total + cell.length, 0)).toBe(1024 * 1024);
-    expect(Math.max(...cells.map((cell) => cell.length))).toBe(4096);
-    expect(result.truncated).toBe(true);
-  } finally {
-    worker.terminate();
-  }
-  const src = URL.createObjectURL(file);
-  try {
-    const container = document.createElement("div");
-    container.style.cssText = "display:flex;flex-direction:column;width:640px;height:480px";
-    await using screen = await render(
-      <OfficeFilePreview src={src} name="shared.xlsx" kind="xlsx" />,
-      { container },
-    );
-    await vi.waitFor(
-      () =>
-        expect(screen.container.querySelector('[role="gridcell"]')?.textContent).toHaveLength(4096),
-      { timeout: 30_000 },
-    );
-    expect(screen.container.textContent).toContain("Preview limited");
-    const canvas = screen.container.querySelector("canvas")!;
-    await vi.waitFor(() => expect(canvas.width).toBeGreaterThan(0));
-    const scroll = screen.container.querySelector<HTMLElement>('[role="grid"]')!;
-    await act(() => {
-      scroll.scrollTop = 200;
-      scroll.scrollLeft = 200;
-    });
-    await vi.waitFor(() => expect(scroll.scrollTop).toBe(200));
-    expect(canvas.getBoundingClientRect().top).toBeCloseTo(scroll.getBoundingClientRect().top, 0);
-  } finally {
-    URL.revokeObjectURL(src);
-  }
-});
+      const cells = [...sheet.getElementsByTagName("t")].map((cell) => cell.textContent ?? "");
+      expect(cells.reduce((total, cell) => total + cell.length, 0)).toBe(1024 * 1024);
+      expect(Math.max(...cells.map((cell) => cell.length))).toBe(4096);
+      expect(result.truncated).toBe(true);
+    } finally {
+      worker.terminate();
+    }
+    const src = URL.createObjectURL(file);
+    try {
+      const container = document.createElement("div");
+      container.style.cssText = "display:flex;flex-direction:column;width:640px;height:480px";
+      await using screen = await render(
+        <OfficeFilePreview src={src} name="shared.xlsx" kind="xlsx" />,
+        { container },
+      );
+      await vi.waitFor(
+        () =>
+          expect(screen.container.querySelector('[role="gridcell"]')?.textContent).toHaveLength(
+            4096,
+          ),
+        { timeout: 30_000 },
+      );
+      expect(screen.container.textContent).toContain("Preview limited");
+      const canvas = screen.container.querySelector("canvas")!;
+      await vi.waitFor(() => expect(canvas.width).toBeGreaterThan(0));
+      const scroll = screen.container.querySelector<HTMLElement>('[role="grid"]')!;
+      await act(() => {
+        scroll.scrollTop = 200;
+        scroll.scrollLeft = 200;
+      });
+      await vi.waitFor(() => expect(scroll.scrollTop).toBe(200));
+      expect(canvas.getBoundingClientRect().top).toBeCloseTo(scroll.getBoundingClientRect().top, 0);
+    } finally {
+      URL.revokeObjectURL(src);
+    }
+  },
+);
 
 it.each([1, 145])(
   "counts shared Word settings once with %s text repetitions",

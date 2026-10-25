@@ -286,10 +286,12 @@ function boundedWorksheet(xml: string, strings: readonly string[], budget: { rem
     }
     if (cell && (tag.local === "t" || tag.local === "v")) cell.reading = tag.local;
   });
-  parser.on("text", (chunk) => {
+  const readCellText = (chunk: string) => {
     if (cell?.reading === "t") cell.text += chunk;
     if (cell?.reading === "v") cell.value += chunk;
-  });
+  };
+  parser.on("text", readCellText);
+  parser.on("cdata", readCellText);
   parser.on("closetag", (tag) => {
     if (depth === 4 && tag.local === "c" && cell) {
       const end = cell.selfClosing ? cell.start : xml.lastIndexOf("<", parser.position - 1);
@@ -333,13 +335,13 @@ function boundedWorksheet(xml: string, strings: readonly string[], budget: { rem
   const metadata = (part: string) =>
     part
       .replace(
-        /<(?:\w+:)?(?:dimension|mergeCell)\b[^>]*\bref="([^"]*)"[^>]*\/?>/g,
-        (tag, ref: string) => {
+        /<((?:\w+:)?(?:dimension|mergeCell))\b[^>]*\bref="([^"]*)"[^>]*>(?:\s*<\/\1\s*>)?/g,
+        (tag, _name: string, ref: string) => {
           const bounded = boundRange(ref);
           return bounded ? tag.replace('ref="' + ref + '"', 'ref="' + bounded + '"') : "";
         },
       )
-      .replace(/<(?:\w+:)?(?:col)\b[^>]*\/?>/g, (tag) => {
+      .replace(/<((?:\w+:)?col)\b[^>]*>(?:\s*<\/\1\s*>)?/g, (tag) => {
         const min = Math.max(1, Number(/\bmin="(\d+)"/.exec(tag)?.[1] ?? 1));
         const max = Math.min(50, Number(/\bmax="(\d+)"/.exec(tag)?.[1] ?? 16384));
         if (min > max) return "";
@@ -397,9 +399,11 @@ async function boundWorkbook(archive: JSZip) {
       if (tag.local === "si") text = "";
       if (tag.local === "t") reading = true;
     });
-    parser.on("text", (chunk) => {
+    const readSharedText = (chunk: string) => {
       if (reading) text += chunk;
-    });
+    };
+    parser.on("text", readSharedText);
+    parser.on("cdata", readSharedText);
     parser.on("closetag", (tag) => {
       if (tag.local === "t") reading = false;
       if (tag.local === "si") strings.push(text);
