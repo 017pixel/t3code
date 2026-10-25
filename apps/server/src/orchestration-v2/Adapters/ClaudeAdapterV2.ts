@@ -3483,7 +3483,7 @@ interface ActiveClaudeTurnContext {
   readonly heldRootFrames: Array<SDKMessage>;
   // Steers Claude has not started or echoed yet, by prompt uuid. Claude holds
   // a steer behind a running foreground tool call without saying so.
-  readonly unreadSteers: Map<
+  readonly pendingSteers: Map<
     string,
     { readonly nativeItemId: string; readonly startedAt: DateTime.Utc }
   >;
@@ -6680,15 +6680,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly context: ActiveClaudeTurnContext;
           readonly nativeItemId: string;
           readonly startedAt: DateTime.Utc;
-          readonly state: "waiting" | "read" | "unconfirmed";
+          readonly state: "waiting" | "accepted" | "unconfirmed" | "failed";
         }) {
           const now = yield* DateTime.now;
+          // Claude's started lifecycle says it took the steer into the turn,
+          // not that the model has read it yet.
           const title =
             input.state === "waiting"
-              ? "Waiting for Claude to read your steer"
-              : input.state === "read"
-                ? "Claude read your steer"
-                : CLAUDE_STEER_UNCONFIRMED_TITLE;
+              ? "Waiting for Claude to accept your steer"
+              : input.state === "accepted"
+                ? "Claude accepted your steer"
+                : input.state === "failed"
+                  ? "Steer not sent to Claude"
+                  : CLAUDE_STEER_UNCONFIRMED_TITLE;
           yield* emitProviderEvent({
             type: "turn_item.updated",
             driver: CLAUDE_PROVIDER,
@@ -6710,11 +6714,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               parentItemId: null,
               ordinal: yield* resolveItemOrdinal(input.context, input.nativeItemId),
               type: "system_notice",
-              status: input.state === "waiting" ? "waiting" : "completed",
+              status:
+                input.state === "waiting"
+                  ? "waiting"
+                  : input.state === "failed"
+                    ? "failed"
+                    : "completed",
               title,
               message:
                 input.state === "unconfirmed"
-                  ? "The turn ended before Claude confirmed it read this steer."
+                  ? "The turn ended before Claude confirmed it accepted this steer."
                   : title,
               startedAt: input.startedAt,
               completedAt: input.state === "waiting" ? null : now,
@@ -6723,24 +6732,24 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           });
         });
 
-        const markSteersRead = Effect.fnUntraced(function* (
+        const markSteersAccepted = Effect.fnUntraced(function* (
           context: ActiveClaudeTurnContext,
           message: SDKMessage,
         ) {
-          // Completed alone is not proof of reading: Claude also completes
+          // Completed alone is not proof of acceptance: Claude also completes
           // prompts it never started.
           const lifecycle = claudePromptLifecycle(message);
-          const read =
+          const accepted =
             lifecycle === null
               ? claudeEchoedPromptUuids(message)
               : lifecycle.state === "started"
                 ? [lifecycle.uuid]
                 : [];
-          for (const uuid of read) {
-            const steer = context.unreadSteers.get(uuid);
+          for (const uuid of accepted) {
+            const steer = context.pendingSteers.get(uuid);
             if (steer === undefined) continue;
-            context.unreadSteers.delete(uuid);
-            yield* emitSteerNotice({ context, ...steer, state: "read" });
+            context.pendingSteers.delete(uuid);
+            yield* emitSteerNotice({ context, ...steer, state: "accepted" });
           }
         });
 
@@ -6756,10 +6765,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly result?: SDKResultMessage;
         }) {
           yield* reasoningDeltas.flushTurn(input.context.nativeTurnId);
-          for (const steer of input.context.unreadSteers.values()) {
+          for (const steer of input.context.pendingSteers.values()) {
             yield* emitSteerNotice({ context: input.context, ...steer, state: "unconfirmed" });
           }
-          input.context.unreadSteers.clear();
+          input.context.pendingSteers.clear();
           if (input.context.compaction?.status === "running") {
             const reason = input.result?.subtype === "success" ? input.result.result.trim() : "";
             yield* emitProviderEvent({
@@ -8831,10 +8840,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const liveQuery = yield* Ref.get(queryContext);
           if (
             context !== null &&
-            context.unreadSteers.size > 0 &&
+            context.pendingSteers.size > 0 &&
             liveQuery?.query === input.query
           ) {
-            yield* markSteersRead(context, message);
+            yield* markSteersAccepted(context, message);
           }
           if (
             context?.promptUuid === null &&
@@ -9672,7 +9681,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               nativeWakeStarted: false,
               gatedFramesBeforeEcho: 0,
               heldRootFrames: [],
-              unreadSteers: new Map(),
+              pendingSteers: new Map(),
               steerUuids: new Set(),
             };
             const attachTurn = Effect.gen(function* () {
@@ -10045,7 +10054,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 detail: `Claude provider turn ${turnInput.providerTurnId} is not the active turn.`,
               });
             }
-            // Claude echoes this uuid once it reads the steer.
+            // Claude echoes this uuid once it accepts the steer.
             const steerUuid = yield* crypto.randomUUIDv4().pipe(
               Effect.filterOrFail(isClaudePromptUuid),
               Effect.mapError(
@@ -10091,10 +10100,18 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               nativeItemId: claudeSteerNoticeNativeId(steerUuid),
               startedAt: yield* DateTime.now,
             };
-            currentTurn.unreadSteers.set(steerUuid, steer);
+            currentTurn.pendingSteers.set(steerUuid, steer);
             currentTurn.steerUuids.add(steerUuid);
             yield* emitSteerNotice({ context: currentTurn, ...steer, state: "waiting" });
-            yield* existing.query.offer(userMessage);
+            yield* existing.query.offer(userMessage).pipe(
+              Effect.tapError(() =>
+                Effect.gen(function* () {
+                  currentTurn.pendingSteers.delete(steerUuid);
+                  currentTurn.steerUuids.delete(steerUuid);
+                  yield* emitSteerNotice({ context: currentTurn, ...steer, state: "failed" });
+                }),
+              ),
+            );
           },
           (effect, turnInput) =>
             effect.pipe(
