@@ -63,6 +63,7 @@ describe("thread workflows", () => {
         providerThreads: [{ ...projection.providerThreads[0]!, nativeThreadRef: null }],
       }),
     ).toBe(true);
+    expect(threadSupportsProviderHandoff({ ...projection, providerThreads: [] })).toBe(false);
 
     const attached = (supportsProviderSwitchingViaHandoff: boolean) =>
       threadSupportsProviderHandoff({
