@@ -111,6 +111,7 @@ import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } f
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { MiddleTruncate } from "../ui/middle-truncate";
 import { useThreadHasUnsentDraft } from "../../composerDraftStore";
+import { useClientSettings } from "../../hooks/useSettings";
 
 // The fields thread rows show. Provider status pushes refresh `checkedAt`,
 // status and auth on every provider; leaving those out keeps each
@@ -642,6 +643,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     wokeAtDate !== null &&
     (lastVisitedDate === null || lastVisitedDate < wokeAtDate) &&
     thread.settledOverride !== "settled";
+  const projectIconColors = useClientSettings((s) => s.sidebarProjectIconColors);
   const shouldRecede = shouldRecedeSidebarThread({
     status,
     isUnread,
@@ -1281,6 +1283,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                     "size-4 shrink-0",
                     // Repeated brand colors outshout titles; color returns on the row in focus.
                     !props.isActive &&
+                      !projectIconColors &&
                       "opacity-60 grayscale group-focus-visible/sidebar-row:opacity-100 group-focus-visible/sidebar-row:grayscale-0 group-any-hover/sidebar-row:opacity-100 group-any-hover/sidebar-row:grayscale-0",
                   )}
                 />

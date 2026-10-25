@@ -264,6 +264,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["wide full width column layout messages composer monitor"],
   },
   {
+    id: "sidebar-project-icon-colors",
+    title: "Colored project icons",
+    to: "/settings/appearance",
+    searchTerms: ["sidebar favicon logo grayscale gray color"],
+  },
+  {
     id: "math-rendering",
     title: "Render math",
     to: "/settings/appearance",

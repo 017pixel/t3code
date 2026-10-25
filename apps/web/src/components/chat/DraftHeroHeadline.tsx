@@ -3,7 +3,7 @@ import { composerDraftHasUserContent, useComposerDraftStore } from "~/composerDr
 import { resolveEnvironmentMachineKind, type ScopedProjectRef } from "@t3tools/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
-import { ChevronDownIcon, FolderPlusIcon } from "lucide-react";
+import { FolderPlusIcon } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
 import { useEffect, useRef, useState } from "react";
 
@@ -259,10 +259,6 @@ export function DraftHeroHeadline({
           <DraftProjectName
             value={isScratchDraft ? "No project" : (activeProjectDisplayName ?? "Choose a project")}
             singleLine
-          />
-          <ChevronDownIcon
-            aria-hidden
-            className="size-[0.65em] shrink-0 self-center text-foreground/55"
           />
         </TooltipTrigger>
         {activeProjectDisplayName && !isScratchDraft ? (
