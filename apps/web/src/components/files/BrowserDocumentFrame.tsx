@@ -1,8 +1,8 @@
-import { useAtomValue } from "@effect/atom-react";
 import {
   type KeybindingCommand,
   type KeybindingShortcut,
   MODEL_PICKER_JUMP_KEYBINDING_COMMANDS,
+  type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
   THREAD_JUMP_KEYBINDING_COMMANDS,
 } from "@t3tools/contracts";
@@ -16,22 +16,28 @@ import {
   readHtmlRenderImageRequest,
   readHtmlRenderKeyDown,
   readHtmlRenderLinkRequest,
+  type HtmlRenderTheme,
 } from "@t3tools/shared/htmlRender";
 import {
   isMacPlatform,
   matchesKeybindingShortcut,
   normalizeEventKey,
 } from "@t3tools/shared/keybindings";
-import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
+import { useState } from "react";
 
 import { useOpenLink } from "~/browser/useOpenLink";
 import { ExpandedImageDialog } from "~/components/chat/ExpandedImageDialog";
 import type { ExpandedImagePreview } from "~/components/chat/ExpandedImagePreview";
-import { useHtmlRenderTheme } from "~/hooks/useHtmlRenderTheme";
+import {
+  getHtmlRenderTheme,
+  subscribeHtmlRenderTheme,
+  useHtmlRenderTheme,
+} from "~/hooks/useHtmlRenderTheme";
 import { shortcutConflictKey } from "~/keybindings";
 import { useOpenChangeRequestLink } from "~/lib/openPullRequestLink";
 import { readLocalApi } from "~/localApi";
 import { cn } from "~/lib/utils";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { primaryServerKeybindingsAtom, serverEnvironment } from "~/state/server";
 
 /**
@@ -58,6 +64,39 @@ const HTML_RENDER_SHORTCUT_COMMANDS: ReadonlySet<KeybindingCommand> = new Set([
   ...MODEL_PICKER_JUMP_KEYBINDING_COMMANDS,
 ]);
 
+/**
+ * The app resolves a replayed key in its live context, so every allowed binding
+ * counts whatever its `when`, and a key that any binding gives to another
+ * command stays with the page. Only Cmd/Ctrl chords: a printable key would type
+ * into the composer instead.
+ */
+function resolveFrameShortcuts(
+  keybindings: ResolvedKeybindingsConfig,
+  environmentKeybindings: ResolvedKeybindingsConfig | undefined,
+) {
+  const mac = isMacPlatform(navigator.platform);
+  const resolve = (shortcut: KeybindingShortcut): HtmlRenderShortcut => ({
+    key: shortcut.key,
+    metaKey: shortcut.metaKey || (shortcut.modKey && mac),
+    ctrlKey: shortcut.ctrlKey || (shortcut.modKey && !mac),
+    shiftKey: shortcut.shiftKey,
+    altKey: shortcut.altKey,
+  });
+  const blocked = [...keybindings, ...(environmentKeybindings ?? [])]
+    .filter((binding) => !HTML_RENDER_SHORTCUT_COMMANDS.has(binding.command))
+    .map((binding) => resolve(binding.shortcut));
+  const shortcutsByKey = new Map<string, HtmlRenderShortcut>();
+  for (const { command, shortcut } of keybindings) {
+    if (
+      HTML_RENDER_SHORTCUT_COMMANDS.has(command) &&
+      (shortcut.metaKey || shortcut.ctrlKey || shortcut.modKey)
+    ) {
+      shortcutsByKey.set(shortcutConflictKey(shortcut), resolve(shortcut));
+    }
+  }
+  return { shortcuts: [...shortcutsByKey.values()], blocked };
+}
+
 export const isPdfPreviewFile = (path: string): boolean =>
   /\.pdf$/i.test(path.split(/[?#]/, 1)[0] ?? "");
 
@@ -65,6 +104,8 @@ export const isPdfPreviewFile = (path: string): boolean =>
  * HTML runs in a sandboxed frame with an opaque origin, so a page cannot reach
  * the app's session or storage. PDFs use the browser's native viewer.
  */
+const postedThemes = new WeakMap<HTMLIFrameElement, HtmlRenderTheme>();
+
 export function BrowserDocumentFrame(props: {
   readonly src: string;
   readonly title: string;
@@ -120,67 +161,44 @@ export function HtmlRenderDocument(props: {
   readonly onFullscreenChange?: ((fullscreen: boolean) => void) | undefined;
 }) {
   const theme = useHtmlRenderTheme();
-  const frameRef = useRef<HTMLIFrameElement>(null);
   const [src] = useState(() => `${props.src.split("#", 1)[0]}${htmlRenderThemeFragment(theme)}`);
   const [loaded, setLoaded] = useState(false);
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
-  const postTheme = () => {
-    frameRef.current?.contentWindow?.postMessage(htmlRenderThemeMessage(theme), "*");
-  };
-  useEffect(postTheme, [theme]);
-  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
-  const environmentKeybindings = useAtomValue(
-    serverEnvironment.configValueAtom(props.threadRef?.environmentId ?? null),
-  )?.keybindings;
-  // Replay only Cmd/Ctrl chords exclusive to allowed commands regardless of when; live resolution could
-  // otherwise type in the composer.
-  const mac = isMacPlatform(navigator.platform);
-  const resolve = (shortcut: KeybindingShortcut): HtmlRenderShortcut => ({
-    key: shortcut.key,
-    metaKey: shortcut.metaKey || (shortcut.modKey && mac),
-    ctrlKey: shortcut.ctrlKey || (shortcut.modKey && !mac),
-    shiftKey: shortcut.shiftKey,
-    altKey: shortcut.altKey,
-  });
-  const blocked = [...keybindings, ...(environmentKeybindings ?? [])]
-    .filter((binding) => !HTML_RENDER_SHORTCUT_COMMANDS.has(binding.command))
-    .map((binding) => resolve(binding.shortcut));
-  const shortcutsByKey = new Map<string, HtmlRenderShortcut>();
-  for (const { command, shortcut } of keybindings) {
-    if (
-      HTML_RENDER_SHORTCUT_COMMANDS.has(command) &&
-      (shortcut.metaKey || shortcut.ctrlKey || shortcut.modKey)
-    ) {
-      shortcutsByKey.set(shortcutConflictKey(shortcut), resolve(shortcut));
-    }
-  }
-  const shortcuts = [...shortcutsByKey.values()];
-  const postShortcuts = () => {
-    frameRef.current?.contentWindow?.postMessage(
-      htmlRenderShortcutsMessage(shortcuts, blocked),
-      "*",
+  const environmentConfigAtom = serverEnvironment.configValueAtom(
+    props.threadRef?.environmentId ?? null,
+  );
+  const readShortcuts = () =>
+    resolveFrameShortcuts(
+      appAtomRegistry.get(primaryServerKeybindingsAtom),
+      appAtomRegistry.get(environmentConfigAtom)?.keybindings,
     );
+  const postTheme = (frame: HTMLIFrameElement) => {
+    const next = getHtmlRenderTheme();
+    postedThemes.set(frame, next);
+    frame.contentWindow?.postMessage(htmlRenderThemeMessage(next), "*");
   };
-  useEffect(postShortcuts, [blocked, shortcuts]);
+  const postShortcuts = (frame: HTMLIFrameElement) => {
+    const { shortcuts, blocked } = readShortcuts();
+    frame.contentWindow?.postMessage(htmlRenderShortcutsMessage(shortcuts, blocked), "*");
+  };
   // Pages can forge key/code pairs; reject pairs matching other bindings and require named keys to match the
   // shortcut.
-  const isShortcut = useEffectEvent(
-    (key: NonNullable<ReturnType<typeof readHtmlRenderKeyDown>>) => {
-      const matches = (shortcut: HtmlRenderShortcut) =>
-        matchesKeybindingShortcut(key, { ...shortcut, modKey: false }, navigator.platform);
-      const allowed = shortcuts.filter(matches);
-      return (
-        allowed.length > 0 &&
-        !blocked.some(matches) &&
-        (key.key.length === 1 ||
-          key.key === "Dead" ||
-          allowed.some((shortcut) => shortcut.key === normalizeEventKey(key.key)))
-      );
-    },
-  );
+  const isShortcut = (key: NonNullable<ReturnType<typeof readHtmlRenderKeyDown>>) => {
+    const { shortcuts, blocked } = readShortcuts();
+    const matches = (shortcut: HtmlRenderShortcut) =>
+      matchesKeybindingShortcut(key, { ...shortcut, modKey: false }, navigator.platform);
+    const allowed = shortcuts.filter(matches);
+    return (
+      allowed.length > 0 &&
+      !blocked.some(matches) &&
+      (key.key.length === 1 ||
+        key.key === "Dead" ||
+        allowed.some((shortcut) => shortcut.key === normalizeEventKey(key.key)))
+    );
+  };
   const openChangeRequestLink = useOpenChangeRequestLink(props.threadRef);
   const openLink = useOpenLink(props.threadRef);
-  const open = useEffectEvent((url: string, modifiers: { metaKey: boolean; ctrlKey: boolean }) => {
+  const open = (url: string, modifiers: { metaKey: boolean; ctrlKey: boolean }) => {
     if (modifiers.metaKey || modifiers.ctrlKey) {
       void readLocalApi()
         ?.shell.openExternal(url)
@@ -199,107 +217,89 @@ export function HtmlRenderDocument(props: {
       return;
     }
     void openLink(url, { event: modifiers }).catch((cause: unknown) => console.error(cause));
-  });
-  // Require frame focus and recent app use to block opens on load; scripts can still wait for the reader's
-  // next input.
-  useEffect(() => {
-    const openLink = (event: MessageEvent) => {
-      const frame = frameRef.current;
-      const request = readHtmlRenderLinkRequest(event.data);
-      if (
-        request === undefined ||
-        frame === null ||
-        event.source !== frame.contentWindow ||
-        document.activeElement !== frame ||
-        navigator.userActivation?.isActive === false
-      ) {
-        return;
-      }
-      open(request.url, request);
-      frame.contentWindow?.postMessage(htmlRenderResult(request.id), "*");
-    };
-    window.addEventListener("message", openLink);
-    return () => window.removeEventListener("message", openLink);
-  }, []);
-  useEffect(() => {
-    const replayKey = (event: MessageEvent) => {
-      const frame = frameRef.current;
-      const key = readHtmlRenderKeyDown(event.data);
-      if (
-        key === undefined ||
-        frame === null ||
-        event.source !== frame.contentWindow ||
-        document.activeElement !== frame ||
-        navigator.userActivation?.isActive === false
-      ) {
-        return;
-      }
-      if (!isShortcut(key)) return;
-      frame.dispatchEvent(
-        new KeyboardEvent("keydown", { ...key, bubbles: true, cancelable: true }),
-      );
-    };
-    window.addEventListener("message", replayKey);
-    return () => window.removeEventListener("message", replayKey);
-  }, []);
-  useEffect(() => {
-    const openImage = (event: MessageEvent) => {
-      const frame = frameRef.current;
-      const request = readHtmlRenderImageRequest(event.data);
-      if (
-        request === undefined ||
-        frame === null ||
-        event.source !== frame.contentWindow ||
-        document.activeElement !== frame ||
-        navigator.userActivation?.isActive === false
-      ) {
-        return;
-      }
-      setExpandedImage({ images: [{ src: request.src, name: request.name }], index: 0 });
-    };
-    window.addEventListener("message", openImage);
-    return () => window.removeEventListener("message", openImage);
-  }, []);
-  const { onFullscreenChange } = props;
-  useEffect(() => {
-    if (expandedImage === null) return;
-    onFullscreenChange?.(true);
-    return () => onFullscreenChange?.(false);
-  }, [expandedImage, onFullscreenChange]);
-  const { onContentHeight } = props;
-  // Listen at commit because a fast page may post its initial height before passive effects run.
-  useLayoutEffect(() => {
-    if (onContentHeight === undefined) return;
-    const resize = (event: MessageEvent) => {
+  };
+  const { onContentHeight, onFullscreenChange } = props;
+  const closeExpandedImage = () => {
+    setExpandedImage(null);
+    onFullscreenChange?.(false);
+  };
+  // Attached in the commit that inserts the frame, so a fast page's first height
+  // post is not missed. Links, keys and images require frame focus and recent
+  // reader activity: a page can take focus by script, so this stops opens on
+  // load, though not a page that waits for the reader's next input.
+  const attachFrame = (frame: HTMLIFrameElement | null) => {
+    if (frame === null) return;
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== frame.contentWindow) return;
       const height = readHtmlRenderContentHeight(event.data);
-      if (height !== undefined && event.source === frameRef.current?.contentWindow) {
-        onContentHeight(height);
+      if (height !== undefined) {
+        onContentHeight?.(height);
+        return;
+      }
+      if (document.activeElement !== frame || navigator.userActivation?.isActive === false) {
+        return;
+      }
+      const linkRequest = readHtmlRenderLinkRequest(event.data);
+      if (linkRequest !== undefined) {
+        open(linkRequest.url, linkRequest);
+        frame.contentWindow?.postMessage(htmlRenderResult(linkRequest.id), "*");
+        return;
+      }
+      const key = readHtmlRenderKeyDown(event.data);
+      if (key !== undefined) {
+        if (!isShortcut(key)) return;
+        frame.dispatchEvent(
+          new KeyboardEvent("keydown", { ...key, bubbles: true, cancelable: true }),
+        );
+        return;
+      }
+      // A clicked page image opens in the same viewer as chat images.
+      const imageRequest = readHtmlRenderImageRequest(event.data);
+      if (imageRequest !== undefined) {
+        setExpandedImage({
+          images: [{ src: imageRequest.src, name: imageRequest.name }],
+          index: 0,
+        });
+        onFullscreenChange?.(true);
       }
     };
-    window.addEventListener("message", resize);
-    return () => window.removeEventListener("message", resize);
-  }, [onContentHeight]);
+    window.addEventListener("message", onMessage);
+    // The first post happens on load; these keep a loaded page in step.
+    const unsubscribers = [
+      // The store also fires on unrelated settings writes; the theme keeps its
+      // identity while equal, so only a real change is posted.
+      subscribeHtmlRenderTheme(() => {
+        if (postedThemes.get(frame) !== getHtmlRenderTheme()) postTheme(frame);
+      }),
+      appAtomRegistry.subscribe(primaryServerKeybindingsAtom, () => postShortcuts(frame)),
+      appAtomRegistry.subscribe(environmentConfigAtom, () => postShortcuts(frame)),
+    ];
+    return () => {
+      window.removeEventListener("message", onMessage);
+      for (const unsubscribe of unsubscribers) unsubscribe();
+    };
+  };
   return (
     <>
       <iframe
-        ref={frameRef}
+        ref={attachFrame}
         src={src}
         title={props.title}
         // Never allow-same-origin: the opaque origin keeps the page out of the app's session.
         sandbox="allow-scripts allow-forms"
         loading="lazy"
-        onLoad={() => {
+        onLoad={(event) => {
           setLoaded(true);
           // Covers a theme change that landed while the page was loading.
-          postTheme();
-          postShortcuts();
+          postTheme(event.currentTarget);
+          postShortcuts(event.currentTarget);
         }}
         // Match the blank document's scheme to avoid dark-mode white flashes, then follow the app after load.
         className={cn("border-0 scheme-light", props.className)}
         style={loaded ? { colorScheme: theme.appearance } : undefined}
       />
       {expandedImage !== null ? (
-        <ExpandedImageDialog preview={expandedImage} onClose={() => setExpandedImage(null)} />
+        <ExpandedImageDialog preview={expandedImage} onClose={closeExpandedImage} />
       ) : null}
     </>
   );

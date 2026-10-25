@@ -23,11 +23,34 @@ import {
 
 export type { DiffFileTreeEntry } from "./diffFileTree.logic";
 
+/**
+ * Paths a tree should reveal. The latest one replays to a tree that mounts
+ * later, such as one the file list toggle opens after the reveal.
+ */
+export function createDiffFileTreeReveals() {
+  let latest: string | null = null;
+  const listeners = new Set<(path: string) => void>();
+  return {
+    reveal(path: string | null) {
+      latest = path;
+      if (path !== null) for (const listener of listeners) listener(path);
+    },
+    subscribe(listener: (path: string) => void) {
+      listeners.add(listener);
+      if (latest !== null) listener(latest);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}
+
+export type DiffFileTreeReveals = ReturnType<typeof createDiffFileTreeReveals>;
+
 interface DiffFileTreeProps {
   readonly entries: ReadonlyArray<DiffFileTreeEntry>;
   readonly onSelectFile: (path: string) => void;
-  readonly selectedPath?: string | null;
-  readonly revealRequestId?: number;
+  readonly reveals?: DiffFileTreeReveals;
   readonly ariaLabel: string;
   readonly headerAccessory?: ReactNode;
   readonly footer?: ReactNode;
@@ -37,8 +60,7 @@ interface DiffFileTreeProps {
 export function DiffFileTree({
   entries,
   onSelectFile,
-  selectedPath = null,
-  revealRequestId = 0,
+  reveals,
   ariaLabel,
   headerAccessory,
   footer,
@@ -65,10 +87,8 @@ export function DiffFileTree({
     status: entry.status,
   }));
   const syncingSelectionRef = useRef(false);
-  const handledRevealRef = useRef<{
-    path: string;
-    revealRequestId: number;
-  } | null>(null);
+  // A reveal whose row the tree does not hold yet; the path reconcile applies it.
+  const pendingRevealRef = useRef<string | null>(null);
   const mountedPresentationRef = useRef<ReturnType<typeof diffFileTreeModel> | null>(null);
 
   // The tree model keeps the first selection handler it was given.
@@ -95,15 +115,45 @@ export function DiffFileTree({
     areAllDirectoriesExpanded(currentModel, directoryPaths),
   );
 
-  useEffect(() => {
-    model.setIcons(icons);
-  }, [icons, model]);
+  // Reads the presentation from the model's own paths, so a reveal that runs
+  // before the reconcile maps through the presentation the model holds.
+  const revealInTree = (selectedPath: string): boolean => {
+    const presentation = mountedPresentationRef.current;
+    if (presentation === null) return false;
+    const modelPath = presentation.modelPath(selectedPath);
+    const item = model.getItem(modelPath);
+    if (item === null || item.isDirectory()) return false;
+    syncingSelectionRef.current = true;
+    for (const path of model.getSelectedPaths()) {
+      if (path !== modelPath) model.getItem(path)?.deselect();
+    }
+    let ancestor = "";
+    for (const segment of modelPath.split("/").slice(0, -1)) {
+      ancestor += `${segment}/`;
+      const directory = model.getItem(ancestor);
+      if (directory !== null && "expand" in directory) directory.expand();
+    }
+    item.select();
+    model.scrollToPath(modelPath, { offset: "nearest" });
+    queueMicrotask(() => {
+      syncingSelectionRef.current = false;
+    });
+    return true;
+  };
+  const subscribeReveals = (node: HTMLDivElement | null) => {
+    if (node === null || reveals === undefined) return;
+    return reveals.subscribe((path) => {
+      pendingRevealRef.current = revealInTree(path) ? null : path;
+    });
+  };
 
   useEffect(() => {
     ordering.update(positions);
     const mounted = mountedPresentationRef.current;
     if (mounted?.paths === modelPaths) return;
     mountedPresentationRef.current = presented;
+    // Icons derive from the same presentation as the paths.
+    if (mounted?.icons !== icons) model.setIcons(icons);
     if (mounted === null) {
       model.resetPaths(modelPaths);
     } else if (mounted.paths.every((path, index) => modelPaths[index] === path)) {
@@ -142,43 +192,25 @@ export function DiffFileTree({
       }
     }
     model.setGitStatus(gitStatus);
-  }, [directoryPaths, gitStatus, model, modelPaths, ordering, positions, presented]);
-
-  useEffect(() => {
-    if (selectedPath === null) {
-      handledRevealRef.current = null;
-      return;
-    }
-    const modelPath = presented.modelPath(selectedPath);
-    const item = model.getItem(modelPath);
-    if (item === null || item.isDirectory()) {
-      handledRevealRef.current = null;
-      return;
-    }
-    const handled = handledRevealRef.current;
-    if (handled?.path === selectedPath && handled.revealRequestId === revealRequestId) {
-      return;
-    }
-    handledRevealRef.current = { path: selectedPath, revealRequestId };
-    syncingSelectionRef.current = true;
-    for (const path of model.getSelectedPaths()) {
-      if (path !== modelPath) model.getItem(path)?.deselect();
-    }
-    let ancestor = "";
-    for (const segment of modelPath.split("/").slice(0, -1)) {
-      ancestor += `${segment}/`;
-      const directory = model.getItem(ancestor);
-      if (directory !== null && "expand" in directory) directory.expand();
-    }
-    item.select();
-    model.scrollToPath(modelPath, { offset: "nearest" });
-    queueMicrotask(() => {
-      syncingSelectionRef.current = false;
-    });
-  }, [model, presented, revealRequestId, selectedPath]);
+    const pendingReveal = pendingRevealRef.current;
+    if (pendingReveal !== null && revealInTree(pendingReveal)) pendingRevealRef.current = null;
+  }, [
+    directoryPaths,
+    gitStatus,
+    icons,
+    model,
+    modelPaths,
+    ordering,
+    positions,
+    presented,
+    revealInTree,
+  ]);
 
   return (
-    <div className={cn("flex min-h-0 flex-1 flex-col bg-background", className)}>
+    <div
+      ref={subscribeReveals}
+      className={cn("flex min-h-0 flex-1 flex-col bg-background", className)}
+    >
       <div
         className="flex h-10 min-h-10 shrink-0 items-center gap-1 border-b border-border/60 bg-background px-2 text-xs text-muted-foreground in-data-[preview-panel-mode=inline]:mb-3 in-data-[preview-panel-mode=inline]:h-7 in-data-[preview-panel-mode=inline]:min-h-7 in-data-[preview-panel-mode=inline]:border-b-transparent"
         data-surface-subheader

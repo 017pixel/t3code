@@ -26,8 +26,10 @@ import type {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
-import { AsyncResult, Atom } from "effect/reactivity";
-import { useEffect, useState } from "react";
+import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
+import { useState } from "react";
+
+import { useDeadlinePassed } from "../hooks/useDeadline";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useFilesystemReadAccess } from "./filesystem";
@@ -35,6 +37,7 @@ import { orchestrationEnvironment } from "./orchestration";
 import { isPaginatedBranchesNextPagePending } from "./paginatedBranches";
 import { projectContentSearch, projectEnvironment } from "./projects";
 import { useEnvironmentQuery } from "./query";
+import { revisionedQuery } from "./revisionedQuery";
 import { vcsEnvironment } from "./vcs";
 
 const PROJECT_PATH_SEARCH_DEBOUNCE_MS = 120;
@@ -63,18 +66,15 @@ const threadSearchResultsAtom = createThreadSearchResultsAtomFamily({
 });
 
 export function useDebouncedValue<A>(value: A, delayMs: number): A {
-  const [debounced, setDebounced] = useState(value);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setDebounced(value);
-    }, delayMs);
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, [delayMs, value]);
-
-  return debounced;
+  const [latest, setLatest] = useState<{
+    readonly value: A;
+    readonly settled: A;
+    readonly changedAt: number | null;
+  }>({ value, settled: value, changedAt: null });
+  const passed = useDeadlinePassed(latest.changedAt === null ? null : latest.changedAt + delayMs);
+  const settled = passed ? latest.value : latest.settled;
+  if (!Object.is(value, latest.value)) setLatest({ value, settled, changedAt: Date.now() });
+  return settled;
 }
 
 export function useThreadSearch(
@@ -128,6 +128,23 @@ function vcsRefPageAtom(targetKey: string, cursor: number | undefined) {
       limit: VCS_REF_LIST_LIMIT,
     },
   });
+}
+
+/**
+ * The default ref from the branch picker's first loaded page, or null before it loads. The send
+ * path reads it so a new-worktree draft starts from the same base the picker shows. It only reads a
+ * page the picker already holds: `registry.get` would start a listRefs request the send then drops.
+ */
+export function readLoadedDefaultRefName(environmentId: EnvironmentId, cwd: string): string | null {
+  const atom = vcsRefPageAtom(JSON.stringify([environmentId, cwd, ""]), undefined);
+  const node = appAtomRegistry
+    .getNodes()
+    .get(Atom.isSerializable(atom) ? atom[Atom.SerializableTypeId].key : atom) as
+    | AtomRegistry.Node<Atom.Type<typeof atom>>
+    | undefined;
+  const page =
+    node === undefined ? Option.none() : Option.flatMap(node.valueOption(), AsyncResult.value);
+  return Option.getOrNull(page)?.refs.find((ref) => ref.isDefault)?.name ?? null;
 }
 
 const EMPTY_VCS_REF_PAGES_ATOM = Atom.make<
@@ -245,7 +262,11 @@ function areProjectPathSearchTargetsEqual(
 export function useProjectPathSearch(
   target: ProjectPathSearchTarget,
   limit: number,
-  options?: { readonly allowEmptyQuery?: boolean },
+  options?: {
+    readonly allowEmptyQuery?: boolean;
+    /** The workspace mutation id; a new one refetches the results. */
+    readonly revision?: string | null;
+  },
 ) {
   const allowEmptyQuery = options?.allowEmptyQuery === true;
   const normalizedTarget = {
@@ -275,7 +296,9 @@ export function useProjectPathSearch(
         }
       : null;
   const result = useEnvironmentQuery(
-    canReadFiles && searchTarget !== null ? projectEnvironment.searchEntries(searchTarget) : null,
+    canReadFiles && searchTarget !== null
+      ? revisionedQuery(projectEnvironment.searchEntries(searchTarget), options?.revision)
+      : null,
   );
   const hasTarget = searchTarget !== null;
 

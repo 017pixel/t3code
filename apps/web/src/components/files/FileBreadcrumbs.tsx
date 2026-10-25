@@ -17,7 +17,6 @@ import {
 } from "~/components/ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { useTheme } from "~/hooks/useTheme";
-import { useWorkspaceMutationRefresh } from "~/hooks/useWorkspaceMutationRefresh";
 import { cn } from "~/lib/utils";
 import { isHostPath } from "@t3tools/shared/path";
 
@@ -85,12 +84,12 @@ function BreadcrumbMenuContent(props: {
   readonly rootPath: string;
   readonly workspaceMutationId: string | null;
 }) {
-  const entriesQuery = useProjectEntriesQuery(props.environmentId, props.cwd, props.directoryPath);
-  useWorkspaceMutationRefresh({
-    mutationId: props.workspaceMutationId,
-    refresh: entriesQuery.refresh,
-    resourceKey: `files:${props.environmentId}:${props.cwd}`,
-  });
+  const entriesQuery = useProjectEntriesQuery(
+    props.environmentId,
+    props.cwd,
+    props.directoryPath,
+    props.workspaceMutationId,
+  );
   const { resolvedTheme } = useTheme();
   const entries = entriesQuery.data?.entries ?? [];
   const entriesTruncated = entriesQuery.data?.truncated ?? false;
@@ -292,6 +291,15 @@ function FolderBreadcrumb(props: {
   );
 }
 
+// Runs whenever a crumb becomes the current one, so a new path scrolls it into view.
+function revealCurrentCrumb(crumb: HTMLLIElement | null) {
+  if (!crumb) return;
+  const crumbs = crumb.parentElement?.querySelectorAll<HTMLElement>("[data-file-crumb]");
+  // Show the deepest crumb when it fits, but never at the cost of the current one.
+  crumbs?.[crumbs.length - 1]?.scrollIntoView({ block: "nearest", inline: "end" });
+  crumb.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
 /** Host paths outside the workspace omit contents menus; the browser already lists their destination. */
 export function FileBreadcrumbs(props: FileBreadcrumbsProps) {
   const hostPath = isHostPath(props.relativePath);
@@ -310,6 +318,7 @@ export function FileBreadcrumbs(props: FileBreadcrumbsProps) {
               className="flex min-w-0 shrink-0 items-center"
               data-file-crumb
               data-current-file-crumb={current}
+              ref={current ? revealCurrentCrumb : undefined}
             >
               {current ? (
                 <span aria-current="page">

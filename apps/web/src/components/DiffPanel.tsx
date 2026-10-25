@@ -7,6 +7,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import type { ScopedThreadRef, RunId } from "@t3tools/contracts";
+import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
   ArrowRightIcon,
   CheckIcon,
@@ -19,17 +20,18 @@ import {
 } from "lucide-react";
 import { ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown } from "lucide";
 import * as Schema from "effect/Schema";
-import * as DateTime from "effect/DateTime";
-import { useEffect, useRef, useState } from "react";
-import { useCodeViewFileReveal } from "./diffs/useCodeViewFileReveal";
+import { useRef, useState } from "react";
+import { createCodeViewFileReveal } from "./diffs/useCodeViewFileReveal";
 import { useFilesystemReadAccess } from "~/state/filesystem";
 import { useOpenInPreferredEditor } from "../editorPreferences";
 import { useFileContextMenuHandler } from "../fileContextMenu";
 import { type DraftId } from "../composerDraftStore";
 import { openDiffFilePrimaryAction } from "../diffFileActions";
 import { useCheckpointDiff } from "~/lib/checkpointDiffState";
+import { revisionedQuery } from "~/state/revisionedQuery";
 import { cn } from "~/lib/utils";
 import {
+  type DiffPanelSelection,
   selectThreadDiffPanelSelection,
   useDiffPanelSessionStore,
   useDiffPanelStore,
@@ -48,7 +50,7 @@ import {
 } from "../lib/diffRendering";
 import { PREFERRED_HIGHLIGHTER } from "../lib/syntaxHighlighting";
 import { areAllDiffFilesCollapsed, toggleAllDiffFiles } from "../lib/diffCollapse";
-import { useWorkspaceMutationRefresh } from "../hooks/useWorkspaceMutationRefresh";
+import { LIVE_REFRESH_MIN_INTERVAL_MS, useLiveRefresh } from "../hooks/useLiveRefresh";
 import { useProject, useThreadCheckpointSummaries, useQuietThreadShell } from "../state/entities";
 import { useClientSettings, updateClientSettings } from "../hooks/useSettings";
 import { formatShortTimestamp } from "../timestampFormat";
@@ -56,7 +58,7 @@ import { DiffFilePathCopyButton } from "./DiffFilePathCopyButton";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { DiffStatLabel } from "./chat/DiffStatLabel";
 import { AnnotatableCodeView, type AnnotatableCodeViewHandle } from "./diffs/AnnotatableCodeView";
-import { DiffFileTree } from "./diffs/DiffFileTree";
+import { createDiffFileTreeReveals, DiffFileTree } from "./diffs/DiffFileTree";
 import { diffFileTreeEntries } from "./diffs/diffFileTree.logic";
 import { Button } from "./ui/button";
 import { MorphIcon } from "~/components/MorphIcon";
@@ -263,20 +265,9 @@ export default function DiffPanel({
     return right.completedAt.localeCompare(left.completedAt);
   });
 
-  useEffect(() => {
-    if (!routeThreadRef || diffSelection.kind !== "turn") return;
-    useDiffPanelStore.getState().reconcileTurnSelection(
-      routeThreadRef,
-      orderedTurnDiffSummaries.map((summary) => summary.runId),
-    );
-  }, [diffSelection, orderedTurnDiffSummaries, routeThreadRef]);
-
   const selectedRunId = diffSelection.kind === "turn" ? diffSelection.turnId : null;
   const selectedGitScope = diffSelection.kind === "unstaged" ? "unstaged" : "branch";
   const selectedBaseRef = diffSelection.kind === "branch" ? diffSelection.baseRef : null;
-  const selectedFilePath = diffSelection.kind === "turn" ? diffSelection.filePath : null;
-  const selectedFileRevealRequestId =
-    diffSelection.kind === "turn" ? diffSelection.revealRequestId : 0;
   const selectedTurn =
     selectedRunId === null
       ? undefined
@@ -320,20 +311,29 @@ export default function DiffPanel({
     },
     { enabled: isGitRepo && selectedTurn !== undefined },
   );
-  const branchDiffPreview = useEnvironmentQuery(
+  const branchDiffPreviewInput =
     canReadFiles && selectedRunId === null && activeThread && activeCwd
-      ? reviewEnvironment.diffPreview({
-          environmentId: activeThread.environmentId,
-          input: {
-            cwd: activeCwd,
-            ...(selectedBaseRef ? { baseRef: selectedBaseRef } : {}),
-            ignoreWhitespace: diffIgnoreWhitespace,
-          },
-        })
-      : null,
-  );
+      ? {
+          cwd: activeCwd,
+          ...(selectedBaseRef ? { baseRef: selectedBaseRef } : {}),
+          ignoreWhitespace: diffIgnoreWhitespace,
+        }
+      : undefined;
   const canRefreshGitDiff =
     isGitRepo && selectedRunId === null && activeThread != null && activeCwd != null;
+  // Read under the workspace mutation id, so each mutation refetches the diff; the panel stays
+  // mounted while hidden, so a mutation made then is already reflected when it shows.
+  const branchDiffPreview = useEnvironmentQuery(
+    branchDiffPreviewInput && activeThread
+      ? revisionedQuery(
+          reviewEnvironment.diffPreview({
+            environmentId: activeThread.environmentId,
+            input: branchDiffPreviewInput,
+          }),
+          canRefreshGitDiff ? workspaceMutationId : undefined,
+        )
+      : null,
+  );
   const activeThreadRefreshKey = routeThreadRef
     ? `${routeThreadRef.environmentId}:${routeThreadRef.threadId}`
     : null;
@@ -456,51 +456,30 @@ export default function DiffPanel({
     baseRef: lazySource?.baseRef ?? selectedBaseRef,
     ignoreWhitespace: diffIgnoreWhitespace,
     theme: resolvedTheme,
-    revision: branchDiffPreview.data
-      ? DateTime.formatIso(branchDiffPreview.data.generatedAt)
-      : undefined,
+    previewInput: branchDiffPreviewInput,
     preview: renderablePatch,
   });
   const refreshBranchDiffPreview = refreshPreviewQuery;
-  const previewOpenHandledRef = useRef(false);
-  const refreshDiffForWorkspaceMutation = useStableCallback(() => {
-    previewOpenHandledRef.current = true;
-    refreshBranchDiffPreview();
-  });
+  const diffRefreshKey = `diff:${activeThreadRefreshKey ?? ""}`;
 
-  // A mutation refresh also satisfies revalidation for the current opening.
-  useWorkspaceMutationRefresh({
-    enabled: canRefreshGitDiff,
-    mutationId: workspaceMutationId,
-    refresh: refreshDiffForWorkspaceMutation,
-    resourceKey: `diff:${activeThreadRefreshKey ?? ""}`,
-  });
-
-  useEffect(() => {
-    if (!visible || !canReadFiles || !canRefreshGitDiff) {
-      previewOpenHandledRef.current = false;
-      return;
-    }
-    if (previewOpenHandledRef.current) return;
-    previewOpenHandledRef.current = true;
-    if (branchDiffPreview.data !== null && !branchDiffPreview.isPending) {
-      refreshBranchDiffPreview();
-    }
-  }, [
-    branchDiffPreview.data,
-    branchDiffPreview.isPending,
-    canReadFiles,
-    canRefreshGitDiff,
-    refreshBranchDiffPreview,
-    visible,
-  ]);
-
-  useEffect(() => {
-    if (!canRefreshGitDiff) return;
-    const refreshOnFocus = () => refreshBranchDiffPreview();
-    window.addEventListener("focus", refreshOnFocus);
-    return () => window.removeEventListener("focus", refreshOnFocus);
-  }, [canRefreshGitDiff, refreshBranchDiffPreview]);
+  // The panel stays mounted while hidden, and edits made outside T3 Code bump no mutation id, so
+  // showing it revalidates the diff; that also stands in for focus events missed while hidden.
+  // A git diff is too costly to repeat on a timer nobody asked for. A diff read within the floor,
+  // such as a mutation's refetch while hidden, already counts as that revalidation.
+  useLiveRefresh(
+    branchDiffPreview.data !== null && !branchDiffPreview.isPending
+      ? () => {
+          if (Date.now() - branchDiffPreview.dataUpdatedAt < LIVE_REFRESH_MIN_INTERVAL_MS) return;
+          refreshBranchDiffPreview();
+        }
+      : null,
+    {
+      enabled: visible && canReadFiles && canRefreshGitDiff,
+      key: diffRefreshKey,
+      intervalMs: null,
+      refreshOnShow: true,
+    },
+  );
 
   const isRefreshingDiff = branchDiffPreview.isPending || areFilePatchesPending;
   const renderableFileEntries = renderableFiles.map(getCachedFileEntry);
@@ -540,13 +519,13 @@ export default function DiffPanel({
       collapsed:
         collapsedDiffFileKeys.has(fileKey) || fileDiff.cacheKey?.endsWith(":pending") === true,
     }));
-  const codeViewFileKeys = codeViewFiles.map((file) => file.fileKey);
   const pendingFiles = renderableFiles.filter((file) => file.cacheKey?.endsWith(":pending"));
   const allDiffFilesCollapsed = areAllDiffFilesCollapsed(diffFileKeys, collapsedDiffFileKeys);
   const diffLineStat = sourceLineStat ?? getDiffLineStat(renderableFiles);
   const fileTreeEntries = diffFileTreeEntries(renderableFiles);
-  const treeRevealScope = { collapseScopeKey, diffSelection };
-  const requestTreeReveal = useCodeViewFileReveal(codeView, treeRevealScope, codeViewFileKeys);
+  const [codeViewReveal] = useState(createCodeViewFileReveal);
+  const [treeReveals] = useState(createDiffFileTreeReveals);
+  const requestTreeReveal = (fileKey: string) => codeViewReveal.request(codeView, fileKey);
   const revealDiffFile = (filePath: string) => {
     const index = renderableFileEntries.findIndex(
       (candidate) => resolveFileDiffPath(candidate.fileDiff) === filePath,
@@ -565,18 +544,64 @@ export default function DiffPanel({
     return true;
   };
 
-  const externalRevealRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!selectedFilePath) {
-      externalRevealRef.current = null;
-      return;
-    }
-    const key = JSON.stringify([collapseScopeKey, selectedFilePath, selectedFileRevealRequestId]);
-    if (externalRevealRef.current === key) return;
-    if (revealDiffFile(selectedFilePath)) {
-      externalRevealRef.current = key;
-    }
-  }, [collapseScopeKey, selectedFilePath, selectedFileRevealRequestId, revealDiffFile]);
+  // A file another view asked to reveal (a chat diff link), until this diff holds it.
+  const externalRevealRef = useRef<{ turnId: RunId; filePath: string } | null>(null);
+  // The code view keeps the post-render handler it was given, and a request from the store
+  // arrives before the render that reflects it, so this reads the latest render's diff.
+  const flushReveals = useStableCallback(() => {
+    codeViewReveal.flush(codeView);
+    const pending = externalRevealRef.current;
+    if (pending === null || pending.turnId !== selectedRunId) return;
+    if (!revealDiffFile(pending.filePath)) return;
+    externalRevealRef.current = null;
+    // Only now does the path name a file of the shown diff, and the tree mounted with it.
+    treeReveals.reveal(pending.filePath);
+  });
+  const routeThreadKey = routeThreadRef ? scopedThreadKey(routeThreadRef) : null;
+  // The request last followed, kept across the diff's loading remounts so a remount does not
+  // reveal it again over what the user did since.
+  const followedRevealKeyRef = useRef<string | null>(null);
+  // Follows the store's reveal requests for this thread while the diff is shown: a turn picked
+  // with a file names it, and a new request id asks again for the same file.
+  const followRevealRequests = (node: HTMLDivElement | null) => {
+    if (node === null || routeThreadKey === null) return;
+    const requestOf = (byThreadKey: Record<string, DiffPanelSelection>) => {
+      const selection = byThreadKey[routeThreadKey];
+      return selection?.kind === "turn" && selection.filePath !== null
+        ? {
+            turnId: selection.turnId,
+            filePath: selection.filePath,
+            revealRequestId: selection.revealRequestId,
+          }
+        : null;
+    };
+    const keyOf = (request: ReturnType<typeof requestOf>) =>
+      JSON.stringify([
+        routeThreadKey,
+        request?.turnId,
+        request?.filePath,
+        request?.revealRequestId,
+      ]);
+    const follow = (request: ReturnType<typeof requestOf>) => {
+      followedRevealKeyRef.current = keyOf(request);
+      externalRevealRef.current = request;
+      // The tree hears the path once the shown diff holds it, in `flushReveals`.
+      treeReveals.reveal(null);
+      flushReveals();
+    };
+    const followIfNew = (request: ReturnType<typeof requestOf>) => {
+      if (keyOf(request) !== followedRevealKeyRef.current) follow(request);
+    };
+    followIfNew(requestOf(useDiffPanelStore.getState().byThreadKey));
+    const unsubscribe = useDiffPanelStore.subscribe((state) =>
+      followIfNew(requestOf(state.byThreadKey)),
+    );
+    return () => {
+      unsubscribe();
+      // The tree remounts with the diff; it must not replay a path the store may drop meanwhile.
+      treeReveals.reveal(null);
+    };
+  };
 
   const openDiffFile = (filePath: string) => {
     openDiffFilePrimaryAction({
@@ -1023,7 +1048,7 @@ export default function DiffPanel({
                 </div>
               )
             ) : lazySource || renderablePatch?.kind === "files" ? (
-              <div className="flex min-h-0 flex-1 overflow-hidden">
+              <div ref={followRevealRequests} className="flex min-h-0 flex-1 overflow-hidden">
                 <div
                   className="min-h-0 min-w-0 flex-1"
                   onClickCapture={(event) => {
@@ -1136,6 +1161,7 @@ export default function DiffPanel({
                       preferredHighlighter: PREFERRED_HIGHLIGHTER,
                       themeType: resolvedTheme as DiffThemeType,
                       stickyHeaders: true,
+                      onPostRender: flushReveals,
                       ...(currentLoadDiffFiles ? { loadDiffFiles } : {}),
                     }}
                   />
@@ -1145,8 +1171,7 @@ export default function DiffPanel({
                     <DiffFileTree
                       ariaLabel={`${reviewSectionTitle} files`}
                       entries={fileTreeEntries}
-                      selectedPath={selectedFilePath}
-                      revealRequestId={selectedFileRevealRequestId}
+                      reveals={treeReveals}
                       onSelectFile={revealDiffFile}
                     />
                   </aside>

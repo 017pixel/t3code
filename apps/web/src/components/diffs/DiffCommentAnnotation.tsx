@@ -1,5 +1,5 @@
 import { MessageCircle, Trash2 } from "lucide-react";
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
@@ -45,15 +45,12 @@ export function DiffCommentAnnotation({
   const [localDraftText, setLocalDraftText] = useState("");
   const displayedText = kind === "draft" && !onTextChange ? localDraftText : text;
   const trimmedText = displayedText.trim();
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-
-  useLayoutEffect(() => {
-    if (kind !== "draft" || !focusOnMount) return;
-    const frame = window.requestAnimationFrame(() => {
-      textareaRef.current?.focus({ preventScroll: true });
-    });
+  // The annotation slot is placed by the code view after commit, so focus waits a frame.
+  const focusTextareaOnMount = (textarea: HTMLTextAreaElement | null) => {
+    if (textarea === null || !focusOnMount) return;
+    const frame = window.requestAnimationFrame(() => textarea.focus({ preventScroll: true }));
     return () => window.cancelAnimationFrame(frame);
-  }, [focusOnMount, kind]);
+  };
 
   if (kind === "comment") {
     return (
@@ -90,7 +87,7 @@ export function DiffCommentAnnotation({
       onPointerDown={(event) => event.stopPropagation()}
     >
       <Textarea
-        ref={textareaRef}
+        ref={focusTextareaOnMount}
         autoFocus={focusOnMount}
         size="sm"
         value={displayedText}

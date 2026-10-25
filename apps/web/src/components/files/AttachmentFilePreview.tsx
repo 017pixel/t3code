@@ -1,16 +1,31 @@
 import { filePreviewDelimiter } from "@t3tools/shared/delimitedPreview";
-import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
+import type { AssetResource, EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import { readFilePreviewResponse } from "@t3tools/client-runtime/file-preview";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import * as AsyncResult from "effect/reactivity/AsyncResult";
 import * as Cause from "effect/Cause";
-import { filePreviewKind, FILE_TEXT_PREVIEW_MAX_BYTES } from "@t3tools/shared/filePreview";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
+import { Atom } from "effect/reactivity";
+import {
+  decodeFilePreviewText,
+  filePreviewKind,
+  FILE_TEXT_PREVIEW_MAX_BYTES,
+} from "@t3tools/shared/filePreview";
 import { ChevronRightIcon, DownloadIcon, Trash2Icon, WrapTextIcon, XIcon } from "lucide-react";
 import { Check, Code2, Copy, Eye, Table2 } from "lucide";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useState } from "react";
 
-import { useAssetUrlRefresh } from "~/assets/assetUrls";
+import {
+  resolveAssetUrl,
+  revisionedAssetUrl,
+  useAssetUrlRefresh,
+  useAssetUrlState,
+} from "~/assets/assetUrls";
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { MorphIcon } from "~/components/MorphIcon";
 import { ScrollArea } from "~/components/ui/scroll-area";
@@ -18,6 +33,8 @@ import { toastManager } from "~/components/ui/toast";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useClientSettings, updateClientSettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { usePreparedConnection } from "~/state/session";
 
 import { AudioPreview } from "./AudioPreview";
 import { BrowserDocumentFrame } from "./BrowserDocumentFrame";
@@ -30,9 +47,121 @@ import {
   FileSurfaceNotice,
 } from "./fileSurfaceChrome";
 
-const SourcePreview = lazy(() => import("./ReadOnlySourcePreview"));
+type PreviewText = Awaited<ReturnType<typeof readFilePreviewResponse>>;
 
-const STALE_URL_MS = 5 * 60_000;
+class AttachmentPreviewError extends Schema.TaggedError<AttachmentPreviewError>()(
+  "AttachmentPreviewError",
+  { reason: Schema.String, cause: Schema.optional(Schema.Defect()) },
+) {
+  override get message(): string {
+    return this.reason;
+  }
+}
+
+const readPreviewText = (read: (signal: AbortSignal) => Promise<PreviewText>) =>
+  Effect.tryPromise({
+    try: read,
+    catch: (cause) =>
+      new AttachmentPreviewError({
+        reason: cause instanceof Error ? cause.message : "Could not load this file.",
+        cause,
+      }),
+  });
+
+// The atom owns the object URL, so it is revoked once nothing shows the Blob.
+const localFileUrlAtom = Atom.family((file: Blob) =>
+  Atom.make((get) => {
+    const url = URL.createObjectURL(file);
+    get.addFinalizer(() => URL.revokeObjectURL(url));
+    return url;
+  }),
+);
+
+const localFileTextAtom = Atom.family((file: Blob) =>
+  Atom.make(
+    readPreviewText((signal) => readFilePreviewResponse({ ok: true, body: file.stream() }, signal)),
+  ),
+);
+
+// Reads a bounded prefix and stops the body there, even when the host ignores
+// the requested range.
+const readRemotePreviewText = Effect.fn("AttachmentFilePreview.readRemoteText")(
+  function* (url: string, options: { readonly ranged: boolean; readonly reload: boolean }) {
+    const response = yield* HttpClient.get(
+      url,
+      options.ranged ? { headers: { Range: `bytes=0-${FILE_TEXT_PREVIEW_MAX_BYTES}` } } : {},
+    ).pipe(
+      Effect.flatMap(HttpClientResponse.filterStatusOk),
+      Effect.provideService(FetchHttpClient.RequestInit, {
+        cache: options.reload ? "reload" : "default",
+      }),
+    );
+    const limit = FILE_TEXT_PREVIEW_MAX_BYTES + 1;
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    yield* Stream.runForEachWhile(response.stream, (chunk) =>
+      Effect.sync(() => {
+        const kept = chunk.subarray(0, limit - length);
+        chunks.push(kept);
+        length += kept.length;
+        return length < limit;
+      }),
+    );
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return yield* Effect.try({
+      try: () => decodeFilePreviewText(bytes),
+      catch: (cause) =>
+        new AttachmentPreviewError({
+          reason: cause instanceof Error ? cause.message : "Could not load this file.",
+          cause,
+        }),
+    });
+  },
+  Effect.catchTags({
+    HttpClientError: (cause) =>
+      Effect.fail(
+        new AttachmentPreviewError({
+          reason: "The file could not be loaded. Reconnect and try again.",
+          cause,
+        }),
+      ),
+  }),
+  Effect.provideService(HttpClient.TracerPropagationEnabled, false),
+  Effect.provide(FetchHttpClient.layer),
+);
+
+const remoteFileTextAtom = Atom.family((key: string) => {
+  const [environmentId, resource, revision, httpBaseUrl, sizeBytes, pinnedUrl] = JSON.parse(
+    key,
+  ) as [EnvironmentId, AssetResource, number, string, number, string];
+  return Atom.make(
+    Effect.fn("AttachmentFilePreview.remoteFileText")(function* (get: Atom.AtomContext) {
+      // Read once: the asset layer re-mints the URL on a timer, and the same bytes
+      // need no refetch. The current URL covers a fetch made after the pinned media
+      // URL expired (toggling HTML source); the pinned one covers a failed re-mint.
+      const minted = get.once(
+        revisionedAssetUrl({ environmentId, input: { resource }, revision: String(revision) }),
+      );
+      const url =
+        (minted._tag === "Success"
+          ? resolveAssetUrl(httpBaseUrl, minted.value.relativeUrl)
+          : null) ?? pinnedUrl;
+      return yield* readRemotePreviewText(url, { ranged: sizeBytes > 0, reload: revision !== 0 });
+    }),
+  );
+});
+
+const EMPTY_LOCAL_URL_ATOM = Atom.make<string | null>(null);
+const EMPTY_TEXT_ATOM = Atom.make<AsyncResult.AsyncResult<PreviewText, unknown>>(
+  AsyncResult.initial(),
+);
+
+const SourcePreview = lazy(() => import("./ReadOnlySourcePreview"));
 
 export function ReadOnlySourcePreview(props: { name: string; text: string }) {
   return (
@@ -76,86 +205,65 @@ export function AttachmentFilePreview(props: {
       }
     : null;
   const downloadResource = resource ? { ...resource, disposition: "attachment" as const } : null;
-  const refresh = useAssetUrlRefresh(
-    props.file ? null : (props.asset?.environmentId ?? null),
-    props.file ? null : resource,
-  );
   const prepareDownload = useAssetUrlRefresh(props.asset?.environmentId ?? null, downloadResource);
   const [saving, setSaving] = useState(false);
-  const [localUrl, setLocalUrl] = useState<string | null>(null);
-  const [remoteUrl, setRemoteUrl] = useState<string | null>(null);
   const [rendered, setRendered] = useState(true);
+  // Retry bumps the revision, which mints a fresh URL for the attachment.
   const [revision, setRevision] = useState(0);
-  const [content, setContent] = useState<{ text: string; truncated: boolean } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [contentError, setContentError] = useState<string | null>(null);
-  const authorizedAt = useRef(0);
-  useEffect(() => {
-    if (!props.file) return;
-    const url = URL.createObjectURL(props.file);
-    // oxlint-disable-next-line react/set-state-in-effect -- Publish an object URL only after its cleanup is registered for this Blob.
-    setLocalUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [props.file]);
-  useEffect(() => {
-    if (props.file) return;
-    let cancelled = false;
-    // oxlint-disable-next-line react/set-state-in-effect -- A new preview request clears its previous URL and error.
-    setRemoteUrl(null);
-    setError(null);
-    void refresh()
-      .then((url) => {
-        if (cancelled) return;
-        if (!url) throw new Error("Reconnect to the environment and try again.");
-        authorizedAt.current = Date.now();
-        setRemoteUrl(url);
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled)
-          setError(cause instanceof Error ? cause.message : "The attachment is unavailable.");
-      });
-    return () => {
-      cancelled = true;
-    };
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Retry must reauthorize the remote file.
-  }, [props.file, refresh, revision]);
+  const remote = useAssetUrlState(
+    props.file ? null : (props.asset?.environmentId ?? null),
+    props.file ? null : resource,
+    String(revision),
+  );
+  const [mediaError, setMediaError] = useState<string | null>(null);
+  const localUrl = useAtomValue(props.file ? localFileUrlAtom(props.file) : EMPTY_LOCAL_URL_ATOM);
+  const preparedConnection = usePreparedConnection(props.asset?.environmentId ?? null);
+  const httpBaseUrl =
+    preparedConnection._tag === "Some" ? preparedConnection.value.httpBaseUrl : null;
+  // The asset layer re-mints the URL on a timer. A new URL is the same bytes, so
+  // the first settled URL of each revision stays the media src until Retry;
+  // swapping it would restart playback.
+  const settledRemoteUrl = remote._tag === "Success" && !remote.waiting ? remote.url : null;
+  const pinKey = JSON.stringify([props.asset?.environmentId, resource, revision]);
+  const [pinnedRemote, setPinnedRemote] = useState<{ key: string; url: string } | null>(null);
+  if (settledRemoteUrl !== null && pinnedRemote?.key !== pinKey) {
+    setPinnedRemote({ key: pinKey, url: settledRemoteUrl });
+  }
+  const remoteUrl = pinnedRemote?.key === pinKey ? pinnedRemote.url : null;
   const url = props.file ? localUrl : remoteUrl;
+  const error =
+    mediaError ??
+    (!props.file && remoteUrl === null && remote._tag === "Failure" && !remote.waiting
+      ? "The attachment is unavailable."
+      : null);
   const needsText = kind === "text" || kind === "markdown" || (kind === "html" && !rendered);
-  useEffect(() => {
-    if (!needsText || !url) return;
-    const controller = new AbortController();
-    // oxlint-disable-next-line react/set-state-in-effect -- A new external resource must clear the previous response before loading.
-    setContent(null);
-    setContentError(null);
-    const file = props.file;
-    void (async () => {
-      if (!file && Date.now() - authorizedAt.current > STALE_URL_MS) {
-        const target = await refresh();
-        if (controller.signal.aborted) return;
-        if (!target) throw new Error("Reconnect to the environment and try again.");
-        authorizedAt.current = Date.now();
-        if (target !== url) {
-          setRemoteUrl(target);
-          return;
-        }
-      }
-      const response = file
-        ? { ok: true, body: file.stream() }
-        : await fetch(url, {
-            signal: controller.signal,
-            ...(props.sizeBytes > 0
-              ? { headers: { Range: `bytes=0-${FILE_TEXT_PREVIEW_MAX_BYTES}` } }
-              : {}),
-            cache: revision === 0 ? "default" : "reload",
-          });
-      const result = await readFilePreviewResponse(response, controller.signal);
-      if (!controller.signal.aborted) setContent(result);
-    })().catch((cause: unknown) => {
-      if (!controller.signal.aborted)
-        setContentError(cause instanceof Error ? cause.message : "Could not load this file.");
-    });
-    return () => controller.abort();
-  }, [url, needsText, revision, props.sizeBytes, props.file, refresh]);
+  // Waits for the pinned URL so a failed mint shows the media error, not a text one.
+  const textResult = useAtomValue(
+    !needsText || !url
+      ? EMPTY_TEXT_ATOM
+      : props.file
+        ? localFileTextAtom(props.file)
+        : props.asset && resource && httpBaseUrl
+          ? remoteFileTextAtom(
+              JSON.stringify([
+                props.asset.environmentId,
+                resource,
+                revision,
+                httpBaseUrl,
+                props.sizeBytes,
+                url,
+              ]),
+            )
+          : EMPTY_TEXT_ATOM,
+  );
+  const content = textResult._tag === "Success" ? textResult.value : null;
+  const contentError =
+    textResult._tag === "Failure"
+      ? (() => {
+          const cause = Cause.squash(textResult.cause);
+          return cause instanceof Error ? cause.message : "Could not load this file.";
+        })()
+      : null;
   const failure = error ?? (needsText ? contentError : null);
   const wordWrap = useClientSettings((settings) => settings.wordWrap);
   const showsRawText =
@@ -201,7 +309,9 @@ export function AttachmentFilePreview(props: {
     <FileSurfaceFailure
       message={failure}
       onRetry={() => {
-        setError(null);
+        setMediaError(null);
+        // A remote retry reads under a new revision; a local Blob is read again.
+        if (props.file) appAtomRegistry.refresh(localFileTextAtom(props.file));
         setRevision((value) => value + 1);
       }}
     />
@@ -226,7 +336,11 @@ export function AttachmentFilePreview(props: {
       threadRef={props.threadRef}
     />
   ) : kind === "audio" ? (
-    <AudioPreview src={url} name={props.name} onError={() => setError("Unable to load audio.")} />
+    <AudioPreview
+      src={url}
+      name={props.name}
+      onError={() => setMediaError("Unable to load audio.")}
+    />
   ) : kind === "video" ? (
     <div className="flex min-h-0 flex-1 items-center justify-center bg-black">
       <video
@@ -235,7 +349,7 @@ export function AttachmentFilePreview(props: {
         src={url}
         aria-label={props.name}
         className="max-h-full max-w-full"
-        onError={() => setError("Unable to load video.")}
+        onError={() => setMediaError("Unable to load video.")}
       />
     </div>
   ) : kind === "image" ? (
@@ -245,7 +359,7 @@ export function AttachmentFilePreview(props: {
         src={url}
         alt={props.name}
         className="max-h-full max-w-full object-contain"
-        onError={() => setError("Unable to load image.")}
+        onError={() => setMediaError("Unable to load image.")}
       />
     </div>
   ) : (
