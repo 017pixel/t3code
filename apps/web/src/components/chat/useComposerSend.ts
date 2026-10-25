@@ -30,7 +30,6 @@ import {
   RuntimeMode,
 } from "@t3tools/contracts";
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
-import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
 import {
   declinePendingApprovals,
   sendApprovalFeedback,
@@ -63,7 +62,7 @@ import {
 import { resolvePlanFollowUpSubmission } from "../../proposedPlan";
 import { type ChatMessage } from "../../types";
 import { stackedThreadToast, toastManager } from "../ui/toast";
-import { newMessageId, newThreadId, randomUUID } from "~/lib/utils";
+import { newMessageId, randomUUID } from "~/lib/utils";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import {
@@ -1260,15 +1259,13 @@ export function useComposerSend(input: ComposerSendInput) {
       let restoredThreadId = threadIdForSend;
       let restoreTarget = composerDraftTarget;
       if (isLocalDraftThread && draftId && draftThread) {
-        // A cancelled launch may still have committed, so its draft must not reuse the thread id.
-        if (failure === null || wasBootstrapThreadDeleted(squashAtomCommandFailure(failure))) {
-          restoredThreadId = newThreadId();
-        }
         restoreTarget = reopenUnsentDraftThread(
           draftId,
           draftThread,
-          scopeThreadRef(environmentId, restoredThreadId),
+          scopeThreadRef(environmentId, threadIdForSend),
+          failure,
         );
+        restoredThreadId = restoreTarget.threadId;
         clearBackgroundDraftSubmissionByRef(scopeThreadRef(environmentId, threadIdForSend));
       }
       setOptimisticUserMessages((existing) => {

@@ -16,6 +16,8 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
+import type { TurnDeliveryFailure } from "@t3tools/client-runtime/state/turn-delivery";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { readLocalApi } from "../../localApi";
 import { getUploadedAttachments } from "../../lib/attachmentUploadQueue";
 import { findRevertCheckpoint } from "../../session-logic";
@@ -255,14 +257,20 @@ export async function rewindToMessage(input: {
 }
 
 /**
- * Reopens a cancelled launch's draft as `threadRef` and returns where its unsent message
- * restores. The thread ref still resolves after that draft is sent and promoted.
+ * Reopens an unsent launch's draft and returns where its message restores. A cancelled launch
+ * (`failure` null) may have committed, and a deleted one is tombstoned, so either gets a fresh
+ * thread id. The returned ref still resolves after that draft is sent and promoted.
  */
 export function reopenUnsentDraftThread(
   draftId: DraftId,
   draftThread: DraftThreadState,
-  threadRef: ScopedThreadRef,
+  launchRef: ScopedThreadRef,
+  failure: TurnDeliveryFailure | null,
 ): ScopedThreadRef {
+  const threadRef =
+    failure === null || wasBootstrapThreadDeleted(squashAtomCommandFailure(failure))
+      ? scopeThreadRef(launchRef.environmentId, newThreadId())
+      : launchRef;
   restoreFailedDraftThread(draftId, draftThread, threadRef.threadId);
   return threadRef;
 }

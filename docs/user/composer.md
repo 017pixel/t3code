@@ -87,8 +87,9 @@ device until you sign back into the same account.
 On web and desktop, a message sent as the connection drops shows **Waiting to send**. When the
 thread reconnects, T3 Code sends it once, or keeps it if the server already received it. Cancel
 stops the send and puts the message back in the composer, after anything you typed since. It
-can't unsend a message the server already received. If its attachments no longer fit beside what
-you added since, it stays in the thread as **Not sent** until you restore or discard it.
+can't unsend a message the server already received. A queued message waits in the queue instead,
+where its remove control cancels it. If its attachments no longer fit beside what you added since,
+it stays in the thread as **Not sent** until you restore or discard it.
 
 ## Custom models
 

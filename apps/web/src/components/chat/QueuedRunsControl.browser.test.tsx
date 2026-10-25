@@ -1,4 +1,10 @@
-import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
+import {
+  CommandId,
+  EnvironmentId,
+  MessageId,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 import { serializeAssistantCitation } from "@t3tools/shared/assistantCitations";
 import type { ComponentProps } from "react";
 import { expect, it, vi } from "vite-plus/test";
@@ -30,7 +36,33 @@ vi.mock(import("../../assets/assetUrls"), async (importOriginal) => ({
     resources.map((resource) => `https://assets.test/${resource.attachmentId}`)) as never,
 }));
 
+vi.mock(import("../../state/turnDeliveries"), async () => {
+  const { createTurnDeliveries } = await import("@t3tools/client-runtime/state/turn-delivery");
+  const { useSyncExternalStore } = await import("react");
+  const Cause = await import("effect/Cause");
+  const { AsyncResult } = await import("effect/reactivity");
+  const turnDeliveries = createTurnDeliveries<unknown, unknown, unknown>({
+    send: async () =>
+      AsyncResult.failure(Cause.fail({ _tag: "RpcClientError", message: "SocketCloseError" })),
+    // A thread that never resyncs keeps a lost send waiting.
+    observeThread: (_environmentId, _threadId, listener) => {
+      listener({ status: "live" } as never);
+      return () => undefined;
+    },
+    observeShell: () => () => undefined,
+    releaseDisplay: () => undefined,
+  });
+  return {
+    turnDeliveries,
+    usePendingTurnDeliveries: (environmentId: string, threadId: string) =>
+      useSyncExternalStore(turnDeliveries.subscribe, turnDeliveries.getSnapshot).filter(
+        (delivery) => delivery.environmentId === environmentId && delivery.threadId === threadId,
+      ),
+  } as never;
+});
+
 import { render as renderUi } from "../../../test/render";
+import { turnDeliveries } from "../../state/turnDeliveries";
 import { QueuedRunsControl } from "./QueuedRunsControl";
 
 function setup() {
@@ -96,4 +128,35 @@ it("previews assistant quotes as readable text and preserves the citation when e
   expect(onEditQueuedRun).toHaveBeenCalledExactlyOnceWith(
     expect.objectContaining({ text: quoteAndText }),
   );
+});
+
+it("cancels a queued send that is waiting on a reconnect", async () => {
+  setup();
+  state.projection = { projection: { messages: [] } };
+  state.workflow = { activeRun: { id: "run:active" }, canPromoteToSteer: true, queuedRuns: [] };
+  const message = {
+    id: MessageId.make("message:queued"),
+    inputIntent: "queued_turn" as const,
+    text: "Run the tests next",
+    attachments: [],
+  };
+  const outcome = await turnDeliveries.deliver(
+    baseProps.environmentId,
+    {
+      commandId: CommandId.make("command:queued"),
+      threadId: baseProps.threadId,
+      message: { messageId: message.id, role: "user", text: message.text, attachments: [] },
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+    },
+    () => message as never,
+  );
+  expect(outcome.type).toBe("waiting");
+  await using _screen = await renderQueue({ optimisticMessages: [message] });
+
+  await page.getByRole("button", { name: "Cancel waiting queued message", exact: true }).click();
+
+  expect(outcome.type === "waiting" && (await outcome.settled)).toEqual({ type: "cancelled" });
+  expect(turnDeliveries.getSnapshot()).toEqual([]);
 });

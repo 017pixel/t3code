@@ -20,6 +20,7 @@ import { useId, useImperativeHandle, useRef, useState, type Ref } from "react";
 
 import { useAssetUrls } from "../../assets/assetUrls";
 import { threadEnvironment } from "../../state/threads";
+import { turnDeliveries, usePendingTurnDeliveries } from "../../state/turnDeliveries";
 import { useThreadProjection } from "../../state/entities";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { isImageAttachment, type ChatMessage } from "../../types";
@@ -84,6 +85,7 @@ export function QueuedRunsControl({
   const promote = useAtomCommand(threadEnvironment.promoteQueuedRun);
   const resume = useAtomCommand(threadEnvironment.resumeThreadQueue);
   const cancel = useAtomCommand(threadEnvironment.cancelQueuedRun);
+  const pendingDeliveries = usePendingTurnDeliveries(props.environmentId, props.threadId);
   const [expanded, setExpanded] = useState(true);
   const queueListId = useId();
   const [busyRunId, setBusyRunId] = useState<RunId | null>(null);
@@ -134,6 +136,7 @@ export function QueuedRunsControl({
           url: queuedImageUrlById.get(attachment.id) ?? null,
         })),
       pending: false,
+      waitingDeliveryKey: null,
     })),
     ...optimisticQueued.map((message) => ({
       key: message.id,
@@ -152,6 +155,11 @@ export function QueuedRunsControl({
           url: attachment.previewUrl ?? null,
         })),
       pending: true,
+      // Without a server run id, a send waiting on a reconnect can only be cancelled locally.
+      waitingDeliveryKey:
+        pendingDeliveries.find(
+          (delivery) => delivery.messageId === message.id && delivery.state === "waiting",
+        )?.key ?? null,
     })),
   ];
 
@@ -361,7 +369,11 @@ export function QueuedRunsControl({
                     {isEditing ? <span className="sr-only">Editing queued message: </span> : null}
                     {item.pending ? (
                       <Clock3Icon
-                        aria-label="Saving queued message"
+                        aria-label={
+                          item.waitingDeliveryKey === null
+                            ? "Saving queued message"
+                            : "Queued message waiting to send"
+                        }
                         className="size-3 shrink-0 text-muted-foreground/60"
                       />
                     ) : null}
@@ -465,15 +477,30 @@ export function QueuedRunsControl({
                           <TooltipTrigger
                             render={
                               <ComposerBanner.Dismiss
-                                aria-label="Remove queued message"
-                                disabled={item.runId === null || busyRunId !== null}
+                                aria-label={
+                                  item.waitingDeliveryKey === null
+                                    ? "Remove queued message"
+                                    : "Cancel waiting queued message"
+                                }
+                                disabled={
+                                  item.runId === null
+                                    ? item.waitingDeliveryKey === null
+                                    : busyRunId !== null
+                                }
                                 onClick={() => {
                                   if (item.runId !== null) void remove(item.runId);
+                                  else if (item.waitingDeliveryKey !== null) {
+                                    turnDeliveries.cancel(item.waitingDeliveryKey);
+                                  }
                                 }}
                               />
                             }
                           />
-                          <TooltipPopup>Remove from queue</TooltipPopup>
+                          <TooltipPopup>
+                            {item.waitingDeliveryKey === null
+                              ? "Remove from queue"
+                              : "Cancel this send and restore it to the composer"}
+                          </TooltipPopup>
                         </Tooltip>
                       </>
                     )}

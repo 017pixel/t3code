@@ -1,4 +1,10 @@
-import type { CommandId, EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
+import {
+  type CommandId,
+  type EnvironmentId,
+  type MessageId,
+  OrchestrationDispatchCommandError,
+  type ThreadId,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
@@ -206,7 +212,16 @@ export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, 
       if (entry.thread?.status === "deleted") {
         finish(entry, {
           type: "rejected",
-          failure: AsyncResult.failure(Cause.fail(new Error("The thread was deleted."))),
+          failure: AsyncResult.failure(
+            Cause.fail(
+              new OrchestrationDispatchCommandError({
+                message: "The thread was deleted.",
+                ...(entry.input.bootstrap?.createThread !== undefined
+                  ? { bootstrapThreadDisposition: "deleted" as const }
+                  : {}),
+              }),
+            ),
+          ),
         });
         return;
       }

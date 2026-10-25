@@ -1,12 +1,20 @@
-import { EnvironmentId, PROVIDER_SEND_TURN_MAX_ATTACHMENTS, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  OrchestrationDispatchCommandError,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  ProjectId,
+  ThreadId,
+} from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
+import { AsyncResult } from "effect/reactivity";
 import { expect, it } from "vite-plus/test";
 
-import { useComposerDraftStore } from "../../composerDraftStore";
+import { DraftId, type DraftThreadState, useComposerDraftStore } from "../../composerDraftStore";
 import { terminalContextReference } from "../../lib/composerContextRecords";
 import { formatInlineContextReference } from "../../lib/composerContextReferences";
 import type { TerminalContextDraft } from "../../lib/terminalContext";
 import { snapshotComposerSend } from "../ChatView.logic";
-import { restoreComposerDraft } from "./chatViewSend";
+import { reopenUnsentDraftThread, restoreComposerDraft } from "./chatViewSend";
 
 const target = { environmentId: EnvironmentId.make("environment"), threadId: ThreadId.make("t") };
 
@@ -109,4 +117,45 @@ it("points a restored terminal reference at the newer draft's copy of the same s
   const draft = store.getComposerDraft(target);
   expect(draft?.terminalContexts.map((context) => context.id)).toEqual(["newer-selection"]);
   expect(draft?.prompt).toBe(`Newer ${reference(newer)}\n\nUnsent ${reference(newer)}`);
+});
+
+it("gives a deleted launch's restored draft a fresh thread id and keeps it for other rejections", () => {
+  const draftId = DraftId.make("draft");
+  const draftThread: DraftThreadState = {
+    threadId: target.threadId,
+    environmentId: target.environmentId,
+    projectId: ProjectId.make("project"),
+    logicalProjectKey: "project",
+    createdAt: "2026-10-25T00:00:00.000Z",
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    envMode: "local",
+    startFromOrigin: false,
+    promotedTo: target,
+  };
+  const reject = (bootstrapThreadDisposition?: "deleted") =>
+    AsyncResult.failure(
+      Cause.fail(
+        new OrchestrationDispatchCommandError({
+          message: "The thread was deleted.",
+          ...(bootstrapThreadDisposition ? { bootstrapThreadDisposition } : {}),
+        }),
+      ),
+    );
+  useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
+
+  const deleted = reopenUnsentDraftThread(draftId, draftThread, target, reject("deleted"));
+
+  expect(deleted.threadId).not.toBe(target.threadId);
+  expect(useComposerDraftStore.getState().getDraftSession(draftId)).toMatchObject({
+    threadId: deleted.threadId,
+    promotedTo: null,
+  });
+
+  const rejected = reopenUnsentDraftThread(draftId, draftThread, target, reject());
+
+  expect(rejected).toEqual(target);
+  expect(useComposerDraftStore.getState().getDraftSession(draftId)?.threadId).toBe(target.threadId);
 });

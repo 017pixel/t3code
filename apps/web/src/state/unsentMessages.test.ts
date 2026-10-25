@@ -115,10 +115,11 @@ it("restores a cancelled launch into its thread after the newer draft there is s
   store.setPrompt(draftId, "Newer draft");
   store.addImages(draftId, newerImages());
 
-  const reopenedRef = scopeThreadRef(environmentId, ThreadId.make("reopened"));
-  const restoreTarget = reopenUnsentDraftThread(draftId, launched, reopenedRef);
+  const launchedRef = scopeThreadRef(environmentId, launched.threadId);
+  const reopenedRef = reopenUnsentDraftThread(draftId, launched, launchedRef, null);
+  expect(reopenedRef.threadId).not.toBe(launched.threadId);
   const snapshot = unsentSnapshot();
-  const restore = () => restoreComposerDraft(restoreTarget, snapshot);
+  const restore = () => restoreComposerDraft(reopenedRef, snapshot);
   expect(restore()).toBe(false);
   unsentMessages.keep({ environmentId, threadId: reopenedRef.threadId, display, restore });
 

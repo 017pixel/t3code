@@ -13,7 +13,8 @@ import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { AtomCommandResult } from "./runtime.ts";
+import { wasBootstrapThreadDeleted } from "../errors/orchestration.ts";
+import { type AtomCommandResult, squashAtomCommandFailure } from "./runtime.ts";
 import { EMPTY_SHELL_STATE, type EnvironmentShellState } from "./shell.ts";
 import { EMPTY_ENVIRONMENT_THREAD_STATE, type EnvironmentThreadState } from "./threadState.ts";
 import { createTurnDeliveries, type TurnDeliveryInput } from "./turnDelivery.ts";
@@ -385,7 +386,11 @@ describe("turn deliveries", () => {
     harness.emitShell(shell("live", [THREAD_ID]));
     harness.emitThread(thread("deleted"));
 
-    expect((await settled).type).toBe("rejected");
+    const end = await settled;
+    // The composer gives a restored draft a fresh thread id only for this classification.
+    expect(
+      end.type === "rejected" && wasBootstrapThreadDeleted(squashAtomCommandFailure(end.failure)),
+    ).toBe(true);
     expect(harness.sent).toEqual([LAUNCH]);
     expect(harness.deliveries.getSnapshot()).toEqual([]);
     expect(harness.activeObservers()).toBe(0);
