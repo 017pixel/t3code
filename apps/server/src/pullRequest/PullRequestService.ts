@@ -691,6 +691,7 @@ export const make = Effect.gen(function* () {
   const rateLimits = yield* SourceControlRateLimit.SourceControlRateLimit;
   const filesViewedStore = yield* PullRequestFilesViewed.PullRequestFilesViewedRepository;
   const readCache = yield* PullRequestReadCache.PullRequestReadCache;
+  const clock = yield* Clock.Clock;
 
   /**
    * Where each project's remote is served from, by the remote's recognised base URL: a remote no
@@ -3237,10 +3238,10 @@ export const make = Effect.gen(function* () {
         ...(commit === null ? {} : { commit }),
       } as PullRequestDiffInput).pipe(
         observeRead,
-        Effect.map(({ value, observedAt }) => {
+        Effect.tap(({ value, observedAt }) => {
           // Keep the loader's epoch and read time if a refresh occurs during the provider read.
           diffFiles.record(JSON.stringify([reference, cursor, commit]), value, observedAt);
-          return value;
+          return Effect.void;
         }),
       );
     },
@@ -3249,7 +3250,10 @@ export const make = Effect.gen(function* () {
       timeToLive: (exit, key) => {
         if (!Exit.isSuccess(exit)) return Duration.zero;
         const commit = (JSON.parse(key) as ReadonlyArray<unknown>)[2];
-        return commit === null ? DIFF_CACHE_TTL : COMMIT_DIFF_CACHE_TTL;
+        const ttl = Duration.toMillis(commit === null ? DIFF_CACHE_TTL : COMMIT_DIFF_CACHE_TTL);
+        return Duration.millis(
+          Math.max(0, exit.value.observedAt + ttl - clock.currentTimeMillisUnsafe()),
+        );
       },
     },
   );
@@ -3275,7 +3279,7 @@ export const make = Effect.gen(function* () {
       if (held > 0) armDiffSweep();
     }),
   );
-  const diff: PullRequestService["Service"]["diff"] = (input) => {
+  const readDiff = (input: PullRequestDiffInput) => {
     const key = JSON.stringify([
       refCacheKey(input),
       input.cursor ?? null,
@@ -3288,8 +3292,9 @@ export const make = Effect.gen(function* () {
       Effect.tap(() =>
         Cache.entries(diffCache).pipe(
           Effect.flatMap((entries) =>
-            Effect.forEach(diffCacheEvictions(entries), (evicted) =>
-              Cache.invalidate(diffCache, evicted),
+            Effect.forEach(
+              diffCacheEvictions(Array.from(entries, ([key, read]) => [key, read.value] as const)),
+              (evicted) => Cache.invalidate(diffCache, evicted),
             ),
           ),
           Effect.uninterruptible,
@@ -3297,7 +3302,11 @@ export const make = Effect.gen(function* () {
       ),
       Effect.ensuring(Effect.sync(armDiffSweep)),
     );
-    return staleDiff.serve(key, read);
+    return { key, read };
+  };
+  const diff: PullRequestService["Service"]["diff"] = (input) => {
+    const { key, read } = readDiff(input);
+    return staleDiff.serve(key, read.pipe(Effect.map((read) => read.value)));
   };
 
   const filesViewedCache = yield* Cache.makeWith(
@@ -3529,8 +3538,8 @@ export const make = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
       const cached = held.get(key);
       if (cached !== undefined && now - cached.at <= ttlMs) return cached;
-      const slice = yield* diff(input);
-      return record(key, slice, now);
+      const { value, observedAt } = yield* readDiff(input).read;
+      return record(key, value, observedAt);
     });
     return { read: credentialCached(read), record, fileKey };
   })();

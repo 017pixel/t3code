@@ -4179,7 +4179,7 @@ it.effect.each(["commit", "credential"] as const)(
     }),
 );
 
-it.effect.each(["expiry", "refresh"] as const)(
+it.effect.each(["expiry", "commit expiry", "cache hit", "commit cache hit", "refresh"] as const)(
   "keeps a loaded diff's original membership scope through an in-flight %s",
   (boundary) =>
     Effect.gen(function* () {
@@ -4203,17 +4203,40 @@ it.effect.each(["expiry", "refresh"] as const)(
                   nextCursor: null,
                 };
               }),
-            getDiffFileContents: () => Effect.die("an expired file must not be read"),
+            getDiffFileContents: () => Effect.succeed({ oldContents: "old", newContents: "new" }),
           }),
         ],
       });
-      const ref = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+      const ref = {
+        projectId: "p1" as ProjectId,
+        repository: "acme/web",
+        number: 1,
+        ...(boundary.includes("commit") ? { commit: "a".repeat(40) } : {}),
+      };
       const loading = yield* Effect.forkChild(service.diff(ref));
       yield* Deferred.await(started);
       if (boundary === "expiry") yield* TestClock.adjust("61 seconds");
+      else if (boundary === "commit expiry") yield* TestClock.adjust("11 minutes");
+      else if (boundary.includes("cache hit")) yield* TestClock.adjust("30 seconds");
       else yield* service.invalidate({ reference: ref });
       yield* Deferred.succeed(release, undefined);
       yield* Fiber.join(loading);
+      if (boundary.includes("cache hit")) {
+        yield* service.diff(ref);
+        yield* service.diff(ref);
+        yield* TestClock.adjust(boundary.includes("commit") ? "9 minutes" : "29 seconds");
+        assert.deepStrictEqual(
+          yield* service.diffFileContents({
+            ...ref,
+            changeType: "change",
+            oldPath: "private.ts",
+            newPath: "private.ts",
+          }),
+          { oldContents: "old", newContents: "new" },
+        );
+        assert.strictEqual(diffReads, 1);
+        yield* TestClock.adjust(boundary.includes("commit") ? "1 minute" : "2 seconds");
+      }
       const error = yield* service
         .diffFileContents({
           ...ref,
