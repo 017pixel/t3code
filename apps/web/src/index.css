@@ -341,22 +341,37 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 }
 
 /* Tinted current rows: muted text steps toward the foreground to keep 4.5:1
-   on the light accent fill. Mixing the theme's own colors keeps theme hues. */
+   on the light accent fill, inside the same contrast wrap as other text. */
 @utility sidebar-row-tinted-text {
   --contrast-secondary-label: color-mix(
     in oklab,
-    var(--secondary-label),
-    var(--sidebar-foreground) 30%
+    color-mix(
+      in oklab,
+      color-mix(in oklab, var(--secondary-label), var(--sidebar-foreground) 30%)
+        var(--appearance-contrast-base),
+      var(--background)
+    ),
+    var(--appearance-contrast-target) var(--appearance-contrast-boost)
   );
   --contrast-muted-foreground: color-mix(
     in oklab,
-    var(--muted-foreground),
-    var(--sidebar-foreground) 30%
+    color-mix(
+      in oklab,
+      color-mix(in oklab, var(--muted-foreground), var(--sidebar-foreground) 30%)
+        var(--appearance-contrast-base),
+      var(--background)
+    ),
+    var(--appearance-contrast-target) var(--appearance-contrast-boost)
   );
   --contrast-sidebar-muted-foreground: color-mix(
     in oklab,
-    var(--sidebar-muted-foreground),
-    var(--sidebar-foreground) 30%
+    color-mix(
+      in oklab,
+      color-mix(in oklab, var(--sidebar-muted-foreground), var(--sidebar-foreground) 30%)
+        var(--appearance-contrast-base),
+      var(--sidebar)
+    ),
+    var(--appearance-contrast-target) var(--appearance-contrast-boost)
   );
 }
 
