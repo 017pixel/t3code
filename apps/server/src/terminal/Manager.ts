@@ -47,6 +47,7 @@ import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Base64Url from "effect/encoding/Base64Url";
 import * as Equal from "effect/Equal";
@@ -56,6 +57,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as SynchronizedRef from "effect/SynchronizedRef";
@@ -98,6 +100,9 @@ const MAX_HISTORY_CHUNK_LENGTH = 16 * 1024;
 const DEFAULT_PERSIST_DEBOUNCE_MS = 250;
 const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 1_000;
 const MAX_SUBPROCESS_POLL_INTERVAL_MS = 60_000;
+// `ps` and WMI can take seconds on a loaded host and their tables are still
+// valid then; the timeout only ends a query that is truly stuck.
+const PROCESS_TABLE_QUERY_TIMEOUT = "15 seconds";
 // Discover children started without terminal input or output.
 const QUIET_SUBPROCESS_SNAPSHOT_EVERY_TICKS = 30;
 const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
@@ -654,8 +659,17 @@ interface TerminalProcessTableSnapshot {
   readonly commandById: ReadonlyMap<number, string>;
 }
 
-function subprocessSnapshotPollDelayMs(pollIntervalMs: number, failureCount: number): number {
-  return Math.min(pollIntervalMs * 2 ** failureCount, MAX_SUBPROCESS_POLL_INTERVAL_MS);
+// Idles at least four times as long as the last fallback query took, so a slow
+// process table never keeps the poll loop busy most of the time.
+function subprocessSnapshotPollDelayMs(
+  pollIntervalMs: number,
+  failureCount: number,
+  queryElapsedMs: number,
+): number {
+  return Math.min(
+    Math.max(pollIntervalMs * 2 ** failureCount, queryElapsedMs * 4),
+    MAX_SUBPROCESS_POLL_INTERVAL_MS,
+  );
 }
 
 function parsePosixProcessTable(stdout: string): TerminalProcessTableSnapshot {
@@ -757,7 +771,7 @@ const posixProcessTableSnapshot = Effect.fn("terminal.posixProcessTableSnapshot"
     .run({
       command: psCommand,
       args: ["-eo", "pid=,ppid=,comm="],
-      timeout: "1 second",
+      timeout: PROCESS_TABLE_QUERY_TIMEOUT,
       maxOutputBytes: 524_288,
       outputMode: "truncate",
       timeoutBehavior: "timedOutResult",
@@ -797,7 +811,7 @@ const windowsProcessTableSnapshot = Effect.fn("terminal.windowsProcessTableSnaps
       .run({
         command: "powershell.exe",
         args: ["-NoProfile", "-NonInteractive", "-Command", command],
-        timeout: "1500 millis",
+        timeout: PROCESS_TABLE_QUERY_TIMEOUT,
         maxOutputBytes: 262_144,
         outputMode: "truncate",
         timeoutBehavior: "timedOutResult",
@@ -1551,54 +1565,67 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   // One process-table snapshot per poll tick, shared across every terminal.
   // Per-terminal `pgrep`/`ps` calls multiply spawn load by terminal count and
   // can exhaust the PID space on hosts with many sessions (#6332).
+  // The query is timed whether it succeeds or fails so the poll loop can pace
+  // the next one from it.
   const fallbackProcessTableSnapshot = (
     platform === "win32"
       ? windowsProcessTableSnapshot()
       : posixProcessTableSnapshot(yield* resolvePosixPsCommand())
-  ).pipe(Effect.provideService(ProcessRunner.ProcessRunner, processRunner));
-  const fetchProcessTableSnapshot: Effect.Effect<
-    {
-      readonly snapshot: TerminalProcessTableSnapshot;
-      readonly snapshotSucceeded: boolean;
-    },
-    TerminalSubprocessCheckError
-  > = options.processTable
+  ).pipe(
+    Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
+    Effect.result,
+    Effect.timed,
+    Effect.map(([elapsed, snapshot]) => ({
+      snapshot,
+      queryElapsedMs: Duration.toMillis(elapsed),
+    })),
+  );
+  const fetchProcessTableSnapshot: Effect.Effect<{
+    readonly snapshot: Result.Result<TerminalProcessTableSnapshot, TerminalSubprocessCheckError>;
+    readonly snapshotSucceeded: boolean;
+    readonly queryElapsedMs: number;
+  }> = options.processTable
     ? options.processTable.pipe(
         Effect.map((entries) => ({
-          snapshot: processTableSnapshotFromProcesses(entries),
+          snapshot: Result.succeed(processTableSnapshotFromProcesses(entries)),
           snapshotSucceeded: true,
+          queryElapsedMs: 0,
         })),
         Effect.catch(() =>
           fallbackProcessTableSnapshot.pipe(
-            Effect.map((snapshot) => ({ snapshot, snapshotSucceeded: false })),
+            Effect.map((fallback) => ({ ...fallback, snapshotSucceeded: false })),
           ),
         ),
       )
     : fallbackProcessTableSnapshot.pipe(
-        Effect.map((snapshot) => ({ snapshot, snapshotSucceeded: true })),
+        Effect.map((fallback) => ({
+          ...fallback,
+          snapshotSucceeded: Result.isSuccess(fallback.snapshot),
+        })),
       );
   const customSubprocessInspector = options.subprocessInspector;
-  const acquireSubprocessInspector: Effect.Effect<
-    {
-      readonly inspector: TerminalSubprocessInspector;
-      readonly snapshotSucceeded: boolean;
-    },
-    TerminalSubprocessCheckError
-  > =
+  const acquireSubprocessInspector: Effect.Effect<{
+    readonly inspector: Result.Result<TerminalSubprocessInspector, TerminalSubprocessCheckError>;
+    readonly snapshotSucceeded: boolean;
+    readonly queryElapsedMs: number;
+  }> =
     customSubprocessInspector !== undefined
-      ? Effect.succeed({ inspector: customSubprocessInspector, snapshotSucceeded: true })
+      ? Effect.succeed({
+          inspector: Result.succeed(customSubprocessInspector),
+          snapshotSucceeded: true,
+          queryElapsedMs: 0,
+        })
       : Effect.map(
           fetchProcessTableSnapshot,
-          ({
-            snapshot,
+          ({ snapshot, snapshotSucceeded, queryElapsedMs }) => ({
+            inspector: Result.map(
+              snapshot,
+              (table): TerminalSubprocessInspector =>
+                (terminalPid) =>
+                  Effect.succeed(deriveSubprocessInspectResult(table, terminalPid, platform)),
+            ),
             snapshotSucceeded,
-          }): {
-            readonly inspector: TerminalSubprocessInspector;
-            readonly snapshotSucceeded: boolean;
-          } => ({
-            inspector: (terminalPid) =>
-              Effect.succeed(deriveSubprocessInspectResult(snapshot, terminalPid, platform)),
-            snapshotSucceeded,
+            queryElapsedMs,
           }),
         );
   const subprocessPollIntervalMs =
@@ -2532,39 +2559,27 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }));
 
     if (runningSessions.length === 0) {
-      return true;
+      return { snapshotSucceeded: true, queryElapsedMs: 0 };
     }
     if (
       runningSessions.every(({ session }) => isQuiet(session)) &&
       skippedQuietTicks < QUIET_SUBPROCESS_SNAPSHOT_EVERY_TICKS - 1
     ) {
       skippedQuietTicks += 1;
-      return true;
+      return { snapshotSucceeded: true, queryElapsedMs: 0 };
     }
     skippedQuietTicks = 0;
 
-    const inspectorOption = yield* acquireSubprocessInspector.pipe(
-      Effect.asSome,
-      Effect.catch((reason) =>
-        Effect.logWarning("failed to snapshot processes for terminal subprocess polling", {
-          reason,
-        }).pipe(
-          Effect.as(
-            Option.none<{
-              readonly inspector: TerminalSubprocessInspector;
-              readonly snapshotSucceeded: boolean;
-            }>(),
-          ),
-        ),
-      ),
-    );
-
-    if (Option.isNone(inspectorOption)) {
+    const { inspector, snapshotSucceeded, queryElapsedMs } = yield* acquireSubprocessInspector;
+    if (Result.isFailure(inspector)) {
+      yield* Effect.logWarning("failed to snapshot processes for terminal subprocess polling", {
+        reason: inspector.failure,
+      });
       quietSessions = new WeakMap();
-      return false;
+      return { snapshotSucceeded: false, queryElapsedMs };
     }
 
-    const { inspector: subprocessInspector, snapshotSucceeded } = inspectorOption.value;
+    const subprocessInspector = inspector.success;
     const checkSubprocessActivity = Effect.fn("terminal.checkSubprocessActivity")(function* (
       candidate: (typeof runningSessions)[number],
     ) {
@@ -2660,7 +2675,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       discard: true,
     });
 
-    return snapshotSucceeded;
+    return { snapshotSucceeded, queryElapsedMs };
   });
 
   const hasRunningSessions = readManagerState.pipe(
@@ -2675,13 +2690,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       Effect.flatMap((active) =>
         active
           ? pollSubprocessActivity().pipe(
-              Effect.flatMap((snapshotSucceeded) => {
+              Effect.flatMap(({ snapshotSucceeded, queryElapsedMs }) => {
                 subprocessSnapshotFailureCount = snapshotSucceeded
                   ? 0
                   : Math.min(subprocessSnapshotFailureCount + 1, 30);
                 const delayMs = subprocessSnapshotPollDelayMs(
                   subprocessPollIntervalMs,
                   subprocessSnapshotFailureCount,
+                  queryElapsedMs,
                 );
                 return Effect.sleep(delayMs);
               }),
@@ -3347,7 +3363,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         );
         // Inspect now instead of trusting the last poll, so a command started
         // since then keeps its terminal.
-        const { inspector } = yield* acquireSubprocessInspector;
+        const inspector = yield* Effect.fromResult((yield* acquireSubprocessInspector).inspector);
         yield* Effect.forEach(
           running,
           (session) =>
