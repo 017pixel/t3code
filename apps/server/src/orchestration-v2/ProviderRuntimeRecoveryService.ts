@@ -155,6 +155,7 @@ const cancelledItem = (
           ...item,
           status: "cancelled",
           title: CLAUDE_STEER_UNCONFIRMED_TITLE,
+          severity: "warning",
           message: "T3 Code restarted before Claude confirmed it accepted this steer.",
           completedAt: now,
           updatedAt: now,

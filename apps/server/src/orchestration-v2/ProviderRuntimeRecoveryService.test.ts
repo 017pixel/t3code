@@ -392,6 +392,7 @@ it.effect("cancels a stale waiting run when no checkpoint capture can finish it"
       status: "waiting",
       title: "Waiting for Claude to read your steer",
       message: "Waiting for Claude to read your steer",
+      severity: "info",
       nativeItemRef: { driver: "claudeAgent", nativeId, strength: "weak" },
     })),
   } as unknown as OrchestrationV2ThreadProjection;
@@ -431,7 +432,14 @@ it.effect("cancels a stale waiting run when no checkpoint capture can finish it"
     assert.deepEqual(
       committedInput?.events.flatMap((event) =>
         event.type === "turn-item.updated" && event.payload.type === "system_notice"
-          ? [{ id: event.payload.id, status: event.payload.status, title: event.payload.title }]
+          ? [
+              {
+                id: event.payload.id,
+                status: event.payload.status,
+                title: event.payload.title,
+                severity: event.payload.severity,
+              },
+            ]
           : [],
       ),
       [
@@ -439,11 +447,13 @@ it.effect("cancels a stale waiting run when no checkpoint capture can finish it"
           id: TurnItemId.make("turn_item_steer"),
           status: "cancelled",
           title: "Steer not confirmed",
+          severity: "warning",
         },
         {
           id: TurnItemId.make("turn_item_notice"),
           status: "cancelled",
           title: "Waiting for Claude to read your steer",
+          severity: "info",
         },
       ],
     );

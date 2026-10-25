@@ -3292,7 +3292,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       yield* steer("message-steer-read");
       yield* steer("message-steer-unread");
       const notices = () => {
-        const latest = new Map<string, { status: string; title: string }>();
+        const latest = new Map<
+          string,
+          { status: string; title: string; severity: string | undefined }
+        >();
         for (const event of harness.events) {
           if (event.type !== "turn_item.updated" || event.turnItem.type !== "system_notice") {
             continue;
@@ -3300,11 +3303,14 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           latest.set(event.turnItem.nativeItemRef?.nativeId ?? "", {
             status: event.turnItem.status,
             title: event.turnItem.title ?? "",
+            severity: event.turnItem.severity,
           });
         }
         return [...latest.values()];
       };
-      const expectNotices = (expected: ReadonlyArray<{ status: string; title: string }>) =>
+      const expectNotices = (
+        expected: ReadonlyArray<{ status: string; title: string; severity: string }>,
+      ) =>
         harness
           .until(() => JSON.stringify(notices()) === JSON.stringify(expected))
           .pipe(Effect.andThen(Effect.sync(() => assert.deepEqual(notices(), [...expected]))));
@@ -3323,8 +3329,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         ),
       );
       assert.deepEqual(notices(), [
-        { status: "waiting", title: "Waiting for Claude to accept your steer" },
-        { status: "waiting", title: "Waiting for Claude to accept your steer" },
+        { status: "waiting", title: "Waiting for Claude to accept your steer", severity: "info" },
+        { status: "waiting", title: "Waiting for Claude to accept your steer", severity: "info" },
       ]);
 
       const lifecycle = (index: number, state: string, uuid: string) =>
@@ -3342,8 +3348,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       yield* lifecycle(2, "completed", "00000000-0000-4000-8000-000000002393");
       yield* lifecycle(1, "started", "00000000-0000-4000-8000-000000002394");
       yield* expectNotices([
-        { status: "completed", title: "Claude accepted your steer" },
-        { status: "waiting", title: "Waiting for Claude to accept your steer" },
+        { status: "completed", title: "Claude accepted your steer", severity: "info" },
+        { status: "waiting", title: "Waiting for Claude to accept your steer", severity: "info" },
       ]);
 
       yield* harness.offerAndWait(
@@ -3354,8 +3360,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       );
       yield* harness.awaitTerminal(1);
       yield* expectNotices([
-        { status: "completed", title: "Claude accepted your steer" },
-        { status: "completed", title: "Steer not confirmed" },
+        { status: "completed", title: "Claude accepted your steer", severity: "info" },
+        { status: "completed", title: "Steer not confirmed", severity: "warning" },
       ]);
     }).pipe(
       Effect.scoped,
@@ -3419,12 +3425,18 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       yield* harness.awaitTerminal(1);
       const notices = harness.events.flatMap((event) =>
         event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
-          ? [{ status: event.turnItem.status, title: event.turnItem.title }]
+          ? [
+              {
+                status: event.turnItem.status,
+                title: event.turnItem.title,
+                severity: event.turnItem.severity,
+              },
+            ]
           : [],
       );
       assert.deepEqual(notices, [
-        { status: "waiting", title: "Waiting for Claude to accept your steer" },
-        { status: "failed", title: "Steer not sent to Claude" },
+        { status: "waiting", title: "Waiting for Claude to accept your steer", severity: "info" },
+        { status: "failed", title: "Steer not sent to Claude", severity: "warning" },
       ]);
     }).pipe(
       Effect.scoped,
