@@ -328,6 +328,21 @@ describe("bounded binary previews", () => {
     redirect.setBigUint64(end + 104, BigInt(end), true);
     await expect(boundedZip(redirected.buffer)).rejects.toThrow("Unsupported ZIP64 directory");
 
+    const commented = new Uint8Array(extended.length + 20);
+    commented.set(extended);
+    const comment = new DataView(commented.buffer);
+    comment.setUint16(extended.length - 2, 20, true);
+    comment.setUint32(extended.length, 0x07064b50, true);
+    comment.setBigUint64(extended.length + 8, BigInt(end), true);
+    comment.setUint32(extended.length + 16, 1, true);
+    const load = vi.spyOn(JSZip, "loadAsync");
+    try {
+      await expect(boundedZip(commented.buffer)).rejects.toThrow("Unsupported ZIP64 directory");
+      expect(load).not.toHaveBeenCalled();
+    } finally {
+      load.mockRestore();
+    }
+
     const many = new JSZip();
     for (let i = 0; i < 2049; i++) many.file(`file-${i}`, "");
     const crowded = await many.generateAsync({ type: "arraybuffer" });
