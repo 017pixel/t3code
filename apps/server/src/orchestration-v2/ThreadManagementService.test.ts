@@ -459,6 +459,11 @@ it.effect.each([
   { text: "/tmp/report.txt holds the output. SUFFIX", mode: "steer", agent: true },
   { text: 'Keep "$TECH_DIR" and use ($technical-writing).', mode: "auto", agent: true },
   { text: "See [$technical-writing](/skills/writing/SKILL.md).", mode: "steer", agent: true },
+  {
+    text: "cd $BUILD_DIR && echo $HOME then use $technical-writing now.",
+    mode: "auto",
+    agent: true,
+  },
   { text: "PREFIX: $technical-writing mid-sentence. SUFFIX", mode: "auto", agent: false },
 ] as const)(
   "sendToThread with agent=$agent mode=$mode keeps skill dispatch only for the user: $text",
@@ -545,7 +550,9 @@ it.effect.each([
       const dispatchesSkill =
         planClaudeSkillDispatch(providerText, skills) !== undefined ||
         /^\s*\/technical-writing(?:\s|$)/u.test(providerText) ||
-        [...providerText.matchAll(SKILL_MENTION_PATTERN)].length > 0 ||
+        [...providerText.matchAll(SKILL_MENTION_PATTERN)].some(
+          ([, , name]) => name === "technical-writing",
+        ) ||
         providerText.includes("$technical-writing");
       expect(dispatchesSkill).toBe(!agent && text.includes("technical-writing"));
       // Only a word joiner right after the skill's sigil or leading slash may change.

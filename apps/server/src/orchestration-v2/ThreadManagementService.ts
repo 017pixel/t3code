@@ -62,17 +62,16 @@ import * as ServerSettings from "../serverSettings.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
-// Another agent's message must not invoke the recipient's skills. A word joiner breaks mention
-// tokens and a leading `/name`; Codex also reads `$name` inside punctuation or `[$name](path)`,
-// so known skill names are broken there too. Shell vars, amounts, and paths stay byte-identical.
+// Another agent's message must not invoke the recipient's skills. A word joiner breaks a leading
+// `/name` and any mention naming one of its skills, including `$name` inside punctuation or
+// `[$name](path)`, which Codex also reads. Shell vars, amounts, and paths stay byte-identical.
 const LEADING_SLASH_COMMAND = /^\s*\/(?=[^\s/]+(?:\s|$))/u;
 const CODEX_SKILL_MENTION = /\$([a-zA-Z0-9_:-]+)/gu;
 
 function breakAgentSkillSyntax(text: string, skillNames: ReadonlySet<string>): string {
   return text
-    .replace(
-      SKILL_MENTION_PATTERN,
-      (match, _prefix: string, name: string) => `${match.slice(0, -name.length)}\u2060${name}`,
+    .replace(SKILL_MENTION_PATTERN, (match, _prefix: string, name: string) =>
+      skillNames.has(name) ? `${match.slice(0, -name.length)}\u2060${name}` : match,
     )
     .replace(CODEX_SKILL_MENTION, (match, name: string) =>
       skillNames.has(name) ? `$\u2060${name}` : match,
