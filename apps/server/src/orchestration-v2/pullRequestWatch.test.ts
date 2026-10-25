@@ -320,6 +320,59 @@ describe("evaluatePullRequestWatch", () => {
     assert.deepEqual([pushed.next.failedChecks, pushed.next.awaitingApproval], [[], []]);
   });
 
+  it("keeps failures and approvals an unread read misses while updating the checks it lists", () => {
+    const unknown = {
+      ...check("Workflow approval status", "action-required"),
+      url: null,
+      placeholder: true,
+    };
+    const bot = check("bot", "success");
+    const broken = check("CI", "failure");
+    const approval = { ...check("contributor tests", "action-required"), url: null };
+    const seen = evaluatePullRequestWatch(
+      watch(),
+      detail({ checks: [broken, approval] }),
+      noRemarks,
+    );
+    const blind = evaluatePullRequestWatch(
+      seen.next,
+      detail({ checks: [bot, unknown] }),
+      noRemarks,
+    );
+    assert.deepEqual(blind.changes, []);
+    assert.deepEqual(
+      [blind.next.failedChecks, blind.next.awaitingApproval],
+      [["CI"], ["contributor tests"]],
+    );
+    assert.deepEqual(
+      evaluatePullRequestWatch(blind.next, detail({ checks: [broken, approval] }), noRemarks)
+        .changes,
+      [],
+    );
+
+    // What the read does list still counts: a new failure wakes, a settled check is let go.
+    const lint = check("lint", "failure");
+    const listed = evaluatePullRequestWatch(
+      blind.next,
+      detail({
+        checks: [check("CI", "pending"), check("contributor tests", "success"), lint, unknown],
+      }),
+      noRemarks,
+    );
+    assert.deepEqual(listed.changes, [{ kind: "checks-failed", failed: [lint] }]);
+    assert.deepEqual([listed.next.failedChecks, listed.next.awaitingApproval], [["lint"], []]);
+
+    // A read that could tell keeps nothing it does not list, and a push keeps nothing at all.
+    const whole = evaluatePullRequestWatch(blind.next, detail({ checks: [bot] }), noRemarks);
+    assert.deepEqual([whole.next.failedChecks, whole.next.awaitingApproval], [[], []]);
+    const pushed = evaluatePullRequestWatch(
+      blind.next,
+      detail({ headSha: "bbbbbbbbbb", checks: [bot, unknown] }),
+      noRemarks,
+    );
+    assert.deepEqual([pushed.next.failedChecks, pushed.next.awaitingApproval], [[], []]);
+  });
+
   it("waits for an approval with no URL while the host lists it", () => {
     const bot = check("bot", "success");
     const green = evaluatePullRequestWatch(watch(), detail({ checks: [bot] }), noRemarks);

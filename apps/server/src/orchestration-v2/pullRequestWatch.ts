@@ -67,6 +67,8 @@ export function evaluatePullRequestWatch(
   const failed = checks.filter(isFailedCheck);
   const awaiting = checks.filter((check) => check.status === "action-required");
   if (checks.length > 0) {
+    // A read beside a placeholder may have missed checks, so it lets go only of those it lists.
+    const missed = (name: string) => unread && !checks.some((check) => check.name === name);
     const newlyFailed = failed.filter((check) => !failedChecks.includes(check.name));
     if (newlyFailed.length > 0) changes.push({ kind: "checks-failed", failed: newlyFailed });
     // A watch saved before awaitingApproval reported these as failed checks.
@@ -77,10 +79,11 @@ export function evaluatePullRequestWatch(
     if (awaiting.length > 0 && !toldBefore) {
       changes.push({ kind: "checks-awaiting-approval", checks: awaiting });
     }
-    failedChecks = failed.map((check) => check.name);
+    failedChecks = [...failedChecks.filter(missed), ...failed.map((check) => check.name)];
 
     // GitHub lists runs awaiting approval in a separate read that can come back empty, so a run
-    // stays awaited through reads that miss it until one of its jobs finishes.
+    // stays awaited through reads that miss it until one of its jobs finishes. One known only by
+    // name stays only while listed, or through a read beside a placeholder that does not list it.
     const awaitingNow = [...new Set(awaiting.map(approvalKey))];
     const finished = new Set(
       checks
@@ -90,7 +93,9 @@ export function evaluatePullRequestWatch(
     awaitingApproval = [
       ...awaitingNow,
       ...awaitingApproval.filter(
-        (key) => !awaitingNow.includes(key) && workflowRunOf(key) === key && !finished.has(key),
+        (key) =>
+          !awaitingNow.includes(key) &&
+          (workflowRunOf(key) === key ? !finished.has(key) : missed(key)),
       ),
     ];
   }
