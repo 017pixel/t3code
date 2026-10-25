@@ -336,7 +336,13 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
     const row =
       pending &&
       contentRef.current?.querySelector<HTMLElement>(`[data-preview-row="${pending.row}"]`);
-    if (!pending || !node || !row || !row.textContent) return;
+    if (
+      !pending ||
+      !node ||
+      !row ||
+      !props.getRows(Math.floor(pending.row / PREVIEW_PAGE_ROWS))?.[pending.row % PREVIEW_PAGE_ROWS]
+    )
+      return;
     const content = contentRef.current!;
     const firstRow = content.querySelector<HTMLElement>(`[data-preview-row="${first}"]`);
     if (

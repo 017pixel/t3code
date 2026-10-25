@@ -190,7 +190,10 @@ export default function LargeTextViewer(props: {
           reject(new Error("The file is unavailable."));
           return;
         }
-        copyPending.current?.reject(new Error("Another copy is in progress."));
+        if (copyPending.current) {
+          reject(new Error("Another copy is in progress."));
+          return;
+        }
         copyPending.current = { resolve, reject };
         worker.current.postMessage({ type: "copy" }, []);
       }),

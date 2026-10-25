@@ -136,11 +136,6 @@ export function skipHidden(
   return { anchor: selection.anchor, focus };
 }
 
-/** Whether a row or column lies in one of the hidden spans. */
-export function hiddenAt(spans: readonly Span[], index: number) {
-  return spans.some((span) => index >= span.start && index <= span.end);
-}
-
 /** Runs an engine call that throws on input it cannot take, such as a viewport with too many cells to draw. */
 export function attempt<T>(run: () => T): T | undefined {
   try {

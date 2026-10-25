@@ -52,7 +52,7 @@ type Size = { readonly width: number; readonly height: number };
  * the bitmap it last returned, or nothing when the browser cannot decode it.
  */
 type Picture =
-  | { readonly kind: "bitmap"; readonly bitmap: ImageBitmap }
+  | { readonly kind: "bitmap"; readonly bitmap: ImageBitmap; readonly size: Size }
   | {
       readonly kind: "vector";
       readonly blob: Blob;
@@ -150,7 +150,9 @@ function createDeck(
 
     const source = await createImageBitmap(blob).catch(() => undefined);
 
-    return source ? { kind: "bitmap", bitmap: await bounded(source) } : { kind: "missing" };
+    if (!source) return { kind: "missing" };
+    const size = { width: source.width, height: source.height };
+    return { kind: "bitmap", bitmap: await bounded(source), size };
   };
 
   const picture = (asset: string) => {
@@ -163,6 +165,25 @@ function createDeck(
     pictures.set(asset, decoded);
 
     return decoded;
+  };
+
+  const tileScale = async (primitive: SlidePrimitive): Promise<SlidePrimitive> => {
+    if (primitive.kind === "table" || primitive.kind === "chart") {
+      const primitives: SlidePrimitive[] = [];
+      for (const child of primitive.primitives) primitives.push(await tileScale(child));
+      return { ...primitive, primitives };
+    }
+    if (primitive.kind !== "image" || !primitive.tile || !primitive.assetId) return primitive;
+    const found = await picture(primitive.assetId);
+    if (found.kind !== "bitmap") return primitive;
+    return {
+      ...primitive,
+      tile: {
+        ...primitive.tile,
+        scaleX: primitive.tile.scaleX * (found.size.width / found.bitmap.width),
+        scaleY: primitive.tile.scaleY * (found.size.height / found.bitmap.height),
+      },
+    };
   };
 
   return {
@@ -217,6 +238,11 @@ function createDeck(
 
         if (!covers(found.bitmap, need)) wanted.set(asset, { asset, blob: found.blob, size: need });
 
+        if (found.bitmap) {
+          drawn.delete(asset);
+          drawn.set(asset, found.bitmap);
+        }
+
         return found.bitmap ?? null;
       };
 
@@ -234,7 +260,10 @@ function createDeck(
           () => false,
         );
 
-      const shadowed = await attempt(laid);
+      const primitives: SlidePrimitive[] = [];
+      for (const primitive of laid.primitives) primitives.push(await tileScale(primitive));
+      const scaled = { ...laid, primitives };
+      const shadowed = await attempt(scaled);
 
       // Past its shadow budget a slide throws, and paints again without shadows rather than not at all. It first lets
       // through a cancellation that arrived meanwhile, such as a scroll that moved the slide away.
@@ -242,7 +271,7 @@ function createDeck(
 
       if (signal.aborted) return { kind: "cancelled" };
 
-      const done = shadowed || (await attempt(withoutShadows(laid)));
+      const done = shadowed || (await attempt(withoutShadows(scaled)));
 
       if (!done) return { kind: "failed" };
 
@@ -288,8 +317,10 @@ function createDeck(
             return entry.bitmap?.close();
 
           found.bitmap?.close();
+          drawn.delete(entry.asset);
           found.bitmap = entry.bitmap;
           found.failed = !entry.bitmap;
+          if (entry.bitmap) drawn.set(entry.asset, entry.bitmap);
         }),
       ).then(() => undefined),
   };

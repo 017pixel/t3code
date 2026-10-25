@@ -42,28 +42,11 @@ export class Transfer<T> {
   ) {}
 }
 
-/**
- * The buffer to move a file's bytes to a worker in: their own when they span all of it, as a viewer's bytes do, so the
- * file is never copied; a copy of the span otherwise. Moving it leaves `bytes` empty.
- */
-export function movableBuffer(bytes: Uint8Array): ArrayBuffer {
-  const buffer = bytes.buffer;
-
-  if (
-    buffer instanceof ArrayBuffer &&
-    bytes.byteOffset === 0 &&
-    bytes.byteLength === buffer.byteLength
-  )
-    return buffer;
-
-  return bytes.slice().buffer;
-}
-
 /** A call that a newer call with the same key replaced before it ran. */
 export class SupersededError extends Error {}
 
 /** A call made after the worker failed or was closed, or pending when that happened. */
-export class WorkerClosedError extends Error {}
+class WorkerClosedError extends Error {}
 
 type CallOptions = {
   /** A newer call with the same key replaces this one while it waits to run. */
