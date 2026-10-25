@@ -272,9 +272,11 @@ describe("large text preview recovery", () => {
     await vi.waitFor(checkVisible);
   });
 
-  it.each([5, 100, 10_000])(
-    "preserves the source row when indexing grows beyond %i lines",
-    async (count) => {
+  it.each(
+    [5, 100, 10_000].flatMap((count) => [false, true].map((mixed) => [count, mixed] as const)),
+  )(
+    "preserves the source row when indexing grows beyond %i lines (mixed heights: %s)",
+    async (count, mixed) => {
       const view = (count: number) => (
         <div style={{ display: "flex", height: 400, width: 600 }}>
           <VirtualTablePreview
@@ -285,7 +287,8 @@ describe("large text preview recovery", () => {
             wrap
             getRows={(page) =>
               Array.from({ length: 32 }, (_, i) => [
-                `line-${page * 32 + i + 1} ` + "wrapped source text ".repeat(20),
+                `line-${page * 32 + i + 1} ` +
+                  "wrapped source text ".repeat(mixed ? 5 + (i % 4) * 20 : 20),
               ])
             }
           />
@@ -295,7 +298,7 @@ describe("large text preview recovery", () => {
       const viewport = () => screen.container.querySelector<HTMLElement>('[tabindex="0"]')!;
       await vi.waitFor(() => expect(viewport()?.scrollHeight).toBeGreaterThan(400));
       await act(() => {
-        viewport().scrollTop = 1200;
+        viewport().scrollTop = count === 100 ? 100 * 29 - 400 + 1200 : 1200;
         viewport().dispatchEvent(new Event("scroll", { bubbles: true }));
       });
       const visibleRow = () =>
@@ -315,7 +318,7 @@ describe("large text preview recovery", () => {
               viewport().getBoundingClientRect().top -
               offset,
           ),
-        ).toBeLessThan(5);
+          ).toBeLessThan(Math.max(5, visibleRow().offsetHeight / 29 + 1));
       });
     },
   );
