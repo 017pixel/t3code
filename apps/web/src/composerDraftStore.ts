@@ -43,14 +43,17 @@ import {
   draftModelPickMatchesThread,
   normalizeModelSlug,
 } from "@t3tools/shared/model";
+import { isTemporaryWorktreeBranch } from "@t3tools/shared/git";
 import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
 import * as Option from "effect/Option";
 import type {
   EnvironmentShellState,
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
+import { waitForDraftHeroTransition } from "./components/chat/draftHeroTransition";
 import { getLocalStorageItem } from "./hooks/useLocalStorage";
 import { readThreadPreviewState } from "./previewStateStore";
+import type { ThreadRouteTarget } from "./threadRoutes";
 import { resolveAppModelSelection, resolveAppModelSelectionForInstance } from "./modelSelection";
 import {
   DEFAULT_INTERACTION_MODE,
@@ -84,6 +87,7 @@ import { create } from "zustand";
 import { persist, type PersistStorage, type StorageValue } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
 import { createDeferredStorage, createMemoryStorage } from "./lib/storage";
+import { readFileAsDataUrl } from "./lib/imageCompression";
 import { getDefaultServerModel } from "./providerModels";
 import {
   replaceComposerContextReferences,
@@ -107,6 +111,9 @@ const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree"]);
 export type DraftThreadEnvMode = typeof DraftThreadEnvModeSchema.Type;
 
 export const DraftId = Schema.String.pipe(Schema.brand("DraftId"));
+
+/** Queued-message edit drafts have no draft session; their key names no environment either. */
+export const QUEUED_EDIT_DRAFT_PREFIX = "queued-edit:";
 export type DraftId = typeof DraftId.Type;
 
 const COMPOSER_PERSIST_DEBOUNCE_MS = 300;
@@ -416,6 +423,12 @@ interface ComposerDraftStoreState {
   draftThreadsByThreadKey: Record<string, DraftThreadState>;
   logicalProjectDraftThreadKeyByLogicalProjectKey: Record<string, string>;
   backgroundSubmissionThreadKeys: Record<string, true>;
+  /**
+   * Where a just-finalized draft went, so its route and ChatView follow it. Only the handoff
+   * needs it: `retainPromotedDraftRedirectsForRoute` drops entries the open route no longer
+   * shows, so a later visit to the thread renders the shared unkeyed ChatView.
+   */
+  promotedDraftRedirects: Record<string, ScopedThreadRef>;
   rewindingThreadKeys: ReadonlySet<string>;
   stickyModelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>>;
   stickyOptionsByModelByProvider: Partial<
@@ -430,6 +443,9 @@ interface ComposerDraftStoreState {
   getDraftSession: (draftId: DraftId) => DraftSessionState | null;
   getDraftSessionByRef: (threadRef: ScopedThreadRef) => DraftSessionState | null;
   getDraftIdByRef: (threadRef: ScopedThreadRef) => DraftId | null;
+  getPromotedDraftRedirect: (draftId: DraftId) => ScopedThreadRef | null;
+  getPromotedDraftIdByRef: (threadRef: ScopedThreadRef) => DraftId | null;
+  retainPromotedDraftRedirectsForRoute: (route: ThreadRouteTarget | null) => void;
   getDraftThreadByRef: (threadRef: ScopedThreadRef) => DraftThreadState | null;
   getDraftThread: (threadRef: ComposerThreadTarget) => DraftThreadState | null;
   listDraftThreadKeys: () => string[];
@@ -529,17 +545,26 @@ interface ComposerDraftStoreState {
     interactionMode: ProviderInteractionMode | null | undefined,
   ) => void;
   addImage: (threadRef: ComposerThreadTarget, image: ComposerImageAttachment) => boolean;
+  /**
+   * Accepted attachments start uploading to `options.environmentId`, else the environment the
+   * target names (a thread ref, a draft session, a question draft). Drafts that name none, such as
+   * queued-message edits, must pass it.
+   */
   addImages: (
     threadRef: ComposerThreadTarget,
     images: ComposerImageAttachment[],
-    options?: { allowDuplicates?: boolean },
+    options?: { allowDuplicates?: boolean; environmentId?: EnvironmentId },
   ) => string[];
   removeImage: (threadRef: ComposerThreadTarget, imageId: string) => void;
   /** Returns the ids of files appended; a re-pick that replaces a marker is not listed. */
   addFiles: (
     threadRef: ComposerThreadTarget,
     files: ComposerFileAttachment[],
-    options?: { allowDuplicates?: boolean; appendReference?: boolean },
+    options?: {
+      allowDuplicates?: boolean;
+      appendReference?: boolean;
+      environmentId?: EnvironmentId;
+    },
   ) => string[];
   removeFile: (threadRef: ComposerThreadTarget, fileId: string) => void;
   setFileUpload: (
@@ -2383,6 +2408,52 @@ function toHydratedDraftThreadState(
   };
 }
 
+type ComposerAttachmentUploader = (input: {
+  /** Absent when the caller relies on the environment the target itself names. */
+  readonly environmentId: EnvironmentId | undefined;
+  readonly draftTarget: ComposerThreadTarget;
+  readonly attachments: ReadonlyArray<ComposerImageAttachment | ComposerFileAttachment>;
+}) => void;
+
+// Injected by attachmentUploads.ts, which depends on this store; null until the page starts it.
+let composerAttachmentUploader: ComposerAttachmentUploader | null = null;
+
+export function setComposerAttachmentUploader(uploader: ComposerAttachmentUploader | null): void {
+  composerAttachmentUploader = uploader;
+}
+
+function handOverAttachmentUploads(
+  state: ComposerDraftStoreState,
+  target: ComposerThreadTarget,
+  attachments: ReadonlyArray<ComposerImageAttachment | ComposerFileAttachment>,
+  environmentId?: EnvironmentId,
+): void {
+  if (!composerAttachmentUploader) return;
+  const threadKey = resolveComposerDraftKey(state, target);
+  if (!threadKey) return;
+  composerAttachmentUploader({
+    environmentId,
+    draftTarget: typeof target === "string" ? DraftId.make(threadKey) : target,
+    attachments,
+  });
+}
+
+/** A draft session that moved to another environment uploads its attachments there again. */
+function handOverRetargetedDraftUploads(
+  state: ComposerDraftStoreState,
+  threadKey: string,
+  previousEnvironmentId: EnvironmentId | undefined,
+): void {
+  const draftThread = state.draftThreadsByThreadKey[threadKey];
+  const draft = state.draftsByThreadKey[threadKey];
+  if (!draftThread || !draft || previousEnvironmentId === undefined) return;
+  if (draftThread.environmentId === previousEnvironmentId) return;
+  const attachments = [...draft.images, ...draft.files];
+  if (attachments.length > 0) {
+    handOverAttachmentUploads(state, DraftId.make(threadKey), attachments);
+  }
+}
+
 const composerDraftStore = create<ComposerDraftStoreState>()(
   persist(
     (setBase, get) => {
@@ -2393,6 +2464,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
         draftThreadsByThreadKey: {},
         logicalProjectDraftThreadKeyByLogicalProjectKey: {},
         backgroundSubmissionThreadKeys: {},
+        promotedDraftRedirects: {},
         rewindingThreadKeys: new Set<string>(),
         stickyModelSelectionByProvider: {},
         stickyOptionsByModelByProvider: {},
@@ -2472,6 +2544,28 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           }
           return null;
         },
+        getPromotedDraftRedirect: (draftId) => get().promotedDraftRedirects[draftId] ?? null,
+        getPromotedDraftIdByRef: (threadRef) => {
+          for (const [draftId, promotedTo] of Object.entries(get().promotedDraftRedirects)) {
+            if (scopedThreadRefsEqual(promotedTo, threadRef)) {
+              return DraftId.make(draftId);
+            }
+          }
+          return null;
+        },
+        retainPromotedDraftRedirectsForRoute: (route) => {
+          set((state) => {
+            const entries = Object.entries(state.promotedDraftRedirects);
+            const retained = entries.filter(([draftId, promotedTo]) =>
+              route?.kind === "draft"
+                ? route.draftId === draftId
+                : route?.kind === "server" && scopedThreadRefsEqual(promotedTo, route.threadRef),
+            );
+            return retained.length === entries.length
+              ? state
+              : { promotedDraftRedirects: Object.fromEntries(retained) };
+          });
+        },
         getDraftThread: (threadRef) => {
           if (typeof threadRef === "string") {
             return get().getDraftSession(DraftId.make(threadRef));
@@ -2494,6 +2588,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           if (normalizedLogicalProjectKey.length === 0 || draftId.length === 0) {
             return;
           }
+          const previousEnvironmentId = get().draftThreadsByThreadKey[draftId]?.environmentId;
           set((state) => {
             const existingThread = state.draftThreadsByThreadKey[draftId];
             const previousThreadKeyForLogicalProject =
@@ -2581,6 +2676,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 nextLogicalProjectDraftThreadKeyByLogicalProjectKey,
             };
           });
+          handOverRetargetedDraftUploads(get(), draftId, previousEnvironmentId);
         },
         setProjectDraftThreadId: (projectRef, draftId, options) => {
           get().setLogicalProjectDraftThreadId(
@@ -2595,6 +2691,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           if (threadKey.length === 0) {
             return;
           }
+          const previousEnvironmentId = get().draftThreadsByThreadKey[threadKey]?.environmentId;
           set((state) => {
             const existing = state.draftThreadsByThreadKey[threadKey];
             if (!existing) {
@@ -2683,6 +2780,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               },
             };
           });
+          handOverRetargetedDraftUploads(get(), threadKey, previousEnvironmentId);
         },
         clearProjectDraftThreadId: (projectRef) => {
           set((state) => {
@@ -2758,10 +2856,16 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           }
           set((state) => {
             const existing = state.draftThreadsByThreadKey[threadKey];
-            if (!existing || !isDraftThreadPromoting(existing)) {
+            if (!existing?.promotedTo) {
               return state;
             }
-            return removeDraftThreadReferences(state, threadKey, existing.promotedTo ?? undefined);
+            return {
+              ...removeDraftThreadReferences(state, threadKey, existing.promotedTo),
+              promotedDraftRedirects: {
+                ...state.promotedDraftRedirects,
+                [threadKey]: existing.promotedTo,
+              },
+            };
           });
         },
         clearDraftThread: (threadRef) => {
@@ -3174,7 +3278,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           if (threadKey.length === 0 || images.length === 0) {
             return [];
           }
-          let acceptedIds: string[] = [];
+          let acceptedImages: ComposerImageAttachment[] = [];
           set((state) => {
             const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
             const existingIds = new Set(existing.images.map((image) => image.id));
@@ -3212,7 +3316,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             if (dedupedIncoming.length === 0) {
               return state;
             }
-            acceptedIds = dedupedIncoming.map((image) => image.id);
+            acceptedImages = dedupedIncoming;
             return {
               draftsByThreadKey: {
                 ...state.draftsByThreadKey,
@@ -3223,7 +3327,11 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               },
             };
           });
-          return acceptedIds;
+          if (acceptedImages.length > 0) {
+            void persistComposerImageDataUrls(acceptedImages);
+            handOverAttachmentUploads(get(), threadRef, acceptedImages, options?.environmentId);
+          }
+          return acceptedImages.map((image) => image.id);
         },
         removeImage: (threadRef, imageId) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
@@ -3270,6 +3378,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             return [];
           }
           let acceptedIds: string[] = [];
+          let handedOver: ComposerFileAttachment[] = [];
           set((state) => {
             const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
             const knownIds = new Set(existing.files.map((file) => file.id));
@@ -3314,6 +3423,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               return state;
             }
             acceptedIds = accepted.map((file) => file.id);
+            handedOver = [...accepted, ...replacements.values()];
             const retained = existing.files.map((file) => replacements.get(file.id) ?? file);
             const prompt =
               replacements.size === 0
@@ -3343,6 +3453,9 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               },
             };
           });
+          if (handedOver.length > 0) {
+            handOverAttachmentUploads(get(), threadRef, handedOver, options?.environmentId);
+          }
           return acceptedIds;
         },
         removeFile: (threadRef, fileId) => {
@@ -3982,6 +4095,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           if (fromKey.length === 0 || toKey.length === 0 || fromKey === toKey) {
             return;
           }
+          let moved: Array<ComposerImageAttachment | ComposerFileAttachment> = [];
           set((state) => {
             const source = state.draftsByThreadKey[fromKey];
             if (!source) {
@@ -4026,6 +4140,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 return rest;
               });
             const movedFileIds = new Set(movedFiles.map((file) => file.id));
+            moved = [...movedImages, ...movedFiles];
             const retainedFiles = source.files.filter((file) => !movedFileIds.has(file.id));
             const movedPrompt = ensureInlineContextReferences(
               stripInlineContextReferences(source.prompt),
@@ -4076,6 +4191,8 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             }
             return { draftsByThreadKey: nextDraftsByThreadKey };
           });
+          // A move across environments re-uploads at the destination.
+          if (moved.length > 0) handOverAttachmentUploads(get(), to, moved);
         },
       };
     },
@@ -4115,6 +4232,75 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
 );
 
 export const useComposerDraftStore = composerDraftStore;
+
+/**
+ * Reads accepted images into data URLs so a reload can restore them. The read is async, so each
+ * result goes to whichever draft holds the image when it lands; images can move between drafts
+ * (promotion, question answers) or be removed meanwhile.
+ */
+async function persistComposerImageDataUrls(
+  images: ReadonlyArray<ComposerImageAttachment>,
+): Promise<void> {
+  const read = await Promise.all(
+    images.map(async (image): Promise<PersistedComposerImageAttachment | null> => {
+      try {
+        return {
+          id: image.id,
+          name: image.name,
+          mimeType: image.mimeType,
+          sizeBytes: image.sizeBytes,
+          dataUrl: await readFileAsDataUrl(image.file),
+          ...(image.source ? { source: image.source } : {}),
+        };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const readById = new Map(
+    read.flatMap((attachment) => (attachment ? [[attachment.id, attachment] as const] : [])),
+  );
+  // Failed reads still sync, so verification marks those images as not surviving a reload.
+  const readIds = new Set(images.map((image) => image.id));
+  const store = useComposerDraftStore.getState();
+  for (const [threadKey, draft] of Object.entries(store.draftsByThreadKey)) {
+    if (!draft.images.some((image) => readIds.has(image.id))) continue;
+    const existingById = new Map(
+      draft.persistedAttachments.map((attachment) => [attachment.id, attachment]),
+    );
+    const persistedAttachments = draft.images.flatMap((image) => {
+      const attachment = readById.get(image.id) ?? existingById.get(image.id);
+      return attachment ? [attachment] : [];
+    });
+    void store.syncPersistedAttachments(DraftId.make(threadKey), persistedAttachments);
+  }
+}
+
+/**
+ * Derived so the branch selector and send path agree. A new-worktree draft uses its pick, else the
+ * base branch candidate. Other drafts use the checked-out branch, so a switch outside T3 Code wins;
+ * a detached head, unloaded status, or unrenamed temporary worktree branch keeps the pick.
+ */
+export function selectEffectiveDraftBranch(
+  draft: Pick<DraftSessionState, "branch" | "worktreePath" | "envMode"> | null,
+  gitStatus: { readonly refName: string | null } | null,
+  baseBranchCandidate: string | null,
+): string | null {
+  if (!draft) return null;
+  const liveBranch = gitStatus?.refName ?? null;
+  if (draft.envMode === "worktree" && !draft.worktreePath) {
+    return draft.branch ?? baseBranchCandidate ?? liveBranch;
+  }
+  if (
+    liveBranch === null ||
+    (draft.branch !== null &&
+      !isTemporaryWorktreeBranch(draft.branch) &&
+      isTemporaryWorktreeBranch(liveBranch))
+  ) {
+    return draft.branch;
+  }
+  return liveBranch;
+}
 
 export function subscribeComposerDraftModelReconciliation(input: {
   readonly registry: AtomRegistry.AtomRegistry;
@@ -4185,6 +4371,14 @@ export function subscribeComposerDraftModelReconciliation(input: {
   };
 }
 
+// Compat shim: the base ThreadRouteView reads this until the web-chat-view layer.
+export function useBackgroundDraftSubmissionPending(threadRef: ScopedThreadRef | null): boolean {
+  const threadKey = threadRef ? scopedThreadKey(threadRef) : null;
+  return useComposerDraftStore(
+    (state) => threadKey !== null && state.backgroundSubmissionThreadKeys[threadKey] === true,
+  );
+}
+
 export function beginBackgroundDraftSubmissionByRef(threadRef: ScopedThreadRef): void {
   const threadKey = scopedThreadKey(threadRef);
   useComposerDraftStore.setState((state) => ({
@@ -4202,13 +4396,6 @@ export function clearBackgroundDraftSubmissionByRef(threadRef: ScopedThreadRef):
     delete backgroundSubmissionThreadKeys[threadKey];
     return { backgroundSubmissionThreadKeys };
   });
-}
-
-export function useBackgroundDraftSubmissionPending(threadRef: ScopedThreadRef | null): boolean {
-  const threadKey = threadRef ? scopedThreadKey(threadRef) : null;
-  return useComposerDraftStore(
-    (state) => threadKey !== null && state.backgroundSubmissionThreadKeys[threadKey] === true,
-  );
 }
 
 export function clearComposerDraftsEnvironment(environmentId: EnvironmentId): void {
@@ -4260,12 +4447,18 @@ export function clearComposerDraftsEnvironment(environmentId: EnvironmentId): vo
         ([threadKey]) => parseScopedThreadKey(threadKey)?.environmentId !== environmentId,
       ),
     ) as Record<string, true>;
+    const nextPromotedDraftRedirects = Object.fromEntries(
+      Object.entries(state.promotedDraftRedirects).filter(
+        ([, promotedTo]) => promotedTo.environmentId !== environmentId,
+      ),
+    ) as Record<string, ScopedThreadRef>;
 
     return {
       draftsByThreadKey: nextDrafts,
       draftThreadsByThreadKey: nextDraftThreads,
       logicalProjectDraftThreadKeyByLogicalProjectKey: nextLogicalMappings,
       backgroundSubmissionThreadKeys: nextBackgroundSubmissionThreadKeys,
+      promotedDraftRedirects: nextPromotedDraftRedirects,
       rewindingThreadKeys: new Set(
         [...state.rewindingThreadKeys].filter(
           (threadKey) => parseScopedThreadKey(threadKey)?.environmentId !== environmentId,
@@ -4350,4 +4543,97 @@ export function finalizePromotedDraftThreadByRef(threadRef: ScopedThreadRef): vo
     }
   }
   clearBackgroundDraftSubmissionByRef(threadRef);
+}
+
+type DraftPromotionShell = Pick<EnvironmentThreadShell, "latestRun" | "latestUserMessageAt">;
+
+/** The server owns a draft's send once its message persisted or its run started or stopped. */
+export function resolveDraftPromotionNavigationTarget(input: {
+  serverThreadRef: ScopedThreadRef | null;
+  serverThread: DraftPromotionShell | null | undefined;
+  backgroundSubmissionPending: boolean;
+}): ScopedThreadRef | null {
+  if (input.backgroundSubmissionPending) {
+    return null;
+  }
+  const latestRun = input.serverThread?.latestRun ?? null;
+  const runStarted = latestRun?.startedAt != null;
+  const startupStopped =
+    latestRun?.status === "failed" ||
+    latestRun?.status === "interrupted" ||
+    latestRun?.status === "cancelled";
+  const messagePersisted = input.serverThread?.latestUserMessageAt != null;
+  return runStarted || startupStopped || messagePersisted ? input.serverThreadRef : null;
+}
+
+/**
+ * Drives every draft through promotion as server shells arrive: a draft whose reserved thread
+ * appears on the server becomes promoting, and once the server owns its send (and any hero
+ * transition has played) it finalizes into that thread. The draft route follows the redirect
+ * that finalization records, so no route has to watch for these milestones.
+ */
+export function subscribeDraftThreadPromotion(input: {
+  readonly registry: AtomRegistry.AtomRegistry;
+  readonly threadRefsAtom: Atom.Atom<ReadonlyArray<ScopedThreadRef>>;
+  readonly threadShellAtom: (ref: ScopedThreadRef) => Atom.Atom<DraftPromotionShell | null>;
+}): () => void {
+  const draftsAtom = Atom.make(composerDraftStore.getState());
+  const unsubscribeDrafts = composerDraftStore.subscribe((state) =>
+    input.registry.set(draftsAtom, state),
+  );
+  const threadKeysAtom = Atom.map(
+    input.threadRefsAtom,
+    (refs) => new Set(refs.map(scopedThreadKey)),
+  );
+  const milestonesAtom = Atom.make((get) => {
+    const state = get(draftsAtom);
+    const threadKeys = get(threadKeysAtom);
+    const arrived: Array<readonly [DraftId, ScopedThreadRef]> = [];
+    const owned: Array<readonly [DraftId, ScopedThreadRef]> = [];
+    for (const [draftId, draftThread] of Object.entries(state.draftThreadsByThreadKey)) {
+      const ref =
+        draftThread.promotedTo ?? scopeThreadRef(draftThread.environmentId, draftThread.threadId);
+      const threadKey = scopedThreadKey(ref);
+      if (!threadKeys.has(threadKey)) continue;
+      if (!draftThread.promotedTo) {
+        arrived.push([DraftId.make(draftId), ref]);
+        continue;
+      }
+      const target = resolveDraftPromotionNavigationTarget({
+        serverThreadRef: ref,
+        serverThread: get(input.threadShellAtom(ref)),
+        backgroundSubmissionPending: state.backgroundSubmissionThreadKeys[threadKey] === true,
+      });
+      if (target) owned.push([DraftId.make(draftId), target]);
+    }
+    return { arrived, owned };
+  });
+  let disposed = false;
+  const finalizing = new Set<DraftId>();
+  const unsubscribeMilestones = input.registry.subscribe(
+    milestonesAtom,
+    ({ arrived, owned }) => {
+      const store = composerDraftStore.getState();
+      for (const [draftId, ref] of arrived) {
+        store.markDraftThreadPromoting(draftId, ref);
+      }
+      for (const [draftId, ref] of owned) {
+        if (finalizing.has(draftId)) continue;
+        finalizing.add(draftId);
+        void waitForDraftHeroTransition().then(() => {
+          finalizing.delete(draftId);
+          if (disposed) return;
+          const current = composerDraftStore.getState().draftThreadsByThreadKey[draftId];
+          if (!current || !scopedThreadRefsEqual(current.promotedTo, ref)) return;
+          finalizePromotedDraftThreadByRef(ref);
+        });
+      }
+    },
+    { immediate: true },
+  );
+  return () => {
+    disposed = true;
+    unsubscribeMilestones();
+    unsubscribeDrafts();
+  };
 }

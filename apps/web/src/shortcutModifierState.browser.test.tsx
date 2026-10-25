@@ -1,9 +1,31 @@
 import { describe, expect, it } from "vite-plus/test";
 
+import { act, render } from "../test/render";
 import {
   shortcutModifierStateAfterKeyboardEvent,
   type ShortcutModifierState,
+  useShortcutModifierState,
 } from "./shortcutModifierState";
+
+function HeldModifiers() {
+  const raw = useShortcutModifierState();
+  const outsideEditable = useShortcutModifierState(true);
+  return (
+    <>
+      <input aria-label="field" />
+      <output aria-label="raw">{raw.metaKey ? "meta" : "none"}</output>
+      <output aria-label="outside editable">{outsideEditable.metaKey ? "meta" : "none"}</output>
+    </>
+  );
+}
+
+function dispatchKey(target: EventTarget, type: "keydown" | "keyup", key: string) {
+  return act(() => {
+    target.dispatchEvent(
+      new KeyboardEvent(type, { key, metaKey: type === "keydown", bubbles: true }),
+    );
+  });
+}
 
 const emptyState = (): ShortcutModifierState => ({
   metaKey: false,
@@ -107,5 +129,22 @@ describe("shortcutModifierState", () => {
       keyboardEventLike("keydown", { key: "a", metaKey: false }),
     );
     expect(state).toEqual(emptyState());
+  });
+
+  it("ignores modifiers typed into an editable only for consumers that ask", async () => {
+    // A hook-only test: the router adds nothing to a window-level store.
+    await using screen = await render(<HeldModifiers />, { router: false });
+    const field = screen.getByLabelText("field").element();
+
+    await dispatchKey(window, "keydown", "Meta");
+    await expect.element(screen.getByLabelText("raw")).toHaveTextContent("meta");
+    await expect.element(screen.getByLabelText("outside editable")).toHaveTextContent("meta");
+
+    await act(() => (field as HTMLInputElement).focus());
+    await expect.element(screen.getByLabelText("raw")).toHaveTextContent("meta");
+    await expect.element(screen.getByLabelText("outside editable")).toHaveTextContent("none");
+
+    await dispatchKey(field, "keyup", "Meta");
+    await expect.element(screen.getByLabelText("raw")).toHaveTextContent("none");
   });
 });

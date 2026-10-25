@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useSyncExternalStore } from "react";
 import { isEditableFocused } from "./lib/editableFocus";
 
 export interface ShortcutModifierState {
@@ -27,46 +27,89 @@ function areShortcutModifierStatesEqual(
   );
 }
 
-export function useShortcutModifierState(ignoreEditable = false): ShortcutModifierState {
-  const [state, setState] = useState(EMPTY_SHORTCUT_MODIFIER_STATE);
-  const stateRef = useRef(EMPTY_SHORTCUT_MODIFIER_STATE);
+interface ModifierSnapshots {
+  readonly raw: ShortcutModifierState;
+  /** Held modifiers, except while typing into an editable target. */
+  readonly outsideEditable: ShortcutModifierState;
+}
 
-  useEffect(() => {
-    const updateState = (next: ShortcutModifierState) => {
-      if (areShortcutModifierStatesEqual(stateRef.current, next)) return;
-      stateRef.current = next;
-      setState(next);
-    };
-    const onKeyboardEvent = (event: KeyboardEvent) => {
-      updateState(
-        ignoreEditable && isEditableFocused(event.target)
-          ? EMPTY_SHORTCUT_MODIFIER_STATE
-          : shortcutModifierStateAfterKeyboardEvent(stateRef.current, event),
-      );
-    };
-    // Dictation tools can omit Meta keyup after synthetic paste, leaving jump hints stuck.
-    const onResetEvent = () => {
-      updateState(EMPTY_SHORTCUT_MODIFIER_STATE);
-    };
+let snapshots: ModifierSnapshots = {
+  raw: EMPTY_SHORTCUT_MODIFIER_STATE,
+  outsideEditable: EMPTY_SHORTCUT_MODIFIER_STATE,
+};
+const listeners = new Set<() => void>();
 
-    const onFocus = (event: FocusEvent) => {
-      if (ignoreEditable && isEditableFocused(event.target)) onResetEvent();
-    };
-    window.addEventListener("focusin", onFocus);
+function setSnapshots(raw: ShortcutModifierState, outsideEditable: ShortcutModifierState) {
+  // Even a no-op dispatch costs work in the sidebar's large tree, so ordinary
+  // typing must return before notifying React.
+  const rawChanged = !areShortcutModifierStatesEqual(raw, snapshots.raw);
+  const outsideEditableChanged = !areShortcutModifierStatesEqual(
+    outsideEditable,
+    snapshots.outsideEditable,
+  );
+  if (!rawChanged && !outsideEditableChanged) return;
+  snapshots = {
+    raw: rawChanged ? raw : snapshots.raw,
+    outsideEditable: outsideEditableChanged ? outsideEditable : snapshots.outsideEditable,
+  };
+  for (const listener of listeners) listener();
+}
+
+function onKeyboardEvent(event: KeyboardEvent) {
+  setSnapshots(
+    shortcutModifierStateAfterKeyboardEvent(snapshots.raw, event),
+    isEditableFocused(event.target)
+      ? EMPTY_SHORTCUT_MODIFIER_STATE
+      : shortcutModifierStateAfterKeyboardEvent(snapshots.outsideEditable, event),
+  );
+}
+
+// Dictation tools can omit Meta keyup after synthetic paste, leaving jump hints stuck.
+function onResetEvent() {
+  setSnapshots(EMPTY_SHORTCUT_MODIFIER_STATE, EMPTY_SHORTCUT_MODIFIER_STATE);
+}
+
+function onFocusIn(event: FocusEvent) {
+  if (isEditableFocused(event.target)) {
+    setSnapshots(snapshots.raw, EMPTY_SHORTCUT_MODIFIER_STATE);
+  }
+}
+
+function subscribe(listener: () => void): () => void {
+  if (listeners.size === 0) {
+    window.addEventListener("focusin", onFocusIn);
     window.addEventListener("keydown", onKeyboardEvent, true);
     window.addEventListener("keyup", onKeyboardEvent, true);
     window.addEventListener("paste", onResetEvent, true);
     window.addEventListener("blur", onResetEvent);
-    return () => {
-      window.removeEventListener("focusin", onFocus);
-      window.removeEventListener("keydown", onKeyboardEvent, true);
-      window.removeEventListener("keyup", onKeyboardEvent, true);
-      window.removeEventListener("paste", onResetEvent, true);
-      window.removeEventListener("blur", onResetEvent);
+  }
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size > 0) return;
+    window.removeEventListener("focusin", onFocusIn);
+    window.removeEventListener("keydown", onKeyboardEvent, true);
+    window.removeEventListener("keyup", onKeyboardEvent, true);
+    window.removeEventListener("paste", onResetEvent, true);
+    window.removeEventListener("blur", onResetEvent);
+    // Keys released while nobody listened would otherwise read as still held.
+    snapshots = {
+      raw: EMPTY_SHORTCUT_MODIFIER_STATE,
+      outsideEditable: EMPTY_SHORTCUT_MODIFIER_STATE,
     };
-  }, [ignoreEditable]);
+  };
+}
 
-  return state;
+const getRawSnapshot = () => snapshots.raw;
+const getOutsideEditableSnapshot = () => snapshots.outsideEditable;
+const getServerSnapshot = () => EMPTY_SHORTCUT_MODIFIER_STATE;
+
+export function useShortcutModifierState(ignoreEditable = false): ShortcutModifierState {
+  return useSyncExternalStore(
+    subscribe,
+    ignoreEditable ? getOutsideEditableSnapshot : getRawSnapshot,
+    getServerSnapshot,
+  );
 }
 
 function normalizeModifierKey(key: string): keyof ShortcutModifierState | null {

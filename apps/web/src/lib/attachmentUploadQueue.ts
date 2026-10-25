@@ -109,7 +109,10 @@ function resolveCurrentFileDraftTarget(job: UploadJob): ComposerThreadTarget | u
   return undefined;
 }
 
-/** Persist background completions even when no composer is mounted. */
+/**
+ * The only write of an upload result into a draft. It resolves the draft that
+ * holds the file now, so completion survives navigation and draft moves.
+ */
 function stampDraftFileUpload(job: UploadJob, attachmentId: string): void {
   const draftTarget = resolveCurrentFileDraftTarget(job);
   if (draftTarget === undefined) {
