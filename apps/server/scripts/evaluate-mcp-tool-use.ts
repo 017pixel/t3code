@@ -32,6 +32,8 @@ import { Tool } from "effect/ai";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
 import { taskPrompt } from "../src/mcp/OrchestratorMcpService.ts";
+import { ORCHESTRATOR_MCP_RUNNING_TASK_NEXT } from "@t3tools/contracts";
+import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import {
   buildCodexAdditionalContext,
   buildCodexDeveloperInstructions,
@@ -789,8 +791,7 @@ const t3Default = (sample: Sample, name: string, input: Readonly<Record<string, 
     case "t3_thread_read": {
       const threadId = valueText(input.threadId);
       const { title, status, items } = DEFAULT_THREAD;
-      const link = `[${title}](t3-thread://v1/${PROJECT_ID}/${threadId})`;
-      return { thread: { threadId, title, link, status }, items, nextPosition: 3, hasMore: false };
+      return { thread: { threadId, title, status }, items, nextPosition: 3, hasMore: false };
     }
     case "html_preview":
       return { width: 728, contentHeight: 560, capturedHeight: 560, consoleMessages: [] };
@@ -810,6 +811,39 @@ const t3Default = (sample: Sample, name: string, input: Readonly<Record<string, 
       };
     default:
       return { ok: true };
+  }
+};
+
+/** Fields T3 adds to real thread and task results, applied to mocks and defaults alike. */
+const withProductFields = (name: string, value: unknown): unknown => {
+  if (!isRecord(value)) return value;
+  const linked = (thread: unknown, idKey = "threadId") => {
+    if (!isRecord(thread) || thread.link !== undefined) return thread;
+    const id = thread[idKey] ?? thread.id;
+    const title = valueText(thread.title) || "Thread";
+    return typeof id === "string" ? { ...thread, link: formatThreadLink(id, title) } : thread;
+  };
+  const listed = (key: string) =>
+    Array.isArray(value[key]) ? { ...value, [key]: value[key].map((item) => linked(item)) } : value;
+  switch (name) {
+    case "delegate_task":
+    case "task_status": {
+      const task = linked(value, "childThreadId") as Record<string, unknown>;
+      const running = task.status === "running" && task.next === undefined;
+      return running ? { ...task, next: ORCHESTRATOR_MCP_RUNNING_TASK_NEXT } : task;
+    }
+    case "t3_thread_read":
+      return { ...value, thread: linked(value.thread) };
+    case "t3_thread_launch":
+    case "t3_thread_send":
+      return linked(value);
+    case "t3_thread_list":
+    case "create_threads":
+      return listed("threads");
+    case "t3_thread_search":
+      return listed("matches");
+    default:
+      return value;
   }
 };
 
@@ -987,7 +1021,9 @@ const answerToolCall = Effect.fn("evaluateMcpToolUse.answerToolCall")(function* 
   if (mock !== undefined && mock !== "default")
     return toolResult(
       call.id,
-      name === "orchestrator_capabilities" ? capabilities(sample, mock) : mock,
+      name === "orchestrator_capabilities"
+        ? capabilities(sample, mock)
+        : withProductFields(name, mock),
     );
   if (isT3Name(call.name)) {
     // T3 refuses a watch from a delegated child.
@@ -997,7 +1033,9 @@ const answerToolCall = Effect.fn("evaluateMcpToolUse.answerToolCall")(function* 
     const value = t3Default(sample, name, input);
     return toolResult(
       call.id,
-      name === "orchestrator_capabilities" ? capabilities(sample, value) : value,
+      name === "orchestrator_capabilities"
+        ? capabilities(sample, value)
+        : withProductFields(name, value),
     );
   }
   if (call.name === "clock__curr_time")
