@@ -507,16 +507,20 @@ const makeReader = Effect.fnUntraced(function* (options: SqliteClientConfig) {
   return (wait: typeof Effect.interruptible): Effect.Effect<ReaderLease | undefined> =>
     unavailable
       ? Effect.succeed(undefined)
-      : Effect.flatMap(wait(permits.take(1)), () => {
-          const slot = free.shift()!;
-          return Effect.onExit(connect(slot), (exit) =>
-            Exit.isSuccess(exit) && exit.value !== undefined ? Effect.void : release(slot),
-          ).pipe(
-            Effect.map((connection) =>
-              connection === undefined ? undefined : { connection, release: release(slot) },
-            ),
-          );
-        });
+      : Effect.flatMap(
+          // A scheduler yield after the take is interruptible and would drop the permit.
+          Effect.provideService(wait(permits.take(1)), Scheduler.PreventSchedulerYield, true),
+          () => {
+            const slot = free.shift()!;
+            return Effect.onExit(connect(slot), (exit) =>
+              Exit.isSuccess(exit) && exit.value !== undefined ? Effect.void : release(slot),
+            ).pipe(
+              Effect.map((connection) =>
+                connection === undefined ? undefined : { connection, release: release(slot) },
+              ),
+            );
+          },
+        );
 });
 
 const CHECKPOINT_FRAMES = 1000;
