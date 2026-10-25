@@ -6721,8 +6721,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     ? "failed"
                     : "completed",
               title,
-              severity:
-                input.state === "waiting" || input.state === "accepted" ? "info" : "warning",
+              severity: input.state === "accepted" ? "info" : "warning",
               message:
                 input.state === "unconfirmed"
                   ? "The turn ended before Claude confirmed it accepted this steer."

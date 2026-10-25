@@ -3329,8 +3329,16 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         ),
       );
       assert.deepEqual(notices(), [
-        { status: "waiting", title: "Waiting for Claude to accept your steer", severity: "info" },
-        { status: "waiting", title: "Waiting for Claude to accept your steer", severity: "info" },
+        {
+          status: "waiting",
+          title: "Waiting for Claude to accept your steer",
+          severity: "warning",
+        },
+        {
+          status: "waiting",
+          title: "Waiting for Claude to accept your steer",
+          severity: "warning",
+        },
       ]);
 
       const lifecycle = (index: number, state: string, uuid: string) =>
@@ -3349,7 +3357,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       yield* lifecycle(1, "started", "00000000-0000-4000-8000-000000002394");
       yield* expectNotices([
         { status: "completed", title: "Claude accepted your steer", severity: "info" },
-        { status: "waiting", title: "Waiting for Claude to accept your steer", severity: "info" },
+        {
+          status: "waiting",
+          title: "Waiting for Claude to accept your steer",
+          severity: "warning",
+        },
       ]);
 
       yield* harness.offerAndWait(
@@ -3435,7 +3447,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           : [],
       );
       assert.deepEqual(notices, [
-        { status: "waiting", title: "Waiting for Claude to accept your steer", severity: "info" },
+        {
+          status: "waiting",
+          title: "Waiting for Claude to accept your steer",
+          severity: "warning",
+        },
         { status: "failed", title: "Steer not sent to Claude", severity: "warning" },
       ]);
     }).pipe(
