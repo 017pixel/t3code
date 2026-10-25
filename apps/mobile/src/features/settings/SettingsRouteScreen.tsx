@@ -8,6 +8,8 @@ import {
   useNavigationTabOrder,
   useHiddenNavigationTabs,
 } from "../workspace/navigation-tabs";
+import { currentWorkspaceSelections } from "../workspace/workspace-selection-store";
+import { rememberedSettingsPage } from "../workspace/workspace-tab-navigation";
 import { useSelectWorkspaceTab } from "../workspace/useSelectWorkspaceTab";
 import {
   ScreenScrollView as ScrollView,
@@ -42,10 +44,14 @@ export function SettingsRouteScreen() {
   const compactTabs = useCompactWorkspaceTabs();
   const { layout } = useAdaptiveWorkspaceLayout();
   const inSidebar = use(NativePrimaryColumnContext) !== null && layout.usesSplitView;
-  // The page open beside the list: the route right above the Settings tab's route.
+  // The page open beside the list: the route right above the Settings tab's route. While
+  // another tab is open this list stays mounted, hidden, and must keep showing the page Settings
+  // reopens on; otherwise returning shows it unselected for a frame before the page arrives.
   const selected = useNavigationState((state) => {
     const list = state.routes.findIndex((route) => route.name === "Settings");
-    return list < 0 ? null : (state.routes[list + 1]?.name ?? null);
+    return list < 0
+      ? rememberedSettingsPage(currentWorkspaceSelections())
+      : (state.routes[list + 1]?.name ?? null);
   });
   const sidebar = useMemo(() => (inSidebar ? { selected } : null), [inSidebar, selected]);
   const content = hasCloudPublicConfig() ? (
