@@ -114,15 +114,17 @@ export function DocumentAttachmentThumbnail(props: {
     <span ref={target} className="inline-flex max-w-full align-middle">
       {props.children({
         icon: (
-          <span
-            className="relative inline-flex shrink-0 items-center justify-center"
-            style={{ width: kind === "pptx" ? 30 : 18, height: kind === "pptx" ? 18 : 23 }}
-          >
+          <span className="relative inline-flex size-[1.17em] shrink-0 items-center justify-center">
             {available ? (
               <img
                 src={available.src}
                 alt=""
-                className="block h-full w-full rounded-xs border border-foreground/15 bg-white object-cover object-top"
+                className="block rounded-xs border border-foreground/15 bg-white object-cover object-top"
+                style={
+                  kind === "pptx"
+                    ? { width: "100%", height: "60%" }
+                    : { width: "75%", height: "100%" }
+                }
                 onError={() => setFailedSrc(available.src)}
               />
             ) : (

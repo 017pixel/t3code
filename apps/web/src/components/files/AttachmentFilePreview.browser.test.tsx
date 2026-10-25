@@ -27,6 +27,7 @@ import { boundedZip } from "./boundedZip";
 import BinaryViewer from "./BinaryViewer";
 import { decodeImagePreview } from "./decodeImagePreview";
 import type { BinaryWorkerResult } from "./binaryPreviewProtocol";
+import { FileChip } from "../contextChipParts";
 
 // Real worker imports and WASM initialization can exceed waitFor's default second
 // when the full browser project runs concurrently on CI.
@@ -1843,6 +1844,62 @@ it.each(["docx", "xlsx"] as const)(
   },
 );
 
+it("keeps file chip geometry while a thumbnail loads and fails", async () => {
+  const file = new File(["Team,Status\nPlatform,Ready\n"], "planning.csv", { type: "text/csv" });
+  const props = {
+    name: file.name,
+    size: "1 KB",
+    isVideo: false,
+    theme: "light" as const,
+    accessibleLabel: "Planning file",
+    tooltip: "Planning file",
+  };
+  await using screen = await render(
+    <div style={{ fontSize: 14, width: 200 }}>
+      <FileChip {...props} />{" "}
+      <FileChip
+        {...props}
+        documentPreview={{
+          environmentId: EnvironmentId.make("chip-layout"),
+          file: {
+            id: "chip-layout",
+            name: file.name,
+            mimeType: file.type,
+            sizeBytes: file.size,
+            file,
+          },
+        }}
+      />
+    </div>,
+  );
+  const [plain, thumbnail] = screen.container.querySelectorAll('[aria-label="Planning file"]');
+  const geometry = (node: Element) => {
+    const rect = node.getBoundingClientRect();
+    const style = getComputedStyle(node);
+    return [rect.width, rect.height, style.padding, style.lineHeight, style.gap];
+  };
+  const expected = geometry(plain!);
+  expect(geometry(thumbnail!)).toEqual(expected);
+  await vi.waitFor(() => expect(thumbnail!.querySelector("img")).not.toBeNull(), 10_000);
+  const image = thumbnail!.querySelector("img")!;
+  await vi.waitFor(() => expect(image.naturalWidth).toBeGreaterThan(0));
+  expect(geometry(thumbnail!)).toEqual(expected);
+  const chipRect = thumbnail!.getBoundingClientRect();
+  const imageRect = image.getBoundingClientRect();
+  expect(imageRect.top).toBeGreaterThan(chipRect.top);
+  expect(imageRect.bottom).toBeLessThan(chipRect.bottom);
+  expect(imageRect.left).toBeGreaterThan(chipRect.left);
+  expect(imageRect.right).toBeLessThan(chipRect.right);
+  expect((imageRect.top + imageRect.bottom) / 2).toBeCloseTo(
+    (chipRect.top + chipRect.bottom) / 2,
+    1,
+  );
+  await act(() => image.dispatchEvent(new Event("error")));
+  expect(thumbnail!.querySelector("img")).toBeNull();
+  expect(thumbnail!.querySelector("svg")).not.toBeNull();
+  expect(geometry(thumbnail!)).toEqual(expected);
+});
+
 it("paints and caches a bounded CSV thumbnail without opening the viewer", async () => {
   const { loadDocumentThumbnail } = await import("./documentThumbnail");
   const file = new Blob(["Team,Status\nPlatform,Ready\nExperience,Review\n"], { type: "text/csv" });
@@ -1961,7 +2018,9 @@ it("renders PDF thumbnails and navigates, searches, zooms, and selects PDF pages
       selection.removeAllRanges();
     });
     await screen.getByRole("searchbox", { name: "Find in PDF" }).fill(" ");
-    await vi.waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("0/0"));
+    await vi.waitFor(() =>
+      expect(screen.container.querySelector('[role="status"]')?.textContent).toBe("0/0"),
+    );
   } finally {
     URL.revokeObjectURL(url);
   }

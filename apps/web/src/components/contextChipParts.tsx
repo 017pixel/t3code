@@ -260,7 +260,13 @@ export function FileChip(props: {
         {...props.documentPreview}
         fallback={<PierreEntryIcon pathValue={props.name} kind="file" theme={props.theme} />}
       >
-        {({ icon, label }) => <FileChipSurface {...props} icon={icon} size={label ?? props.size} />}
+        {({ icon, label }) => (
+          <FileChipSurface
+            {...props}
+            icon={icon}
+            tooltip={label ? `${props.tooltip}\n${label}` : props.tooltip}
+          />
+        )}
       </DocumentAttachmentThumbnail>
     );
   }
