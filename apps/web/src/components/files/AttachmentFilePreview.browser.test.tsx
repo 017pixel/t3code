@@ -1139,6 +1139,7 @@ it.each([
 
 it.each([
   "footnotes",
+  "note roots",
   "endnotes",
   "header",
   "footer",
@@ -1157,7 +1158,9 @@ it.each([
     ? "styles"
     : role === "picture numbering"
       ? "numbering"
-      : role;
+      : role === "note roots"
+        ? "footnotes"
+        : role;
   archive.file(
     "_rels/.rels",
     '<Relationships><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
@@ -1182,7 +1185,33 @@ it.each([
             ? `<w:${role === "header" ? "hdr" : "ftr"} xmlns:w="${ns}">${text("omitted payload").repeat(2_000)}</w:${role === "header" ? "hdr" : "ftr"}>`
             : `<w:${role} xmlns:w="${ns}"><w:${role.slice(0, -1)} w:id="1">${text("omitted payload").repeat(2_000)}</w:${role.slice(0, -1)}></w:${role}>`;
   archive.file("word/media/aux.xml", xml);
+  if (role === "note roots") {
+    archive.file(
+      "word/document.xml",
+      `<w:document xmlns:w="${ns}"><w:body>${text("body retained")}${Array.from({ length: 200 }, (_, id) => `<w:p><w:r><w:footnoteReference w:id="${id}"/></w:r></w:p>`).join("")}</w:body></w:document>`,
+    );
+    archive.file(
+      "word/media/aux.xml",
+      `<w:footnotes xmlns:w="${ns}" padding="${"x".repeat(32_000)}">${Array.from({ length: 200 }, (_, id) => `<w:footnote w:id="${id}">${text("omitted payload")}</w:footnote>`).join("")}</w:footnotes>`,
+    );
+  }
   const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
+  if (role === "note roots") {
+    const { SaxesParser } = await import("saxes");
+    const { prepareOffice } = await import("./officeArchive");
+    const parse = vi.spyOn(SaxesParser.prototype, "write");
+    try {
+      expect((await prepareOffice(await file.arrayBuffer(), "docx")).truncated).toBe(true);
+      expect(
+        parse.mock.calls.reduce(
+          (sum, [chunk]) => sum + (typeof chunk === "string" ? chunk.length : 0),
+          0,
+        ),
+      ).toBeLessThan(4 * 1024 * 1024);
+    } finally {
+      parse.mockRestore();
+    }
+  }
   const src = URL.createObjectURL(file);
   try {
     const container = document.createElement("div");
