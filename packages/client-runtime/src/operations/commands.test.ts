@@ -356,6 +356,58 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(layerTestCrypto)),
   );
 
+  it.effect("stops resending a message whose dispatch keeps losing the socket", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      const healthySession = Option.getOrThrow(yield* SubscriptionRef.get(supervisor.session));
+      const dyingClient: WsRpcProtocolClient = {
+        ...healthySession.client,
+        [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
+          Effect.gen(function* () {
+            commands.push(command);
+            yield* SubscriptionRef.set(
+              supervisor.session,
+              Option.some({ ...healthySession, client: dyingClient }),
+            );
+            return yield* new RpcClientError.RpcClientError({
+              reason: new RpcClientError.RpcClientDefect({
+                message: "socket closed",
+                cause: new Error("socket closed"),
+              }),
+            });
+          }),
+      } as unknown as WsRpcProtocolClient;
+      yield* SubscriptionRef.set(
+        supervisor.session,
+        Option.some({ ...healthySession, client: dyingClient }),
+      );
+
+      const error = yield* startThreadTurn({
+        commandId: CommandId.make("command-socket-killer"),
+        threadId: v2ThreadId,
+        message: {
+          messageId: MessageId.make("message-socket-killer"),
+          role: "user",
+          text: "hello",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.flip,
+      );
+
+      expect(commands.map((command) => command.commandId)).toEqual([
+        "command-socket-killer",
+        "command-socket-killer",
+        "command-socket-killer",
+      ]);
+      expect(error._tag).toBe("RpcClientError");
+    }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
   it.effect("retains projection-shaped delivery for servers without command context support", () =>
     Effect.gen(function* () {
       const activeRunId = RunId.make("legacy-active-run");

@@ -33,8 +33,13 @@ import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2Pend
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 
-import { getInitialServerConfig, request } from "../rpc/client.ts";
+import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import { getInitialServerConfig, isRpcClientError, request } from "../rpc/client.ts";
 
 interface CommandMetadata {
   readonly commandId?: CommandId;
@@ -271,6 +276,34 @@ const allocateCommandId = Effect.fn("EnvironmentCommands.allocateCommandId")(fun
 
 const dispatch = (command: OrchestrationV2Command) =>
   request(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, command);
+
+// A socket can close after the server accepted the frame but before it answered.
+// The server replays an accepted commandId from its receipt, so resending on the
+// next session cannot duplicate the message. The bound stops a frame that itself
+// kills the socket from looping across reconnects.
+const MAX_LOST_TRANSPORT_RESENDS = 2;
+
+const dispatchMessage = Effect.fn("EnvironmentCommands.dispatchMessage")(function* (
+  command: Extract<OrchestrationV2Command, { type: "message.dispatch" }>,
+) {
+  const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+  for (let resends = 0; ; resends += 1) {
+    const attemptSession = yield* SubscriptionRef.get(supervisor.session);
+    const result = yield* dispatch(command).pipe(Effect.result);
+    if (Result.isSuccess(result)) return result.success;
+    if (!isRpcClientError(result.failure) || resends >= MAX_LOST_TRANSPORT_RESENDS) {
+      return yield* result.failure;
+    }
+    yield* SubscriptionRef.changes(supervisor.session).pipe(
+      Stream.filter(
+        (session) =>
+          Option.isSome(session) &&
+          !(Option.isSome(attemptSession) && session.value === attemptSession.value),
+      ),
+      Stream.runHead,
+    );
+  }
+});
 
 const getProjection = (threadId: ThreadId) =>
   request(ORCHESTRATION_V2_WS_METHODS.getThreadProjection, { threadId });
@@ -734,7 +767,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
 
   const requestedMode = input.dispatchMode ?? "auto";
   if (requestedMode === "start") {
-    return yield* dispatch({
+    return yield* dispatchMessage({
       type: "message.dispatch",
       commandId,
       createdBy: "user",
@@ -801,7 +834,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
   const shouldSendTitleSeed =
     input.titleSeed !== undefined &&
     (serverResolvesCommandContext || projection?.messages.length === 0);
-  return yield* dispatch({
+  return yield* dispatchMessage({
     type: "message.dispatch",
     commandId,
     createdBy: "user",
