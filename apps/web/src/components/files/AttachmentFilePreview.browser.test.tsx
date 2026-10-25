@@ -354,6 +354,70 @@ describe("large text preview recovery", () => {
     await vi.waitFor(() => expect(load).toHaveBeenCalledWith(0));
   });
 });
+it("rejects oversized embedded images before decoding pixels and retains ordinary images", async () => {
+  const { officeImageBitmap } = await import("./office/image-bitmap");
+  const canvas = new OffscreenCanvas(2, 3);
+  canvas.getContext("2d");
+  const blob = await canvas.convertToBlob({ type: "image/png" });
+  const bytes = await blob.arrayBuffer();
+  new DataView(bytes).setUint32(16, 12000);
+  new DataView(bytes).setUint32(20, 12000);
+  const decode = vi.spyOn(globalThis, "createImageBitmap");
+  try {
+    await expect(officeImageBitmap(new Blob([bytes]))).rejects.toThrow("pixel limit");
+    expect(decode).not.toHaveBeenCalled();
+    const bitmap = await officeImageBitmap(blob);
+    expect([bitmap.width, bitmap.height]).toEqual([2, 3]);
+    bitmap.close();
+  } finally {
+    decode.mockRestore();
+  }
+});
+
+it.each(["utf-16le", "utf-16be", "windows-1252"])(
+  "preserves %s Office XML and safe hyperlink targets",
+  async (encoding) => {
+    const { default: JSZip } = await import("jszip");
+    const { prepareOffice } = await import("./officeArchive");
+    const archive = new JSZip();
+    const encode = (text: string) => {
+      const xml = `<?xml version="1.0" encoding="${encoding}"?>${text}`;
+      if (encoding === "windows-1252") return Uint8Array.from(xml, (char) => char.charCodeAt(0));
+      const bytes = new Uint8Array(2 + xml.length * 2);
+      const view = new DataView(bytes.buffer);
+      const little = encoding === "utf-16le";
+      view.setUint16(0, 0xfeff, little);
+      for (let i = 0; i < xml.length; i++) view.setUint16(2 + i * 2, xml.charCodeAt(i), little);
+      return bytes;
+    };
+    archive.file(
+      "word/document.xml",
+      encode(
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>café</w:t></w:r></w:p></w:body></w:document>',
+      ),
+    );
+    archive.file(
+      "word/_rels/document.xml.rels",
+      encode(
+        `<Relationships>${["https://example.com/page", "http://example.com", "mailto:maria@example.com", "javascript:alert(1)", "file:///tmp/private"].map((target, i) => `<Relationship Id="r${i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" TargetMode="External" Target="${target}"/>`).join("")}</Relationships>`,
+      ),
+    );
+    const prepared = await prepareOffice(
+      await archive.generateAsync({ type: "arraybuffer" }),
+      "docx",
+    );
+    const result = await JSZip.loadAsync(prepared.bytes);
+    expect(await result.file("word/document.xml")!.async("string")).toContain("café");
+    const links = await result.file("word/_rels/document.xml.rels")!.async("string");
+    expect(links).toContain('encoding="UTF-8"');
+    expect(links).toContain("https://example.com/page");
+    expect(links).toContain("http://example.com");
+    expect(links).toContain("mailto:maria@example.com");
+    expect(links).not.toContain("javascript:");
+    expect(links).not.toContain("file:");
+  },
+);
+
 it.each([
   ["", "worksheets/./sheet1.xml", false],
   ["x:", "../xl/worksheets/sheet1.xml", false],
