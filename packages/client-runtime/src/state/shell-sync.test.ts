@@ -129,6 +129,7 @@ const makePersistenceHarness = Effect.fn("test.makeShellPersistenceHarness")(fun
 const RESUMABLE_CONFIG = {
   shellResumeCompletionMarker: true,
   shellThreadFamilies: true,
+  shellOlderSettled: true,
   shellResumeKey: "server-1",
 };
 
@@ -230,7 +231,12 @@ const savedResumableShell = Effect.fn(function* () {
   return (yield* Ref.get(before.saved)).at(-1)!;
 });
 
-const RESUMED_INPUT = { afterSequence: 10, omitIdleSubagents: true, requestCompletionMarker: true };
+const RESUMED_INPUT = {
+  afterSequence: 10,
+  omitIdleSubagents: true,
+  omitOlderSettled: true,
+  requestCompletionMarker: true,
+};
 
 describe("environment shell synchronization", () => {
   it.effect("skips unchanged shell writes, persists resets and flushes changed rows", () =>
@@ -1050,8 +1056,8 @@ describe("environment shell synchronization", () => {
     { name: "another client build", build: "build-2" },
     { name: "other snapshot flags", config: { ...RESUMABLE_CONFIG, shellThreadFamilies: false } },
     {
-      name: "older settled threads left out",
-      config: { ...RESUMABLE_CONFIG, shellOlderSettled: true },
+      name: "a server that keeps older settled threads",
+      config: { ...RESUMABLE_CONFIG, shellOlderSettled: false },
     },
     {
       name: "a server without completion markers",

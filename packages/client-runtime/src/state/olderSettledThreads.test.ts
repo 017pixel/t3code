@@ -428,6 +428,32 @@ describe("createOlderSettledThreadAtoms", () => {
     }),
   );
 
+  it.effect("a completed resume reads the cached counts once more", () =>
+    Effect.gen(function* () {
+      const { replies, requests, atoms, registry, setShell, until } = yield* makeAtoms();
+      const olderAtom = atoms.olderSettledAtom(environmentId);
+      const count = (value: OlderSettled | null) => value?.counts.get(project);
+      registry.mount(olderAtom);
+
+      // A resume keeps the cached snapshot, whose cursor is past its counts.
+      const cached = shellSnapshot({ sequence: 5, asOfSequence: 3, count: 5 });
+      setShell({ snapshot: cached });
+      expect(count(registry.get(olderAtom))).toBe(5);
+      yield* Queue.offer(
+        replies,
+        Effect.succeed({
+          snapshotSequence: 6,
+          threads: [],
+          counts: [{ projectId: project, count: 4 }],
+        }),
+      );
+      setShell({ snapshot: cached, generation: 1 });
+      yield* TestClock.adjust("500 millis");
+      expect(count(yield* until(olderAtom, (value) => count(value) === 4))).toBe(4);
+      expect(requests).toEqual([{ before: { settledAt: before }, limit: 0 }]);
+    }),
+  );
+
   it.effect("reads pages in order until a short one, and retries a failed page", () =>
     Effect.gen(function* () {
       const { replies, requests, atoms, registry, setShell, until } = yield* makeAtoms();
