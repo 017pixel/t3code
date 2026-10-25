@@ -2868,8 +2868,34 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             return;
           }
           const normalizedContexts = normalizeTerminalContextsForThread(threadId, contexts);
+          // A context deduplicated onto an earlier copy of its selection hands its references over.
+          const survivorByReferenceId = new Map<string, TerminalContextDraft>();
+          for (const context of contexts) {
+            const normalized = normalizeTerminalContextForThread(threadId, context);
+            if (!normalized) continue;
+            const dedupKey = terminalContextDedupKey(normalized);
+            const survivor = normalizedContexts.find(
+              (candidate) =>
+                candidate.id === normalized.id || terminalContextDedupKey(candidate) === dedupKey,
+            );
+            if (survivor && survivor.id !== normalized.id) {
+              survivorByReferenceId.set(terminalContextReference(normalized).contextId, survivor);
+            }
+          }
           set((state) => {
             const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            const remappedPrompt =
+              survivorByReferenceId.size === 0
+                ? existing.prompt
+                : replaceComposerContextReferences(existing.prompt, (occurrence) => {
+                    const survivor =
+                      occurrence.kind === "terminal"
+                        ? survivorByReferenceId.get(occurrence.contextId)
+                        : undefined;
+                    return survivor
+                      ? formatInlineContextReference(terminalContextReference(survivor))
+                      : occurrence.source;
+                  });
             const nextDraft: ComposerThreadDraftState = {
               ...existing,
               prompt: ensureInlineContextReferences(
@@ -2881,7 +2907,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                         prompt,
                         terminalContextReference(context).contextId,
                       ).prompt,
-                    existing.prompt,
+                    remappedPrompt,
                   ),
                 normalizedContexts.map(terminalContextReference),
               ),

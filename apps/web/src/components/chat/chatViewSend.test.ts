@@ -2,6 +2,9 @@ import { EnvironmentId, PROVIDER_SEND_TURN_MAX_ATTACHMENTS, ThreadId } from "@t3
 import { expect, it } from "vite-plus/test";
 
 import { useComposerDraftStore } from "../../composerDraftStore";
+import { terminalContextReference } from "../../lib/composerContextRecords";
+import { formatInlineContextReference } from "../../lib/composerContextReferences";
+import type { TerminalContextDraft } from "../../lib/terminalContext";
 import { snapshotComposerSend } from "../ChatView.logic";
 import { restoreComposerDraft } from "./chatViewSend";
 
@@ -69,4 +72,41 @@ it("leaves a full newer draft untouched when the unsent attachments do not fit",
   expect(draft?.prompt).toBe("Newer draft");
   expect(draft?.images).toHaveLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS);
   expect(unsent.images.map((attachment) => attachment.id)).toEqual(["unsent"]);
+});
+
+it("points a restored terminal reference at the newer draft's copy of the same selection", () => {
+  useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
+  const store = useComposerDraftStore.getState();
+  const selection = (id: string): TerminalContextDraft => ({
+    id,
+    threadId: target.threadId,
+    createdAt: "2026-10-25T00:00:00.000Z",
+    terminalId: "default",
+    terminalLabel: "Terminal 1",
+    lineStart: 4,
+    lineEnd: 6,
+    text: "npm test failed",
+  });
+  const newer = selection("newer-selection");
+  const unsentSelection = selection("unsent-selection");
+  const reference = (context: TerminalContextDraft) =>
+    formatInlineContextReference(terminalContextReference(context));
+  store.setPrompt(target, `Newer ${reference(newer)}`);
+  store.setTerminalContexts(target, [newer]);
+  const unsent = snapshotComposerSend({
+    prompt: `Unsent ${reference(unsentSelection)}`,
+    images: [],
+    files: [],
+    terminalContexts: [unsentSelection],
+    sendableTerminalContexts: [unsentSelection],
+    previewAnnotations: [],
+    reviewComments: [],
+    threadContexts: [],
+  });
+
+  expect(restoreComposerDraft(target, unsent)).toBe(true);
+
+  const draft = store.getComposerDraft(target);
+  expect(draft?.terminalContexts.map((context) => context.id)).toEqual(["newer-selection"]);
+  expect(draft?.prompt).toBe(`Newer ${reference(newer)}\n\nUnsent ${reference(newer)}`);
 });

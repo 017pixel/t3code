@@ -34,7 +34,9 @@ function drop(environmentId: EnvironmentId, messageId: MessageId) {
 export const unsentMessages = {
   keep: (record: UnsentMessage) => {
     drop(record.environmentId, record.display.id);
-    records = [...records, record];
+    // It is no longer queued, so it belongs in the timeline rather than the queue.
+    const { inputIntent, ...display } = record.display;
+    records = [...records, inputIntent === "queued_turn" ? { ...record, display } : record];
     for (const listener of listeners) listener();
   },
   restore: (environmentId: EnvironmentId, messageId: MessageId): boolean => {

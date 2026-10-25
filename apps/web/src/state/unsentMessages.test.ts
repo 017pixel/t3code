@@ -16,6 +16,7 @@ import {
 } from "../composerDraftStore";
 import { snapshotComposerSend } from "../components/ChatView.logic";
 import { reopenUnsentDraftThread, restoreComposerDraft } from "../components/chat/chatViewSend";
+import { deriveTimelineEntriesFromVisibleTurnItems } from "../session-logic";
 import type { ChatMessage } from "../types";
 import { unsentMessages } from "./unsentMessages";
 
@@ -131,4 +132,28 @@ it("restores a cancelled launch into its thread after the newer draft there is s
   const draft = store.getComposerDraft(reopenedRef);
   expect(draft?.prompt).toBe("Unsent message");
   expect(draft?.images.map((attachment) => attachment.id)).toEqual(["unsent"]);
+});
+
+it("shows a kept queued message in its timeline instead of as a queued run", () => {
+  useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
+  const store = useComposerDraftStore.getState();
+  store.setPrompt(target, "Newer draft");
+  store.addImages(target, newerImages());
+  const snapshot = unsentSnapshot();
+  const restore = () => restoreComposerDraft(target, snapshot);
+  unsentMessages.keep({
+    environmentId,
+    threadId,
+    display: { ...display, inputIntent: "queued_turn" },
+    restore,
+  });
+
+  const [kept] = unsentMessages.getSnapshot();
+  expect(kept?.display.inputIntent).not.toBe("queued_turn");
+  const entries = deriveTimelineEntriesFromVisibleTurnItems({
+    visibleTurnItems: [],
+    optimisticMessages: unsentMessages.getSnapshot().map((record) => record.display),
+  });
+  expect(entries.map((entry) => entry.id)).toEqual([messageId]);
+  unsentMessages.discard(environmentId, messageId);
 });
