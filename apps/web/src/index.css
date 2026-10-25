@@ -1286,6 +1286,9 @@ html[data-theme-id]:not([data-theme-id=""]) {
      a distinct action color make these identical. */
   --primary: var(--app-theme-message-action);
   --primary-foreground: var(--app-theme-message-action-foreground);
+  /* Theme action colors are tuned for filled buttons, not text, so themed
+     links keep the info color. */
+  --link: var(--info-foreground);
   --secondary: var(--app-theme-secondary);
   --secondary-foreground: var(--app-theme-secondary-foreground);
   --muted: var(--app-theme-muted);
