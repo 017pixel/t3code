@@ -101,8 +101,11 @@ export function mergeResponseGroupCheckpoints(
   }
   return {
     ...last,
-    // With no completed run to end at, the card opens its last run's own diff.
-    ...(end === undefined ? {} : { rangeFromTurnCount: first.checkpointTurnCount - 1 }),
+    // With no completed run to end at, or only one turn to show, the card
+    // opens that run's own diff.
+    ...(end === undefined || end === first
+      ? {}
+      : { rangeFromTurnCount: first.checkpointTurnCount - 1 }),
     files: Array.from(files, ([path, file]) => ({
       path,
       kind: file.kind !== "deleted" && file.firstKind === "added" ? "added" : file.kind,

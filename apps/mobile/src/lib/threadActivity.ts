@@ -1947,7 +1947,7 @@ export function deriveThreadFeedPresentation(
       group.unfinishedRunIds,
     );
     for (const runId of runIds) groupCoveredRunIds.add(runId);
-    if (merged) result[index] = { ...row, checkpointSummary: merged };
+    if (merged && merged.files.length > 0) result[index] = { ...row, checkpointSummary: merged };
   }
   const workRowByRunId = new Map<RunId, number>();
   for (let index = tailStart; index < result.length; index += 1) {

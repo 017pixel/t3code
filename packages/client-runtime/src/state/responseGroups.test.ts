@@ -49,16 +49,27 @@ describe("mergeResponseGroupCheckpoints", () => {
   it("ends the range at the last completed run while still counting a stopped run's files", () => {
     const stopped = summary(6, [{ path: "late.ts", kind: "modified", additions: 3, deletions: 0 }]);
     const merged = mergeResponseGroupCheckpoints(
-      [summary(5, [{ path: "a.ts", kind: "modified", additions: 1, deletions: 0 }]), stopped],
+      [
+        summary(4, [{ path: "a.ts", kind: "modified", additions: 1, deletions: 0 }]),
+        summary(5, []),
+        stopped,
+      ],
       new Set([stopped.runId]),
     );
-    expect(merged).toMatchObject({ checkpointTurnCount: 5, rangeFromTurnCount: 4 });
+    expect(merged).toMatchObject({ checkpointTurnCount: 5, rangeFromTurnCount: 3 });
     expect(merged?.files.map((file) => file.path)).toEqual(["a.ts", "late.ts"]);
     const none = mergeResponseGroupCheckpoints(
       [summary(5, []), stopped],
       new Set([RunId.make("run-5"), stopped.runId]),
     );
     expect(none).not.toHaveProperty("rangeFromTurnCount");
+    // Ending at the first turn is that turn's own diff, not a range.
+    const single = mergeResponseGroupCheckpoints(
+      [summary(5, [{ path: "a.ts", kind: "modified", additions: 1, deletions: 0 }]), stopped],
+      new Set([stopped.runId]),
+    );
+    expect(single).toMatchObject({ checkpointTurnCount: 5 });
+    expect(single).not.toHaveProperty("rangeFromTurnCount");
   });
 
   it("returns a lone ready checkpoint unchanged, and nothing without one", () => {
