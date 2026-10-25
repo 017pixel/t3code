@@ -1,5 +1,6 @@
 import {
   DEFAULT_CLIENT_SETTINGS,
+  type PreviewOpenInput,
   type PreviewSessionSnapshot,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
@@ -9,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import * as browserDefaults from "~/browser/browserDefaults";
 import { BrowserSettingsReadError, openUrlInPreview } from "~/browser/openFileInPreview";
+import * as previewRuntime from "~/browser/previewRuntime";
 import { __setClientSettingsForTests } from "~/hooks/useSettings";
 import { useRightPanelStore } from "~/rightPanelStore";
 import {
@@ -86,6 +88,26 @@ describe("openPreviewSession", () => {
           profileId: "work",
         },
       });
+    },
+  );
+
+  it.each(["session", "link"] as const)(
+    "opens a server %s at the appearance saved when it opens",
+    async (entryPoint) => {
+      vi.spyOn(previewRuntime, "previewRuntimeFor").mockReturnValue("server");
+      const colorSchemes: Array<PreviewOpenInput["colorScheme"]> = [];
+      const openPreview = async (request: { readonly input: PreviewOpenInput }) => {
+        colorSchemes.push(request.input.colorScheme);
+        return AsyncResult.success(snapshot);
+      };
+      const open = entryPoint === "session" ? openPreviewSession : openUrlInPreview;
+
+      for (const browserDefaultAppearance of ["light", "dark", "system"] as const) {
+        __setClientSettingsForTests({ ...DEFAULT_CLIENT_SETTINGS, browserDefaultAppearance });
+        await open({ openPreview, threadRef, url: "https://t3.chat/" });
+      }
+
+      expect(colorSchemes).toEqual(["light", "dark", "system"]);
     },
   );
 });

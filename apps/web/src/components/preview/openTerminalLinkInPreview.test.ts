@@ -1,4 +1,4 @@
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { PreviewOpenInput, ScopedThreadRef } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -26,6 +26,11 @@ vi.mock("~/browser/browserDefaults", () => ({
   browserDefaultOpenProfileId: (defaults: { profileId: string }) => defaults.profileId,
 }));
 
+vi.mock("~/browser/previewRuntime", () => ({
+  isPreviewAvailableFor: () => true,
+  previewRuntimeFor: () => "server",
+}));
+
 const linkTargetMocks = vi.hoisted(() => ({
   preference: vi.fn<() => "system" | "app">(),
 }));
@@ -38,6 +43,7 @@ vi.mock("~/browser/browserLinkTarget", () => ({
 const hydratedDefaults = {
   viewport: { _tag: "fixed", width: 1280, height: 720 } as const,
   profileId: "work",
+  appearance: "dark",
 };
 
 const threadRef = {
@@ -70,5 +76,22 @@ describe("openTerminalLinkInPreview", () => {
 
     expect(reportError).not.toHaveBeenCalled();
     expect(fallbackToBrowser).not.toHaveBeenCalled();
+  });
+
+  it("opens the link at the saved default appearance", async () => {
+    const colorSchemes: Array<PreviewOpenInput["colorScheme"]> = [];
+
+    await openTerminalLinkInPreview({
+      url: "http://localhost:5173/",
+      threadRef,
+      openPreview: async (request) => {
+        colorSchemes.push(request.input.colorScheme);
+        return AsyncResult.failure(Cause.interrupt());
+      },
+      fallbackToBrowser: vi.fn(),
+      forceBrowser: false,
+    });
+
+    expect(colorSchemes).toEqual(["dark"]);
   });
 });
