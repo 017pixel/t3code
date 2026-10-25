@@ -166,12 +166,7 @@ export function ComposerControlsBar(props: {
       ? [
           {
             id: "traits",
-            content: (
-              <>
-                <ComposerControlSeparator size={composerControlsCollapsed ? "xs" : "sm"} />
-                {restingProviderTraitsPicker}
-              </>
-            ),
+            content: restingProviderTraitsPicker,
           },
         ]
       : []),

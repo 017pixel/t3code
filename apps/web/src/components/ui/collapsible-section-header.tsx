@@ -18,7 +18,8 @@ export function CollapsibleSectionHeader({
 }: Omit<ComponentProps<"button">, "className" | "style" | "aria-expanded"> & {
   expanded: boolean;
   tone?: keyof typeof tones;
-  variant?: "default" | "panel";
+  /** `row` matches the thread details panel's plain rows instead of a ruled header. */
+  variant?: "default" | "panel" | "row";
   accessory?: ReactNode;
 }) {
   return (
@@ -28,16 +29,24 @@ export function CollapsibleSectionHeader({
       aria-expanded={expanded}
       className={cn(
         "flex h-8 w-full cursor-pointer items-center gap-2 rounded-md text-left text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
-        variant === "panel" ? "ps-2 pe-2.5" : "px-2",
-        tones[tone].label,
+        variant === "row"
+          ? "rounded-lg px-2.5 text-[13px] text-foreground/80 hover:bg-black/[0.035] dark:hover:bg-white/[0.08]"
+          : cn(variant === "panel" ? "ps-2 pe-2.5" : "px-2", tones[tone].label),
       )}
     >
       <span className="shrink-0">{children}</span>
-      <span aria-hidden className={cn("h-px min-w-2 flex-1", tones[tone].line)} />
+      <span
+        aria-hidden
+        className={cn("h-px min-w-2 flex-1", variant !== "row" && tones[tone].line)}
+      />
       {accessory}
       <ChevronDownIcon
         aria-hidden
-        className={cn("size-3 shrink-0 transition-transform", !expanded && "rotate-180")}
+        className={cn(
+          "shrink-0 transition-transform",
+          variant === "row" ? "size-4 text-muted-foreground" : "size-3",
+          !expanded && "rotate-180",
+        )}
       />
     </button>
   );

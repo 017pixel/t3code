@@ -337,13 +337,13 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "snooze-limited-threads",
-    title: "Snooze limited threads",
+    title: "Snooze until limits reset",
     to: "/settings/general",
     searchTerms: ["usage quota rate limit reset wake recover continue"],
   },
   {
     id: "auto-resume-limited-threads",
-    title: "Auto-resume limited threads",
+    title: "Resume after usage limits",
     to: "/settings/general",
     searchTerms: ["usage quota rate limit reset recover continue"],
   },

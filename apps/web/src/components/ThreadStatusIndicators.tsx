@@ -287,11 +287,12 @@ function PullRequestBadge({
   return (
     <Tooltip key={opensList ? "list" : "link"}>
       <TooltipTrigger render={control}>
-        <span
-          className={cn("contents font-normal text-xs tabular-nums", presentation.toneClassName)}
-        >
-          <presentation.Icon aria-hidden className="size-3 shrink-0" />
-          <span>{presentation.text}</span>
+        <span className="contents font-normal text-xs tabular-nums">
+          <presentation.Icon
+            aria-hidden
+            className={cn("size-3 shrink-0", presentation.toneClassName)}
+          />
+          <span className="text-secondary-label">{presentation.text}</span>
         </span>
       </TooltipTrigger>
       <TooltipPopup

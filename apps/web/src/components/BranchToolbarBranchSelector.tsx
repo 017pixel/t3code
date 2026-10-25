@@ -726,9 +726,7 @@ export function BranchToolbarBranchSelector({
                 className="w-full"
               />
             </ComposerContextLabel>
-            {displayMode !== "panel" ? (
-              <ChevronDownIcon className="size-3 shrink-0 opacity-50" />
-            ) : null}
+            {displayMode !== "panel" ? <ChevronDownIcon className="size-3 shrink-0" /> : null}
           </ComboboxTrigger>
         </span>
         {displayMode === "panel" && prNumber !== undefined && prUrl !== undefined ? (

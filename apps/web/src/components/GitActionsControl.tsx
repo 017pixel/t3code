@@ -1151,6 +1151,14 @@ export default function GitActionsControl({
       ? (quickAction.hint ?? "This action is currently unavailable.")
       : null;
   const gitActionProgress = resolveGitActionProgressPresentation(vcsActionState);
+  // A fresh draft with nothing to commit, push, or diff hides those rows until there is work.
+  const quietEmptyDraft =
+    isPanel &&
+    draftId !== undefined &&
+    gitActionProgress === null &&
+    quickAction.disabled &&
+    !changesTotals?.insertions &&
+    !changesTotals?.deletions;
   const pendingDefaultBranchActionCopy = pendingDefaultBranchAction
     ? resolveDefaultBranchActionDialogCopy({
         action: pendingDefaultBranchAction.action,
@@ -1684,7 +1692,7 @@ export default function GitActionsControl({
             {initAction.isPending ? "Initializing..." : "Initialize Git"}
           </span>
         </ThreadDetailsControl>
-      ) : compact && !gitActionProgress && !visibleInlineSuccess ? null : (
+      ) : quietEmptyDraft || (compact && !gitActionProgress && !visibleInlineSuccess) ? null : (
         <ActionGroup
           role="group"
           aria-label="Git actions"
@@ -1821,7 +1829,7 @@ export default function GitActionsControl({
         </ActionGroup>
       )}
 
-      {isPanel && isRepo ? (
+      {isPanel && isRepo && !quietEmptyDraft ? (
         <ThreadDetailsControl
           type="button"
           variant="ghost"
@@ -1832,11 +1840,21 @@ export default function GitActionsControl({
         >
           <FileDiffIcon className={THREAD_DETAILS_PANEL_ICON_CLASS} aria-hidden />
           <span className={cn("flex-1 text-left", THREAD_DETAILS_PANEL_LABEL_CLASS)}>Changes</span>
-          <span className="flex items-center gap-1 font-mono text-2xs tabular-nums">
-            <span className="text-diff-addition">
+          <span className="flex items-center gap-1 font-mono text-xs tabular-nums">
+            <span
+              className={
+                changesTotals?.insertions
+                  ? "text-diff-addition-foreground"
+                  : "text-muted-foreground"
+              }
+            >
               +{formatDiffCount(changesTotals?.insertions ?? 0)}
             </span>
-            <span className="text-diff-deletion">
+            <span
+              className={
+                changesTotals?.deletions ? "text-diff-deletion-foreground" : "text-muted-foreground"
+              }
+            >
               -{formatDiffCount(changesTotals?.deletions ?? 0)}
             </span>
           </span>
