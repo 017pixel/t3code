@@ -151,11 +151,11 @@ function setupEntry() {
     return <div>{data.files.map((file) => file.path).join(",")}</div>;
   }
   function Entry() {
-    const ready = usePullRequestDiffEntry(navigation);
+    const { ready, attachShell } = usePullRequestDiffEntry(navigation);
     useLayoutEffect(() => {
       events.push(ready ? "body-commit" : "shell-commit");
     }, [ready]);
-    return ready ? <Body /> : <div>Opening changes</div>;
+    return ready ? <Body /> : <div ref={attachShell}>Opening changes</div>;
   }
   const container = document.createElement("div");
   const root = createRoot(container);

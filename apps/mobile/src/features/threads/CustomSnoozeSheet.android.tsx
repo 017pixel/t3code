@@ -27,10 +27,11 @@ import {
   type CustomSnoozeInput,
 } from "@t3tools/client-runtime/state/thread-settled";
 import { requireNativeModule } from "expo";
-import { useEffect, useState } from "react";
-import { AppState, useWindowDimensions } from "react-native";
+import { useState } from "react";
+import { useWindowDimensions } from "react-native";
 
 import { OverlayPortal } from "../../components/ui/OverlayPortal";
+import { useValueOnAppActive } from "../../lib/appState";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { useScaledTextRole } from "../settings/appearance/useScaledTextRole";
 import type { CustomSnoozeSheet as SharedCustomSnoozeSheet } from "./CustomSnoozeSheet.shared";
@@ -60,13 +61,7 @@ function systemUses24HourClock() {
 
 export function CustomSnoozeSheet(props: Props) {
   const { themeAppearance, themeVariables: colors } = useAppearancePreferences();
-  const [is24Hour, setIs24Hour] = useState(systemUses24HourClock);
-  useEffect(() => {
-    const subscription = AppState.addEventListener("change", (state) => {
-      if (state === "active") setIs24Hour(systemUses24HourClock());
-    });
-    return () => subscription.remove();
-  }, []);
+  const is24Hour = useValueOnAppActive(systemUses24HourClock);
   const titleTypography = useScaledTextRole("title");
   const bodyTypography = useScaledTextRole("footnote");
   const { width: windowWidth } = useWindowDimensions();

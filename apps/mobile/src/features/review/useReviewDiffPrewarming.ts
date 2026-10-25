@@ -1,5 +1,3 @@
-import { useEffect } from "react";
-
 import { getCachedNativeReviewDiffData } from "./nativeReviewDiffAdapter";
 import type { ReviewSectionItem } from "./reviewModel";
 import {
@@ -98,56 +96,74 @@ export function getReviewDiffPrewarmSections(input: {
   return pendingSections;
 }
 
-export function useReviewDiffPrewarming(input: {
+interface PrewarmJob {
+  readonly threadKey: string;
+  readonly sections: ReadonlyArray<ReviewSectionItem>;
+  readonly selectedSectionId: string | null;
+  handle: number | null;
+}
+
+let currentJob: PrewarmJob | null = null;
+
+function cancelReviewDiffPrewarm(): void {
+  if (currentJob?.handle != null) {
+    cancelIdle(currentJob.handle);
+  }
+  currentJob = null;
+}
+
+/**
+ * Ref callback for the native diff view: prewarming starts from its draw events, so it stops when
+ * that view goes away (the sheet closes or falls back to an empty, loading or error state).
+ * Module-level so its identity is stable and React does not detach it on every render.
+ */
+export function stopReviewDiffPrewarmOnDetach(): () => void {
+  return cancelReviewDiffPrewarm;
+}
+
+/**
+ * Parses the selected section's neighbors while idle. Call it on the selected section's draw and
+ * visible-range events so prewarming never competes with its first draw. Skipped while the native
+ * view is hidden, since only that view uses the parsed data.
+ */
+export function prewarmReviewDiffNeighbors(input: {
   readonly threadKey: string | null;
   readonly sections: ReadonlyArray<ReviewSectionItem>;
   readonly selectedSectionId: string | null;
 }): void {
   const { sections, selectedSectionId, threadKey } = input;
+  if (
+    currentJob !== null &&
+    currentJob.threadKey === threadKey &&
+    currentJob.sections === sections &&
+    currentJob.selectedSectionId === selectedSectionId
+  ) {
+    return;
+  }
+  cancelReviewDiffPrewarm();
+  if (!threadKey) {
+    return;
+  }
 
-  useEffect(() => {
-    if (!threadKey) {
-      return;
-    }
-
-    const pendingSections = getReviewDiffPrewarmSections({
-      threadKey,
-      sections,
-      selectedSectionId,
-    });
-    if (pendingSections.length === 0) {
-      return;
-    }
-
-    let cancelled = false;
-    let idleHandle: number | null = null;
-    let nextSectionIndex = 0;
-
-    const scheduleNext = () => {
-      idleHandle = scheduleIdle(() => {
-        if (cancelled) {
-          return;
-        }
-
-        const section = pendingSections[nextSectionIndex];
-        if (!section) {
-          return;
-        }
-        nextSectionIndex += 1;
-        prewarmReviewDiffSection({ threadKey, section });
-
-        if (nextSectionIndex < pendingSections.length) {
-          scheduleNext();
-        }
-      });
-    };
-
-    scheduleNext();
-    return () => {
-      cancelled = true;
-      if (idleHandle !== null) {
-        cancelIdle(idleHandle);
+  const job: PrewarmJob = { threadKey, sections, selectedSectionId, handle: null };
+  currentJob = job;
+  const pendingSections = getReviewDiffPrewarmSections({ threadKey, sections, selectedSectionId });
+  let nextSectionIndex = 0;
+  const scheduleNext = () => {
+    job.handle = scheduleIdle(() => {
+      job.handle = null;
+      const section = pendingSections[nextSectionIndex];
+      if (currentJob !== job || !section) {
+        return;
       }
-    };
-  }, [sections, selectedSectionId, threadKey]);
+      nextSectionIndex += 1;
+      prewarmReviewDiffSection({ threadKey, section });
+      if (nextSectionIndex < pendingSections.length) {
+        scheduleNext();
+      }
+    });
+  };
+  if (pendingSections.length > 0) {
+    scheduleNext();
+  }
 }

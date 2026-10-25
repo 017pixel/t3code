@@ -1,6 +1,6 @@
-import { useNavigation, useNavigationState } from "@react-navigation/native";
-import { useCallback, useEffect, useRef } from "react";
-import { BackHandler, Keyboard, View, type TextInputInstance } from "react-native";
+import { useNavigation } from "@react-navigation/native";
+import { useCallback, useRef } from "react";
+import { Keyboard, View, type TextInputInstance } from "react-native";
 import { AndroidHeaderIconButton } from "../../components/ui/AndroidScreenHeader";
 import { AndroidAnchoredMenu } from "../../components/ui/AndroidAnchoredMenu";
 import { SearchField } from "../../components/ui/SearchField";
@@ -8,17 +8,19 @@ import { useToolbarLayout } from "../../components/ui/useToolbarLayout";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { WorkspaceListToolbarRow } from "../workspace/WorkspaceListToolbarRow";
 import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
-import { usePullRequestFilterMenu } from "./PullRequestFilterMenuContext";
+import type { PullRequestFilterMenu } from "./PullRequestListFilters";
+import { backHandlerRef } from "../../lib/backHandler";
 import { openSettings } from "../settings/settings-navigation";
 
 /** PR search shares the thread list's Android header row. */
-export function PullRequestToolbar(props: { readonly onRequestVisibility?: () => void }) {
+export function PullRequestToolbar(props: {
+  readonly filters: PullRequestFilterMenu | null;
+  readonly onRequestVisibility?: () => void;
+}) {
   const navigation = useNavigation();
-  const filters = usePullRequestFilterMenu();
+  const { filters } = props;
   const workspace = useWorkspaceTabs()!;
   const { dispatch, getScrollOffset, recordScrollOffset, isTabActive } = workspace;
-  const homeFocused = useNavigationState((state) => state.routes[state.index]?.name === "Home");
-  const listFocused = homeFocused && workspace.state.selectedTab === "pullRequests";
   const { onRequestVisibility } = props;
   const tab = workspace.state.tabs.pullRequests;
   const input = useRef<TextInputInstance>(null);
@@ -40,33 +42,32 @@ export function PullRequestToolbar(props: { readonly onRequestVisibility?: () =>
     recordScrollOffset("pullRequests", tab.searchEntryOffset);
     dispatch({ type: "cancel", tab: "pullRequests" });
   }, [dispatch, recordScrollOffset, tab.searchEntryOffset]);
-  useEffect(() => {
-    if (!searching || !listFocused) return;
-    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
-      // Frozen Home screens can keep effects alive after a detail route opens.
-      const state = navigation.getState();
-      if (!state || state.routes[state.index]?.name !== "Home" || !isTabActive("pullRequests"))
-        return false;
-      if (Keyboard.isVisible()) Keyboard.dismiss();
-      else closeSearch();
-      return true;
-    });
-    return () => subscription.remove();
-  }, [searching, closeSearch, listFocused, navigation, isTabActive]);
+  // The search field stays mounted on frozen Home screens under a detail route
+  // or another tab, so back only applies while the PR list is in front.
+  const searchBackRef = backHandlerRef(() => {
+    const state = navigation.getState();
+    if (!state || state.routes[state.index]?.name !== "Home" || !isTabActive("pullRequests"))
+      return false;
+    if (Keyboard.isVisible()) Keyboard.dismiss();
+    else closeSearch();
+    return true;
+  });
   const { paddingTop, paddingBottom } = useToolbarLayout();
   return (
     <View className="bg-header px-2" style={{ paddingTop, paddingBottom }}>
       <WorkspaceListToolbarRow
         searching={searching}
         searchField={
-          <SearchField
-            inputRef={input}
-            accessibilityLabel="Search pull requests"
-            clearAccessibilityLabel="Clear search"
-            placeholder="Search pull requests"
-            value={tab.query}
-            onChangeText={(query) => dispatch({ type: "query", tab: "pullRequests", query })}
-          />
+          <View ref={searchBackRef} className="min-w-0 flex-1 flex-row">
+            <SearchField
+              inputRef={input}
+              accessibilityLabel="Search pull requests"
+              clearAccessibilityLabel="Clear search"
+              placeholder="Search pull requests"
+              value={tab.query}
+              onChangeText={(query) => dispatch({ type: "query", tab: "pullRequests", query })}
+            />
+          </View>
         }
         onCloseSearch={closeSearch}
         onOpenSearch={openSearch}

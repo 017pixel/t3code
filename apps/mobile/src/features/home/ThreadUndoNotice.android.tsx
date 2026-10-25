@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState } from "react";
+import { useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { GestureDetector, usePanGesture } from "react-native-gesture-handler";
 import Animated, {
@@ -53,13 +53,6 @@ function SwipeableUndoNotice(props: {
   const translation = useSharedValue(0);
   const width = useSharedValue(0);
 
-  useLayoutEffect(
-    () => () => {
-      cancelAnimation(translation);
-    },
-    [translation],
-  );
-
   const dismiss = () => {
     // A newer action can replace the notice while the swipe is animating out.
     if (readThreadUndoNotice() === notice) dismissThreadUndoNotice();
@@ -94,6 +87,10 @@ function SwipeableUndoNotice(props: {
   // Clip the entrance above navigation; the notice intentionally covers the anchored FAB.
   return (
     <Animated.View
+      ref={(node: object | null) => {
+        if (node === null) return;
+        return () => cancelAnimation(translation);
+      }}
       className="absolute inset-x-3 z-[100] overflow-hidden"
       style={{ bottom: insets.bottom + 12 }}
       pointerEvents="box-none"

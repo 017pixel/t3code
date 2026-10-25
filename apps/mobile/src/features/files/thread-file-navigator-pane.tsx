@@ -56,6 +56,7 @@ export function ThreadFileNavigatorPane(props: {
     environmentId: props.environmentId,
     cwd: canReadFiles ? props.cwd : null,
     searchQuery,
+    selectedPath: props.selectedPath,
   });
   const handlePreviewFile = useCallback(
     (relativePath: string) => {
@@ -88,8 +89,9 @@ export function ThreadFileNavigatorPane(props: {
     <FileTreeBrowser
       key={JSON.stringify([props.environmentId, props.cwd])}
       entries={entriesQuery.entries}
+      expandedPaths={entriesQuery.expandedPaths}
       loadingDirectories={entriesQuery.loadingDirectories}
-      onLoadDirectory={entriesQuery.loadDirectory}
+      onToggleDirectory={entriesQuery.toggleDirectory}
       error={
         canReadFiles
           ? entriesQuery.error

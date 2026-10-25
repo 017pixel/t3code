@@ -50,7 +50,7 @@ import { type PullRequestDetail, type PullRequestListEntry } from "@t3tools/cont
 import { PullRequestOverviewLoading } from "./PullRequestOverviewLoading";
 import { copyPullRequestLink, sharePullRequestLink } from "./pullRequestLink";
 import { pullRequestStatus } from "./pullRequestStatus";
-import { use, useEffect, useMemo, useRef, useState } from "react";
+import { use, useMemo, useRef, useState } from "react";
 import {
   Linking,
   Platform,
@@ -122,6 +122,7 @@ import { PullRequestMergeControls } from "./PullRequestMergeControls";
 import { PullRequestStackCard } from "./PullRequestStackCard";
 import { usePullRequestStack, type PullRequestStackState } from "./usePullRequestStack";
 import { usePullRequestEnvironmentFallback } from "./usePullRequestEnvironmentFallback";
+import { pullRequestFileJumpScope, subscribePullRequestFileJump } from "./pullRequestFileJump";
 import {
   capitalizeTerm,
   sourceControlClients,
@@ -339,19 +340,28 @@ export function PullRequestRouteScreen({ route }: StaticScreenProps<PullRequestP
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const [toolbarHeight, setToolbarHeight] = usePullRequestToolbarHeight(insets.bottom);
-  const params = route.params;
-  usePullRequestEnvironmentFallback(params);
+  const params = usePullRequestEnvironmentFallback(route.params);
   const connected = usePullRequestConnected(params.environmentId);
-  const [section, setSection] = useState<"overview" | "activity" | "guide">("overview");
-  const requestedSection = useRef(section);
+  const [chosenSection, setSection] = useState<"overview" | "activity" | "guide">("overview");
+  const requestedSection = useRef(chosenSection);
   const [listAnimationsReady, setListAnimationsReady] = useState(false);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const filesContent = usePullRequestFilesSection(params);
   const guidesEnabled = useReviewGuidesEnabled(params);
+  // The guide tab goes away while guides are off and overview stands in. The pick is kept, so
+  // guides coming back (a settings reload, a reconnect) return to the guide the user chose.
+  const shown = (tab: typeof chosenSection) =>
+    !guidesEnabled && tab === "guide" ? "overview" : tab;
+  const section = shown(chosenSection);
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>(DEFAULT_ACTIVITY_FILTER);
   const activityContent = usePullRequestActivityRows(params, activityFilter);
   const scrollOffsets = useRef<Record<string, number>>({});
-  const currentScrollOffset = useRef(-insets.top);
+  // The offset of the tab last shown, and which tab that was: a tab standing in for a hidden guide
+  // has its own offset, which only its next scroll would record here.
+  const currentScrollOffset = useRef<{ tab: typeof section; offset: number }>({
+    tab: "overview",
+    offset: -insets.top,
+  });
   const bodyY = useRef(0);
   const [headerHeight, setHeaderHeight] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
@@ -370,26 +380,20 @@ export function PullRequestRouteScreen({ route }: StaticScreenProps<PullRequestP
   });
   const selectSection = (next: typeof section) => {
     if (next === section) return;
-    scrollOffsets.current[section] = currentScrollOffset.current;
+    const from = shown(requestedSection.current);
+    const current =
+      currentScrollOffset.current.tab === from
+        ? currentScrollOffset.current.offset
+        : (scrollOffsets.current[from] ?? -insets.top);
+    scrollOffsets.current[section] = current;
     const headerEnd = Math.max(-insets.top, bodyY.current - insets.top);
-    const offset = pullRequestTabOffset(
-      currentScrollOffset.current,
-      scrollOffsets.current[next],
-      headerEnd,
-    );
+    const offset = pullRequestTabOffset(current, scrollOffsets.current[next], headerEnd);
     requestedSection.current = next;
     scrollOffsets.current[next] = offset;
-    currentScrollOffset.current = offset;
+    currentScrollOffset.current = { tab: next, offset };
     scrollViews.current[next]?.scrollToOffset({ offset, animated: false });
     setSection(next);
   };
-  useEffect(() => {
-    if (!guidesEnabled && section === "guide") {
-      requestedSection.current = "overview";
-      currentScrollOffset.current = scrollOffsets.current.overview ?? -insets.top;
-      setSection("overview");
-    }
-  }, [guidesEnabled, section, insets.top]);
   const tabContent = activityContent;
   const filesY = useRef(0);
   const descriptionY = useRef(0);
@@ -659,7 +663,8 @@ export function PullRequestRouteScreen({ route }: StaticScreenProps<PullRequestP
                   onScroll={(event) => {
                     const offset = event.nativeEvent.contentOffset.y;
                     scrollOffsets.current[tab] = offset;
-                    if (requestedSection.current === tab) currentScrollOffset.current = offset;
+                    if (shown(requestedSection.current) === tab)
+                      currentScrollOffset.current = { tab, offset };
                   }}
                   className="flex-1"
                   renderScrollComponent={
@@ -735,7 +740,8 @@ export function PullRequestRouteScreen({ route }: StaticScreenProps<PullRequestP
                                   filesY.current = event.nativeEvent.layout.y;
                                   if (pendingFilesJump.current) {
                                     requestAnimationFrame(() => {
-                                      if (requestedSection.current === "overview") jumpToFiles();
+                                      if (shown(requestedSection.current) === "overview")
+                                        jumpToFiles();
                                     });
                                   }
                                 }}
@@ -852,7 +858,6 @@ export function PullRequestRouteScreen({ route }: StaticScreenProps<PullRequestP
 type PullRequestFileRouteProps = StaticScreenProps<
   PullRequestDiffParams & {
     readonly path: string;
-    readonly fileSelectionId?: string;
     readonly replacingDraftId?: string;
     readonly focus?: GuideDiffFocus;
   }
@@ -861,11 +866,11 @@ type PullRequestFileRouteProps = StaticScreenProps<
 export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
   const navigation =
     useNavigation<NativeStackNavigationProp<ReactNavigation.RootParamList, "PullRequestFile">>();
-  const ready = usePullRequestDiffEntry(navigation);
+  const { ready, attachShell } = usePullRequestDiffEntry(navigation);
   if (ready) return <PullRequestFileRouteContent {...props} />;
   const title = props.route.params.commit ? "Commit changes" : "Changes";
   return (
-    <View className="flex-1 bg-screen">
+    <View ref={attachShell} className="flex-1 bg-screen">
       <NativeStackScreenOptions options={{ title, headerTitle: title }} />
       {Platform.OS === "android" ? (
         <AndroidScreenHeader title={title} onBack={() => navigation.goBack()} />
@@ -887,7 +892,8 @@ function PullRequestFileRouteContent({ route }: PullRequestFileRouteProps) {
   const terminology = sourceControlClients.get(
     (detail.data ?? route.params.initialSummary)?.provider,
   ).changeRequest;
-  const result = usePullRequestDiff(route.params, terminology);
+  const [jumpPath, setJumpPath] = useState(route.params.path);
+  const result = usePullRequestDiff(route.params, terminology, jumpPath ? [jumpPath] : []);
   const filter = usePullRequestFileFilter(
     result.parsed,
     route.params.focus ? route.params.path : undefined,
@@ -962,7 +968,6 @@ function PullRequestFileRouteContent({ route }: PullRequestFileRouteProps) {
       code: row.content ?? "",
     });
   };
-  const [jumpPath, setJumpPath] = useState(route.params.path);
   const requestedFile =
     result.parsed.kind === "files"
       ? result.parsed.files.find((file) => file.path === jumpPath)
@@ -978,40 +983,36 @@ function PullRequestFileRouteContent({ route }: PullRequestFileRouteProps) {
   const [collapsedIds, setCollapsedIds] = useState<readonly string[]>(EMPTY_IDS);
   const [visibleFileId, setVisibleFileId] = useState<string | null>(null);
   const nativeView = useRef<NativeReviewDiffViewHandle>(null);
-  // Native applies the entry destination before its first viewport. Imperative
-  // jumps below are for subsequent selections and filter changes only.
-  const jumpStarted = useRef(true);
-  const lastSelection = useRef({ path: route.params.path, id: route.params.fileSelectionId });
-  useEffect(() => {
-    if (
-      lastSelection.current.path === route.params.path &&
-      lastSelection.current.id === route.params.fileSelectionId
-    )
-      return;
-    lastSelection.current = { path: route.params.path, id: route.params.fileSelectionId };
-    if (route.params.focus) navigation.setParams({ focus: undefined });
-    setJumpPath(route.params.path);
-    setSelectedRowId(null);
-    jumpStarted.current = false;
-    const file = data.files.find((entry) => entry.path === route.params.path);
-    if (!file || !nativeView.current) return;
-    setCollapsedIds((ids) => ids.filter((id) => id !== file.id));
-    jumpStarted.current = true;
-    void nativeView.current.scrollToFile(file.id, false).catch(() => {
-      jumpStarted.current = false;
+  // The filter the current jump was made under. Hiding or showing test files replaces the rows,
+  // so a jump made under the other filter has to run again. Native applies the entry
+  // destination before its first viewport, so the first one counts as made.
+  const jumpedUnder = useRef<boolean | null>(filter.hideTestFiles);
+  const hasTestFiles =
+    result.parsed.kind === "files" &&
+    result.parsed.files.some((file) => isPullRequestTestFile(file.path));
+  const jumpStarted = () =>
+    jumpedUnder.current !== null && (!hasTestFiles || jumpedUnder.current === filter.hideTestFiles);
+  const scrollToFile = (fileId: string) => {
+    if (!nativeView.current) return;
+    jumpedUnder.current = filter.hideTestFiles;
+    void nativeView.current.scrollToFile(fileId, false).catch(() => {
+      jumpedUnder.current = null;
     });
-  }, [route.params.path, route.params.fileSelectionId, route.params.focus, data.files, navigation]);
-  const appliedFilter = useRef(filter.hideTestFiles);
-  useEffect(() => {
-    if (appliedFilter.current === filter.hideTestFiles) return;
-    appliedFilter.current = filter.hideTestFiles;
-    if (
-      result.parsed.kind === "files" &&
-      result.parsed.files.some((file) => isPullRequestTestFile(file.path))
-    ) {
-      jumpStarted.current = false;
-    }
-  }, [filter.hideTestFiles, result.parsed]);
+  };
+  const jumpScope = pullRequestFileJumpScope(route.params);
+  // On the screen root, so a pick made while the diff is still loading is kept for the first draw.
+  const attachFileJumps = (node: object | null) => {
+    if (!node) return;
+    return subscribePullRequestFileJump(jumpScope, (path) => {
+      setJumpPath(path);
+      setSelectedRowId(null);
+      jumpedUnder.current = null;
+      const file = data.files.find((entry) => entry.path === path);
+      if (!file) return;
+      setCollapsedIds((ids) => ids.filter((id) => id !== file.id));
+      scrollToFile(file.id);
+    });
+  };
   const { nativeReviewDiffStyle } = useAppearanceCodeSurface();
   const { themeAppearance, appearance, setCodeWordBreak } = useAppearancePreferences();
   const bridge = useNativeReviewDiffBridge({
@@ -1025,9 +1026,6 @@ function PullRequestFileRouteContent({ route }: PullRequestFileRouteProps) {
     canHighlight: true,
   });
   const [NativeDiffView] = useState(() => resolveNativeReviewDiffView());
-  useEffect(() => {
-    if (!targetFile) loadMore();
-  }, [targetFile, loadMore]);
   const onDebug: NonNullable<NativeReviewDiffViewProps["onDebug"]> = (event) =>
     handlePullRequestDiffDebugEvent(event, {
       rowCount: data.rows.length,
@@ -1036,6 +1034,9 @@ function PullRequestFileRouteContent({ route }: PullRequestFileRouteProps) {
       isIos: Platform.OS === "ios",
       nativeView,
       jumpStarted,
+      setJumpStarted: (started) => {
+        jumpedUnder.current = started ? filter.hideTestFiles : null;
+      },
       onDebug: bridge.onDebug,
       loadMore,
     });
@@ -1053,10 +1054,13 @@ function PullRequestFileRouteContent({ route }: PullRequestFileRouteProps) {
     filter.toggle();
   };
   const title = commit ? "Commit changes" : "Changes";
-  const seekingFile = !targetFile && result.nextCursor !== null;
+  const seekingFile = Boolean(jumpPath) && !requestedFile && result.nextCursor !== null;
   const loadingDiff = (result.isPending && !data.rows.length) || (seekingFile && !result.error);
   return (
-    <View className={Platform.OS === "android" ? "flex-1 bg-header" : "flex-1 bg-screen"}>
+    <View
+      ref={attachFileJumps}
+      className={Platform.OS === "android" ? "flex-1 bg-header" : "flex-1 bg-screen"}
+    >
       <NativeStackScreenOptions
         options={{
           title,
@@ -1192,7 +1196,7 @@ function PullRequestFileRouteContent({ route }: PullRequestFileRouteProps) {
             onPress={() => {
               result.refresh();
               setDiffHead({ scopeKey, sha: detail.data?.headSha ?? null });
-              jumpStarted.current = false;
+              jumpedUnder.current = null;
               setSelectedRowId(null);
               setCollapsedIds(EMPTY_IDS);
             }}

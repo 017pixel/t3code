@@ -1,7 +1,7 @@
 import { MOBILE_SHAPE } from "../../lib/designTokens";
-import { useEffect } from "react";
-import { AccessibilityInfo, Platform, View, useWindowDimensions } from "react-native";
+import { View, useWindowDimensions } from "react-native";
 
+import { announceRef } from "./announceRef";
 import { AppText } from "./AppText";
 import { Button } from "./Button";
 import { GlassSurface } from "./GlassSurface";
@@ -26,9 +26,6 @@ export function Toast(props: ToastProps) {
   const action = props.action ? (
     <Button label={props.action.label} onPress={props.action.onPress} />
   ) : null;
-  useEffect(() => {
-    if (Platform.OS === "ios") AccessibilityInfo.announceForAccessibility(props.message);
-  }, [props.message]);
   return (
     <GlassSurface className="p-3" style={{ borderRadius: MOBILE_SHAPE.toast }}>
       <View className="flex-row items-center gap-3">
@@ -43,7 +40,12 @@ export function Toast(props: ToastProps) {
             }
           />
         )}
-        <View className="min-w-0 flex-1" accessibilityLiveRegion="polite">
+        <View
+          key={props.message}
+          ref={announceRef(props.message)}
+          className="min-w-0 flex-1"
+          accessibilityLiveRegion="polite"
+        >
           <AppText textRole="footnote" className="font-t3-semibold">
             {props.message}
           </AppText>

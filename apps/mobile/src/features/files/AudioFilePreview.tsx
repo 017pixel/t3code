@@ -1,9 +1,9 @@
 import { Button } from "../../components/ui/Button";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { View } from "react-native";
 import { AppText as Text } from "../../components/ui/AppText";
-import { useFullscreenVideoOpen, useMediaAudioSessionHold } from "../../lib/videoAudioSession";
+import { useMediaAudioSessionHold } from "../../lib/videoAudioSession";
 
 function timestamp(seconds: number) {
   const value = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0;
@@ -15,11 +15,7 @@ export function AudioFilePreview(props: { uri: string; onRetry: () => void }) {
   const status = useAudioPlayerStatus(player);
   const [seekError, setSeekError] = useState(false);
   // Video teardown deactivates the shared iOS session, which would stop this player.
-  useMediaAudioSessionHold(status.playing);
-  const fullscreenVideoOpen = useFullscreenVideoOpen();
-  useEffect(() => {
-    if (fullscreenVideoOpen) player.pause();
-  }, [fullscreenVideoOpen, player]);
+  useMediaAudioSessionHold(status.playing, () => player.pause());
   const seek = (seconds: number, play = false) => {
     setSeekError(false);
     void player

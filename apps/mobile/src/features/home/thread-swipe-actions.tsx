@@ -6,7 +6,6 @@ import {
   createContext,
   use,
   useCallback,
-  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -143,6 +142,8 @@ export function SwipeableScrollGateProvider(props: {
 export function useSwipeableScrollGate(options?: {
   readonly onScroll?: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
   readonly onScrollBeginDrag?: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
+  /** Called when a drag's scroll settles and swipes turn back on. */
+  readonly onSettle?: () => void;
 }) {
   const [gateActive, setGateActive] = useState(false);
   const gateActiveRef = useRef(false);
@@ -151,20 +152,24 @@ export function useSwipeableScrollGate(options?: {
   const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const externalOnScroll = options?.onScroll;
   const externalOnScrollBeginDrag = options?.onScrollBeginDrag;
+  const externalOnSettle = options?.onSettle;
 
-  const update = useCallback((next: boolean) => {
-    if (gateActiveRef.current !== next) {
-      gateActiveRef.current = next;
-      setGateActive(next);
-    }
-  }, []);
+  const update = useCallback(
+    (next: boolean) => {
+      if (gateActiveRef.current !== next) {
+        gateActiveRef.current = next;
+        setGateActive(next);
+        if (!next) externalOnSettle?.();
+      }
+    },
+    [externalOnSettle],
+  );
   const clearSettle = useCallback(() => {
     if (settleTimerRef.current !== null) {
       clearTimeout(settleTimerRef.current);
       settleTimerRef.current = null;
     }
   }, []);
-  useEffect(() => clearSettle, [clearSettle]);
 
   const onScrollBeginDrag = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -289,17 +294,25 @@ export function ThreadSwipeable(props: ThreadSwipeableProps) {
     pending.resolve();
   }, []);
 
-  useLayoutEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      cancelAnimation(collapse);
-      cancelAnimation(actionOpacity);
-      cancelAnimation(fallbackTranslation);
-      if (activeTranslationRef.current) cancelAnimation(activeTranslationRef.current);
-      finishDismiss();
-    };
-  }, [actionOpacity, collapse, fallbackTranslation, finishDismiss]);
+  // Queued runOnJS commits can land after the row unmounts; they must not act.
+  // This file is a compiler bailout, so ref callbacks need explicit stable
+  // identities: a fresh one would detach on every commit, and the cleanups here
+  // cancel an in-flight dismissal or close an open row.
+  const attachRow = useCallback(
+    (node: object | null) => {
+      if (node === null) return;
+      mountedRef.current = true;
+      return () => {
+        mountedRef.current = false;
+        cancelAnimation(collapse);
+        cancelAnimation(actionOpacity);
+        cancelAnimation(fallbackTranslation);
+        if (activeTranslationRef.current) cancelAnimation(activeTranslationRef.current);
+        finishDismiss();
+      };
+    },
+    [actionOpacity, collapse, fallbackTranslation, finishDismiss],
+  );
 
   // Reset recycled rows in place so their child views stay mounted.
   useLayoutEffect(() => {
@@ -308,12 +321,6 @@ export function ThreadSwipeable(props: ThreadSwipeableProps) {
     finishDismiss();
     restoreRow();
   }, [content, finishDismiss, restoreRow]);
-
-  useLayoutEffect(() => {
-    if (props.dormant && activeTranslationRef.current && dismissalRef.current === null) {
-      restoreRow();
-    }
-  }, [props.dormant, restoreRow]);
 
   const dismiss = useCallback(
     (translation: SharedValue<number>, id: number) => {
@@ -339,29 +346,42 @@ export function ThreadSwipeable(props: ThreadSwipeableProps) {
     },
     [actionOpacity, collapse, dismissing, finishDismiss, rowWidth],
   );
-  useLayoutEffect(
-    () =>
-      props.dormant
-        ? undefined
-        : registerThreadDismissal(props.threadKey, () => {
-            if (dismissalRef.current) return dismissalRef.current;
-            const id = ++dismissalIdRef.current;
-            const finished = new Promise<void>((resolve) => {
-              pendingDismissRef.current = { id, resolve };
-            });
-            setIsDismissing(true);
-            if (swipeableRef.current) onSwipeableClose?.(swipeableRef.current);
-            runOnUI(dismiss)(activeTranslationRef.current ?? fallbackTranslation, id);
-            const dismissal = {
-              finished,
-              restore: () => {
-                if (dismissalRef.current === dismissal) restoreRow();
-              },
-            };
-            dismissalRef.current = dismissal;
-            return dismissal;
-          }),
-    [dismiss, fallbackTranslation, onSwipeableClose, props.dormant, props.threadKey, restoreRow],
+  // The actions render only while the row is not dormant, so refs inside them
+  // carry that lifecycle. Each concern gets its own element: registration
+  // re-attaches when its handlers change, which must not close an open row.
+  const restoreWhenDormant = useCallback(
+    (node: object | null) => {
+      if (node === null) return;
+      return () => {
+        if (activeTranslationRef.current && dismissalRef.current === null) restoreRow();
+      };
+    },
+    [restoreRow],
+  );
+  const threadKey = props.threadKey;
+  const registerDismissal = useCallback(
+    (node: object | null) => {
+      if (node === null) return;
+      return registerThreadDismissal(threadKey, () => {
+        if (dismissalRef.current) return dismissalRef.current;
+        const id = ++dismissalIdRef.current;
+        const finished = new Promise<void>((resolve) => {
+          pendingDismissRef.current = { id, resolve };
+        });
+        setIsDismissing(true);
+        if (swipeableRef.current) onSwipeableClose?.(swipeableRef.current);
+        runOnUI(dismiss)(activeTranslationRef.current ?? fallbackTranslation, id);
+        const dismissal = {
+          finished,
+          restore: () => {
+            if (dismissalRef.current === dismissal) restoreRow();
+          },
+        };
+        dismissalRef.current = dismissal;
+        return dismissal;
+      });
+    },
+    [dismiss, fallbackTranslation, onSwipeableClose, restoreRow, threadKey],
   );
   const dismissStyle = useAnimatedStyle(() => ({
     // Native prop updates omit undefined, leaving a collapsed height in place.
@@ -439,6 +459,8 @@ export function ThreadSwipeable(props: ThreadSwipeableProps) {
       onDelete,
       secondaryAction,
       threadTitle,
+      restoreWhenDormant,
+      registerDismissal,
     ];
     const cached = rightActions.current;
     if (cached && deps.every((dep, index) => Object.is(dep, cached.deps[index]))) {
@@ -451,6 +473,8 @@ export function ThreadSwipeable(props: ThreadSwipeableProps) {
         }}
         style={actionStyle}
       >
+        <View ref={restoreWhenDormant} style={{ position: "absolute" }} />
+        <View ref={registerDismissal} style={{ position: "absolute" }} />
         <ThreadSwipeActions
           backgroundColor={backgroundColor}
           compact={compactActions}
@@ -478,7 +502,7 @@ export function ThreadSwipeable(props: ThreadSwipeableProps) {
   );
 
   return (
-    <Animated.View style={dismissStyle}>
+    <Animated.View ref={attachRow} style={dismissStyle}>
       <View
         onLayout={({ nativeEvent: { layout } }) => {
           rowHeight.set(layout.height);

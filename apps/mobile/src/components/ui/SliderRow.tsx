@@ -6,7 +6,7 @@ import {
   tint,
 } from "@expo/ui/swift-ui/modifiers";
 import * as Haptics from "expo-haptics";
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
 import { View } from "react-native";
 
 import { AppText } from "./AppText";
@@ -21,9 +21,6 @@ export function SliderRow(props: SliderRowProps) {
   const { colors } = useControlTheme();
   const draft = useRef(props.value);
   const editing = useRef(false);
-  useEffect(() => {
-    if (!editing.current) draft.current = props.value;
-  }, [props.value]);
   const commit = (value: number) => {
     if (props.disabled) return;
     const next = Math.min(
@@ -66,7 +63,8 @@ export function SliderRow(props: SliderRowProps) {
             }}
             onEditingChanged={(isEditing) => {
               editing.current = isEditing;
-              if (!isEditing) commit(draft.current);
+              if (isEditing) draft.current = props.value;
+              else commit(draft.current);
             }}
           />
         </NativeThemeHost>

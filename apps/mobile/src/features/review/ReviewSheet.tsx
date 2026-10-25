@@ -10,14 +10,7 @@ import type { AppBarMenuItem } from "../../components/ui/AppBar.types";
 import type { ReviewSectionItem } from "./reviewModel";
 import { useReviewHeaderPresentation } from "./useReviewHeaderPresentation";
 import { Screen, ScreenStack, ScreenStackHeaderConfig } from "react-native-screens";
-import {
-  type Ref,
-  type ReactElement,
-  useEffect,
-  useImperativeHandle,
-  useRef,
-  useState,
-} from "react";
+import { type Ref, type ReactElement, useImperativeHandle, useRef, useState } from "react";
 import {
   FlatList,
   Platform,
@@ -59,7 +52,10 @@ import {
 import { NATIVE_REVIEW_DIFF_CONTENT_WIDTH } from "./nativeReviewDiffAdapter";
 import { useAppearanceCodeSurface } from "../settings/appearance/useAppearanceCodeSurface";
 import { useReviewDiffData } from "./useReviewDiffData";
-import { useReviewDiffPrewarming } from "./useReviewDiffPrewarming";
+import {
+  prewarmReviewDiffNeighbors,
+  stopReviewDiffPrewarmOnDetach,
+} from "./useReviewDiffPrewarming";
 import { useReviewFileVisibility } from "./reviewFileVisibility";
 import { useReviewSections } from "./useReviewSections";
 import { useNativeReviewDiffBridge } from "./useNativeReviewDiffBridge";
@@ -432,7 +428,7 @@ type ReviewSheetProps = StaticScreenProps<{
 export function ReviewSheet(props: ReviewSheetProps) {
   const { nativeReviewDiffStyle } = useAppearanceCodeSurface();
   useAdaptiveWorkspacePaneRole("inspector");
-  const { panes, showAuxiliaryPane } = useAdaptiveWorkspaceLayout();
+  const { panes } = useAdaptiveWorkspaceLayout();
   const navigation = useNavigation();
   const selectDetail = useSelectWorkspaceDetail();
   const insets = useSafeAreaInsets();
@@ -451,9 +447,6 @@ export function ReviewSheet(props: ReviewSheetProps) {
   const bottomContentInset =
     Platform.OS === "ios" ? safeArea.bottom + 8 : Math.max(insets.bottom, 18) + 18;
 
-  useEffect(() => {
-    showAuxiliaryPane("inspector");
-  }, [environmentId, showAuxiliaryPane, threadId]);
   const {
     error,
     reviewSections,
@@ -461,17 +454,11 @@ export function ReviewSheet(props: ReviewSheetProps) {
     refreshSelectedSection,
     selectSection,
     isSelectedSectionPending,
-    diffPreviewRevision,
   } = useReviewSections({
     enabled: isEnvironmentReady,
     environmentId,
     threadId,
     reviewCache,
-  });
-  useReviewDiffPrewarming({
-    threadKey: reviewCache.threadKey,
-    sections: reviewSections,
-    selectedSectionId: selectedSection?.id ?? null,
   });
   const {
     headerDiffSummary,
@@ -485,7 +472,6 @@ export function ReviewSheet(props: ReviewSheetProps) {
     environmentId,
     cwd: selectedThreadCwd,
     selectedSection,
-    revision: diffPreviewRevision,
     draftMessage,
   });
   // Expo may return null before registration or in older binaries; use the fallback.
@@ -534,6 +520,13 @@ export function ReviewSheet(props: ReviewSheetProps) {
       : null;
   const handleNativeDebug = (event: NativeSyntheticEvent<Record<string, unknown>>) => {
     nativeBridge.onDebug(event);
+    if (isNativeReviewDiffDrawEvent(event.nativeEvent)) {
+      prewarmReviewDiffNeighbors({
+        threadKey: reviewCache.threadKey,
+        sections: reviewSections,
+        selectedSectionId: selectedSection?.id ?? null,
+      });
+    }
     if (
       showcaseReviewKey === null ||
       showcasedReviewDrawRef.current === showcaseReviewKey ||
@@ -720,7 +713,11 @@ export function ReviewSheet(props: ReviewSheetProps) {
                 style={listHeader ? { paddingTop: topContentInset } : undefined}
               >
                 {listHeader}
-                <View className="min-w-0 flex-1" collapsable={false}>
+                <View
+                  className="min-w-0 flex-1"
+                  collapsable={false}
+                  ref={stopReviewDiffPrewarmOnDetach}
+                >
                   <NativeReviewDiffView
                     collapsable={false}
                     testID="review-native-diff-view"

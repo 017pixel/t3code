@@ -4,7 +4,7 @@ import { LegendList } from "@legendapp/list/react-native";
 import type { ProjectEntry } from "@t3tools/contracts";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { SymbolView } from "../../components/ui/AppSymbol";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Platform, Pressable, RefreshControl, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -32,21 +32,12 @@ function cachedFileTree(entries: ReadonlyArray<ProjectEntry>): ReadonlyArray<Fil
   return tree;
 }
 
-function ancestorPaths(path: string): ReadonlyArray<string> {
-  const parts = path.split("/").filter(Boolean);
-  const ancestors: string[] = [];
-  for (let index = 1; index < parts.length; index += 1) {
-    ancestors.push(parts.slice(0, index).join("/"));
-  }
-  return ancestors;
-}
-
 const FileTreeRow = function FileTreeRow(props: {
   readonly item: VisibleFileTreeNode;
   readonly selected: boolean;
   readonly expanded: boolean;
   readonly loading: boolean;
-  readonly onPressDirectory: (path: string, expand: boolean) => void;
+  readonly onPressDirectory: (path: string) => void;
   readonly onPreviewFile?: (path: string) => void;
   readonly onPressFile: (path: string) => void;
 }) {
@@ -64,7 +55,7 @@ const FileTreeRow = function FileTreeRow(props: {
       }}
       onPress={() => {
         if (node.kind === "directory") {
-          props.onPressDirectory(node.path, !props.expanded);
+          props.onPressDirectory(node.path);
           return;
         }
         props.onPressFile(node.path);
@@ -115,13 +106,13 @@ export function FileTreeBrowser(props: {
   readonly searchResultPaths: ReadonlySet<string> | null;
   readonly searchTruncated: boolean;
   readonly selectedPath: string | null;
+  readonly expandedPaths: ReadonlySet<string>;
   readonly loadingDirectories: ReadonlySet<string>;
-  readonly onLoadDirectory: (path: string) => void;
+  readonly onToggleDirectory: (path: string) => void;
   readonly onPreviewFile?: (path: string) => void;
   readonly onRefresh: () => void;
   readonly onSelectFile: (path: string) => void;
 }) {
-  const [expandedPaths, setExpandedPaths] = useState<ReadonlySet<string>>(() => new Set());
   const [pendingSelection, setPendingSelection] = useState<{
     readonly path: string;
     readonly selectedPathAtPress: string | null;
@@ -130,7 +121,8 @@ export function FileTreeBrowser(props: {
   const columnMetrics = useNativeColumnLayoutMetrics();
   const headerInset = Platform.OS === "ios" ? (columnMetrics?.safeArea.top ?? insets.top) : 0;
   const {
-    onLoadDirectory,
+    expandedPaths,
+    onToggleDirectory,
     onPreviewFile,
     onSelectFile,
     loadingDirectories,
@@ -149,48 +141,6 @@ export function FileTreeBrowser(props: {
     searchResultPaths: props.searchResultPaths,
   });
 
-  useEffect(() => {
-    if (!controlledSelectedPath) {
-      return;
-    }
-    setExpandedPaths((current) => {
-      const ancestors = ancestorPaths(controlledSelectedPath);
-      if (ancestors.every((ancestor) => current.has(ancestor))) {
-        return current;
-      }
-      const next = new Set(current);
-      for (const ancestor of ancestors) {
-        next.add(ancestor);
-      }
-      return next;
-    });
-  }, [controlledSelectedPath]);
-
-  useEffect(() => {
-    for (const path of expandedPaths) onLoadDirectory(path);
-  }, [expandedPaths, onLoadDirectory]);
-
-  useEffect(
-    () => () => {
-      if (pendingSelectionTimeoutRef.current !== null) {
-        clearTimeout(pendingSelectionTimeoutRef.current);
-      }
-    },
-    [],
-  );
-
-  const toggleDirectory = (path: string, expand: boolean) => {
-    if (expand) onLoadDirectory(path);
-    setExpandedPaths((current) => {
-      const next = new Set(current);
-      if (next.has(path)) {
-        next.delete(path);
-      } else {
-        next.add(path);
-      }
-      return next;
-    });
-  };
   const handleSelectFile = (path: string) => {
     if (pendingSelectionTimeoutRef.current !== null) {
       clearTimeout(pendingSelectionTimeoutRef.current);
@@ -211,7 +161,7 @@ export function FileTreeBrowser(props: {
       selected={item.node.kind === "file" && item.node.path === selectedPath}
       expanded={expandedPaths.has(item.node.path)}
       loading={loadingDirectories.has(item.node.path)}
-      onPressDirectory={toggleDirectory}
+      onPressDirectory={onToggleDirectory}
       onPreviewFile={onPreviewFile}
       onPressFile={handleSelectFile}
     />

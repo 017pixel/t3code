@@ -194,24 +194,24 @@ export function NativeStackScreenOptions(props: {
   const lastAppliedOptionsSignatureRef = useRef<string | undefined>(undefined);
   const latestOptionFunctionsRef = useRef(new Map<string, (...args: unknown[]) => unknown>());
   const optionFunctionWrappersRef = useRef(new Map<string, (...args: unknown[]) => unknown>());
-  const normalizedOptions = useMemo(() => normalizeScreenOptions(props.options), [props.options]);
-  const stableOptions = normalizedOptions
-    ? (stabilizeOptionFunctions(
-        normalizedOptions,
-        "options",
-        latestOptionFunctionsRef.current,
-        optionFunctionWrappersRef.current,
-      ) as NativeStackNavigationOptions)
-    : undefined;
 
+  // Stabilizing records each factory's latest closure, so it runs in the commit
+  // phase: a render React discards must not leak its closures into the header.
   useLayoutEffect(() => {
     if (!tabActive) {
       lastAppliedOptionsSignatureRef.current = undefined;
       return;
     }
-    if (!setOptions || !stableOptions) {
+    const normalizedOptions = normalizeScreenOptions(props.options);
+    if (!setOptions || !normalizedOptions) {
       return;
     }
+    const stableOptions = stabilizeOptionFunctions(
+      normalizedOptions,
+      "options",
+      latestOptionFunctionsRef.current,
+      optionFunctionWrappersRef.current,
+    );
     const signature = optionsSignature([stableOptions, props.optionsVersion]);
     if (lastAppliedOptionsSignatureRef.current === signature) {
       return;
@@ -229,7 +229,7 @@ export function NativeStackScreenOptions(props: {
         optionFunctionWrappersRef.current,
       ) as NativeStackNavigationOptions,
     );
-  }, [setOptions, normalizedOptions, props.optionsVersion, stableOptions, tabActive]);
+  }, [setOptions, props.options, props.optionsVersion, tabActive]);
 
   useEffect(() => {
     if (!navigation || !props.listeners) {

@@ -1,5 +1,4 @@
-import { useAtomValue } from "@effect/atom-react";
-import { useEffect } from "react";
+import { useAtomMount, useAtomValue } from "@effect/atom-react";
 import { AppState } from "react-native";
 import * as Atom from "effect/reactivity/Atom";
 import * as Schema from "effect/Schema";
@@ -72,19 +71,22 @@ async function persist() {
     }
   });
 }
+// Mounted while any review screen is open: each first mount retries a failed load, and the drafts
+// are saved when the app leaves the foreground and once the last screen closes.
+const session = Atom.make((get) => {
+  void load();
+  const listener = AppState.addEventListener("change", (phase) => {
+    if (phase !== "active") void persist();
+  });
+  get.addFinalizer(() => {
+    listener.remove();
+    void persist();
+  });
+});
 export function usePullRequestReviewDraft(params: PullRequestParams) {
+  useAtomMount(session);
   const snapshot = useAtomValue(state);
   const key = pullRequestReviewKey(params);
-  useEffect(() => {
-    void load();
-    const listener = AppState.addEventListener("change", (phase) => {
-      if (phase !== "active") void persist();
-    });
-    return () => {
-      listener.remove();
-      void persist();
-    };
-  }, []);
   const update = (transform: (current: ReviewDraft) => ReviewDraft) => {
     const current = appAtomRegistry.get(state);
     if (!current.ready) return;

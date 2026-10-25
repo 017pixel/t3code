@@ -1,7 +1,7 @@
-import { useEffect } from "react";
-import { AccessibilityInfo, Platform, Pressable, View } from "react-native";
+import { Platform, Pressable, View } from "react-native";
 
 import { cn } from "../../lib/cn";
+import { announceRef } from "./announceRef";
 import { AppText } from "./AppText";
 import { SymbolView, type AppSymbolName } from "./AppSymbol";
 import { GlassSurface } from "./GlassSurface";
@@ -16,13 +16,13 @@ export function Notice(props: {
   readonly dismissLabel?: string;
 }) {
   const danger = props.tone === "danger";
-  useEffect(() => {
-    // Live regions reach TalkBack; VoiceOver needs an explicit announcement.
-    if (Platform.OS === "ios") AccessibilityInfo.announceForAccessibility(props.message);
-  }, [props.message]);
 
   const content = (
-    <View className="flex-row items-start gap-3">
+    <View
+      key={props.message}
+      ref={announceRef(props.message)}
+      className="flex-row items-start gap-3"
+    >
       {props.icon ? (
         <View className="pt-0.5">
           <SymbolView

@@ -19,10 +19,15 @@ const parsedSnapshots = new WeakMap<
   Map<string, CachedPullRequestDiffPages>
 >();
 
+/**
+ * Returns the same combination while the pages are unchanged, so a new route reading the same
+ * query result reuses it. `cache` parses pages once across readers that share a scope.
+ */
 export function getCachedPullRequestDiffPages(
   pages: readonly PullRequestDiffPage[],
   scope: string,
   terminology: ChangeRequestTerminology,
+  cache?: WeakMap<PullRequestDiffResult, ReviewParsedDiff>,
 ): ReviewParsedDiff {
   const first = pages[0];
   if (!first) return { kind: "empty" };
@@ -41,31 +46,85 @@ export function getCachedPullRequestDiffPages(
     })
   )
     return previous.parsed;
-  const cache = previous?.cache ?? new WeakMap<PullRequestDiffResult, ReviewParsedDiff>();
-  const parsed = combinePullRequestDiffPages(pages, cache, scope, terminology);
-  snapshots.set(key, { pages, cache, parsed });
+  const pageCache =
+    cache ?? previous?.cache ?? new WeakMap<PullRequestDiffResult, ReviewParsedDiff>();
+  const parsed = combinePullRequestDiffPages(pages, pageCache, scope, terminology);
+  snapshots.set(key, { pages, cache: pageCache, parsed });
   return parsed;
 }
 
-/** A changed page invalidates later cursors, which belong to the previous patch. */
-export function retainPullRequestDiffPage(
-  pages: readonly PullRequestDiffPage[],
-  cursor: string | null,
-  result: PullRequestDiffResult,
-): readonly PullRequestDiffPage[] {
-  const index = pages.findIndex((page) => page.cursor === cursor);
-  if (index === -1) return [...pages, { cursor, result }];
-  const previous = pages[index]?.result;
-  if (
-    previous === result ||
-    (previous?.patch === result.patch &&
-      previous.truncated === result.truncated &&
-      previous.nextCursor === result.nextCursor &&
-      JSON.stringify(previous.omittedFileStats ?? []) ===
-        JSON.stringify(result.omittedFileStats ?? []))
-  )
-    return pages;
-  return [...pages.slice(0, index), { cursor, result }];
+/**
+ * Follows each loaded page's next cursor until `count` pages and every wanted path have loaded.
+ * `frontier` is the cursor the walk stopped on: the last page read, or the one still loading or
+ * failed. A page whose answer changed leads to its new cursors, so stale later pages drop out.
+ */
+export function walkPullRequestDiffPages(
+  read: (cursor: string | null) => PullRequestDiffResult | null,
+  count: number,
+  wanted: readonly string[],
+  paths: (page: PullRequestDiffPage) => readonly string[],
+): { readonly pages: readonly PullRequestDiffPage[]; readonly frontier: string | null } {
+  const pages: PullRequestDiffPage[] = [];
+  const missing = new Set(wanted);
+  const seen = new Set<string | null>();
+  let cursor: string | null = null;
+  for (;;) {
+    seen.add(cursor);
+    const result = read(cursor);
+    if (result === null) return { pages, frontier: cursor };
+    const page = { cursor, result };
+    pages.push(page);
+    for (const path of paths(page)) missing.delete(path);
+    const next = result.nextCursor;
+    if (next === null || seen.has(next) || (pages.length >= count && missing.size === 0))
+      return { pages, frontier: cursor };
+    cursor = next;
+  }
+}
+
+export interface PullRequestDiffRequest {
+  readonly key: string;
+  readonly count: number;
+  readonly wanted: readonly string[];
+}
+
+/**
+ * Wanted paths only accumulate for a target: dropping one would let the walk stop at an earlier
+ * file and shrink the diff the screen already shows. A new target starts over.
+ */
+export function requestPullRequestDiffPaths(
+  request: PullRequestDiffRequest,
+  key: string,
+  wanted: readonly string[],
+): PullRequestDiffRequest {
+  if (request.key !== key) return { key, count: 1, wanted };
+  const added = wanted.filter((path) => !request.wanted.includes(path));
+  return added.length === 0 ? request : { ...request, wanted: [...request.wanted, ...added] };
+}
+
+export function parsePullRequestDiffPage(
+  page: PullRequestDiffPage,
+  cache: WeakMap<PullRequestDiffResult, ReviewParsedDiff>,
+  scope: string,
+): ReviewParsedDiff {
+  const cached = cache.get(page.result);
+  if (cached) return cached;
+  let value = buildReviewParsedDiff(page.result.patch, `${scope}:${page.cursor ?? "first"}`);
+  if (value.kind === "files" && page.result.omittedFileStats?.length) {
+    const omittedFileStats = new Map(page.result.omittedFileStats.map((stat) => [stat.path, stat]));
+    const files = value.files.map((file) => {
+      const stat = omittedFileStats.get(file.path);
+      return stat ? { ...file, additions: stat.additions, deletions: stat.deletions } : file;
+    });
+    value = {
+      ...value,
+      files,
+      additions: files.reduce((total, file) => total + file.additions, 0),
+      deletions: files.reduce((total, file) => total + file.deletions, 0),
+    };
+  }
+  cache.set(page.result, value);
+  return value;
 }
 
 export function combinePullRequestDiffPages(
@@ -74,28 +133,7 @@ export function combinePullRequestDiffPages(
   scope: string,
   terminology: ChangeRequestTerminology,
 ): ReviewParsedDiff {
-  const parsed = pages.map((page) => {
-    const cached = cache.get(page.result);
-    if (cached) return cached;
-    let value = buildReviewParsedDiff(page.result.patch, `${scope}:${page.cursor ?? "first"}`);
-    if (value.kind === "files" && page.result.omittedFileStats?.length) {
-      const omittedFileStats = new Map(
-        page.result.omittedFileStats.map((stat) => [stat.path, stat]),
-      );
-      const files = value.files.map((file) => {
-        const stat = omittedFileStats.get(file.path);
-        return stat ? { ...file, additions: stat.additions, deletions: stat.deletions } : file;
-      });
-      value = {
-        ...value,
-        files,
-        additions: files.reduce((total, file) => total + file.additions, 0),
-        deletions: files.reduce((total, file) => total + file.deletions, 0),
-      };
-    }
-    cache.set(page.result, value);
-    return value;
-  });
+  const parsed = pages.map((page) => parsePullRequestDiffPage(page, cache, scope));
   const files = parsed.flatMap((page) => (page.kind === "files" ? page.files : []));
   if (files.length === 0) return parsed[0] ?? { kind: "empty" };
   return {

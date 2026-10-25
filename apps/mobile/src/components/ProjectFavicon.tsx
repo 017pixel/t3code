@@ -1,7 +1,7 @@
 import { SymbolView } from "./ui/AppSymbol";
 import { AppText } from "./ui/AppText";
 import { Image } from "expo-image";
-import { memo, useLayoutEffect, useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { View } from "react-native";
 import type { EnvironmentId, ProjectIconOverride } from "@t3tools/contracts";
 import {
@@ -152,6 +152,8 @@ function ProjectIconGlyphView(props: { readonly glyph: ProjectIconGlyph; readonl
   );
 }
 
+type FaviconLoadStatus = "loading" | "loaded" | "error";
+
 function ProjectFaviconImage(props: {
   readonly cacheKey: string | null;
   readonly faviconUrl: string | null;
@@ -163,23 +165,15 @@ function ProjectFaviconImage(props: {
     () => createProjectFaviconRequest(props.cacheKey, props.faviconUrl),
     [props.cacheKey, props.faviconUrl],
   );
-  const [activeFaviconRequest, setActiveFaviconRequest] = useState<typeof faviconRequest>(null);
-  useLayoutEffect(() => {
-    if (faviconRequest === null) return;
-
-    const endRequest = beginProjectFaviconRequest(faviconRequest);
-    setActiveFaviconRequest(faviconRequest);
-    return endRequest;
-  }, [faviconRequest]);
-
-  const [status, setStatus] = useState<"loading" | "loaded" | "error">(() =>
+  const initialStatus = (): FaviconLoadStatus =>
     props.faviconUrl?.startsWith("data:") || hasLoadedProjectFavicon(props.cacheKey)
       ? "loaded"
-      : "loading",
-  );
+      : "loading";
+  const [load, setLoad] = useState(() => ({ request: faviconRequest, status: initialStatus() }));
+  // A new favicon starts from its own cache state, not the previous favicon's outcome.
+  const status = load.request === faviconRequest ? load.status : initialStatus();
 
-  const requestIsActive = faviconRequest !== null && activeFaviconRequest === faviconRequest;
-  const showImage = requestIsActive && status === "loaded";
+  const showImage = faviconRequest !== null && status === "loaded";
   const fallbackGlyph = showImage ? null : projectAutoMonogram(props.projectTitle);
 
   return (
@@ -202,9 +196,11 @@ function ProjectFaviconImage(props: {
         />
       )}
 
-      {requestIsActive ? (
+      {faviconRequest !== null ? (
         <Image
           key={faviconRequest.faviconUrl}
+          // Registers this favicon as the current one for its cache key before it can load.
+          ref={() => beginProjectFaviconRequest(faviconRequest)}
           source={
             faviconRequest.faviconUrl.startsWith("data:")
               ? { uri: faviconRequest.faviconUrl }
@@ -222,11 +218,11 @@ function ProjectFaviconImage(props: {
           contentFit="contain"
           onLoad={() => {
             if (!markProjectFaviconLoaded(faviconRequest)) return;
-            setStatus("loaded");
+            setLoad({ request: faviconRequest, status: "loaded" });
           }}
           onError={() => {
             if (!markProjectFaviconFailed(faviconRequest)) return;
-            setStatus("error");
+            setLoad({ request: faviconRequest, status: "error" });
           }}
         />
       ) : null}

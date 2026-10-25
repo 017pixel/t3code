@@ -36,43 +36,112 @@ export type ReviewCommentMessageSegment =
       readonly comment: ReviewInlineComment;
     };
 
-let currentTarget: ReviewCommentTarget | null = null;
+/** The first line of a range picked with a long press, waiting for its other end. */
+export interface PendingReviewCommentRange extends Pick<
+  ReviewCommentTarget,
+  "sectionId" | "sectionTitle" | "filePath" | "lines"
+> {
+  readonly lineIndex: number;
+  readonly rowId: string;
+}
+
+export interface ReviewCommentSelection {
+  /** Identifies the sheet, thread and section the selection was made in. */
+  readonly scope: string | null;
+  readonly target: ReviewCommentTarget | null;
+  readonly pending: PendingReviewCommentRange | null;
+}
+
+const EMPTY_SELECTION: ReviewCommentSelection = { scope: null, target: null, pending: null };
+let selection = EMPTY_SELECTION;
 const listeners = new Set<() => void>();
 const REVIEW_COMMENT_BLOCK_PATTERN = /<review_comment\b([^>]*)>\s*([\s\S]*?)<\/review_comment>/g;
 const REVIEW_COMMENT_ATTRIBUTE_PATTERN = /([a-zA-Z][a-zA-Z0-9_-]*)="([^"]*)"/g;
 const REVIEW_COMMENT_FENCE_PATTERN = /(`{3,})([^\s`]*)[^\n]*\n([\s\S]*?)\n\1/g;
 
-function emitChange() {
+function setSelection(next: ReviewCommentSelection) {
+  selection = next;
   listeners.forEach((listener) => listener());
 }
 
-export function subscribeReviewCommentTarget(listener: () => void): () => void {
+function subscribeReviewCommentSelection(listener: () => void): () => void {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
   };
 }
 
-export function getReviewCommentTarget(): ReviewCommentTarget | null {
-  return currentTarget;
+export function getReviewCommentSelection(): ReviewCommentSelection {
+  return selection;
 }
 
-export function setReviewCommentTarget(target: ReviewCommentTarget | null) {
-  currentTarget = target;
-  emitChange();
+let lastReviewSheetId = 0;
+
+/** A fresh id per mounted review sheet, so reopening the sheet starts without a selection. */
+export function nextReviewSheetId(): number {
+  lastReviewSheetId += 1;
+  return lastReviewSheetId;
+}
+
+export function reviewCommentSelectionScope(
+  sheetId: number,
+  threadKey: string | null,
+  sectionId: string | null,
+): string | null {
+  return threadKey === null || sectionId === null
+    ? null
+    : JSON.stringify([sheetId, threadKey, sectionId]);
+}
+
+export function setReviewCommentTarget(scope: string, target: ReviewCommentTarget) {
+  setSelection({ scope, target, pending: null });
+}
+
+/**
+ * Keeps the pending range: when both ends are the same line the target is a single line, and
+ * the range still waits for a different end.
+ */
+export function completeReviewCommentRange(scope: string, target: ReviewCommentTarget) {
+  setSelection({
+    scope,
+    target,
+    pending: selection.scope === scope ? selection.pending : null,
+  });
+}
+
+export function startReviewCommentRange(scope: string, pending: PendingReviewCommentRange) {
+  setSelection({ scope, target: null, pending });
 }
 
 export function clearReviewCommentTarget() {
-  currentTarget = null;
-  emitChange();
+  setSelection(EMPTY_SELECTION);
+}
+
+/** A selection made in another sheet, thread or section reads as empty. */
+export function selectReviewCommentSelection(
+  current: ReviewCommentSelection,
+  scope: string | null,
+): ReviewCommentSelection {
+  return scope !== null && current.scope === scope ? current : EMPTY_SELECTION;
+}
+
+export function useReviewCommentSelection(scope: string | null): ReviewCommentSelection {
+  return selectReviewCommentSelection(
+    useSyncExternalStore(
+      subscribeReviewCommentSelection,
+      getReviewCommentSelection,
+      getReviewCommentSelection,
+    ),
+    scope,
+  );
 }
 
 export function useReviewCommentTarget(): ReviewCommentTarget | null {
   return useSyncExternalStore(
-    subscribeReviewCommentTarget,
-    getReviewCommentTarget,
-    getReviewCommentTarget,
-  );
+    subscribeReviewCommentSelection,
+    getReviewCommentSelection,
+    getReviewCommentSelection,
+  ).target;
 }
 
 export function getSelectedReviewCommentLines(

@@ -32,7 +32,7 @@ import {
   WEBHOOK_FILTER_OPS,
   type WebhookFilterDraft,
 } from "@t3tools/client-runtime/scheduled-task-webhook";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { useFocusEffect, useNavigation, usePreventRemove } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { AppState, Platform, Pressable, TextInput as RNTextInput, View } from "react-native";
@@ -449,15 +449,9 @@ export function SettingsScheduledTasksRouteScreen() {
   );
 }
 
+// The "New task" action and takeScheduledTaskNewLink clear the editor before
+// this screen opens, so it starts from the default target.
 export function SettingsScheduledTaskNewRouteScreen() {
-  const { resetEditor } = useScheduledTaskEditor();
-  const { availableTargets } = useSettingsEnvironmentFilter();
-  const initialized = useRef(false);
-  useLayoutEffect(() => {
-    if (initialized.current || availableTargets.length === 0) return;
-    initialized.current = true;
-    resetEditor();
-  }, [availableTargets.length, resetEditor]);
   return <SettingsScheduledTaskEditorScreen title="New scheduled task" />;
 }
 
@@ -479,7 +473,8 @@ function SettingsScheduledTaskEditorScreen({ title }: { readonly title: string }
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  // Set once the save lands, so the removal guard lets the editor close.
+  const saved = useRef(false);
   const ownerKey = editor ? `${voiceOwnerKey}:${editor.environmentId}` : null;
   const prompt = editor?.draft.prompt ?? "";
   const [selectionState, setSelectionState] = useState<{
@@ -518,8 +513,12 @@ function SettingsScheduledTaskEditorScreen({ title }: { readonly title: string }
     },
     disabled: saving,
   });
-  const preventRemove = !saved && (hasChanges || saving);
+  const preventRemove = hasChanges || saving;
   usePreventRemove(preventRemove, ({ data }) => {
+    if (saved.current) {
+      navigation.dispatch(data.action);
+      return;
+    }
     if (saving) {
       Dialog.alert("Saving task", "Wait for the task to finish saving before leaving.");
       return;
@@ -537,13 +536,6 @@ function SettingsScheduledTaskEditorScreen({ title }: { readonly title: string }
       },
     ]);
   });
-  useEffect(() => {
-    if (!saved) return;
-    const frame = requestAnimationFrame(() => {
-      if (navigation.isFocused()) navigation.goBack();
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [navigation, saved]);
   return (
     <SettingsScreen title={title}>
       {Platform.OS === "ios" ? (
@@ -599,7 +591,10 @@ function SettingsScheduledTaskEditorScreen({ title }: { readonly title: string }
             setDraft={(draft) => {
               if (!saving) setEditor({ ...editor, draft });
             }}
-            onSaved={() => setSaved(true)}
+            onSaved={() => {
+              saved.current = true;
+              if (navigation.isFocused()) navigation.goBack();
+            }}
             onChangeEnvironment={(target) => {
               if (target.environmentId === editor.environmentId) return;
               setEditor({

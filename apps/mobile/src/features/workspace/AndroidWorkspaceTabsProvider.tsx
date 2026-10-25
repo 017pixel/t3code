@@ -1,14 +1,7 @@
 import type { NavigationState } from "@react-navigation/native";
-import {
-  createContext,
-  use,
-  useCallback,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  type ReactNode,
-} from "react";
+import { createContext, use, type ReactNode } from "react";
 import { Platform } from "react-native";
+import { rootNavigationRef } from "../../lib/rootNavigation";
 import { androidWorkspaceSettingsOpen } from "./android-workspace-tabs";
 import { WorkspaceTabsProvider } from "./WorkspaceTabsContext";
 
@@ -34,14 +27,14 @@ export function AndroidWorkspaceTabsProvider(props: {
   readonly state: NavigationState;
   readonly children: ReactNode;
 }) {
-  const stateRef = useRef(props.state);
-  useLayoutEffect(() => {
-    stateRef.current = props.state;
-  }, [props.state]);
-  const getState = useCallback(() => stateRef.current, []);
-  const key = props.state.key;
-  const settingsOpen = Platform.OS === "android" && androidWorkspaceSettingsOpen(props.state);
-  const root = useMemo(() => ({ key, getState, settingsOpen }), [key, getState, settingsOpen]);
+  const fallbackState = props.state;
+  const root = {
+    key: props.state.key,
+    // This provider renders inside the root stack's layout, so the container's
+    // root state is this stack's current state.
+    getState: () => rootNavigationRef.getRootState() ?? fallbackState,
+    settingsOpen: Platform.OS === "android" && androidWorkspaceSettingsOpen(props.state),
+  };
   return Platform.OS === "android" ? (
     <WorkspaceTabsProvider>
       <AndroidWorkspaceRootContext value={root}>{props.children}</AndroidWorkspaceRootContext>

@@ -121,6 +121,9 @@ export function WorkspaceToolbar(props: {
       return () => cancelAnimationFrame(frame);
     }, [restoreSearch]),
   );
+  // The native search bar is recreated after setOptions commits (fold posture
+  // flips bottomSearch, searchVisible remounts it), and RNS takes only a
+  // RefObject, so no attach callback or activation event can re-seed it.
   useEffect(() => {
     if (!tabActive) return;
     const frame = requestAnimationFrame(restoreSearch);

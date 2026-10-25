@@ -24,6 +24,7 @@ import { environmentSession } from "./session";
 import { downloadAndShareAttachment, shareLocalAttachment } from "../lib/attachmentDownload";
 import { copyTextWithHaptic } from "../lib/copyTextWithHaptic";
 import { loadLocalAttachmentPreview } from "../lib/localAttachmentPreview";
+import type { MediaShareScope } from "../lib/videoAudioSession";
 
 function allowsHostMedia(session: SessionGrantInput | null) {
   return session === null || sessionGrantsScope(session, AuthFilesystemReadScope);
@@ -35,7 +36,12 @@ function canReadHostMedia(environmentId: EnvironmentId | null): boolean {
   return result._tag !== "Failure" && allowsHostMedia(Option.getOrNull(AsyncResult.value(result)));
 }
 
-export function useMediaActions(source: MediaActionsSource | undefined, onOpenFile?: () => void) {
+export function useMediaActions(
+  source: MediaActionsSource | undefined,
+  onOpenFile?: () => void,
+  /** The player this share sheet covers. */
+  shareScope?: MediaShareScope,
+) {
   const navigation = useNavigation();
   const hostEnvironmentId =
     source &&
@@ -62,6 +68,7 @@ export function useMediaActions(source: MediaActionsSource | undefined, onOpenFi
     const request = new AbortController();
     controller.current = request;
     setSharing(true);
+    shareScope?.shareStarted();
     return (async () => {
       if ("attachment" in source) {
         const preview = await loadLocalAttachmentPreview(source.attachment, request.signal);
@@ -93,6 +100,7 @@ export function useMediaActions(source: MediaActionsSource | undefined, onOpenFi
         }
       })
       .finally(() => {
+        shareScope?.shareEnded();
         if (controller.current === request) {
           controller.current = null;
           if (!request.signal.aborted) setSharing(false);

@@ -1,9 +1,7 @@
 import { useFocusEffect } from "@react-navigation/native";
-import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react";
+import { useCallback, useRef } from "react";
 import {
-  BackHandler,
   Keyboard,
-  Platform,
   Pressable,
   View,
   useWindowDimensions,
@@ -14,6 +12,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
 import { GlassSurface } from "../../components/ui/GlassSurface";
+import { backHandlerRef } from "../../lib/backHandler";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { WorkspaceDock } from "./WorkspaceDock";
 import { WorkspaceSearchField } from "./WorkspaceSearchField";
@@ -53,7 +52,7 @@ export function WorkspaceToolbar(props: {
 }) {
   const workspace = useWorkspaceTabs();
   const input = useRef<TextInputInstance>(null);
-  const [focusRequest, setFocusRequest] = useState(0);
+  const focusOnMount = useRef(false);
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const edge = width < 360 ? 12 : WORKSPACE_TOOLBAR.edge;
@@ -65,7 +64,11 @@ export function WorkspaceToolbar(props: {
     if (tab !== "threads" && tab !== "pullRequests") return false;
     workspace.dispatch({ type: "scroll", tab, offset: workspace.getScrollOffset(tab) });
     workspace.dispatch({ type: "search" });
-    setFocusRequest((request) => request + 1);
+    // React Native has no flushSync, so a field this opens mounts after the
+    // handler returns; it takes the request on attach. A field remounting on its
+    // own (tab switch, screen remount) must not pop the keyboard.
+    if (input.current) input.current.focus();
+    else focusOnMount.current = true;
     return true;
   }, [workspace]);
   useHardwareKeyboardCommand("focusSearch", focusSearch);
@@ -79,21 +82,18 @@ export function WorkspaceToolbar(props: {
       );
     workspace?.dispatch({ type: "cancel" });
   }, [workspace]);
-  const handleBack = useEffectEvent(() => {
-    if (!workspace || workspace.state.tabs[workspace.state.selectedTab].searchMode === "resting")
-      return false;
-    if (keyboardVisible) Keyboard.dismiss();
+  const attachSearchField = (node: TextInputInstance | null) => {
+    input.current = node;
+    if (node && focusOnMount.current) {
+      focusOnMount.current = false;
+      node.focus();
+    }
+  };
+  const searchBackRef = backHandlerRef(() => {
+    if (Keyboard.isVisible()) Keyboard.dismiss();
     else cancelSearch();
     return true;
   });
-  useEffect(() => {
-    if (Platform.OS !== "android") return;
-    const subscription = BackHandler.addEventListener("hardwareBackPress", handleBack);
-    return () => subscription.remove();
-  }, []);
-  useEffect(() => {
-    if (focusRequest > 0) input.current?.focus();
-  }, [focusRequest]);
   if (!workspace) return null;
   const { state, dispatch } = workspace;
   const tab = state.tabs[state.selectedTab];
@@ -114,7 +114,7 @@ export function WorkspaceToolbar(props: {
         style={{ paddingHorizontal: edge, paddingBottom: bottom, gap: 10 }}
       >
         {searching ? (
-          <View className="flex-row items-center" style={{ gap }}>
+          <View ref={searchBackRef} className="flex-row items-center" style={{ gap }}>
             {!keyboardVisible && !expanded ? (
               <ToolbarButton
                 label={`Show tabs, ${activeTab.label} selected`}
@@ -124,7 +124,7 @@ export function WorkspaceToolbar(props: {
               />
             ) : null}
             <WorkspaceSearchField
-              ref={input}
+              ref={attachSearchField}
               tab={state.selectedTab}
               query={tab.query}
               onChangeQuery={(query) => dispatch({ type: "query", query })}

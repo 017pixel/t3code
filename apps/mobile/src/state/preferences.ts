@@ -31,6 +31,8 @@ export function createMobilePreferencesState(
             Effect.as<MobilePreferences.Preferences>({}),
           ),
         ),
+        // Readers fall back to defaults on a failed load, so the defect is reported here.
+        Effect.tapDefect((defect) => Effect.logError("Mobile preferences load defected.", defect)),
       ),
     )
     .pipe(Atom.keepAlive, Atom.withLabel("mobile:preferences:stored"));

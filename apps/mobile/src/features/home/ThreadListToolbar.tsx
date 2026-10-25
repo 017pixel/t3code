@@ -1,13 +1,7 @@
-import { useCallback, useEffect, useRef, useState, type ComponentProps } from "react";
-import { useNavigation, useNavigationState } from "@react-navigation/native";
+import { useCallback, useRef, useState, type ComponentProps } from "react";
+import { useNavigation } from "@react-navigation/native";
 import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
-import {
-  BackHandler,
-  Keyboard,
-  type TextInputInstance,
-  View,
-  type LayoutChangeEvent,
-} from "react-native";
+import { Keyboard, type TextInputInstance, View, type LayoutChangeEvent } from "react-native";
 import type { MenuAction } from "@react-native-menu/menu";
 
 import { AndroidHeaderIconButton } from "../../components/ui/AndroidScreenHeader";
@@ -18,6 +12,7 @@ import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands
 import { WorkspaceListToolbarRow } from "../workspace/WorkspaceListToolbarRow";
 import { useWorkspaceConnectionState } from "../../state/workspace";
 import { useToolbarLayout } from "../../components/ui/useToolbarLayout";
+import { backHandlerRef } from "../../lib/backHandler";
 
 export function ThreadListToolbar(props: {
   readonly searchQuery: string;
@@ -33,9 +28,6 @@ export function ThreadListToolbar(props: {
   const navigation = useNavigation();
   const workspace = useWorkspaceTabs();
   const isTabActive = workspace?.isTabActive;
-  const homeFocused = useNavigationState((state) => state.routes[state.index]?.name === "Home");
-  const listFocused =
-    homeFocused && (workspace === null || workspace.state.selectedTab === "threads");
   const { paddingTop, paddingBottom } = useToolbarLayout();
   const connectionState = useWorkspaceConnectionState();
   const { onRequestVisibility, onSearchQueryChange } = props;
@@ -56,36 +48,31 @@ export function ThreadListToolbar(props: {
     Keyboard.dismiss();
   }, [onSearchQueryChange]);
 
-  useEffect(() => {
-    if (!searching || !listFocused) return;
-    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
-      // Frozen Home screens can keep effects alive after a detail route opens.
-      const state = navigation.getState();
-      if (
-        !state ||
-        state.routes[state.index]?.name !== "Home" ||
-        isTabActive?.("threads") === false
-      )
-        return false;
-      if (Keyboard.isVisible()) Keyboard.dismiss();
-      else closeSearch();
-      return true;
-    });
-    return () => subscription.remove();
-  }, [closeSearch, searching, listFocused, navigation, isTabActive]);
+  // The search field stays mounted on frozen Home screens under a detail route
+  // or another tab, so back only applies while the thread list is in front.
+  const searchBackRef = backHandlerRef(() => {
+    const state = navigation.getState();
+    if (!state || state.routes[state.index]?.name !== "Home" || isTabActive?.("threads") === false)
+      return false;
+    if (Keyboard.isVisible()) Keyboard.dismiss();
+    else closeSearch();
+    return true;
+  });
 
   const filterIcon = props.filterCustomized
     ? "line.3.horizontal.decrease.circle.fill"
     : "line.3.horizontal.decrease.circle";
   const searchField = (
-    <SearchField
-      inputRef={searchRef}
-      accessibilityLabel="Search threads"
-      clearAccessibilityLabel="Clear search"
-      placeholder="Search"
-      value={props.searchQuery}
-      onChangeText={onSearchQueryChange}
-    />
+    <View ref={searchBackRef} className="min-w-0 flex-1 flex-row">
+      <SearchField
+        inputRef={searchRef}
+        accessibilityLabel="Search threads"
+        clearAccessibilityLabel="Clear search"
+        placeholder="Search"
+        value={props.searchQuery}
+        onChangeText={onSearchQueryChange}
+      />
+    </View>
   );
   const filterButton = connectionState.hasConnections ? (
     <AndroidAnchoredMenu actions={props.filterActions} onPressAction={props.onFilterAction}>

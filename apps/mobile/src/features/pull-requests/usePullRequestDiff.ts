@@ -1,15 +1,24 @@
 import type { ChangeRequestTerminology } from "@t3tools/client-runtime/source-control-clients";
-import { EnvironmentId, ProjectId, type PullRequestListEntry } from "@t3tools/contracts";
-import { useAtomRefresh } from "@effect/atom-react";
-import { useCallback, useLayoutEffect, useMemo, useState } from "react";
+import {
+  EnvironmentId,
+  ProjectId,
+  type PullRequestDiffResult,
+  type PullRequestListEntry,
+} from "@t3tools/contracts";
+import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
+import * as Option from "effect/Option";
+import { AsyncResult, Atom } from "effect/reactivity";
+import { useState } from "react";
 
 import { composerPullRequests } from "../../state/pull-requests";
 import { useEnvironmentQuery } from "../../state/query";
 import { usePullToRefresh } from "../../state/use-pull-to-refresh";
+import type { ReviewParsedDiff } from "../review/reviewModel";
 import {
   getCachedPullRequestDiffPages,
-  retainPullRequestDiffPage,
-  type PullRequestDiffPage,
+  parsePullRequestDiffPage,
+  requestPullRequestDiffPaths,
+  walkPullRequestDiffPages,
 } from "./pullRequestDiffPages";
 
 export type PullRequestParams = {
@@ -35,7 +44,9 @@ export function pullRequestTarget(params: PullRequestParams) {
   };
 }
 
-const NO_PAGES: readonly PullRequestDiffPage[] = [];
+type PullRequestDiffTarget = ReturnType<typeof pullRequestTarget> & {
+  readonly input: { readonly commit?: string };
+};
 
 export function usePullRequestDiffEntry(navigation: {
   readonly addListener: (
@@ -44,8 +55,9 @@ export function usePullRequestDiffEntry(navigation: {
   ) => () => void;
 }) {
   const [ready, setReady] = useState(false);
-  useLayoutEffect(() => {
-    if (ready) return;
+  // The loading shell renders only until the diff opens, so its element owns the wait.
+  const attachShell = (node: object | null) => {
+    if (node === null) return;
     let opening = false;
     let closing = false;
     const finish = () => {
@@ -73,16 +85,53 @@ export function usePullRequestDiffEntry(navigation: {
       cancelAnimationFrame(frame);
       clearTimeout(fallback);
     };
-  }, [navigation, ready]);
-  return ready;
+  };
+  return { ready, attachShell };
 }
 
+const pageTarget = (target: PullRequestDiffTarget, cursor: string | null) => ({
+  ...target,
+  input: { ...target.input, ...(cursor ? { cursor } : {}) },
+});
+
+// Pages parse once however many readers combine them; each answer is its own object.
+const parseCache = new WeakMap<PullRequestDiffResult, ReviewParsedDiff>();
+
+// Reads the cached pages in order and mounts the next one a reader still needs, so paging toward
+// a wanted file continues as each page lands, without the screen asking again.
+const diffPagesFamily = Atom.family((key: string) => {
+  const [target, count, wanted] = JSON.parse(key) as [
+    PullRequestDiffTarget,
+    number,
+    readonly string[],
+  ];
+  const scope = JSON.stringify(target);
+  return Atom.make((get) =>
+    walkPullRequestDiffPages(
+      (cursor) =>
+        Option.getOrNull(
+          AsyncResult.value(get(composerPullRequests.diff(pageTarget(target, cursor)))),
+        ),
+      count,
+      wanted,
+      (page) => {
+        const parsed = parsePullRequestDiffPage(page, parseCache, scope);
+        return parsed.kind === "files" ? parsed.files.map((file) => file.path) : [];
+      },
+    ),
+  );
+});
+
+const NO_PATHS: readonly string[] = [];
+
+/** `wantedPaths` keeps paging until those files have loaded or the diff ends. */
 export function usePullRequestDiff(
   params: PullRequestDiffParams,
   terminology: ChangeRequestTerminology,
+  wantedPaths: readonly string[] = NO_PATHS,
 ) {
   const reference = pullRequestTarget(params);
-  const target = {
+  const target: PullRequestDiffTarget = {
     ...reference,
     input: { ...reference.input, ...(params.commit ? { commit: params.commit } : {}) },
   };
@@ -90,49 +139,35 @@ export function usePullRequestDiff(
   const firstPageAtom = composerPullRequests.diff(target);
   const refreshFirstPage = useAtomRefresh(firstPageAtom);
   const { refreshing, onRefresh } = usePullToRefresh(firstPageAtom);
-  const [state, setState] = useState<{
-    key: string;
-    cursor: string | null;
-    pages: readonly PullRequestDiffPage[];
-  }>({ key, cursor: null, pages: NO_PAGES });
-  const cursor = state.key === key ? state.cursor : null;
-  const query = useEnvironmentQuery(
-    composerPullRequests.diff({
-      ...target,
-      input: { ...target.input, ...(cursor ? { cursor } : {}) },
-    }),
+  const [stored, setRequested] = useState(() => ({ key, count: 1, wanted: wantedPaths }));
+  // React's adjust-state-while-rendering form: the request outlives a single wanted path.
+  const requested = requestPullRequestDiffPaths(stored, key, wantedPaths);
+  if (requested !== stored) setRequested(requested);
+  const { pages, frontier } = useAtomValue(
+    diffPagesFamily(JSON.stringify([target, requested.count, requested.wanted])),
   );
-  const pages = useMemo(() => {
-    const loaded = state.key === key ? state.pages : NO_PAGES;
-    return query.data ? retainPullRequestDiffPage(loaded, cursor, query.data) : loaded;
-  }, [cursor, key, query.data, state.key, state.pages]);
-  if (state.key !== key || state.pages !== pages) setState({ key, cursor, pages });
-
-  const parsed = useMemo(
-    () => getCachedPullRequestDiffPages(pages, key, terminology),
-    [key, pages, terminology],
-  );
-  const patch = useMemo(() => pages.map((page) => page.result.patch).join("\n"), [pages]);
+  const query = useEnvironmentQuery(composerPullRequests.diff(pageTarget(target, frontier)));
+  const parsed = getCachedPullRequestDiffPages(pages, key, terminology, parseCache);
+  const patch = pages.map((page) => page.result.patch).join("\n");
   const nextCursor = pages.at(-1)?.result.nextCursor ?? null;
-  const canLoadMore =
-    nextCursor !== null && nextCursor !== cursor && !query.isPending && query.error === null;
-  const loadMore = useCallback(() => {
-    if (!canLoadMore) return;
-    setState({ key, cursor: nextCursor, pages });
-  }, [canLoadMore, key, nextCursor, pages, setState]);
-  const { error, refresh: refreshPage } = query;
-  const refresh = useCallback(() => {
-    if (cursor !== null && error !== null) {
-      refreshPage();
+  const canLoadMore = nextCursor !== null && !query.isPending && query.error === null;
+  const loadMore = () => {
+    if (canLoadMore) setRequested({ ...requested, count: pages.length + 1 });
+  };
+  const refresh = () => {
+    // A failed continuation retries alone, keeping the pages already loaded.
+    if (frontier !== null && query.error !== null) {
+      query.refresh();
       return;
     }
-    setState({ key, cursor: null, pages: NO_PAGES });
+    setRequested({ key, count: 1, wanted: wantedPaths });
     refreshFirstPage();
-  }, [cursor, error, refreshPage, key, refreshFirstPage, setState]);
-  const onPullRefresh = useCallback(() => {
-    setState({ key, cursor: null, pages: NO_PAGES });
+    if (frontier !== null) query.refresh();
+  };
+  const onPullRefresh = () => {
+    setRequested({ key, count: 1, wanted: wantedPaths });
     onRefresh();
-  }, [key, onRefresh, setState]);
+  };
   return {
     ...query,
     refresh,

@@ -6,7 +6,9 @@ import * as reviewModel from "../review/reviewModel";
 import {
   combinePullRequestDiffPages,
   getCachedPullRequestDiffPages,
-  retainPullRequestDiffPage,
+  requestPullRequestDiffPaths,
+  walkPullRequestDiffPages,
+  type PullRequestDiffPage,
 } from "./pullRequestDiffPages";
 
 const GITHUB = sourceControlClients.get("github").changeRequest;
@@ -126,11 +128,10 @@ describe("paged mobile pull request diffs", () => {
     const first = { ...diff("first.ts"), nextCursor: "second" };
     const withheld = withheldDiff();
     const cache = new WeakMap<PullRequestDiffResult, ReviewParsedDiff>();
-    const pages = retainPullRequestDiffPage(
-      retainPullRequestDiffPage([], null, first),
-      "second",
-      withheld,
-    );
+    const pages = [
+      { cursor: null, result: first },
+      { cursor: "second", result: withheld },
+    ];
     const before = combinePullRequestDiffPages(pages, cache, "pr", GITHUB);
     if (before.kind !== "files") throw new Error("Expected structured diff");
     expect(before.files.map((file) => [file.path, file.additions, file.deletions])).toEqual([
@@ -140,10 +141,16 @@ describe("paged mobile pull request diffs", () => {
     expect(before.additions).toBe(3001);
     expect(before.deletions).toBe(1801);
 
-    const refreshed = retainPullRequestDiffPage(pages, "second", {
-      ...withheld,
-      omittedFileStats: [{ path: "large.ts", additions: 4000, deletions: 2000 }],
-    });
+    const refreshed = [
+      pages[0]!,
+      {
+        cursor: "second",
+        result: {
+          ...withheld,
+          omittedFileStats: [{ path: "large.ts", additions: 4000, deletions: 2000 }],
+        },
+      },
+    ];
     const after = combinePullRequestDiffPages(refreshed, cache, "pr", GITHUB);
     if (after.kind !== "files") throw new Error("Expected structured diff");
     expect(after.files[0]).toBe(before.files[0]);
@@ -155,17 +162,63 @@ describe("paged mobile pull request diffs", () => {
     expect(before.additions).toBe(3001);
   });
 
-  it("discards later pages when a refreshed page changes", () => {
-    const first = diff("first.ts");
-    const pages = retainPullRequestDiffPage(
-      retainPullRequestDiffPage([], null, first),
-      "second",
-      diff("second.ts"),
-    );
-    expect(retainPullRequestDiffPage(pages, null, first)).toBe(pages);
-    expect(retainPullRequestDiffPage(pages, null, { ...first })).toBe(pages);
-    const refreshed = retainPullRequestDiffPage(pages, null, diff("changed.ts"));
-    expect(refreshed).toHaveLength(1);
-    expect(refreshed[0]?.result.patch).toContain("changed.ts");
+  it("pages on until the wanted files load, then stops", () => {
+    const answers = new Map<string | null, PullRequestDiffResult>([
+      [null, { ...diff("a.ts"), nextCursor: "2" }],
+      ["2", { ...diff("b.ts"), nextCursor: "3" }],
+      ["3", { ...diff("c.ts"), nextCursor: "4" }],
+      ["4", diff("d.ts")],
+    ]);
+    const read = (cursor: string | null) => answers.get(cursor) ?? null;
+    const paths = (page: PullRequestDiffPage) => [page.result.patch.split(" ")[2]!.slice(2)];
+    const walk = (count: number, wanted: readonly string[]) => {
+      const { pages, frontier } = walkPullRequestDiffPages(read, count, wanted, paths);
+      return { cursors: pages.map((page) => page.cursor), frontier };
+    };
+
+    expect(walk(1, [])).toEqual({ cursors: [null], frontier: null });
+    expect(walk(1, ["c.ts"])).toEqual({ cursors: [null, "2", "3"], frontier: "3" });
+    expect(walk(4, [])).toEqual({ cursors: [null, "2", "3", "4"], frontier: "4" });
+    expect(walk(1, ["gone.ts"])).toEqual({ cursors: [null, "2", "3", "4"], frontier: "4" });
+    answers.delete("3");
+    expect(walk(1, ["d.ts"])).toEqual({ cursors: [null, "2"], frontier: "3" });
+  });
+
+  it("keeps pages loaded while seeking one file when the wanted file moves to an earlier page", () => {
+    const answers = new Map<string | null, PullRequestDiffResult>([
+      [null, { ...diff("a.ts"), nextCursor: "2" }],
+      ["2", { ...diff("b.ts"), nextCursor: "3" }],
+      ["3", { ...diff("c.ts"), nextCursor: "4" }],
+      ["4", diff("d.ts")],
+    ]);
+    const read = (cursor: string | null) => answers.get(cursor) ?? null;
+    const paths = (page: PullRequestDiffPage) => [page.result.patch.split(" ")[2]!.slice(2)];
+    const shown = (request: { count: number; wanted: readonly string[] }) =>
+      walkPullRequestDiffPages(read, request.count, request.wanted, paths).pages.map(
+        (page) => page.cursor,
+      );
+
+    const opened = requestPullRequestDiffPaths({ key: "pr", count: 1, wanted: [] }, "pr", ["c.ts"]);
+    expect(shown(opened)).toEqual([null, "2", "3"]);
+    const jumped = requestPullRequestDiffPaths(opened, "pr", ["a.ts"]);
+    expect(shown(jumped)).toEqual([null, "2", "3"]);
+    expect(requestPullRequestDiffPaths(jumped, "pr", ["a.ts"])).toBe(jumped);
+    expect(requestPullRequestDiffPaths(jumped, "other", ["a.ts"])).toEqual({
+      key: "other",
+      count: 1,
+      wanted: ["a.ts"],
+    });
+  });
+
+  it("drops later pages when a refreshed page points elsewhere, and stops on a cursor loop", () => {
+    const answers = new Map<string | null, PullRequestDiffResult>([
+      [null, { ...diff("a.ts"), nextCursor: "2" }],
+      ["2", { ...diff("b.ts"), nextCursor: "2" }],
+    ]);
+    const read = (cursor: string | null) => answers.get(cursor) ?? null;
+    expect(walkPullRequestDiffPages(read, 5, [], () => []).pages).toHaveLength(2);
+    answers.set(null, diff("changed.ts"));
+    const { pages } = walkPullRequestDiffPages(read, 5, [], () => []);
+    expect(pages.map((page) => page.result.patch)).toEqual([diff("changed.ts").patch]);
   });
 });

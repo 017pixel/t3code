@@ -6,6 +6,7 @@ import type { ResolvedMobileCodeSurface } from "../../lib/appearancePreferences"
 import { resolveHighlightLanguage } from "../../lib/highlightLanguage";
 import { type MobileThemeId, type MobileThemeVariables } from "../../lib/mobileTheme";
 import { getMobileTerminalTheme, type TerminalAppearanceScheme } from "../terminal/terminalTheme";
+import { markReviewEvent } from "./reviewPerf";
 import { computeWordAltDiffRanges } from "./reviewWordDiffs";
 import {
   getReviewFilePreviewState,
@@ -122,6 +123,11 @@ export interface NativeReviewDiffCommentTarget {
 export interface BuildNativeReviewDiffDataInput {
   readonly parsedDiff: ReviewParsedDiff;
   readonly comments?: ReadonlyArray<ReviewInlineComment>;
+}
+
+interface CachedNativeReviewDiffDataInput extends BuildNativeReviewDiffDataInput {
+  /** Set for the section on screen; its builds mark `parsed-diff-ready`, prewarm builds do not. */
+  readonly displayedSectionId?: string | null;
 }
 
 interface CachedNativeReviewDiffData {
@@ -572,7 +578,7 @@ export function buildNativeReviewDiffData(
 }
 
 export function getCachedNativeReviewDiffData(
-  input: BuildNativeReviewDiffDataInput,
+  input: CachedNativeReviewDiffDataInput,
 ): NativeReviewDiffData {
   const comments = input.comments ?? [];
   const commentsKey = buildReviewCommentsCacheKey(comments);
@@ -584,5 +590,15 @@ export function getCachedNativeReviewDiffData(
   const prepared = cached?.prepared ?? prepareNativeReviewDiffData(input.parsedDiff);
   const data = buildCommentedNativeReviewDiffData(prepared, comments);
   nativeReviewDiffDataCache.set(input.parsedDiff, { prepared, commentsKey, data });
+  if (input.displayedSectionId !== undefined && input.parsedDiff.kind === "files") {
+    markReviewEvent("parsed-diff-ready", {
+      sectionId: input.displayedSectionId,
+      fileCount: input.parsedDiff.fileCount,
+      renderableFileCount: input.parsedDiff.files.length,
+      additions: input.parsedDiff.additions,
+      deletions: input.parsedDiff.deletions,
+      renderedItems: data.rows.length,
+    });
+  }
   return data;
 }

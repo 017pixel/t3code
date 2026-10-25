@@ -45,13 +45,6 @@ export function createReviewDiffHighlightScheduler(
         timer = setTimeout(flush, 150);
       }
     },
-    reset() {
-      cancel();
-      const previousRange = visibleRange;
-      requestedRange = undefined;
-      visibleRange = requestedRange;
-      return previousRange;
-    },
     cancel,
   };
 }

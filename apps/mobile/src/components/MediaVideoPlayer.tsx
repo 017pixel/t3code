@@ -1,7 +1,7 @@
-import { useIsFocused } from "@react-navigation/native";
+import { useNavigation } from "@react-navigation/native";
 import { useEvent } from "expo";
 import { useVideoPlayer, VideoView } from "expo-video";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { AppState, Pressable, View } from "react-native";
 
 import { AppActivityIndicator } from "./ui/AppActivityIndicator";
@@ -10,21 +10,26 @@ import { SymbolView } from "./ui/AppSymbol";
 import { VideoThumbnailImage } from "./VideoThumbnailImage";
 import { useMediaActions } from "../state/mediaActions";
 import { type MediaActionsSource } from "../lib/mediaActionsSource";
-import { useFullscreenVideoOpen, useMediaAudioSessionHold } from "../lib/videoAudioSession";
+import { isAppActive } from "../lib/appState";
+import {
+  isFullscreenVideoOpen,
+  MediaShareScope,
+  useMediaAudioSessionHold,
+} from "../lib/videoAudioSession";
 import { MediaActionsMenu } from "./MediaActionsMenu";
 
 function LoadedMediaVideo(props: {
   readonly uri: string;
   readonly resolvePlaybackUri?: () => Promise<string | null>;
   readonly playRequested: boolean;
-  readonly paused: boolean;
+  readonly shareScope: MediaShareScope;
 }) {
-  const focused = useIsFocused();
-  const fullscreenVideoOpen = useFullscreenVideoOpen();
-  const paused = props.paused || fullscreenVideoOpen;
-  const active = useRef(focused && AppState.currentState === "active");
+  const navigation = useNavigation();
   const fullscreen = useRef(false);
-  const [attempt, setAttempt] = useState(0);
+  const loading = useRef<AbortController | null>(null);
+  // The player loads once when it mounts; a renewed signature is used on Retry,
+  // not as a reason to reset the native player.
+  const [initialSource] = useState(() => props);
   // Expo's Android player also reports completed playback as idle.
   const [loadState, setLoadState] = useState<"pending" | "complete" | "error">("pending");
   const player = useVideoPlayer(null, (player) => {
@@ -33,32 +38,27 @@ function LoadedMediaVideo(props: {
   });
   const { status } = useEvent(player, "statusChange", { status: player.status });
   const { isPlaying } = useEvent(player, "playingChange", { isPlaying: player.playing });
-  useMediaAudioSessionHold(isPlaying);
-  const loadSource = useEffectEvent(async (signal: AbortSignal) => {
-    const uri = props.resolvePlaybackUri ? await props.resolvePlaybackUri() : props.uri;
-    if (signal.aborted) return;
-    if (uri === null) throw new Error("Video unavailable");
-    player.pause();
-    await player.replaceAsync({ uri, contentType: "progressive" });
-    if (!signal.aborted && props.playRequested && active.current) player.play();
-  });
+  useMediaAudioSessionHold(isPlaying, () => player.pause(), props.shareScope);
 
-  useEffect(() => {
-    active.current = focused && !paused && AppState.currentState === "active";
-    if (!focused || paused || (!active.current && !fullscreen.current)) player.pause();
-    // RN reports both leaving the app and Android fullscreen as background; native handling distinguishes them.
-    const subscription = AppState.addEventListener("change", (state) => {
-      active.current = focused && !paused && state === "active";
-      if (state === "inactive" || (state === "background" && !fullscreen.current)) player.pause();
-    });
-    return () => subscription.remove();
-  }, [focused, player, paused]);
-
-  useEffect(() => {
+  const load = (source: typeof props) => {
+    loading.current?.abort();
     const controller = new AbortController();
+    loading.current = controller;
     setLoadState("pending");
-    // A renewed signature is used on Retry, not as a reason to reset the native player.
-    void loadSource(controller.signal).then(
+    void (async () => {
+      const uri = source.resolvePlaybackUri ? await source.resolvePlaybackUri() : source.uri;
+      if (controller.signal.aborted) return;
+      if (uri === null) throw new Error("Video unavailable");
+      player.pause();
+      await player.replaceAsync({ uri, contentType: "progressive" });
+      if (controller.signal.aborted) return;
+      const canPlay =
+        navigation.isFocused() &&
+        isAppActive() &&
+        !isFullscreenVideoOpen() &&
+        !source.shareScope.sharing;
+      if (source.playRequested && canPlay) player.play();
+    })().then(
       () => {
         if (!controller.signal.aborted) setLoadState("complete");
       },
@@ -66,12 +66,27 @@ function LoadedMediaVideo(props: {
         if (!controller.signal.aborted) setLoadState("error");
       },
     );
-    return () => controller.abort();
-  }, [player, props.playRequested, attempt]);
+  };
+
+  const attachVideoView = (view: VideoView | null) => {
+    if (view === null) return;
+    load(initialSource);
+    const offBlur = navigation.addListener("blur", () => player.pause());
+    // RN reports both leaving the app and Android fullscreen as background; native handling distinguishes them.
+    const appState = AppState.addEventListener("change", (state) => {
+      if (state === "inactive" || (state === "background" && !fullscreen.current)) player.pause();
+    });
+    return () => {
+      loading.current?.abort();
+      offBlur();
+      appState.remove();
+    };
+  };
 
   return (
     <View collapsable={false} style={{ flex: 1 }}>
       <VideoView
+        ref={attachVideoView}
         player={player}
         style={{ width: "100%", height: "100%" }}
         surfaceType="textureView"
@@ -92,7 +107,7 @@ function LoadedMediaVideo(props: {
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Retry video"
-            onPress={() => setAttempt((value) => value + 1)}
+            onPress={() => load(props)}
             className="min-h-11 justify-center px-4"
           >
             <AppText className="text-sm text-white">Retry</AppText>
@@ -116,12 +131,15 @@ interface MediaVideoPlayerProps {
   readonly unavailable?: boolean;
   readonly expanded?: boolean;
   readonly autoPlay?: boolean;
-  readonly paused?: boolean;
   readonly actionsSource?: MediaActionsSource;
+  /** Set when the share offered for this player lives outside it, as in a preview modal. */
+  readonly shareScope?: MediaShareScope;
 }
 
 function MediaVideoPlayerContent(props: MediaVideoPlayerProps) {
-  const mediaActions = useMediaActions(props.actionsSource);
+  const [ownShareScope] = useState(() => new MediaShareScope());
+  const shareScope = props.shareScope ?? ownShareScope;
+  const mediaActions = useMediaActions(props.actionsSource, undefined, shareScope);
   const [playbackUri, setPlaybackUri] = useState<string | null>(props.expanded ? props.uri : null);
   // Keep an opened player mounted while signing or reconnecting temporarily has no usable URL.
   if (playbackUri === null && props.expanded && props.uri !== null) setPlaybackUri(props.uri);
@@ -137,7 +155,7 @@ function MediaVideoPlayerContent(props: MediaVideoPlayerProps) {
           uri={props.uri ?? playbackUri}
           resolvePlaybackUri={props.resolvePlaybackUri}
           playRequested={!props.expanded || props.autoPlay === true}
-          paused={(props.paused ?? false) || mediaActions.sharing}
+          shareScope={shareScope}
         />
       ) : (
         <MediaActionsMenu media={mediaActions} inModal={props.expanded} style={{ flex: 1 }}>

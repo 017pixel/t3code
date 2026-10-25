@@ -3,7 +3,6 @@ import { Toolbar } from "../../../components/ui/Toolbar";
 import { parsePatchFiles } from "@pierre/diffs/utils/parsePatchFiles";
 import type { FileDiffMetadata } from "@pierre/diffs";
 import { StackActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
-import { useEffect } from "react";
 import { Platform, Pressable, View } from "react-native";
 import { AndroidScreenHeader } from "../../../components/ui/AndroidScreenHeader";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -102,20 +101,17 @@ export function PullRequestGuideStopScreen({ route }: StaticScreenProps<GuideSto
   const { guide, stale } = reviewGuideState(state.data);
   const position = Math.max(0, Math.min(route.params.position, (guide?.stops.length ?? 1) - 1));
   const stop = guide?.stops[Math.max(0, position)];
+  const wanted = stop ? stopFilePaths(stop) : [];
   const diff = usePullRequestDiff(
     route.params,
     sourceControlClients.get((detail.data ?? route.params.initialSummary)?.provider).changeRequest,
+    state.enabled ? wanted : [],
   );
   const excerptFiles = diffFilesByPath(diff.patch);
-  const wanted = stop ? stopFilePaths(stop) : [];
   const loadedPaths = new Set(
     diff.parsed.kind === "files" ? diff.parsed.files.map((file) => file.path) : [],
   );
   const missing = wanted.some((path) => !loadedPaths.has(path));
-  const { error: diffError, loadMore } = diff;
-  useEffect(() => {
-    if (state.enabled && missing && !diffError) loadMore();
-  }, [state.enabled, missing, diffError, loadMore]);
   const insets = useSafeAreaInsets();
   const changedGuide =
     guide !== null &&
@@ -207,7 +203,6 @@ export function PullRequestGuideStopScreen({ route }: StaticScreenProps<GuideSto
                             ...route.params,
                             path: excerpt.path,
                             focus: { side: excerpt.side, start: excerpt.start, end: excerpt.end },
-                            fileSelectionId: `guide:${position}:${excerpt.path}:${excerpt.start}`,
                           }),
                         )
                       }
