@@ -124,6 +124,7 @@ import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
 import {
+  NEWEST_SETTLED_KEPT,
   archivedShellStreamItemFromThreadShell,
   buildActiveShellSnapshot,
   bufferShellLiveStream,
@@ -575,9 +576,10 @@ const serverWsRpcs = Array.from(ServerWsRpcGroup.requests.values());
 const SplitWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isSplitWsRpc));
 const OtherWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isOtherWsRpc));
 // A shell resume decodes no payloads: one indexed scan of the gap finds the touched projects and
-// threads, then their current rows are read. Past either cap a snapshot is about as cheap.
+// threads, then their current rows are read. Past either cap a snapshot is about as cheap: a
+// snapshot holds at least the newest settled threads, while touched rows are often ones it omits.
 const SHELL_RESUME_MAX_GAP = 100_000;
-const SHELL_RESUME_MAX_TOUCHED = 500;
+const SHELL_RESUME_MAX_TOUCHED = NEWEST_SETTLED_KEPT;
 
 function toAuthAccessStreamEvent(
   change: PairingGrantStore.BootstrapCredentialChange | SessionStore.SessionCredentialChange,

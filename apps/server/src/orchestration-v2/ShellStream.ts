@@ -116,7 +116,7 @@ export function activeShellRowsForSubscriber(
   };
 }
 
-const NEWEST_SETTLED_KEPT = 25;
+export const NEWEST_SETTLED_KEPT = 25;
 
 /**
  * Opted-in snapshots keep the 25 newest settled top-level threads (and ties) and count the rest per

@@ -381,12 +381,12 @@ it.effect("shell resume sends each touched aggregate once, or a snapshot past it
     assert.deepEqual(yield* resume(gone + 1), ["snapshot", "synchronized"]);
 
     const first = yield* insert("project", "project:0", "project.meta-updated");
-    for (let index = 1; index <= 500; index += 1) {
+    for (let index = 1; index <= 25; index += 1) {
       yield* insert("project", `project:${index}`, "project.meta-updated");
     }
     assert.deepEqual(yield* resume(gone), ["snapshot", "synchronized"]);
     const capped = yield* resume(first);
-    assert.equal(capped.length, 501);
+    assert.equal(capped.length, 26);
     assert.equal(capped.at(-1), "synchronized");
   }).pipe(Effect.scoped, Effect.provide(ReplayTestLayer)),
 );
