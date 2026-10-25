@@ -98,7 +98,7 @@ describe("composer attachment files", () => {
       "image",
       "image",
       "image",
-      "unsupported-image",
+      "file",
       "unsupported-image",
     ]);
   });
