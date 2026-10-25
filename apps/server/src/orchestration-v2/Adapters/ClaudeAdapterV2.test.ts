@@ -35,6 +35,7 @@ import {
   type ModelSelection,
   NodeId,
   type OrchestrationV2AppThread,
+  type OrchestrationV2PendingBackgroundTask,
   type OrchestrationV2ProviderThread,
   ProjectId,
   ProviderInstanceId,
@@ -247,6 +248,28 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
     assert.equal(options.permissionMode, expected);
     assert.isUndefined(options.extraArgs?.["permission-mode"]);
     assert.isUndefined(options.extraArgs?.["dangerously-skip-permissions"]);
+  });
+
+  it("gives delegated children Claude's subagent prompt cache TTL", () => {
+    const lineage = (relationshipToParent: "fork" | "subagent" | null) => ({
+      lineage: {
+        parentThreadId: null,
+        relationshipToParent,
+        rootThreadId: ThreadId.make("thread-root"),
+      },
+    });
+    const env = { PATH: "/bin" };
+    const ttl = (environment: NodeJS.ProcessEnv, ...args: Parameters<typeof lineage>) =>
+      ClaudeAdapterV2.claudeQueryEnvironment(environment, lineage(...args), "5m")
+        .CLAUDE_CODE_PROMPT_CACHE_TTL;
+    assert.equal(ttl(env, "subagent"), "5m");
+    assert.isUndefined(ttl(env, null));
+    assert.isUndefined(ttl(env, "fork"));
+    assert.equal(ttl({ ...env, CLAUDE_CODE_PROMPT_CACHE_TTL: "1h" }, "subagent"), "1h");
+    assert.strictEqual(
+      ClaudeAdapterV2.claudeQueryEnvironment(env, lineage("subagent"), undefined),
+      env,
+    );
   });
 
   it("projects AskUserQuestion input with question text as the answer key", () => {
@@ -543,6 +566,7 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
     assert.equal(systemPrompt.type, "preset");
     assert.equal(systemPrompt.preset, "claude_code");
     assert.include(systemPrompt.append ?? "", "Use `delegate_task`");
+    assert.include(systemPrompt.append ?? "", "call `t3_background_wait`");
     const logged = ClaudeAdapterV2.loggedClaudeQueryOptions(options);
     assert.equal(logged.hasMcpServers, true);
     assert.notInclude(JSON.stringify(logged), "secret-claude-token");
@@ -563,6 +587,47 @@ describe("ClaudeAdapterV2 context usage", () => {
       DateTime.makeUnsafe("2026-08-29T00:00:00.000Z"),
     );
     assert.strictEqual(usage.promptCacheExpiresAt, "2026-08-29T00:05:00.000Z");
+  });
+});
+
+describe("ClaudeAdapterV2 approval presentation", () => {
+  it("marks asks that full access could not auto-allow and keeps the CLI's reason", () => {
+    const presentation = ClaudeAdapterV2.claudeApprovalPresentation({
+      permissionMode: "bypassPermissions",
+      prompt: 'Claude wants to run rm -r -- "$rr/$h"',
+      callbackOptions: {
+        decisionReason: "\u001b[33mDangerous rm on a path built from a variable\u001b[39m",
+        suppressAlwaysAllowRule: true,
+      },
+    });
+    assert.deepEqual(presentation, {
+      reason: "Dangerous rm on a path built from a variable",
+      fullAccessOverride: "provider_check",
+      options: [
+        { decision: "decline", label: "Decline" },
+        { decision: "accept", label: "Approve" },
+      ],
+    });
+  });
+
+  it("attributes a bypass ask to the user's ask rule when one matched", () => {
+    const presentation = ClaudeAdapterV2.claudeApprovalPresentation({
+      permissionMode: "bypassPermissions",
+      prompt: "Claude wants to run git push",
+      callbackOptions: {
+        matchedAskRule: { source: "userSettings", toolName: "Bash", ruleContent: "git push:*" },
+      },
+    });
+    assert.deepEqual(presentation, { fullAccessOverride: "ask_rule" });
+  });
+
+  it("adds nothing to ordinary approvals outside full access", () => {
+    const presentation = ClaudeAdapterV2.claudeApprovalPresentation({
+      permissionMode: "default",
+      prompt: "Run make?",
+      callbackOptions: { decisionReason: "Run make?" },
+    });
+    assert.deepEqual(presentation, {});
   });
 });
 
@@ -904,7 +969,10 @@ describe("ClaudeAdapterV2 append-system-prompt-file launch argument", () => {
 describe("ClaudeAdapterV2 approval cancellation", () => {
   it.effect("observes an approval signal that was already aborted", () =>
     Effect.gen(function* () {
-      const decision = yield* Deferred.make<ProviderApprovalDecision>();
+      const decision = yield* Deferred.make<{
+        decision: ProviderApprovalDecision;
+        feedback?: string;
+      }>();
       const controller = new AbortController();
       controller.abort();
 
@@ -913,7 +981,7 @@ describe("ClaudeAdapterV2 approval cancellation", () => {
         controller.signal,
       );
 
-      assert.equal(result, "cancel");
+      assert.deepEqual(result, { decision: "cancel" });
     }),
   );
 });
@@ -2136,6 +2204,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* Queue.unbounded<
           Extract<ProviderAdapter.ProviderAdapterV2Event, { type: "plan.updated" }>
         >();
+      const providerThreadReceipts =
+        yield* Queue.unbounded<
+          Extract<ProviderAdapter.ProviderAdapterV2Event, { type: "provider_thread.updated" }>
+        >();
       let openedOptions: ClaudeAdapterV2.ClaudeAgentSdkQueryOptions | undefined;
       const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
         instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
@@ -2263,6 +2335,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             if (event.type === "plan.updated") {
               yield* Queue.offer(planReceipts, event);
             }
+            if (event.type === "provider_thread.updated") {
+              yield* Queue.offer(providerThreadReceipts, event);
+            }
             if (event.type === "turn_item.updated" && event.turnItem.type === "system_notice") {
               yield* Queue.offer(systemNoticeReceipts, event);
             }
@@ -2306,6 +2381,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         systemNoticeReceipts,
         runtimeRequestReceipts,
         planReceipts,
+        providerThreadReceipts,
         getOpenedOptions: () => openedOptions,
         terminalEvents,
         hasPendingBackgroundWork,
@@ -2810,12 +2886,14 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       turn: Effect.Success<ReturnType<typeof openPlanTurn>>,
       toolName: string,
       toolInput: Record<string, unknown>,
+      options?: { toolUseID: string; agentID?: string },
     ) {
       const decision = yield* Effect.promise(() =>
         turn.canUseTool(toolName, toolInput, {
           signal: new AbortController().signal,
-          toolUseID: "tool-plan-write",
+          toolUseID: options?.toolUseID ?? "tool-plan-write",
           requestId: "request-plan-write",
+          ...(options?.agentID === undefined ? {} : { agentID: options.agentID }),
         }),
       ).pipe(Effect.forkScoped);
       const first = yield* Effect.raceFirst(
@@ -2889,6 +2967,61 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
         ),
       ),
+    );
+
+    it.effect(
+      "returns approval feedback to the requesting tool without sending a parent prompt",
+      () =>
+        Effect.gen(function* () {
+          const turn = yield* openPlanTurn("full-access");
+          const parentPermission = yield* requestWrite(
+            turn,
+            "Bash",
+            { command: "git status" },
+            { toolUseID: "parent-command" },
+          );
+          assert.equal(parentPermission.first.type, "request");
+          if (parentPermission.first.type !== "request") return;
+          const permission = yield* requestWrite(
+            turn,
+            "Bash",
+            { command: "rm -f $W/*/*.obj" },
+            { toolUseID: "child-command", agentID: "child-worker" },
+          );
+          assert.equal(permission.first.type, "request");
+          if (permission.first.type !== "request") return;
+          const request = permission.first.event.runtimeRequest;
+          assert.equal(request.responseCapability.type, "live");
+          assert.isTrue(
+            request.responseCapability.type === "live" &&
+              request.responseCapability.supportsFeedback,
+          );
+          yield* turn.runtime.respondToRuntimeRequest({
+            requestId: request.id,
+            decision: "decline",
+            feedback: "Run it in a safer manner.",
+          });
+          const result = yield* Fiber.join(permission.decision);
+          assert.equal(result?.behavior, "deny");
+          if (result?.behavior === "deny") {
+            assert.include(result.message, "Run it in a safer manner.");
+            assert.notProperty(result, "interrupt");
+          }
+          assert.equal(turn.offeredMessages.length, 1);
+          yield* turn.runtime.respondToRuntimeRequest({
+            requestId: parentPermission.first.event.runtimeRequest.id,
+            decision: "accept",
+          });
+          const parentResult = yield* Fiber.join(parentPermission.decision);
+          assert.equal(parentResult?.behavior, "allow");
+          if (parentResult?.behavior === "allow")
+            assert.equal(parentResult.toolUseID, "parent-command");
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
     );
 
     it.effect("still captures ExitPlanMode when Plan approvals are never allowed", () =>
@@ -4170,15 +4303,35 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       const [running, settled] = updates;
       assert.equal(running?.status, "running");
       assert.equal(settled?.status, compaction === "success" ? "completed" : "failed");
+      assert.equal(
+        settled?.type === "compaction" ? settled.summary : undefined,
+        compaction === "failed"
+          ? limited
+            ? compactError
+            : "Not enough messages to compact."
+          : undefined,
+      );
       assert.equal(settled?.id, running?.id);
       assert.equal(settled?.ordinal, running?.ordinal);
       assert.deepEqual(settled?.startedAt, running?.startedAt);
       assert.isNotNull(settled?.completedAt);
       assert.isEmpty(harness.terminalEvents());
 
-      yield* Queue.offer(
+      yield* Queue.offerAll(
         harness.sdkMessages,
-        compact ? claudeSdkFrame({ ...result, local_command: "compact" }) : result,
+        compact
+          ? [
+              // Claude Code echoes the command's stdout as a synthetic assistant message.
+              claudeSdkFrame({
+                ...makeAssistantTextFrame({
+                  uuid: "00000000-0000-4000-8000-000000000615",
+                  text: "Compacted.",
+                }),
+                local_command_source: "<local-command-stdout>Compacted.</local-command-stdout>",
+              }),
+              claudeSdkFrame({ ...result, local_command: "compact" }),
+            ]
+          : [result],
       );
       const terminal = yield* Queue.take(harness.terminalReceipts);
       assert.deepEqual(
@@ -4190,12 +4343,83 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         updates,
       );
       assert.equal(terminal.status, status);
+      assert.equal(
+        harness.events.some(
+          (event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "assistant_message",
+        ),
+        !compact,
+      );
       if (terminal.status !== "failed") return;
       assert.equal(terminal.failure.class, "usage_limit");
       assert.equal(terminal.failure.message, compactError);
       assert.equal(
         terminal.failure.resetAt,
         DateTime.formatIso(DateTime.makeUnsafe(resetsAt * 1000)),
+      );
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect("keeps an unreported /compact failure's reason on the compaction, not as a reply", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      const now = yield* DateTime.now;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("attempt-claude-compaction-unreported"),
+          text: "/compact",
+          attachments: [],
+        }),
+      );
+      // Claude can refuse a /compact without a compact_result: the only reason is the result text.
+      yield* Queue.offerAll(harness.sdkMessages, [
+        claudeSdkFrame({
+          type: "system",
+          subtype: "status",
+          status: "compacting",
+          uuid: "00000000-0000-4000-8000-000000000620",
+          session_id: WAKE_NATIVE_SESSION,
+        }),
+        claudeSdkFrame({
+          ...makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000622",
+            text: "Not enough messages to compact.",
+          }),
+          local_command_source:
+            "<local-command-stdout>Not enough messages to compact.</local-command-stdout>",
+        }),
+        claudeSdkFrame({
+          ...makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000621",
+            result: "Not enough messages to compact.",
+            numTurns: 0,
+            terminalReason: null,
+          }),
+          local_command: "compact",
+        }),
+      ]);
+      yield* Queue.take(harness.terminalReceipts);
+      const settled = harness.events
+        .flatMap((event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "compaction"
+            ? [event.turnItem]
+            : [],
+        )
+        .at(-1);
+      assert.equal(settled?.status, "failed");
+      assert.equal(settled?.summary, "Not enough messages to compact.");
+      assert.isFalse(
+        harness.events.some(
+          (event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "assistant_message",
+        ),
       );
     }).pipe(
       Effect.provide(
@@ -6209,6 +6433,132 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
         ),
       ),
+  );
+
+  it.effect("holds only the background tasks the agent marks awaited, until they end", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const awaitBackgroundTasks = harness.runtime.awaitBackgroundTasks;
+        if (awaitBackgroundTasks === undefined) {
+          throw new Error("Claude adapter runtime must expose awaitBackgroundTasks.");
+        }
+        const roster = (tasks: ReadonlyArray<string>, uuid: string) =>
+          claudeSdkFrame({
+            type: "system",
+            subtype: "background_tasks_changed",
+            tasks: tasks.map((taskId) => ({
+              task_id: taskId,
+              task_type: "local_bash",
+              description: taskId,
+            })),
+            uuid,
+            session_id: WAKE_NATIVE_SESSION,
+          });
+        const nextRoster = Effect.fn("nextRoster")(function* (
+          matches: (tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>) => boolean,
+        ) {
+          while (true) {
+            const { providerThread } = yield* Queue.take(harness.providerThreadReceipts);
+            const tasks = providerThread.pendingBackgroundTasks ?? [];
+            if (matches(tasks)) return tasks;
+          }
+        });
+        const marks = (tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>) =>
+          tasks.map((task) => [task.taskId, task.awaited === true]);
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-awaited-roster"),
+            text: "Run the tests in the background and the dev server.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          roster([WAKE_TASK_ID, "dev-server"], "00000000-0000-4000-8000-000000000301"),
+        );
+        yield* nextRoster((tasks) => tasks.length === 2);
+
+        const marked = yield* awaitBackgroundTasks({
+          providerThread: harness.providerThread,
+          taskIds: [WAKE_TASK_ID, "already-finished"],
+          awaited: true,
+        });
+        assert.deepStrictEqual(marked.matched, [WAKE_TASK_ID]);
+        assert.deepStrictEqual(
+          marks(yield* nextRoster((tasks) => tasks.some((task) => task.awaited === true))),
+          [
+            [WAKE_TASK_ID, true],
+            ["dev-server", false],
+          ],
+        );
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        yield* Queue.take(harness.terminalReceipts);
+
+        // A replacing level rebuilds every entry; the mark must survive it.
+        yield* Queue.offer(
+          harness.sdkMessages,
+          roster(["dev-server", WAKE_TASK_ID], "00000000-0000-4000-8000-000000000302"),
+        );
+        assert.deepStrictEqual(
+          marks(yield* nextRoster((tasks) => tasks[0]?.taskId === "dev-server")),
+          [
+            ["dev-server", false],
+            [WAKE_TASK_ID, true],
+          ],
+        );
+
+        // Once the task leaves the roster, a reused id starts unmarked.
+        yield* Queue.offer(
+          harness.sdkMessages,
+          roster(["dev-server"], "00000000-0000-4000-8000-000000000303"),
+        );
+        yield* nextRoster((tasks) => tasks.length === 1);
+        yield* Queue.offer(
+          harness.sdkMessages,
+          roster(["dev-server", WAKE_TASK_ID], "00000000-0000-4000-8000-000000000304"),
+        );
+        assert.deepStrictEqual(marks(yield* nextRoster((tasks) => tasks.length === 2)), [
+          ["dev-server", false],
+          [WAKE_TASK_ID, false],
+        ]);
+
+        yield* awaitBackgroundTasks({
+          providerThread: harness.providerThread,
+          taskIds: ["dev-server"],
+          awaited: true,
+        });
+        assert.deepStrictEqual(
+          marks(yield* nextRoster((tasks) => tasks.some((task) => task.awaited === true))),
+          [
+            ["dev-server", true],
+            [WAKE_TASK_ID, false],
+          ],
+        );
+        const released = yield* awaitBackgroundTasks({
+          providerThread: harness.providerThread,
+          taskIds: ["dev-server"],
+          awaited: false,
+        });
+        assert.deepStrictEqual(released.matched, ["dev-server"]);
+        assert.deepStrictEqual(
+          marks(yield* nextRoster((tasks) => !tasks.some((task) => task.awaited === true))),
+          [
+            ["dev-server", false],
+            [WAKE_TASK_ID, false],
+          ],
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
   );
 
   it.effect("keeps a running Claude monitor typed after many newer monitors end", () =>

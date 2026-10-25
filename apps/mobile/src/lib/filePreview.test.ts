@@ -155,13 +155,17 @@ vi.mock("../state/projects", () => ({
     fileMetadata: (input: unknown) => input,
   },
 }));
+vi.mock("../state/server", () => ({ serverEnvironment: {} }));
 vi.mock("../state/session", () => ({
   readEnvironmentScope: () => true,
   usePreparedConnection: () => ({ _tag: "Some", value: { httpBaseUrl: "https://example.com" } }),
 }));
 vi.mock("../state/atom-registry", () => ({ appAtomRegistry: {} }));
 vi.mock("../state/threads", () => ({ environmentThreadShells: {}, threadEnvironment: {} }));
-vi.mock("../state/entities", () => ({ useLiveThreadLinkLabels: (text: string) => text }));
+vi.mock("../state/entities", () => ({
+  useLiveThreadLinkLabels: (text: string) => text,
+  useThreadChipIcons: () => new Map(),
+}));
 vi.mock("../state/use-thread-selection", () => ({
   useThreadSelection: () => ({ selectedThread: null }),
 }));
@@ -225,7 +229,14 @@ vi.mock("../components/VideoPreviewModal", () => ({ VideoPreviewModal: () => nul
 vi.mock("../components/ComposerContextSheet", () => ({}));
 vi.mock("../native/useOpenPullRequest", () => ({ useOpenPullRequest: () => vi.fn() }));
 vi.mock("../native/useMarkdownImageSource", () => ({ useMarkdownImageSource: () => vi.fn() }));
-vi.mock("../native/useEnrichedLinkVariants", () => ({}));
+vi.mock("../native/useEnrichedLinkVariants", () => ({
+  enrichedThreadLinkCustomization: () => undefined,
+  enrichedContextLinkCustomization: () => undefined,
+  withChipIcon: (value: unknown) => value,
+}));
+vi.mock("../native/NativeScrollViewMarker", () => ({
+  NativeScrollViewMarker: ({ children }: { children?: ReactNode }) => children,
+}));
 vi.mock("../native/NativeWorkspaceColumns", () => ({
   useNativeWorkspaceColumnsSupported: () => false,
 }));

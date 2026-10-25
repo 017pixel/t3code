@@ -375,7 +375,8 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
-          case "runtime-request.respond":
+          case "runtime-request.respond": {
+            const requestId = effect.request.requestId;
             return runtimeRequests
               .respond({
                 threadId: effect.threadId,
@@ -384,11 +385,33 @@ export const layerExecutor: Layer.Layer<
                 ...(effect.request.decision === undefined
                   ? {}
                   : { decision: effect.request.decision }),
+                ...(effect.request.feedback === undefined
+                  ? {}
+                  : { feedback: effect.request.feedback }),
                 ...(effect.request.answers === undefined
                   ? {}
                   : { answers: effect.request.answers }),
               })
               .pipe(
+                Effect.tapCause((cause) =>
+                  willRetry || Cause.hasInterruptsOnly(cause)
+                    ? Effect.void
+                    : threads
+                        .dispatch({
+                          type: "runtime-request.delivery.fail",
+                          commandId: CommandId.make(`${effect.commandId}:delivery-failed`),
+                          threadId: effect.threadId,
+                          requestId,
+                        })
+                        .pipe(
+                          Effect.catchCause((recordCause) =>
+                            Effect.logWarning("Failed to record answer delivery failure", {
+                              effectId: effect.id,
+                              cause: recordCause,
+                            }),
+                          ),
+                        ),
+                ),
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({
@@ -398,6 +421,7 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          }
           case "provider-thread.rollback":
             return checkpointRollback
               .execute({
