@@ -4,15 +4,7 @@ import { collectComposerInlineTokens } from "@t3tools/shared/composerInlineToken
 import { composerContextEditorTokens, composerSkillLabels } from "../lib/composerContext";
 import { requireNativeView } from "expo";
 import { TextInputWrapper } from "expo-paste-input";
-import {
-  useCallback,
-  useEffect,
-  useImperativeHandle,
-  useMemo,
-  useRef,
-  useState,
-  type Ref,
-} from "react";
+import { useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
 import type { NativeSyntheticEvent, ViewProps } from "react-native";
 import { Image, Platform, StyleSheet } from "react-native";
 
@@ -31,13 +23,12 @@ import { useAppearancePreferences } from "../features/settings/appearance/Appear
 import { useUniwindTheme } from "../lib/useUniwindTheme";
 import { createNativeComposerTheme } from "../lib/nativeComposerTheme";
 import {
-  acknowledgeComposerNativeEvent,
-  assumeComposerControlledState,
-  isComposerNativeEcho,
-  pruneAcknowledgedComposerNativeEvents,
-  resolveComposerControlledEventCount,
-  type ComposerNativeEventSnapshot,
-} from "./composerEditorRevision";
+  acceptComposerNativeEvent,
+  assumeComposerControlledDocument,
+  createComposerEditorEcho,
+  pruneComposerEditorEcho,
+  resolveComposerControlledDocument,
+} from "./t3ComposerEditorEcho";
 import type { ComposerEditorProps, ComposerEditorSelection } from "./T3ComposerEditor.types";
 
 const NATIVE_MODULE_NAME = "T3ComposerEditor";
@@ -132,11 +123,9 @@ export function ComposerEditor({
   ...props
 }: ComposerEditorProps) {
   const nativeRef = useRef<NativeComposerEditorRef>(null);
-  const mostRecentEventCountRef = useRef(0);
+  const echoRef = useRef(createComposerEditorEcho());
   const [mostRecentEventCount, setMostRecentEventCount] = useState(0);
   const [, forceNativeEventRender] = useState(0);
-  // Start history empty so restored drafts or recycled views receive a non-echo controlled payload.
-  const nativeEventSnapshotsRef = useRef<ComposerNativeEventSnapshot[]>([]);
   const [initialConfirmedTokens] = useState(() => collectComposerInlineTokens(props.value));
   const confirmedTokensRef = useRef(initialConfirmedTokens);
   const theme = useUniwindTheme();
@@ -193,67 +182,33 @@ export function ComposerEditor({
       }),
     );
   }, [props.value, props.context, skillLabels, theme, chipTextColor]);
-  // Every render resolves against the snapshot history, so a render whose
-  // (value, selection) lags the acknowledged native state is stamped behind
-  // the native revision and rejected by the editor instead of re-applying a
-  // stale caret or stale text mid-typing.
-  const controlledEventCount = resolveComposerControlledEventCount(
-    props.value,
-    selection ?? null,
-    mostRecentEventCount,
-    nativeEventSnapshotsRef.current,
-  );
-  const acknowledgesLatestNativeEvent = isComposerNativeEcho(
-    props.value,
-    selection ?? null,
-    mostRecentEventCount,
-    nativeEventSnapshotsRef.current,
-  );
-  const isNativeEcho =
-    controlledEventCount === mostRecentEventCount && acknowledgesLatestNativeEvent;
-  const controlledDocumentJson = JSON.stringify({
-    value: props.value,
-    selection: isNativeEcho ? null : (selection ?? null),
-    tokensJson,
-    mostRecentEventCount: controlledEventCount,
+  const {
+    controlledDocumentJson,
+    controlledEventCount,
+    acknowledgesLatestNativeEvent,
     isNativeEcho,
+  } = resolveComposerControlledDocument(echoRef.current, {
+    value: props.value,
+    selection: selection ?? null,
+    tokensJson,
+    renderedEventCount: mostRecentEventCount,
   });
   useEffect(() => {
-    if (!acknowledgesLatestNativeEvent) return;
-    nativeEventSnapshotsRef.current = pruneAcknowledgedComposerNativeEvents(
-      nativeEventSnapshotsRef.current,
-      mostRecentEventCount,
-    );
+    if (acknowledgesLatestNativeEvent)
+      pruneComposerEditorEcho(echoRef.current, mostRecentEventCount);
   }, [acknowledgesLatestNativeEvent, mostRecentEventCount]);
   const assumedValue = props.value;
   useEffect(() => {
-    // Newer native events make this payload stale; do not record it as applied.
-    if (isNativeEcho || controlledEventCount !== mostRecentEventCountRef.current) return;
-    nativeEventSnapshotsRef.current = assumeComposerControlledState(
-      nativeEventSnapshotsRef.current,
-      controlledEventCount,
-      assumedValue,
-    );
+    if (!isNativeEcho)
+      assumeComposerControlledDocument(echoRef.current, controlledEventCount, assumedValue);
   }, [assumedValue, controlledEventCount, isNativeEcho, controlledDocumentJson]);
-  const acceptNativeEvent = useCallback(
-    (eventCount: number, value: string, nextSelection: ComposerEditorSelection) => {
-      const acknowledgedEventCount = acknowledgeComposerNativeEvent(
-        mostRecentEventCountRef.current,
-        eventCount,
-      );
-      if (acknowledgedEventCount === null) {
-        return false;
-      }
-      mostRecentEventCountRef.current = acknowledgedEventCount;
-      nativeEventSnapshotsRef.current.push({
-        eventCount: acknowledgedEventCount,
-        value,
-        selection: nextSelection,
-      });
-      return acknowledgedEventCount;
-    },
-    [],
-  );
+  const acceptNativeEvent = (
+    eventCount: number,
+    value: string,
+    nextSelection: ComposerEditorSelection,
+  ) =>
+    acceptComposerNativeEvent(echoRef.current, { eventCount, value, selection: nextSelection }) ??
+    false;
   const { systemColorsActive } = useAppearancePreferences();
   const themeJson = JSON.stringify({
     ...createNativeComposerTheme(theme),

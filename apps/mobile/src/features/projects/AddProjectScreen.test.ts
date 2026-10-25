@@ -49,6 +49,10 @@ vi.mock("../../components/EnvironmentMachineSymbol", () => ({
   EnvironmentMachineSymbol: "EnvironmentMachineSymbol",
 }));
 vi.mock("../../components/ui/ErrorBanner", () => ({ ErrorBanner: "ErrorBanner" }));
+// Opening a draft route stamps a persisted draft; these tests cover navigation only.
+vi.mock("../threads/open-new-task-draft", () => ({
+  withOpenedNewTaskDraft: <Params>(params: Params) => params,
+}));
 vi.mock("./SourceControlIcon", () => ({ SourceControlIcon: "SourceControlIcon" }));
 vi.mock("../../lib/uuid", () => ({ uuidv4: () => "project" }));
 vi.mock("../../state/session", () => ({

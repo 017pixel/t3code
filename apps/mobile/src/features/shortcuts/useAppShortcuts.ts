@@ -1,14 +1,16 @@
 import * as QuickActions from "expo-quick-actions";
-import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform } from "react-native";
-import { useLinkTo, type NavigationState } from "@react-navigation/native";
+import type { NavigationState } from "@react-navigation/native";
+import type { ScopedThreadRef } from "@t3tools/contracts";
+import { Atom } from "effect/reactivity";
 
 import {
   loadRecentThreadShortcuts,
   saveRecentThreadShortcuts,
   type RecentThreadShortcut,
 } from "../../persistence/imperative";
-import { useThreadShell } from "../../state/entities";
+import { appAtomRegistry } from "../../state/atom-registry";
+import { environmentThreadShells } from "../../state/threads";
 import {
   activeThreadRef,
   buildShortcutActions,
@@ -16,110 +18,132 @@ import {
   withRecentThreadShortcut,
 } from "./appShortcuts";
 
-export function useAppShortcuts(state: NavigationState): void {
-  useShortcutNavigation();
-  useRecentThreadShortcutSync(state);
+export interface RecentThreadShortcutsDependencies {
+  readonly load: () => Promise<ReadonlyArray<RecentThreadShortcut>>;
+  readonly save: (recents: ReadonlyArray<RecentThreadShortcut>) => Promise<void>;
+  readonly publish: (recents: ReadonlyArray<RecentThreadShortcut>) => Promise<void>;
 }
 
-function useShortcutNavigation(): void {
-  const linkTo = useLinkTo();
-  const handledInitialAction = useRef(false);
-
-  useEffect(() => {
-    // Handle the launch action before listeners; push over Home so Back returns there.
-    if (!handledInitialAction.current) {
-      handledInitialAction.current = true;
-      const initialHref = QuickActions.initial ? shortcutHref(QuickActions.initial) : null;
-      if (initialHref !== null) {
-        linkTo(initialHref);
-      }
-    }
-
-    const subscription = QuickActions.addListener((action) => {
-      const href = shortcutHref(action);
-      if (href !== null) {
-        linkTo(href);
-      }
-    });
-    return () => subscription.remove();
-  }, [linkTo]);
-}
-
-function useRecentThreadShortcutSync(state: NavigationState): void {
-  // iOS subscriptions for Android-only shortcuts would re-render every screen on active-thread updates.
-  const threadRef = useMemo(
-    () => (Platform.OS === "android" ? activeThreadRef(state) : null),
-    [state],
-  );
-  const threadShell = useThreadShell(threadRef);
-  // Wait for persisted recents before recording visits, or cold starts overwrite older entries.
-  const [recents, setRecents] = useState<ReadonlyArray<RecentThreadShortcut> | null>(null);
-  // Do not persist failed-load fallbacks; only a real visit makes the list authoritative.
-  const persistableRef = useRef(false);
+/**
+ * Keeps the launcher's recent-thread list. Recording waits for the persisted
+ * list so the first thread opened after a cold start cannot clobber older
+ * entries, and a failed load never persists its empty fallback over valid
+ * history until a real thread open makes the in-memory list the new truth.
+ */
+export function createRecentThreadShortcuts(dependencies: RecentThreadShortcutsDependencies) {
+  let recents: ReadonlyArray<RecentThreadShortcut> | null = null;
+  let persistable = false;
+  let active: RecentThreadShortcut | null = null;
   // Serialize saves so older lists cannot overwrite newer ones.
-  const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  let saveQueue: Promise<unknown> = Promise.resolve();
 
-  useEffect(() => {
-    if (Platform.OS !== "android") {
-      return;
-    }
-
-    let cancelled = false;
-    void loadRecentThreadShortcuts()
-      .then((threads) => {
-        if (!cancelled) {
-          persistableRef.current = true;
-          setRecents(threads);
-        }
-      })
-      .catch((error) => {
-        console.warn("[app-shortcuts] failed to load recent threads", error);
-        if (!cancelled) {
-          setRecents([]);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const loaded = recents !== null;
-  const environmentId = threadRef?.environmentId ?? null;
-  const threadId = threadRef?.threadId ?? null;
-  const title = threadShell?.title ?? "";
-  useEffect(() => {
-    if (!loaded || environmentId === null || threadId === null) {
-      return;
-    }
-
-    setRecents((current) => {
-      if (current === null) {
-        return current;
-      }
-      const next = withRecentThreadShortcut(current, { environmentId, threadId, title });
-      if (next !== current) {
-        persistableRef.current = true;
-      }
-      return next;
-    });
-  }, [loaded, environmentId, threadId, title]);
-
-  useEffect(() => {
-    if (recents === null) {
-      return;
-    }
-
-    if (persistableRef.current) {
-      saveQueueRef.current = saveQueueRef.current.then(
+  const commit = (next: ReadonlyArray<RecentThreadShortcut>) => {
+    recents = next;
+    if (persistable) {
+      saveQueue = saveQueue.then(
         () =>
-          saveRecentThreadShortcuts(recents).catch((error) => {
+          dependencies.save(next).catch((error: unknown) => {
             console.warn("[app-shortcuts] failed to persist recent threads", error);
           }),
         () => undefined,
       );
     }
-    void QuickActions.setItems(buildShortcutActions(recents)).catch((error) => {
+    void dependencies.publish(next).catch((error: unknown) => {
       console.warn("[app-shortcuts] failed to update launcher shortcuts", error);
     });
-  }, [recents]);
+  };
+
+  const withActive = (list: ReadonlyArray<RecentThreadShortcut>) => {
+    if (active === null) return list;
+    const next = withRecentThreadShortcut(list, active);
+    if (next !== list) persistable = true;
+    return next;
+  };
+
+  const loaded = dependencies.load().then(
+    (threads) => {
+      persistable = true;
+      commit(withActive(threads));
+    },
+    (error: unknown) => {
+      console.warn("[app-shortcuts] failed to load recent threads", error);
+      commit(withActive([]));
+    },
+  );
+
+  return {
+    loaded,
+    /** Resolves once every save issued so far has finished. */
+    saved: () => saveQueue,
+    recordActiveThread(next: RecentThreadShortcut | null): void {
+      active = next;
+      if (recents === null || next === null) return;
+      const updated = withActive(recents);
+      if (updated !== recents) commit(updated);
+    },
+  };
+}
+
+const activeThreadRefAtom = Atom.make<ScopedThreadRef | null>(null).pipe(
+  Atom.keepAlive,
+  Atom.withLabel("mobile:app-shortcuts-active-thread-ref"),
+);
+
+const activeThreadShortcutAtom = Atom.make((get): RecentThreadShortcut | null => {
+  const ref = get(activeThreadRefAtom);
+  if (ref === null) return null;
+  const title = get(environmentThreadShells.threadShellAtom(ref))?.title ?? "";
+  return { environmentId: ref.environmentId, threadId: ref.threadId, title };
+}).pipe(
+  Atom.withEquality(
+    (left: RecentThreadShortcut | null, right: RecentThreadShortcut | null) =>
+      left === right ||
+      (left !== null &&
+        right !== null &&
+        left.environmentId === right.environmentId &&
+        left.threadId === right.threadId &&
+        left.title === right.title),
+  ),
+);
+
+/** Wired to the root navigation container's state changes. */
+export function recordAppShortcutNavigationState(state: NavigationState): void {
+  // Launcher shortcuts are Android-only; iOS never subscribes to thread shells.
+  if (Platform.OS !== "android") return;
+  const next = activeThreadRef(state);
+  const current = appAtomRegistry.get(activeThreadRefAtom);
+  if (next?.environmentId === current?.environmentId && next?.threadId === current?.threadId) {
+    return;
+  }
+  appAtomRegistry.set(activeThreadRefAtom, next);
+}
+
+/**
+ * App-lifetime quick actions. `navigate` must queue until navigation is ready:
+ * a cold-start shortcut arrives as the launch action, and pushing it over the
+ * initial Home route makes back return home instead of exiting the app.
+ */
+export function installAppShortcuts(navigate: (href: string) => void): () => void {
+  const initialHref = QuickActions.initial ? shortcutHref(QuickActions.initial) : null;
+  if (initialHref !== null) navigate(initialHref);
+  const subscription = QuickActions.addListener((action) => {
+    const href = shortcutHref(action);
+    if (href !== null) navigate(href);
+  });
+  if (Platform.OS !== "android") return () => subscription.remove();
+
+  const recents = createRecentThreadShortcuts({
+    load: loadRecentThreadShortcuts,
+    save: saveRecentThreadShortcuts,
+    publish: (list) => QuickActions.setItems(buildShortcutActions(list)),
+  });
+  const unsubscribe = appAtomRegistry.subscribe(
+    activeThreadShortcutAtom,
+    (active) => recents.recordActiveThread(active),
+    { immediate: true },
+  );
+  return () => {
+    subscription.remove();
+    unsubscribe();
+  };
 }

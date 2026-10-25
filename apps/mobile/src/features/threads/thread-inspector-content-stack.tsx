@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { Activity, useState, type ReactNode } from "react";
 import { View } from "react-native";
 
 import { RenderErrorBoundary, RenderFailureView } from "../../components/RenderErrorBoundary";
@@ -6,42 +6,46 @@ import { NativeInspectorContent } from "../../native/NativeInspectorContent";
 
 export type ThreadInspectorMode = "route" | "git" | "files";
 
-const INSPECTOR_PREWARM_DELAY_MS = 350;
+type PaneState = "unmounted" | "prewarm" | "mounted";
 
 function InspectorContentPane(props: {
   readonly children: ReactNode;
-  readonly mounted: boolean;
+  readonly state: PaneState;
   readonly resetKeys: readonly [string | null, string | null];
   readonly visible: boolean;
 }) {
-  if (!props.mounted) {
+  if (props.state === "unmounted") {
     return null;
   }
 
+  // A prewarmed pane renders at idle priority with its effects held back; once
+  // visited it stays mounted and live, hidden only by opacity.
   return (
-    <View
-      accessibilityElementsHidden={!props.visible}
-      focusable={props.visible}
-      importantForAccessibility={props.visible ? "auto" : "no-hide-descendants"}
-      pointerEvents={props.visible ? "auto" : "none"}
-      style={{
-        position: "absolute",
-        inset: 0,
-        opacity: props.visible ? 1 : 0,
-        zIndex: props.visible ? 1 : 0,
-      }}
-    >
-      <RenderErrorBoundary
-        resetKeys={props.resetKeys}
-        renderFallback={(fallback) => (
-          <NativeInspectorContent>
-            <RenderFailureView {...fallback} title="The inspector couldn't be displayed" />
-          </NativeInspectorContent>
-        )}
+    <Activity mode={props.state === "prewarm" ? "hidden" : "visible"}>
+      <View
+        accessibilityElementsHidden={!props.visible}
+        focusable={props.visible}
+        importantForAccessibility={props.visible ? "auto" : "no-hide-descendants"}
+        pointerEvents={props.visible ? "auto" : "none"}
+        style={{
+          position: "absolute",
+          inset: 0,
+          opacity: props.visible ? 1 : 0,
+          zIndex: props.visible ? 1 : 0,
+        }}
       >
-        {props.children}
-      </RenderErrorBoundary>
-    </View>
+        <RenderErrorBoundary
+          resetKeys={props.resetKeys}
+          renderFallback={(fallback) => (
+            <NativeInspectorContent>
+              <RenderFailureView {...fallback} title="The inspector couldn't be displayed" />
+            </NativeInspectorContent>
+          )}
+        >
+          {props.children}
+        </RenderErrorBoundary>
+      </View>
+    </Activity>
   );
 }
 
@@ -52,40 +56,27 @@ export function ThreadInspectorContentStack(props: {
   readonly resetKeys: readonly [string | null, string | null];
   readonly renderRoute?: () => ReactNode;
 }) {
-  const [mountedModes, setMountedModes] = useState<ReadonlySet<ThreadInspectorMode>>(
+  const [visitedModes, setVisitedModes] = useState<ReadonlySet<ThreadInspectorMode>>(
     () => new Set([props.mode]),
   );
-
-  useEffect(() => {
-    setMountedModes((current) => {
-      if (current.has(props.mode)) {
-        return current;
-      }
-      return new Set([...current, props.mode]);
-    });
-
-    if (props.mode === "route") {
-      return;
-    }
-
-    // Keep both inspectors alive after opening; detaching the file tree makes UIKit rebuild its expensive focus graph.
-    const alternateMode = props.mode === "files" ? "git" : "files";
-    const timeout = setTimeout(() => {
-      setMountedModes((current) => {
-        if (current.has(alternateMode)) {
-          return current;
-        }
-        return new Set([...current, alternateMode]);
-      });
-    }, INSPECTOR_PREWARM_DELAY_MS);
-
-    return () => clearTimeout(timeout);
-  }, [props.mode]);
+  if (!visitedModes.has(props.mode)) {
+    setVisitedModes(new Set([...visitedModes, props.mode]));
+  }
+  // The file tree is expensive to detach because UIKit rebuilds its focus
+  // graph. Keep both chat inspectors alive so a Files/Git switch only changes
+  // visibility; the one not yet opened is prewarmed.
+  const prewarmMode = props.mode === "files" ? "git" : props.mode === "git" ? "files" : null;
+  const paneState = (mode: ThreadInspectorMode): PaneState =>
+    visitedModes.has(mode) || props.mode === mode
+      ? "mounted"
+      : prewarmMode === mode
+        ? "prewarm"
+        : "unmounted";
 
   return (
     <View className="flex-1">
       <InspectorContentPane
-        mounted={mountedModes.has("files") || props.mode === "files"}
+        state={paneState("files")}
         resetKeys={props.resetKeys}
         visible={props.mode === "files"}
       >
@@ -93,7 +84,7 @@ export function ThreadInspectorContentStack(props: {
       </InspectorContentPane>
       {props.renderGit ? (
         <InspectorContentPane
-          mounted={mountedModes.has("git") || props.mode === "git"}
+          state={paneState("git")}
           resetKeys={props.resetKeys}
           visible={props.mode === "git"}
         >
@@ -102,7 +93,7 @@ export function ThreadInspectorContentStack(props: {
       ) : null}
       {props.renderRoute ? (
         <InspectorContentPane
-          mounted={mountedModes.has("route") || props.mode === "route"}
+          state={paneState("route")}
           resetKeys={props.resetKeys}
           visible={props.mode === "route"}
         >

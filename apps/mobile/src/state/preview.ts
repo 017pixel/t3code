@@ -16,6 +16,7 @@ import { AsyncResult, Atom } from "effect/reactivity";
 import { useMemo } from "react";
 
 import { connectionAtomRuntime } from "../connection/runtime";
+import { appAtomRegistry } from "./atom-registry";
 import { useEnvironmentQuery } from "./query";
 import { environmentSession, usePreparedConnection } from "./session";
 
@@ -142,22 +143,49 @@ export function useThreadServerBrowserTabs(input: {
   return { tabs: sessions, loaded: tabs.listed };
 }
 
+interface PreviewStreamRetry {
+  readonly attempt: number;
+  readonly notBefore: number;
+}
+
+const previewStreamRetryAtom = Atom.family((environmentId: EnvironmentId) =>
+  Atom.make<PreviewStreamRetry>({ attempt: 0, notBefore: 0 }).pipe(
+    Atom.withLabel(`mobile-preview-stream-retry:${environmentId}`),
+  ),
+);
+
 const previewStreamAccessAtom = Atom.family((environmentId: EnvironmentId) =>
   connectionAtomRuntime
     .atom((get) => {
       const prepared = Option.getOrNull(
         get(environmentSession.preparedConnectionValueAtom(environmentId)),
       );
-      return prepared === null
-        ? Effect.never
-        : resolveDeviceHubAccess({ prepared, hubBasePath: PREVIEW_STREAM_BASE_PATH });
+      const { notBefore } = get(previewStreamRetryAtom(environmentId));
+      if (prepared === null) return Effect.never;
+      const resolve = resolveDeviceHubAccess({ prepared, hubBasePath: PREVIEW_STREAM_BASE_PATH });
+      // A recompute interrupts the wait, so only the newest retry resolves.
+      const wait = notBefore - Date.now();
+      return wait > 0 ? Effect.andThen(Effect.sleep(wait), resolve) : resolve;
     })
     .pipe(Atom.setIdleTTL(60_000), Atom.withLabel(`mobile-preview-stream-access:${environmentId}`)),
 );
+
+/** Resolves fresh stream access once `delayMs` has passed. */
+function retryPreviewStreamAccess(environmentId: EnvironmentId, delayMs: number) {
+  appAtomRegistry.update(previewStreamRetryAtom(environmentId), (current) => ({
+    attempt: current.attempt + 1,
+    notBefore: Date.now() + delayMs,
+  }));
+}
 
 export function usePreviewStreamAccess(environmentId: EnvironmentId) {
   const prepared = usePreparedConnection(environmentId);
   const query = useEnvironmentQuery(previewStreamAccessAtom(environmentId));
   const access = query.data && query.error === null && Option.isSome(prepared) ? query.data : null;
-  return { access, error: query.error, refresh: query.refresh };
+  return {
+    access,
+    error: query.error,
+    refresh: query.refresh,
+    retryAfter: (delayMs: number) => retryPreviewStreamAccess(environmentId, delayMs),
+  };
 }

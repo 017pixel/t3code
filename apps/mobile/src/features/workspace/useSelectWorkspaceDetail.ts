@@ -2,6 +2,7 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useNavigation } from "@react-navigation/native";
 import { useAdaptiveWorkspaceLayout } from "../layout/adaptive-workspace-context";
 import { startOpeningEnvironmentThread } from "../../state/threads";
+import { withOpenedNewTaskDraft } from "../threads/open-new-task-draft";
 import {
   selectWorkspaceDetail,
   type WorkspaceDetail,
@@ -32,7 +33,14 @@ export function useSelectWorkspaceDetail() {
     selectDetail ??
     ((detail: WorkspaceDetail, sheet?: WorkspaceDetailSheet) => {
       startOpeningDetail(detail);
-      navigation.dispatch(selectWorkspaceDetail(detail, sheet));
+      navigation.dispatch(
+        selectWorkspaceDetail(
+          detail.name === "Thread"
+            ? { ...detail, params: withOpenedNewTaskDraft(detail.params) }
+            : detail,
+          sheet,
+        ),
+      );
     })
   );
 }

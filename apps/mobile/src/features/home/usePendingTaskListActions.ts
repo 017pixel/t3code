@@ -10,6 +10,7 @@ import {
   holdEditingQueuedMessage,
   releaseEditingQueuedMessage,
 } from "../../state/use-thread-outbox";
+import { refreshNewTaskDraftBranches } from "../threads/new-task-project-branches";
 import { withThreadDismissal } from "./thread-dismissal";
 
 export function usePendingTaskListActions(
@@ -20,6 +21,7 @@ export function usePendingTaskListActions(
 } {
   const openPendingTask = useCallback(
     (pendingTask: PendingNewTask) => {
+      if (pendingTask.kind === "draft") refreshNewTaskDraftBranches(pendingTask.draftKey);
       selectThreadRoute(
         pendingTask.kind === "pending"
           ? {

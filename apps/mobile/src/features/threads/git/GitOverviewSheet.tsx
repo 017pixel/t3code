@@ -1,4 +1,5 @@
 import * as Dialog from "../../../components/ui/Dialog";
+import { EmptyState } from "../../../components/ui/EmptyState";
 import { SheetHeader } from "../../../components/ui/SheetHeader";
 import { useOpenPullRequest } from "../../../native/useOpenPullRequest";
 import {
@@ -16,7 +17,7 @@ import {
   type StaticScreenProps,
 } from "@react-navigation/native";
 import { SymbolView } from "../../../components/ui/AppSymbol";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Platform, Pressable, RefreshControl, ScrollView, View } from "react-native";
 
 import { ScreenStack } from "react-native-screens";
@@ -66,10 +67,21 @@ export function GitOverviewSheet(props: GitOverviewSheetProps) {
   const navigation = useNavigation();
   const { environmentId, threadId } = props.route.params;
   const isBlankLink = environmentId.trim().length === 0 || threadId.trim().length === 0;
-  useEffect(() => {
-    if (isBlankLink) navigation.goBack();
-  }, [isBlankLink, navigation]);
-  if (isBlankLink) return null;
+  // A malformed deep link has nothing to show. Navigating away from render is
+  // not allowed, so offer the way out instead.
+  if (isBlankLink) {
+    return (
+      <View className="flex-1 justify-center bg-sheet">
+        <EmptyState
+          variant="plain"
+          title="Thread unavailable"
+          detail="This link doesn't point to a thread."
+          actionLabel="Close"
+          onAction={() => navigation.goBack()}
+        />
+      </View>
+    );
+  }
   return <GitOverviewSheetContent {...props} />;
 }
 

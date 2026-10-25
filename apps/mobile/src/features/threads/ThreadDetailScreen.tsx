@@ -7,15 +7,14 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { AsyncResult } from "effect/reactivity";
 import * as Dialog from "../../components/ui/Dialog";
-import { useAtomValue } from "@effect/atom-react";
-import {
-  useChildThreadInputs,
-  useThreadReportedModelSelection,
-  useThreadShell,
-} from "../../state/entities";
+import { useAtomMount, useAtomValue } from "@effect/atom-react";
+import { Atom } from "effect/reactivity";
+import { parseThreadKey, threadKey } from "@t3tools/client-runtime/state/entities";
+import { createThreadVisitTracker } from "@t3tools/client-runtime/state/thread-visits";
+import { useChildThreadInputs, useThreadReportedModelSelection } from "../../state/entities";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
 import { ChatGptUsageLimitNotice } from "./ChatGptUsageLimitNotice";
-import { StackActions, useFocusEffect, useNavigation } from "@react-navigation/native";
+import { StackActions, useNavigation } from "@react-navigation/native";
 import {
   effectiveSnoozed,
   threadWokeAt,
@@ -47,7 +46,6 @@ import type {
   RuntimeRequestId,
   ScopedThreadRef,
   ServerConfig as T3ServerConfig,
-  ThreadId,
   UsageLimitsReport,
 } from "@t3tools/contracts";
 import {
@@ -80,13 +78,11 @@ import {
   useContext,
   useEffect,
   useEffectEvent,
-  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
 } from "react";
 import {
-  AppState,
   Keyboard,
   Platform,
   useWindowDimensions,
@@ -106,6 +102,7 @@ import Animated, {
   FadeInDown,
   FadeOut,
   ReduceMotion,
+  runOnJS,
   useAnimatedReaction,
   useAnimatedStyle,
   useDerivedValue,
@@ -141,7 +138,6 @@ import { ThreadBrowserFloat } from "../browser/ThreadBrowserFloat";
 import { useThreadServerBrowserTabs } from "../../state/preview";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
 import { scopedThreadKey } from "../../lib/scopedEntities";
-import { claimThreadOpen } from "@t3tools/client-runtime/state/thread-search";
 import {
   finishThreadMessageJump,
   pendingThreadMessageJump,
@@ -151,7 +147,15 @@ import {
   clearThreadComposerError,
   threadComposerErrorsAtom,
 } from "../../state/thread-composer-error";
-import { threadEnvironment } from "../../state/threads";
+import {
+  environmentThreadDetails,
+  environmentThreadShells,
+  threadEnvironment,
+} from "../../state/threads";
+import { appAtomRegistry } from "../../state/atom-registry";
+import { subscribeAppActive } from "../../lib/appState";
+import { useNowAfter, useNowMinute } from "../../lib/clock";
+import { threadStreamHaptics } from "./threadStreamHaptics";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useDelayedStatus } from "../../lib/useDelayedStatus";
 import type {
@@ -184,7 +188,7 @@ import {
   ThreadComposer,
 } from "./ThreadComposer";
 import { ComposerPopoverHost } from "./ComposerPopoverHost";
-import { ThreadFeed, type ThreadFeedHistoryControls } from "./ThreadFeed";
+import { ThreadFeed, type ThreadFeedHandle, type ThreadFeedHistoryControls } from "./ThreadFeed";
 import { useThreadTurnSubagents } from "./ThreadAgentsSheet";
 import { ComposerQueuedEditBanner } from "./ComposerQueuedEdit";
 import { useThreadQueuedCount } from "./ThreadQueueControl";
@@ -282,8 +286,6 @@ export interface ThreadDetailScreenProps {
   ) => Promise<MessageId | null>;
   readonly onReconnectEnvironment: () => void;
   readonly canSwitchThreadProvider: boolean;
-  readonly onUpdateThreadModelSelection: (modelSelection: ModelSelection) => void;
-  readonly onUpdateThreadRuntimeMode: (runtimeMode: RuntimeMode) => void;
   readonly onUpdateThreadInteractionMode?: (interactionMode: ProviderInteractionMode) => void;
   readonly onRespondToApproval: ApprovalResponder;
   readonly onSelectUserInputOption: (
@@ -301,76 +303,6 @@ export interface ThreadDetailScreenProps {
   readonly showContent?: boolean;
 }
 
-function latestStreamingAssistantMessage(
-  feed: ReadonlyArray<ThreadFeedEntry>,
-): { readonly id: string; readonly textLength: number } | null {
-  for (let index = feed.length - 1; index >= 0; index -= 1) {
-    const entry = feed[index];
-    if (entry?.type !== "message") {
-      continue;
-    }
-    if (entry.message.role !== "assistant" || !entry.message.streaming) {
-      continue;
-    }
-    return {
-      id: entry.message.id,
-      textLength: entry.message.text.length,
-    };
-  }
-
-  return null;
-}
-
-function useStreamingHaptics(threadId: ThreadId, feed: ReadonlyArray<ThreadFeedEntry>) {
-  const lastStreamingAssistantRef = useRef<{
-    readonly id: string;
-    readonly textLength: number;
-  } | null>(null);
-  const lastStreamHapticAtRef = useRef(0);
-  const hydratedRef = useRef(false);
-  const previousThreadIdRef = useRef(threadId);
-
-  useEffect(() => {
-    if (previousThreadIdRef.current !== threadId) {
-      previousThreadIdRef.current = threadId;
-      hydratedRef.current = false;
-    }
-
-    const latestStreamingMessage = latestStreamingAssistantMessage(feed);
-
-    if (!hydratedRef.current) {
-      hydratedRef.current = true;
-      lastStreamingAssistantRef.current = latestStreamingMessage;
-      return;
-    }
-
-    if (!latestStreamingMessage) {
-      lastStreamingAssistantRef.current = null;
-      return;
-    }
-
-    const previousStreamingMessage = lastStreamingAssistantRef.current;
-    lastStreamingAssistantRef.current = latestStreamingMessage;
-
-    const isNewStream = previousStreamingMessage?.id !== latestStreamingMessage.id;
-    const textGrew =
-      previousStreamingMessage?.id === latestStreamingMessage.id &&
-      latestStreamingMessage.textLength > previousStreamingMessage.textLength;
-
-    if (!isNewStream && !textGrew) {
-      return;
-    }
-
-    const now = Date.now();
-    if (!isNewStream && now - lastStreamHapticAtRef.current < 320) {
-      return;
-    }
-
-    lastStreamHapticAtRef.current = now;
-    void Haptics.selectionAsync();
-  }, [threadId, feed]);
-}
-
 const USAGE_LIMITS_PANEL_GAP = 12;
 const USAGE_LIMITS_PANEL_MIN_HEIGHT = 44;
 
@@ -379,130 +311,93 @@ const USER_INPUT_TOGGLE_TIMING = {
   easing: Easing.out(Easing.cubic),
 };
 
-// The visit watermark follows the shell's updatedAt, which ticks while a run
-// streams. Keeping it in a leaf lets the screen read the quiet shell.
-function ThreadVisitWatermark(props: {
-  readonly environmentId: EnvironmentId;
-  readonly selectedThread: EnvironmentThreadShell;
-  readonly showContent: boolean;
-}) {
-  const liveThread = useThreadShell({
-    environmentId: props.environmentId,
-    threadId: props.selectedThread.id,
-  });
-  const thread = liveThread ?? props.selectedThread;
-  const showContent = props.showContent;
-  const selectedThreadKey = scopedThreadKey(props.environmentId, thread.id);
-  const visitThread = useAtomCommand(threadEnvironment.visit, { reportFailure: false });
-  const lastDispatchedVisitRef = useRef<string | null>(null);
-  const lastVisitDispatchRef = useRef({ threadKey: selectedThreadKey, at: 0 });
-  const selectedThreadId = thread.id;
-  const snoozedUntil = thread.snoozedUntil;
-  // Keep the clock in state so React Compiler invalidates the wake calculation.
-  const [wakeNow, setWakeNow] = useState(() => new Date().toISOString());
-  useEffect(() => {
-    if (!showContent || snoozedUntil == null) return;
-    const delay = Date.parse(snoozedUntil) - Date.now();
-    if (!Number.isFinite(delay)) return;
-    const timer = setTimeout(() => setWakeNow(new Date().toISOString()), Math.max(0, delay) + 50);
-    return () => clearTimeout(timer);
-  }, [showContent, snoozedUntil]);
-  const selectedThreadWokeAt = threadWokeAt(thread, {
-    now: wakeNow,
-  });
-  // A scheduled wake can happen without a newer server update.
-  const selectedThreadUpdatedAt =
-    selectedThreadWokeAt !== null && Date.parse(selectedThreadWokeAt) > Date.parse(thread.updatedAt)
-      ? selectedThreadWokeAt
-      : thread.updatedAt;
-  const wakeIsLatestUpdate = selectedThreadUpdatedAt === selectedThreadWokeAt;
-  const selectedThreadLastVisitedAt = thread.lastVisitedAt;
-  const selectedThreadCompletedAt = thread.latestRun?.completedAt;
-  // Opening a thread is one visit that also counts toward search ranking; a
-  // palette pick already sent it with the query. The watermark effect below
-  // skips it.
-  const recordedOpenRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!showContent) return;
-    if (recordedOpenRef.current === selectedThreadKey) return;
-    recordedOpenRef.current = selectedThreadKey;
-    // Recorded here even when the server cannot take opens, so recents follow it.
-    const claimed = claimThreadOpen(props.environmentId, selectedThreadId, Date.now());
-    if (!claimed || selectedThreadLastVisitedAt === undefined) return;
-    lastDispatchedVisitRef.current = `${selectedThreadKey}:${selectedThreadUpdatedAt}`;
-    lastVisitDispatchRef.current = { threadKey: selectedThreadKey, at: Date.now() };
-    void visitThread({
-      environmentId: props.environmentId,
-      input: {
-        threadId: selectedThreadId,
-        visitedAt: selectedThreadUpdatedAt,
-        opened: true,
-      },
-    });
-  }, [
-    props.environmentId,
-    selectedThreadId,
-    selectedThreadKey,
-    selectedThreadLastVisitedAt,
-    selectedThreadUpdatedAt,
-    showContent,
-    visitThread,
-  ]);
-  useEffect(() => {
-    if (!showContent || selectedThreadLastVisitedAt === undefined) return;
-    const threadUpdatedAtMs = Date.parse(selectedThreadUpdatedAt);
-    if (Number.isNaN(threadUpdatedAtMs)) return;
-    const lastVisitedAtMs = selectedThreadLastVisitedAt
-      ? Date.parse(selectedThreadLastVisitedAt)
-      : NaN;
-    if (!Number.isNaN(lastVisitedAtMs) && lastVisitedAtMs >= threadUpdatedAtMs) return;
-    const dispatchKey = `${selectedThreadKey}:${selectedThreadUpdatedAt}`;
-    if (lastDispatchedVisitRef.current === dispatchKey) return;
-    const dispatch = () => {
-      lastDispatchedVisitRef.current = dispatchKey;
-      lastVisitDispatchRef.current = { threadKey: selectedThreadKey, at: Date.now() };
-      void visitThread({
-        environmentId: props.environmentId,
-        input: { threadId: selectedThreadId, visitedAt: selectedThreadUpdatedAt },
-      });
-    };
-    const completedAtMs = selectedThreadCompletedAt ? Date.parse(selectedThreadCompletedAt) : NaN;
-    const hasUnseenCompletion =
-      !Number.isNaN(completedAtMs) &&
-      (Number.isNaN(lastVisitedAtMs) || completedAtMs > lastVisitedAtMs);
-    const previous = lastVisitDispatchRef.current;
-    const elapsed = Date.now() - previous.at;
-    // Like a completion, a wake the user is looking at must not wait out the throttle:
-    // leaving within it would cancel the dispatch and keep Woke in the list.
-    if (
-      previous.threadKey !== selectedThreadKey ||
-      hasUnseenCompletion ||
-      wakeIsLatestUpdate ||
-      elapsed >= 10_000
-    ) {
-      dispatch();
-      return;
+// A scheduled wake is an update the user sees without a newer server
+// updatedAt, so the watermark advances to it. The shell's updatedAt ticks
+// while a run streams; the tracker follows it outside React.
+const wakeAwareVisitShell = Atom.family((key: string) => {
+  const ref = parseThreadKey(key);
+  return Atom.make((get) => {
+    const shell = get(environmentThreadShells.threadShellAtom(ref));
+    if (shell === null) return null;
+    const nowMs = Date.now();
+    const wokeAt = threadWokeAt(shell, { now: new Date(nowMs).toISOString() });
+    const wakeAtMs = shell.snoozedUntil == null ? NaN : Date.parse(shell.snoozedUntil);
+    if (wokeAt === null && wakeAtMs > nowMs) {
+      const timer = setTimeout(
+        () => get.refreshSelf(),
+        Math.min(wakeAtMs - nowMs + 50, 2_147_483_647),
+      );
+      get.addFinalizer(() => clearTimeout(timer));
     }
-    const timer = setTimeout(dispatch, 10_000 - elapsed);
-    return () => clearTimeout(timer);
-  }, [
-    props.environmentId,
-    selectedThreadId,
-    selectedThreadKey,
-    selectedThreadLastVisitedAt,
-    selectedThreadCompletedAt,
-    selectedThreadUpdatedAt,
-    showContent,
-    visitThread,
-    wakeIsLatestUpdate,
-  ]);
+    if (wokeAt === null || Date.parse(wokeAt) <= Date.parse(shell.updatedAt)) return shell;
+    // Like a completion, a wake the user is looking at must not wait out the
+    // throttle: leaving within it would cancel the dispatch and keep Woke in
+    // the list. The tracker sends unseen completions at once.
+    return {
+      environmentId: shell.environmentId,
+      id: shell.id,
+      updatedAt: wokeAt,
+      lastVisitedAt: shell.lastVisitedAt,
+      latestRun: { completedAt: wokeAt },
+    };
+  }).pipe(Atom.withLabel(`mobile-thread-visit-shell:${key}`));
+});
+
+const threadVisitTracker = createThreadVisitTracker({
+  threadShellAtom: (ref) => wakeAwareVisitShell(threadKey(ref)),
+  visit: threadEnvironment.visit,
+});
+
+function ThreadVisitWatermark(props: { readonly threadRef: ScopedThreadRef }) {
+  useAtomMount(threadVisitTracker(props.threadRef));
   return null;
 }
+
+function ThreadStreamHaptics(props: { readonly threadRef: ScopedThreadRef }) {
+  useAtomMount(threadStreamHaptics(props.threadRef));
+  return null;
+}
+
+// Android can lose IME hide callbacks across a background switch, so each
+// return to the foreground is an input to the keyboard quarantine below.
+const appResumes = (() => {
+  let count = 0;
+  const listeners = new Set<() => void>();
+  let unsubscribe: (() => void) | null = null;
+  return {
+    getSnapshot: () => count,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      unsubscribe ??= subscribeAppActive(() => {
+        count += 1;
+        for (const notify of listeners) notify();
+      });
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) {
+          unsubscribe?.();
+          unsubscribe = null;
+        }
+      };
+    },
+  };
+})();
 
 // Past the composer's 180 ms height animation.
 const COMPOSER_HEIGHT_SETTLE_MS = 220;
 
-export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetailScreenProps) {
+// Anchors, the submitted message, follow state and pending scrolls belong to
+// one thread, so the body remounts when the thread changes.
+export function ThreadDetailScreen(props: ThreadDetailScreenProps) {
+  return (
+    <ThreadDetailBody
+      key={scopedThreadKey(props.environmentId, props.selectedThread.id)}
+      {...props}
+    />
+  );
+}
+
+function ThreadDetailBody(props: ThreadDetailScreenProps) {
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
   const deviceType = useDeviceType();
   const workspace = useWorkspaceTabs();
@@ -546,30 +441,38 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   const isKeyboardVisible = useKeyboardState((state) => state.isVisible);
   const liveKeyboardHeight = useKeyboardState((state) => state.height);
   // Android can lose IME hide callbacks on backgrounding. Quarantine translation on resume unless focused input retained its keyboard.
-  const [keyboardStateSuspect, setKeyboardStateSuspect] = useState(false);
-  const ownedInputFocusedRef = useRef(false);
-  useEffect(() => {
-    if (Platform.OS !== "android") {
-      return;
-    }
-    const subscription = AppState.addEventListener("change", (state) => {
-      if (state === "active") {
-        setKeyboardStateSuspect(!ownedInputFocusedRef.current);
-      }
-    });
-    return () => {
-      subscription.remove();
-    };
-  }, []);
-  useEffect(() => {
-    setKeyboardStateSuspect(false);
-  }, [isKeyboardVisible, liveKeyboardHeight]);
+  // The quarantine holds the keyboard state seen on resume and lifts on the
+  // first keyboard change after it, or when an owned input takes focus.
+  const [ownedInputFocused, setOwnedInputFocused] = useState(false);
+  const resumeCount = useSyncExternalStore(appResumes.subscribe, appResumes.getSnapshot);
+  const [seenResumeCount, setSeenResumeCount] = useState(resumeCount);
+  const [keyboardQuarantine, setKeyboardQuarantine] = useState<{
+    readonly visible: boolean;
+    readonly height: number;
+  } | null>(null);
+  if (seenResumeCount !== resumeCount) {
+    setSeenResumeCount(resumeCount);
+    setKeyboardQuarantine(
+      Platform.OS === "android" && !ownedInputFocused
+        ? { visible: isKeyboardVisible, height: liveKeyboardHeight }
+        : null,
+    );
+  } else if (
+    keyboardQuarantine !== null &&
+    (keyboardQuarantine.visible !== isKeyboardVisible ||
+      keyboardQuarantine.height !== liveKeyboardHeight)
+  ) {
+    setKeyboardQuarantine(null);
+  }
+  const keyboardStateSuspect = keyboardQuarantine !== null;
+  // Must keep a stable identity: QuestionAttachments releases focus from a ref cleanup that
+  // re-runs whenever this changes, so it captures no render values. composerOwnsKeyboard is
+  // only read on the Duo, so recording ownership on other devices is harmless.
   const handleOwnedInputFocusChange = (focused: boolean) => {
-    ownedInputFocusedRef.current = focused;
+    setOwnedInputFocused(focused);
     if (focused) {
-      if (deviceType === "duo-folded" || deviceType === "duo-unfolded")
-        setComposerOwnsKeyboard(true);
-      setKeyboardStateSuspect(false);
+      setComposerOwnsKeyboard(true);
+      setKeyboardQuarantine(null);
     }
   };
   const windowHeight = useWindowDimensions().height;
@@ -592,17 +495,17 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   const defaultComposerEditorRef = useRef<ComposerEditorHandle>(null);
   const composerEditorRef = props.draftMode?.editorRef ?? defaultComposerEditorRef;
   const isProviderSubagent = isProviderNativeSubagentThread(props.selectedThread.source);
-  const editingRunId = props.queuedRunEdit?.runId ?? null;
-  useEffect(() => {
-    if (editingRunId === null) return;
+  // The edit banner mounts per edited run; the editor takes focus with it.
+  const focusEditorForQueuedEdit = () => {
     const frame = requestAnimationFrame(() => composerEditorRef.current?.focus());
     return () => cancelAnimationFrame(frame);
-  }, [editingRunId, composerEditorRef]);
+  };
   const composerOverlayRef = useRef<ViewInstance>(null);
   const listRef = useRef<LegendListRef>(null);
   const feedTouchStartRef = useRef<{ pageX: number; pageY: number } | null>(null);
-  const selectedThreadKeyRef = useRef(selectedThreadKey);
-  const lastScrolledSubmittedMessageIdRef = useRef<MessageId | null>(null);
+  // Aborted when this thread's body unmounts, so async work started for it
+  // stops touching a list or composer that now shows another thread.
+  const [threadScope] = useState(() => new AbortController());
   const [composerHeight, setComposerHeight] = useState<number | null>(null);
   // The composer animates its height and reports a layout every frame. The feed follows those
   // frames on the UI thread through onComposerLayout; this is only an estimate, so committing
@@ -616,14 +519,8 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
       setComposerHeight(height);
     }, COMPOSER_HEIGHT_SETTLE_MS);
   }, []);
-  useEffect(
-    () => () => {
-      if (composerHeightSettle.current !== null) clearTimeout(composerHeightSettle.current);
-    },
-    [],
-  );
   const [anchorMessageId, setAnchorMessageId] = useState<MessageId | null>(null);
-  const [submittedMessageId, setSubmittedMessageId] = useState<MessageId | null>(null);
+  const feedRef = useRef<ThreadFeedHandle>(null);
   const [endFollowEnabled, setEndFollowEnabled] = useState(true);
   // Keep the bottom padding fixed while the keyboard animates. Changing it at
   // keyboardDidHide makes the composer land low, then jump back above the safe area.
@@ -671,27 +568,21 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   const visitThread = useAtomCommand(threadEnvironment.visit, { reportFailure: false });
   const [statusRequest, setStatusRequest] = useState<{ threadKey: string } | null>(null);
   const statusPending = statusRequest?.threadKey === selectedThreadKey;
-  const [lifecycleNow, setLifecycleNow] = useState(() => new Date().toISOString());
-  useFocusEffect(
-    useCallback(() => {
-      setLifecycleNow(new Date().toISOString());
-      const timer = setInterval(() => setLifecycleNow(new Date().toISOString()), 60_000);
-      return () => clearInterval(timer);
-    }, []),
-  );
+  const snoozedUntil = props.selectedThread.snoozedUntil;
+  const snoozeWakeMs =
+    props.serverConfig?.environment.capabilities.threadSnooze === true && snoozedUntil !== null
+      ? Date.parse(snoozedUntil)
+      : NaN;
+  // The minute tick keeps the wake countdown fresh; the deadline flips the
+  // snooze exactly at its wake time.
+  const nowMinute = useNowMinute();
+  const nowAtWake = useNowAfter(Number.isFinite(snoozeWakeMs) ? snoozeWakeMs : null);
+  const lifecycleNow = new Date(
+    Math.max(Date.parse(`${nowMinute}:00.000Z`), nowAtWake),
+  ).toISOString();
   const snoozed =
     props.serverConfig?.environment.capabilities.threadSnooze === true &&
     effectiveSnoozed(props.selectedThread, { now: lifecycleNow });
-  const snoozedUntil = props.selectedThread.snoozedUntil;
-  useEffect(() => {
-    if (!snoozed || snoozedUntil === null) return;
-    const timer = setTimeout(
-      () => setLifecycleNow(new Date().toISOString()),
-      Math.min(Math.max(0, Date.parse(snoozedUntil) - Date.now()) + 50, 2_147_483_647),
-    );
-    return () => clearTimeout(timer);
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Re-arm if timer clamping fires before the wake time.
-  }, [snoozed, snoozedUntil, lifecycleNow]);
   const settled =
     props.serverConfig?.environment.capabilities.threadSettlement === true &&
     props.selectedThread.settledOverride === "settled";
@@ -885,8 +776,6 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   const jumpMessageLoaded =
     jumpMessageId !== null &&
     selectedThreadFeed.some((entry) => entry.type === "message" && entry.id === jumpMessageId);
-  // A jump this screen never reached lets go when the thread closes.
-  useEffect(() => () => finishThreadMessageJump(selectedThreadKey), [selectedThreadKey]);
   const historyForJump = props.historyControls;
   // History down to the message in one request; another page if it is not
   // there yet.
@@ -922,8 +811,11 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
       props.selectedThread.latestUserMessageAt !== null);
   const composerOverlapHeight =
     composerHeight ?? COMPOSER_COLLAPSED_CHROME + (hasSidebarTabBar ? 14 : 0) + composerBottomInset;
-  const [collapsedUserInputRequestId, setCollapsedUserInputRequestId] =
-    useState<RuntimeRequestId | null>(null);
+  // The last collapse toggle; it only applies to the request it was made on.
+  const [userInputToggle, setUserInputToggle] = useState<{
+    readonly requestId: RuntimeRequestId;
+    readonly collapsed: boolean;
+  } | null>(null);
   const activeUserInputRequestId = props.activePendingUserInput?.requestId ?? null;
   const composerSlotHidden =
     activeUserInputRequestId !== null || props.creationState?.kind === "failed";
@@ -967,16 +859,15 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     setUsageLimitsPanel((current) =>
       current !== null && current.threadKey === threadKey ? null : current,
     );
-  const userInputCollapsed =
-    activeUserInputRequestId !== null && collapsedUserInputRequestId === activeUserInputRequestId;
+  const userInputToggled =
+    userInputToggle !== null && userInputToggle.requestId === activeUserInputRequestId;
+  const userInputCollapsed = userInputToggled && userInputToggle.collapsed;
   // A height React sets from keyboard state lags the sticky translation by a Yoga pass and
   // flashes over the nav header on the way up, so the usage panel reserves the keyboard instead.
   const [lastKnownKeyboardHeight, setLastKnownKeyboardHeight] = useState(0);
-  useEffect(() => {
-    if (liveKeyboardHeight > 0 && liveKeyboardHeight !== lastKnownKeyboardHeight) {
-      setLastKnownKeyboardHeight(liveKeyboardHeight);
-    }
-  }, [lastKnownKeyboardHeight, liveKeyboardHeight]);
+  if (liveKeyboardHeight > 0 && liveKeyboardHeight !== lastKnownKeyboardHeight) {
+    setLastKnownKeyboardHeight(liveKeyboardHeight);
+  }
   const reservedKeyboardHeight =
     lastKnownKeyboardHeight > 0 ? lastKnownKeyboardHeight : ESTIMATED_KEYBOARD_HEIGHT;
   // Waiting for a visibility render misses the first keyboard frames.
@@ -1052,19 +943,69 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
         USAGE_LIMITS_PANEL_GAP * 2,
     ),
   );
-  const userInputCardProgress = useSharedValue(1);
-  const userInputInsetProgress = useSharedValue(1);
+  // A toggle animates the card; a new request starts expanded at once.
+  const userInputMotion = !userInputToggled
+    ? "fresh"
+    : userInputCollapsed
+      ? "collapsed"
+      : "expanded";
+  const userInputCardProgress = useDerivedValue<number>(
+    () =>
+      userInputMotion === "fresh"
+        ? 1
+        : withTiming(userInputMotion === "collapsed" ? 0 : 1, USER_INPUT_TOGGLE_TIMING),
+    [userInputMotion],
+  );
+  // Collapsing the inset is instant: the sinking card still covers the strip
+  // being revealed, and animating the inset downward drifted the short-content
+  // end anchor.
+  const userInputInsetProgress = useDerivedValue<number>(() => {
+    if (userInputMotion === "collapsed") return 0;
+    return userInputMotion === "fresh" ? 1 : withTiming(1, USER_INPUT_TOGGLE_TIMING);
+  }, [userInputMotion]);
   const userInputCardCoverage = useSharedValue(0);
   const composerPopoverHeight = useSharedValue(0);
-  const floatingControlCoverage = useSharedValue(
-    showFloatingStatus ? FLOATING_WORKING_CONTROL_COVERAGE : 0,
+  const { freeze, scrollMessageToEnd } = useKeyboardScrollToEnd({ listRef });
+  const reduceMotion = useReducedMotion();
+  // Repin timers fire after the render that scheduled them, so they read follow
+  // state from the ref the writers below keep in step with it.
+  const endFollowEnabledRef = useRef(true);
+  const overlayRepinTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleOverlayRepin = (delayMs: number) => {
+    if (overlayRepinTimerRef.current !== null) {
+      clearTimeout(overlayRepinTimerRef.current);
+    }
+    overlayRepinTimerRef.current = setTimeout(() => {
+      overlayRepinTimerRef.current = null;
+      if (!endFollowEnabledRef.current) {
+        return;
+      }
+      void scrollMessageToEnd({ animated: false, closeKeyboard: false }).catch(() => {
+        freeze.set(false);
+      });
+    }, delayMs);
+  };
+  // LegendList does not re-anchor short followed conversations when floating
+  // coverage changes after load. Re-pin each time it settles at a new value;
+  // the repin checks follow state so a user who scrolled up stays put.
+  const settledFloatingCoverageRef = useRef(0);
+  const repinAfterCoverageSettles = (coverage: number) => {
+    if (coverage === settledFloatingCoverageRef.current) return;
+    settledFloatingCoverageRef.current = coverage;
+    scheduleOverlayRepin(50);
+  };
+  const floatingCoverageTarget = showFloatingStatus ? FLOATING_WORKING_CONTROL_COVERAGE : 0;
+  const floatingControlCoverage = useDerivedValue(
+    () =>
+      withTiming(
+        floatingCoverageTarget,
+        { duration: 180, reduceMotion: ReduceMotion.System },
+        (finished) => {
+          if (finished) runOnJS(repinAfterCoverageSettles)(floatingCoverageTarget);
+        },
+      ),
+    [floatingCoverageTarget],
   );
-  useEffect(() => {
-    floatingControlCoverage.value = withTiming(
-      showFloatingStatus ? FLOATING_WORKING_CONTROL_COVERAGE : 0,
-      { duration: 180, reduceMotion: ReduceMotion.System },
-    );
-  }, [floatingControlCoverage, showFloatingStatus]);
   // Android measures its expanded card in-flow; only iOS needs extra overlay coverage.
   const userInputCoverageApplies = Platform.OS === "ios" && activeUserInputRequestId !== null;
   const combinedContentInsetEndAdjustment = useSharedValue(
@@ -1094,78 +1035,30 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
       ),
     [userInputCoverageApplies],
   );
-  const { freeze, scrollMessageToEnd } = useKeyboardScrollToEnd({ listRef });
-  const reduceMotion = useReducedMotion();
-  // Repin timers fire after the render that scheduled them, so they read follow
-  // state from the ref the writers below keep in step with it.
-  const endFollowEnabledRef = useRef(true);
-  const overlayRepinTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const previousWorkingControlStateRef = useRef({
-    threadKey: selectedThreadKey,
-    visible: false,
-  });
   const handleEndFollowEnabledChange = (enabled: boolean) => {
     endFollowEnabledRef.current = enabled;
     setEndFollowEnabled(enabled);
   };
-  const scheduleOverlayRepin = (delayMs: number) => {
-    if (overlayRepinTimerRef.current !== null) {
-      clearTimeout(overlayRepinTimerRef.current);
-    }
-    overlayRepinTimerRef.current = setTimeout(() => {
-      overlayRepinTimerRef.current = null;
-      if (!endFollowEnabledRef.current) {
-        return;
-      }
-      void scrollMessageToEnd({ animated: false, closeKeyboard: false }).catch(() => {
-        freeze.set(false);
-      });
-    }, delayMs);
+  // A jump this thread never reached lets go when it closes.
+  const releaseThreadScope = () => () => {
+    threadScope.abort();
+    if (overlayRepinTimerRef.current !== null) clearTimeout(overlayRepinTimerRef.current);
+    if (composerHeightSettle.current !== null) clearTimeout(composerHeightSettle.current);
+    finishThreadMessageJump(selectedThreadKey);
   };
-  useEffect(
-    () => () => {
-      if (overlayRepinTimerRef.current !== null) {
-        clearTimeout(overlayRepinTimerRef.current);
-      }
-    },
-    [],
-  );
-  useEffect(() => {
-    const previous = previousWorkingControlStateRef.current;
-    const threadChanged = previous.threadKey !== selectedThreadKey;
-    const visibilityChanged = previous.visible !== showFloatingStatus;
-    previousWorkingControlStateRef.current = {
-      threadKey: selectedThreadKey,
-      visible: showFloatingStatus,
-    };
-    if ((!threadChanged && !visibilityChanged) || (threadChanged && !showFloatingStatus)) {
-      return;
-    }
-    // LegendList misses short-conversation re-anchoring after coverage changes; re-pin after transition only if still following.
-    scheduleOverlayRepin(230);
-  }, [scheduleOverlayRepin, selectedThreadKey, showFloatingStatus]);
   const handleToggleUserInputCollapsed = () => {
     if (activeUserInputRequestId === null) {
       return;
     }
     if (userInputCollapsed) {
-      userInputCardProgress.set(withTiming(1, USER_INPUT_TOGGLE_TIMING));
-      userInputInsetProgress.set(withTiming(1, USER_INPUT_TOGGLE_TIMING));
-      setCollapsedUserInputRequestId(null);
+      setUserInputToggle({ requestId: activeUserInputRequestId, collapsed: false });
       scheduleOverlayRepin(USER_INPUT_TOGGLE_DURATION_MS + 50);
     } else {
       Keyboard.dismiss();
-      userInputCardProgress.set(withTiming(0, USER_INPUT_TOGGLE_TIMING));
-      // The sinking card already covers this strip. Animating the inset downward would drift the end anchor.
-      userInputInsetProgress.set(0);
-      setCollapsedUserInputRequestId(activeUserInputRequestId);
+      setUserInputToggle({ requestId: activeUserInputRequestId, collapsed: true });
       scheduleOverlayRepin(60);
     }
   };
-  useEffect(() => {
-    userInputCardProgress.set(1);
-    userInputInsetProgress.set(1);
-  }, [activeUserInputRequestId, userInputCardProgress, userInputInsetProgress]);
   const showContent = props.showContent ?? true;
   const layoutVariant = props.layoutVariant ?? "compact";
   const isSplitLayout = layoutVariant === "split";
@@ -1202,7 +1095,6 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
       : { width: "auto", right: controlInsets.right },
   );
   const selectedInstanceId = props.selectedThread.modelSelection.instanceId;
-  useStreamingHaptics(props.selectedThread.id, props.selectedThreadFeed);
   const selectedProviderSkills = (() => {
     const provider = props.serverConfig?.providers.find(
       (candidate) => candidate.instanceId === selectedInstanceId,
@@ -1212,81 +1104,12 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
       : [];
   })();
 
-  useLayoutEffect(() => {
-    selectedThreadKeyRef.current = selectedThreadKey;
-  }, [selectedThreadKey]);
-
-  useEffect(() => {
-    setAnchorMessageId(null);
-    setSubmittedMessageId(null);
-    lastScrolledSubmittedMessageIdRef.current = null;
-    endFollowEnabledRef.current = true;
-    setEndFollowEnabled(true);
-    freeze.set(false);
-  }, [freeze, selectedThreadKey]);
-
-  useEffect(() => {
-    if (
-      submittedMessageId === null ||
-      anchorMessageId !== submittedMessageId ||
-      lastScrolledSubmittedMessageIdRef.current === submittedMessageId ||
-      contentPresentationKind !== "ready" ||
-      (!selectedThreadFeed.some(
-        (entry) => entry.type === "message" && entry.id === submittedMessageId,
-      ) &&
-        !props.queuedMessages.some((message) => message.messageId === submittedMessageId))
-    ) {
-      return;
-    }
-
-    const targetThreadKey = selectedThreadKey;
-    const frame = requestAnimationFrame(() => {
-      if (selectedThreadKeyRef.current !== targetThreadKey) {
-        return;
-      }
-      lastScrolledSubmittedMessageIdRef.current = submittedMessageId;
-      // Dismiss before scrollMessageToEnd freezes insets, or the missed hide leaves permanent padding.
-      void KeyboardController.dismiss()
-        .then(() => {
-          if (
-            selectedThreadKeyRef.current !== targetThreadKey ||
-            lastScrolledSubmittedMessageIdRef.current !== submittedMessageId
-          ) {
-            return;
-          }
-          return scrollMessageToEnd({
-            animated: !reduceMotion,
-            closeKeyboard: false,
-          });
-        })
-        .catch(() => {
-          if (
-            selectedThreadKeyRef.current !== targetThreadKey ||
-            lastScrolledSubmittedMessageIdRef.current !== submittedMessageId
-          ) {
-            return;
-          }
-          lastScrolledSubmittedMessageIdRef.current = null;
-          freeze.set(false);
-        });
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [
-    anchorMessageId,
-    submittedMessageId,
-    freeze,
-    contentPresentationKind,
-    props.queuedMessages,
-    selectedThreadFeed,
-    reduceMotion,
-    scrollMessageToEnd,
-    selectedThreadKey,
-  ]);
-
-  const activePendingApprovalsRef = useRef(props.activePendingApprovals);
-  useLayoutEffect(() => {
-    activePendingApprovalsRef.current = props.activePendingApprovals;
-  }, [props.activePendingApprovals]);
+  const currentPendingApprovals = () =>
+    props.selectedThreadDetailRef === null
+      ? []
+      : (appAtomRegistry.get(
+          environmentThreadDetails.pendingRequestsAtom(props.selectedThreadDetailRef),
+        )?.approvals ?? []);
   const handleSendMessage = async (
     followUp?: ActiveTurnComposerAction,
     stillSendable?: () => boolean,
@@ -1302,7 +1125,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
       approvalsToDecline.length > 0 && props.activePendingUserInput === null
         ? async (text: string, hasAttachmentsOrContext: boolean) => {
             if (
-              selectedThreadKeyRef.current !== targetThreadKey ||
+              threadScope.signal.aborted ||
               stillSendable?.() === false ||
               props.respondingApprovalId !== null
             )
@@ -1323,12 +1146,12 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
             return (
               props.respondingApprovalId === null &&
               (await declinePendingApprovals(approvalsToDecline, props.onRespondToApproval)) &&
-              selectedThreadKeyRef.current === targetThreadKey &&
+              !threadScope.signal.aborted &&
               // A draft edited or pasted into during the decline isn't what the user sent.
               stillSendable?.() !== false &&
               // An approval that arrived during the decline would block the redirect; the draft
               // stays so the next send declines it too.
-              !activePendingApprovalsRef.current.some(
+              !currentPendingApprovals().some(
                 (approval) =>
                   !approvalsToDecline.some((declined) => declined.requestId === approval.requestId),
               )
@@ -1336,24 +1159,41 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
           }
         : undefined;
     const messageId = await props.onSendMessage(followUp, declineBeforeDispatch);
-    if (messageId === null || selectedThreadKeyRef.current !== targetThreadKey) {
+    if (messageId === null || threadScope.signal.aborted) {
       return messageId;
     }
 
     clearUsageLimitsFor(targetThreadKey);
 
-    setSubmittedMessageId(messageId);
-    setAnchorMessageId(
-      resolveThreadFeedSubmissionAnchor({
-        currentAnchorMessageId: anchorMessageId,
-        submittedMessageId: messageId,
-        hasStartedTurn: props.selectedThread.latestRun !== null,
-        hasUserMessage,
-        queuedMessageCount: props.selectedThreadQueueCount,
-        deliveryDeferred: props.connectionStateLabel !== "connected",
-      }),
-    );
+    const nextAnchorMessageId = resolveThreadFeedSubmissionAnchor({
+      currentAnchorMessageId: anchorMessageId,
+      submittedMessageId: messageId,
+      hasStartedTurn: props.selectedThread.latestRun !== null,
+      hasUserMessage,
+      queuedMessageCount: props.selectedThreadQueueCount,
+      deliveryDeferred: props.connectionStateLabel !== "connected",
+    });
+    feedRef.current?.resetEndFollow();
+    setAnchorMessageId(nextAnchorMessageId);
     composerEditorRef.current?.blur();
+    // The send enqueued the message optimistically, so it is in the feed or
+    // the queue by the next frame, once the new anchor has rendered.
+    if (nextAnchorMessageId === messageId && contentPresentationKind === "ready") {
+      requestAnimationFrame(() => {
+        if (threadScope.signal.aborted) return;
+        // Wait for the keyboard to finish dismissing: scrollMessageToEnd freezes
+        // keyboard-driven inset updates, and a close event swallowed by that
+        // freeze leaves a phantom bottom inset.
+        void KeyboardController.dismiss()
+          .then(() => {
+            if (threadScope.signal.aborted) return;
+            return scrollMessageToEnd({ animated: !reduceMotion, closeKeyboard: false });
+          })
+          .catch(() => {
+            if (!threadScope.signal.aborted) freeze.set(false);
+          });
+      });
+    }
     return messageId;
   };
 
@@ -1369,7 +1209,8 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     }
     if (
       edited.value &&
-      selectedThreadKeyRef.current === scopedThreadKey(message.environmentId, message.threadId)
+      !threadScope.signal.aborted &&
+      selectedThreadKey === scopedThreadKey(message.environmentId, message.threadId)
     ) {
       composerEditorRef.current?.focus();
     }
@@ -1433,13 +1274,16 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   };
 
   return (
-    <View className="flex-1" onLayout={handleScreenLayout}>
+    <View className="flex-1" ref={releaseThreadScope} onLayout={handleScreenLayout}>
       {!usesNativeWorkspaceColumns ? <NativeLayoutObserver onChange={setScreenMetrics} /> : null}
-      <ThreadVisitWatermark
-        environmentId={props.environmentId}
-        selectedThread={props.selectedThread}
-        showContent={showContent && !props.draftMode}
-      />
+      {showContent && !props.draftMode ? (
+        <ThreadVisitWatermark
+          threadRef={{ environmentId: props.environmentId, threadId: props.selectedThread.id }}
+        />
+      ) : null}
+      {props.selectedThreadDetailRef !== null ? (
+        <ThreadStreamHaptics threadRef={props.selectedThreadDetailRef} />
+      ) : null}
       {props.draftMode ? (
         props.draftMode.content(
           navigationHeaderHeight,
@@ -1501,7 +1345,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
               anchorMessageId={anchorMessageId}
               jumpToMessageId={jumpMessageLoaded ? jumpMessageId : null}
               onJumpedToMessage={() => finishThreadMessageJump(selectedThreadKey)}
-              submittedMessageId={submittedMessageId}
+              ref={feedRef}
               contentInsetEndAdjustment={combinedContentInsetEndAdjustment}
               keyboardOffset={composerKeyboardOffset}
               contentTopInset={0}
@@ -1604,6 +1448,8 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                 <View className="w-full self-center" style={{ maxWidth: contentMaxWidth }}>
                   {props.queuedRunEdit !== null ? (
                     <Animated.View
+                      key={props.queuedRunEdit.runId}
+                      ref={focusEditorForQueuedEdit}
                       className="shrink-0"
                       entering={FadeInDown.duration(180)}
                       exiting={FadeOut.duration(120)}
@@ -1822,8 +1668,6 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                         onSendMessage={handleSendMessage}
                         onShowUsageLimits={showUsageLimits}
                         canSwitchProvider={props.canSwitchThreadProvider}
-                        onUpdateModelSelection={props.onUpdateThreadModelSelection}
-                        onUpdateRuntimeMode={props.onUpdateThreadRuntimeMode}
                         onUpdateInteractionMode={props.onUpdateThreadInteractionMode}
                         onHeightChange={handleComposerHeightChange}
                         onEditorFocusChange={handleOwnedInputFocusChange}
@@ -1838,4 +1682,4 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
       ) : null}
     </View>
   );
-};
+}

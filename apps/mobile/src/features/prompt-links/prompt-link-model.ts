@@ -17,8 +17,12 @@ export function promptLinkSearchFromParams(
   return search.size > 0 ? search.toString() : null;
 }
 
-export function clearedPromptLinkParams(keys: ReadonlyArray<string> = PROMPT_LINK_PARAM_KEYS) {
-  return Object.fromEntries(keys.map((key) => [key, undefined]));
+export function withoutPromptLinkParams(params: object | undefined): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(params ?? {}).filter(
+      ([key]) => !(PROMPT_LINK_PARAM_KEYS as ReadonlyArray<string>).includes(key),
+    ),
+  );
 }
 
 export function promptLinkNotice(input: {
@@ -73,3 +77,21 @@ export function latestThreadEnvironmentIds<Id extends string>(
 
 export const promptLinkRepositoryName = (repository: PromptLinkRepository) =>
   `${repository.owner}/${repository.name}`;
+
+export interface PendingPromptLink {
+  readonly search: string;
+  /** Set once the link's screen is on the stack; leaving it after that drops the link. */
+  readonly arrived: boolean;
+}
+
+/** Advances a link waiting for its screen and settled shells; `resolve` is the search to open. */
+export function stepPendingPromptLink(
+  pending: PendingPromptLink,
+  input: { readonly screenOnStack: boolean; readonly shellsSettled: boolean },
+): { readonly pending: PendingPromptLink | null; readonly resolve: string | null } {
+  if (!input.screenOnStack) {
+    return { pending: pending.arrived ? null : pending, resolve: null };
+  }
+  if (input.shellsSettled) return { pending: null, resolve: pending.search };
+  return { pending: pending.arrived ? pending : { ...pending, arrived: true }, resolve: null };
+}

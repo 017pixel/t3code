@@ -1,14 +1,6 @@
 import { Button } from "../../components/ui/Button";
 import deviceStreamScript from "@t3tools/mobile-device-stream";
-import {
-  useEffect,
-  useEffectEvent,
-  useImperativeHandle,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type Ref,
-} from "react";
+import { useImperativeHandle, useRef, useState, type Ref } from "react";
 import { Platform, View } from "react-native";
 import { WebView } from "react-native-webview";
 import type { DeviceStreamStatus } from "@t3tools/client-runtime/device/stream";
@@ -94,28 +86,45 @@ function DeviceStreamDocumentView({
   readonly onStreaming: () => void;
   readonly onRecoverProcess: () => boolean;
 }) {
-  const webView = useRef<WebView<object>>(null);
-  const active = useRef(true);
+  const webView = useRef<WebView<object> | null>(null);
+  const active = useRef(false);
   const failed = useRef(false);
+  const bootstrapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [status, setStatus] = useState<DeviceStreamStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
-  const [started, setStarted] = useState(false);
+  const clearBootstrapTimer = () => {
+    if (bootstrapTimer.current === null) return;
+    clearTimeout(bootstrapTimer.current);
+    bootstrapTimer.current = null;
+  };
   const fail = (message: string) => {
     if (!active.current || failed.current) return;
     failed.current = true;
+    clearBootstrapTimer();
     void onInputConnected(false);
     webView.current?.injectJavaScript("window.T3DeviceStream?.stop(); true;");
     setError(message);
     setStatus("error");
   };
-  const bootstrapTimedOut = useEffectEvent(() =>
-    fail("Device viewer could not start. Reconnect to try again."),
-  );
-  useEffect(() => {
-    if (started) return;
-    const timer = setTimeout(bootstrapTimedOut, 15_000);
-    return () => clearTimeout(timer);
-  }, [started]);
+  // The stream lives exactly as long as this WebView. `onInputConnected` must
+  // be stable, or a new identity would restart the stream.
+  const attachWebView = (view: WebView<object> | null) => {
+    if (view === null) return;
+    webView.current = view;
+    active.current = true;
+    void onInputConnected(false);
+    bootstrapTimer.current = setTimeout(
+      () => fail("Device viewer could not start. Reconnect to try again."),
+      15_000,
+    );
+    return () => {
+      clearBootstrapTimer();
+      active.current = false;
+      webView.current = null;
+      view.injectJavaScript("window.T3DeviceStream?.stop(); true;");
+      void onInputConnected(false);
+    };
+  };
   const source = {
     html: deviceStreamDocument(configuration, deviceStreamScript),
     baseUrl,
@@ -131,16 +140,6 @@ function DeviceStreamDocumentView({
     appSwitcher: () => command("appSwitcher"),
     rotate: () => command("rotate"),
   }));
-  const resetInput = useEffectEvent(() => void onInputConnected(false));
-  useLayoutEffect(() => {
-    active.current = true;
-    resetInput();
-    const view = webView.current;
-    return () => {
-      active.current = false;
-      view?.injectJavaScript("window.T3DeviceStream?.stop(); true;");
-    };
-  }, []);
   const processTerminated = () => {
     if (!active.current || failed.current) return;
     void onInputConnected(false);
@@ -149,7 +148,7 @@ function DeviceStreamDocumentView({
   return (
     <View className="flex-1" style={{ backgroundColor: background }}>
       <WebView<object>
-        ref={webView}
+        ref={attachWebView}
         source={source}
         originWhitelist={["*"]}
         scrollEnabled={false}
@@ -173,7 +172,7 @@ function DeviceStreamDocumentView({
           else if (message?.type === "input") void onInputConnected(message.connected);
           else if (message?.type === "retry") onRetry();
           else if (message?.type === "status") {
-            setStarted(true);
+            clearBootstrapTimer();
             if (message.status === "error") fail(message.detail ?? "Device stream failed.");
             else {
               setStatus(message.status);

@@ -21,7 +21,6 @@ import {
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { useEffect } from "react";
 import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
 import * as Option from "effect/Option";
 import { parseScopedThreadKey, scopedThreadKey } from "@t3tools/client-runtime/environment";
@@ -55,6 +54,10 @@ import type { DraftComposerAttachment, FileBackedComposerAttachment } from "../l
 import { SerializedAsyncQueue } from "../lib/serialized-async-queue";
 import { appAtomRegistry } from "./atom-registry";
 import {
+  abortComposerDraftOperations,
+  abortComposerDraftOperationsWhere,
+} from "./composerDraftOperations";
+import {
   isNewTaskDraftKey,
   newTaskDraftKey,
   parseLegacyNewTaskDraftKey,
@@ -84,15 +87,36 @@ export function setComposerContextImporting(draftKey: string, importing: boolean
   appAtomRegistry.set(composerContextImportsAtom, next);
 }
 
-let lastComposerSelection: { draftKey: string; text: string; start: number; end: number } | null =
-  null;
+interface ComposerDraftSelection {
+  readonly text: string;
+  readonly start: number;
+  readonly end: number;
+}
+
+// Keyed by draft so a caret move in one composer only notifies that draft's readers.
+// Kept alive so the caret survives the composer unmounting, like the draft itself.
+const composerDraftSelectionAtom = Atom.family((_draftKey: string) =>
+  Atom.make<ComposerDraftSelection | null>(null).pipe(
+    Atom.keepAlive,
+    Atom.withLabel("mobile:composer-draft-selection"),
+  ),
+);
+const NO_COMPOSER_DRAFT_SELECTION_ATOM = Atom.make<ComposerDraftSelection | null>(null);
 
 export function rememberComposerDraftSelection(
   draftKey: string,
   text: string,
   selection: { start: number; end: number },
 ): void {
-  lastComposerSelection = { draftKey, text, ...selection };
+  appAtomRegistry.set(composerDraftSelectionAtom(draftKey), { text, ...selection });
+}
+
+function matchingComposerDraftSelection(
+  selection: ComposerDraftSelection | null,
+  text: string,
+): { start: number; end: number } | null {
+  if (selection?.text !== text) return null;
+  return { start: selection.start, end: selection.end };
 }
 
 /** Read the post-chip-insertion selection or the editor restores the pre-insert caret before the chip. */
@@ -100,10 +124,20 @@ export function readComposerDraftSelection(
   draftKey: string,
   text: string,
 ): { start: number; end: number } | null {
-  if (lastComposerSelection?.draftKey !== draftKey || lastComposerSelection.text !== text) {
-    return null;
-  }
-  return { start: lastComposerSelection.start, end: lastComposerSelection.end };
+  return matchingComposerDraftSelection(
+    appAtomRegistry.get(composerDraftSelectionAtom(draftKey)),
+    text,
+  );
+}
+
+export function useComposerDraftSelection(
+  draftKey: string | null,
+  text: string,
+): { start: number; end: number } | null {
+  const selection = useAtomValue(
+    draftKey === null ? NO_COMPOSER_DRAFT_SELECTION_ATOM : composerDraftSelectionAtom(draftKey),
+  );
+  return draftKey === null ? null : matchingComposerDraftSelection(selection, text);
 }
 
 export interface ComposerDraftInsertion {
@@ -129,8 +163,7 @@ function contextInsertionRange(
   draft: ComposerDraft,
   target?: ComposerDraftInsertion,
 ) {
-  const captured =
-    target ?? (lastComposerSelection?.draftKey === draftKey ? lastComposerSelection : null);
+  const captured = target ?? appAtomRegistry.get(composerDraftSelectionAtom(draftKey));
   // Append after text edits during writes; caret-only moves preserve the captured insertion range.
   const selection = captured?.text === draft.text ? captured : null;
   const start = Math.max(0, Math.min(selection?.start ?? draft.text.length, draft.text.length));
@@ -303,12 +336,10 @@ function draftWithInsertedContext(
   for (const record of content.context.records) records.set(record.contextId, record);
   const context = referencedComposerContext(text, { version: 1, records: [...records.values()] });
   if ((context?.records.length ?? 0) > COMPOSER_CONTEXT_MAX_RECORDS) return null;
-  lastComposerSelection = {
-    draftKey,
-    text,
+  rememberComposerDraftSelection(draftKey, text, {
     start: start + insertion.length,
     end: start + insertion.length,
-  };
+  });
   return withReferencedContextFiles(draft, text, context);
 }
 
@@ -357,6 +388,8 @@ export interface ComposerDraftWorkspaceSelection {
   readonly worktreePath: string | null;
   readonly startFromOrigin?: boolean;
   readonly pullRequestReference?: string;
+  /** Local mode chosen before refs named the current branch; the branch follows it. */
+  readonly followsCurrentCheckout?: boolean;
 }
 
 export type ComposerDraftSettingsUpdate = Pick<
@@ -370,6 +403,7 @@ const ComposerDraftWorkspaceSelectionSchema = Schema.Struct({
   worktreePath: Schema.NullOr(Schema.String),
   startFromOrigin: Schema.optional(Schema.Boolean),
   pullRequestReference: Schema.optional(Schema.String),
+  followsCurrentCheckout: Schema.optional(Schema.Boolean),
 });
 
 const ComposerDraftProjectSchema = Schema.Struct({
@@ -432,6 +466,17 @@ export const composerDraftsAtom = Atom.make<Record<string, ComposerDraft>>({}).p
   Atom.withLabel("mobile:composer-drafts"),
 );
 
+const composerDraftsHydratedAtom = Atom.make(false).pipe(
+  Atom.keepAlive,
+  Atom.withLabel("mobile:composer-drafts-hydrated"),
+);
+
+/** Whether persisted drafts have merged in; reading it starts hydration. */
+export const composerDraftsLoadedAtom = Atom.make((get) => {
+  ensureComposerDraftsLoaded();
+  return get(composerDraftsHydratedAtom);
+}).pipe(Atom.withLabel("mobile:composer-drafts-loaded"));
+
 export const stickyComposerModelSelectionAtom = Atom.make<ModelSelection | null>(null).pipe(
   Atom.keepAlive,
   Atom.withLabel("mobile:sticky-composer-model-selection"),
@@ -468,6 +513,7 @@ const persistenceQueue = new SerializedAsyncQueue();
 
 export function resetComposerDraftsLoadState(): void {
   loadPromise = null;
+  appAtomRegistry.set(composerDraftsHydratedAtom, false);
   persistRetryNeeded = false;
 }
 
@@ -1000,6 +1046,7 @@ export function ensureComposerDraftsLoaded(): void {
         ),
       });
     }
+    appAtomRegistry.set(composerDraftsHydratedAtom, true);
   });
   loadPromise = loading;
   void loading.catch((cause) => {
@@ -1700,7 +1747,7 @@ export async function restoreComposerDraftSnapshot(
   );
 }
 
-export function sameComposerDraftState(a: ComposerDraft, b: ComposerDraft): boolean {
+function sameComposerDraftState(a: ComposerDraft, b: ComposerDraft): boolean {
   return (
     a.text === b.text &&
     a.attachments === b.attachments &&
@@ -1804,6 +1851,7 @@ export function clearComposerDraft(
   draftKey: string,
   options?: { readonly deferAttachmentCleanup?: boolean },
 ): void {
+  abortComposerDraftOperations(draftKey);
   const previousAttachments = getComposerDraftSnapshot(draftKey).attachments;
   updateComposerDrafts((current) => {
     if (!current[draftKey]) {
@@ -1846,6 +1894,31 @@ export function createNewTaskDraft(project: {
     [draftKey]: { ...EMPTY_DRAFT, project: stamp },
   }));
   return draftKey;
+}
+
+/**
+ * Stamps a new-task draft with its project unless it already has one, and
+ * reports whether it did. A route's draft key is derived before anything is
+ * written, so whoever opens the route stamps it; an existing stamp (and the
+ * draft's content) is left alone.
+ */
+export function ensureNewTaskDraft(
+  draftKey: string,
+  project: { readonly environmentId: EnvironmentId; readonly projectId: ProjectId },
+): boolean {
+  let stamped = false;
+  updateComposerDrafts((current) => {
+    const existing = current[draftKey];
+    if (existing?.project !== undefined) return current;
+    stamped = true;
+    const stamp: ComposerDraftProject = {
+      environmentId: project.environmentId,
+      projectId: project.projectId,
+      createdAt: new Date().toISOString(),
+    };
+    return { ...current, [draftKey]: { ...normalizeDraft(existing), project: stamp } };
+  });
+  return stamped;
 }
 
 export function retargetNewTaskDraft(
@@ -1913,6 +1986,13 @@ export async function clearComposerDraftsEnvironment(environmentId: EnvironmentI
   const removedAttachments = Object.entries(current)
     .filter(([draftKey]) => next[draftKey] === undefined)
     .flatMap(([, draft]) => draft.attachments);
+  // Keys with no stored draft yet (an empty thread composer) can still have a pick running.
+  const environmentPrefix = `${environmentId}:`;
+  abortComposerDraftOperationsWhere(
+    (draftKey) =>
+      draftKey.startsWith(environmentPrefix) ||
+      (current[draftKey] !== undefined && next[draftKey] === undefined),
+  );
 
   if (persistTimer !== null) {
     clearTimeout(persistTimer);
@@ -1925,10 +2005,21 @@ export async function clearComposerDraftsEnvironment(environmentId: EnvironmentI
   await releaseUnusedComposerAttachmentFiles(removedAttachments);
 }
 
+// Reading drafts from a component hydrates them from disk the first time.
 const composerDraftAtom = Atom.family((draftKey: string) =>
-  Atom.make((get) => get(composerDraftsAtom)[draftKey] ?? EMPTY_DRAFT),
+  Atom.make((get) => {
+    ensureComposerDraftsLoaded();
+    return get(composerDraftsAtom)[draftKey] ?? EMPTY_DRAFT;
+  }),
 );
-const EMPTY_DRAFT_ATOM = Atom.make(EMPTY_DRAFT);
+const EMPTY_DRAFT_ATOM = Atom.make(() => {
+  ensureComposerDraftsLoaded();
+  return EMPTY_DRAFT;
+});
+const stickyComposerModelSelectionReaderAtom = Atom.make((get) => {
+  ensureComposerDraftsLoaded();
+  return get(stickyComposerModelSelectionAtom);
+});
 
 type ComposerDraftsByKey = Readonly<Record<string, ComposerDraft>>;
 const EMPTY_DRAFTS: ComposerDraftsByKey = {};
@@ -1996,30 +2087,22 @@ const composerDraftSettingsAtom = Atom.family((draftKey: string) =>
     ),
   ),
 );
-const EMPTY_DRAFT_SETTINGS_ATOM = Atom.make(EMPTY_DRAFT_SETTINGS);
+const EMPTY_DRAFT_SETTINGS_ATOM = Atom.make((get) => {
+  get(EMPTY_DRAFT_ATOM);
+  return EMPTY_DRAFT_SETTINGS;
+});
 
 export function useComposerDraftSettings(draftKey: string | null): ComposerDraftSettings {
   const settings = useAtomValue(
     draftKey ? composerDraftSettingsAtom(draftKey) : EMPTY_DRAFT_SETTINGS_ATOM,
   );
-  useEffect(() => {
-    ensureComposerDraftsLoaded();
-  }, []);
   return settings;
 }
 
 export function useComposerDraft(draftKey: string | null): ComposerDraft {
-  const draft = useAtomValue(draftKey ? composerDraftAtom(draftKey) : EMPTY_DRAFT_ATOM);
-  useEffect(() => {
-    ensureComposerDraftsLoaded();
-  }, []);
-  return draft;
+  return useAtomValue(draftKey ? composerDraftAtom(draftKey) : EMPTY_DRAFT_ATOM);
 }
 
 export function useStickyComposerModelSelection(): ModelSelection | null {
-  const selection = useAtomValue(stickyComposerModelSelectionAtom);
-  useEffect(() => {
-    ensureComposerDraftsLoaded();
-  }, []);
-  return selection;
+  return useAtomValue(stickyComposerModelSelectionReaderAtom);
 }

@@ -4,7 +4,7 @@ import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import { sortInboxThreadsByReturn } from "@t3tools/client-runtime/state/thread-inbox";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 import { Animated, FlatList, Modal, Pressable, View } from "react-native";
 import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
 import Reanimated, { ReduceMotion, useAnimatedStyle, withTiming } from "react-native-reanimated";
@@ -29,6 +29,7 @@ import {
   type ThreadMoveDestination,
 } from "./threadOrder";
 import { getThreadListV2OrderedSection, threadListInboxReturns } from "./threadListV2";
+import { useThreadListNow } from "./use-thread-list-now";
 import { useThreadListV2ShelfPreferences } from "./use-thread-list-v2-shelf-preferences";
 
 const ROW_HEIGHT = 56;
@@ -43,14 +44,23 @@ type Row = {
   offset: number;
   height: number;
 };
+type Planners = Record<"pinned" | "active", ReturnType<typeof createThreadMovePlanner>>;
 type Drag = {
   orderVersion: string;
+  // The layout the drag started on. Any change to it changes orderVersion,
+  // which ends the drag, so the snapshot cannot go stale while it is in use.
+  rows: readonly Row[];
+  planners: Planners;
   sourceSection: Section;
   thread: EnvironmentThreadShell;
   startY: number;
   translation: number;
   destination: Destination | null;
 };
+
+function sameDestination(a: Destination | null, b: Destination | null) {
+  return a?.targetId === b?.targetId && a?.section === b?.section && a?.placement === b?.placement;
+}
 
 function ArrangementRow(props: {
   height: number;
@@ -92,21 +102,17 @@ function DragHandle(props: {
   canMoveUp: boolean;
   canMoveDown: boolean;
 }) {
-  const latest = useRef(props);
-  latest.current = props;
-  const gesture = useMemo(
-    () =>
-      Gesture.Pan()
-        .enabled(!props.disabled)
-        .minDistance(0)
-        .shouldCancelWhenOutside(false)
-        .runOnJS(true)
-        .onStart(() => latest.current.onStart())
-        .onUpdate((event) => latest.current.onMove(event.translationY))
-        .onEnd((event) => latest.current.onMove(event.translationY))
-        .onFinalize((_, success) => latest.current.onEnd(!success)),
-    [props.disabled],
-  );
+  // A new config each render keeps its handler tag (same gesture type), so
+  // GestureDetector swaps in the current callbacks without dropping a live pan.
+  const gesture = Gesture.Pan()
+    .enabled(!props.disabled)
+    .minDistance(0)
+    .shouldCancelWhenOutside(false)
+    .runOnJS(true)
+    .onStart(() => props.onStart())
+    .onUpdate((event) => props.onMove(event.translationY))
+    .onEnd((event) => props.onMove(event.translationY))
+    .onFinalize((_, success) => props.onEnd(!success));
   return (
     <GestureDetector gesture={gesture}>
       <View
@@ -156,23 +162,9 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
   const dropBusy = useAtomValue(threadDropBusyAtom);
   const { moveThread } = useThreadListActions();
   const { workingShelfEnabled } = useThreadListV2ShelfPreferences();
-  const [now, setNow] = useState(() => new Date().toISOString());
+  const now = useThreadListNow(threads);
   const [expanded, setExpanded] = useState({ snoozed: false, settled: false });
-  useEffect(() => {
-    const wakeAt = Math.min(
-      ...threads.flatMap((thread) => {
-        const at = Date.parse(thread.snoozedUntil ?? "");
-        return at > Date.parse(now) ? [at] : [];
-      }),
-    );
-    if (!Number.isFinite(wakeAt)) return;
-    const timer = setTimeout(
-      () => setNow(new Date().toISOString()),
-      Math.min(Math.max(0, wakeAt - Date.now()) + 1, 2_147_483_647),
-    );
-    return () => clearTimeout(timer);
-  }, [threads, now]);
-  const sections = useMemo(() => {
+  const sections = (() => {
     const shared = {
       threads,
       now,
@@ -203,8 +195,8 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
       snoozed: parked.filter((thread) => effectiveSnoozed(thread, { now })),
       settled: parked.filter((thread) => !effectiveSnoozed(thread, { now })),
     };
-  }, [threads, configs, now, queuedThreadKeys, pendingOrder, workingShelfEnabled]);
-  const planners = useMemo(() => {
+  })();
+  const planners = (() => {
     const planner = (section: "pinned" | "active") =>
       createThreadMovePlanner({
         ordered: sections[section],
@@ -223,8 +215,8 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
         ),
       });
     return { pinned: planner("pinned"), active: planner("active") };
-  }, [sections, threads, configs, workingShelfEnabled]);
-  const rows = useMemo(() => {
+  })();
+  const rows = (() => {
     const result: Row[] = [];
     let offset = 0;
     for (const section of ["pinned", "active", "snoozed", "settled"] as const) {
@@ -238,15 +230,13 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
       }
     }
     return result;
-  }, [sections, expanded]);
+  })();
   const list = useRef<FlatList<Row>>(null);
   const geometry = useRef({ height: 0, offset: 0 });
   const drag = useRef<Drag | null>(null);
   const frame = useRef<number | null>(null);
   const [preview, setPreview] = useState<Drag | null>(null);
-  const translateY = useRef(new Animated.Value(0)).current;
-  const latest = useRef({ rows, planners, moveThread });
-  latest.current = { rows, planners, moveThread };
+  const [translateY] = useState(() => new Animated.Value(0));
 
   function stop() {
     if (frame.current !== null) cancelAnimationFrame(frame.current);
@@ -257,27 +247,22 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
   const orderVersion = rows
     .map((row) => `${row.key}:${row.thread?.pinOrderKey}:${row.thread?.activeOrderKey}`)
     .join("|");
-  useEffect(() => {
-    stop();
-  }, [orderVersion]);
-  useEffect(
-    () => () => {
-      if (frame.current !== null) cancelAnimationFrame(frame.current);
-    },
-    [],
-  );
-
   function update(translation: number) {
     const current = drag.current;
     if (current === null) return;
+    // The order changed under the drag (a drop landed, or another client moved
+    // a thread), so its rows and planners no longer describe the list.
+    if (current.orderVersion !== orderVersion) {
+      stop();
+      return;
+    }
     current.translation = translation;
     const { height, offset } = geometry.current;
     const y = current.startY + translation;
     translateY.setValue(Math.max(0, Math.min(height - ROW_HEIGHT, y - ROW_HEIGHT / 2)));
     const contentY = Math.max(0, y + offset);
     const target =
-      latest.current.rows.find((row) => contentY < row.offset + row.height) ??
-      latest.current.rows.at(-1);
+      current.rows.find((row) => contentY < row.offset + row.height) ?? current.rows.at(-1);
     let destination: Destination | null = null;
     if (
       target &&
@@ -297,14 +282,10 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
           configs.get(current.thread.environmentId)?.environment.capabilities.threadSettlement
         )
           destination = { section: "settled", targetId: null, placement: "before" };
-      } else if (latest.current.planners[target.section](keyOf(current.thread), candidate) !== null)
+      } else if (current.planners[target.section](keyOf(current.thread), candidate) !== null)
         destination = candidate;
     }
-    if (
-      current.destination?.targetId !== destination?.targetId ||
-      current.destination?.section !== destination?.section ||
-      current.destination?.placement !== destination?.placement
-    ) {
+    if (!sameDestination(current.destination, destination)) {
       current.destination = destination;
       setPreview({ ...current });
     }
@@ -313,6 +294,8 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
     if (!row.thread || preview !== null) return;
     drag.current = {
       orderVersion,
+      rows,
+      planners,
       sourceSection: row.section,
       thread: row.thread,
       startY: row.offset + ROW_HEIGHT / 2 - geometry.current.offset,
@@ -336,7 +319,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
           : y > bounds.height - 48
             ? Math.min(1, (y - bounds.height + 48) / 48)
             : 0;
-      const tail = latest.current.rows.at(-1);
+      const tail = current.rows.at(-1);
       const maximum = Math.max(0, (tail ? tail.offset + tail.height : 0) - bounds.height);
       const offset = Math.max(0, Math.min(maximum, bounds.offset + speed * dt * 0.5));
       if (offset !== bounds.offset) {
@@ -387,6 +370,9 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
                 Drag to reorder, pin, or settle. Changes save when you drop.
               </Text>
               <View
+                ref={() => () => {
+                  if (frame.current !== null) cancelAnimationFrame(frame.current);
+                }}
                 onLayout={(event) => {
                   geometry.current.height = event.nativeEvent.layout.height;
                 }}
@@ -401,6 +387,10 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
                   removeClippedSubviews={false}
                   onScroll={(event) => {
                     geometry.current.offset = event.nativeEvent.contentOffset.y;
+                    // The auto-scroll tick holds the start render's update; this
+                    // handler is the current render's, so it ends a drag whose
+                    // order changed while the list scrolls under a still finger.
+                    if (drag.current) update(drag.current.translation);
                   }}
                   scrollEventThrottle={16}
                   getItemLayout={(_, index) => ({
@@ -496,7 +486,11 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
                               onMove={update}
                               onEnd={(cancelled) => {
                                 const current = drag.current;
-                                if (cancelled || !current?.destination) {
+                                if (
+                                  cancelled ||
+                                  !current?.destination ||
+                                  current.orderVersion !== orderVersion
+                                ) {
                                   stop();
                                   return;
                                 }

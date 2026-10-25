@@ -105,8 +105,7 @@ export function hasCompleteProviderWorkspaceSnapshot(
   return Boolean(snapshot && !snapshot.slashCommandsPending);
 }
 
-// Compat shim: still exported for mobile use-composer-command-menu until the mobile-threads layer.
-export function hasCurrentProviderWorkspaceSnapshot(
+function hasCurrentProviderWorkspaceSnapshot(
   provider: ServerProvider | null | undefined,
   cwd: string | null | undefined,
   nowMs: number,

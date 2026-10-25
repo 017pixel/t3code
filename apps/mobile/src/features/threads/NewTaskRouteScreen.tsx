@@ -3,12 +3,7 @@ import * as Dialog from "../../components/ui/Dialog";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { NavigationRow } from "../../components/ui/NavigationRow";
 import { AppBar } from "../../components/ui/AppBar";
-import {
-  StackActions,
-  useIsFocused,
-  useNavigation,
-  type StaticScreenProps,
-} from "@react-navigation/native";
+import { StackActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { availableScratchWorkspaceRoot } from "@t3tools/client-runtime/operations/projects";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
@@ -17,7 +12,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Platform, Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { cn } from "../../lib/cn";
@@ -33,7 +28,6 @@ import { useRemoteConnectionStatus } from "../../state/use-remote-environment-re
 import type { WorkspaceState } from "../../state/workspaceModel";
 import { useWorkspaceState } from "../../state/workspace";
 
-import { usePromptLinkResolver } from "../prompt-links/usePromptLinkResolver";
 import { useIncomingShare } from "../sharing/IncomingShareProvider";
 import { useNewTaskFlow } from "./new-task-flow-provider";
 import { filterProjectScopes, getProjectScopeSelectionTarget } from "./new-task-project-selection";
@@ -156,10 +150,8 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
   const { state: catalogState } = useWorkspaceState();
   const navigation = useNavigation();
   const selectDetail = useSelectWorkspaceDetail();
-  const isFocused = useIsFocused();
   const insets = useSafeAreaInsets();
   const { getShare, releaseShareReservation } = useIncomingShare();
-  usePromptLinkResolver(route.params);
   const routeShareId = Array.isArray(route.params?.incomingShareId)
     ? route.params.incomingShareId[0]
     : route.params?.incomingShareId;
@@ -181,7 +173,6 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
       ),
   );
   const visibleScopes = filterProjectScopes(listScopes, searchText);
-  const resumedDestinationKeyRef = useRef<string | null>(null);
   const reservedDestinationProject = incomingShare?.destination
     ? (projects.find(
         (project) =>
@@ -207,9 +198,19 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
     scratchEnvironments[0] ??
     null;
   const canStartScratch = scratchEnvironment !== null && reservedDestinationProject === null;
+  const isLockedToOtherProject = (scope: (typeof visibleScopes)[number]) =>
+    reservedDestinationProject !== null &&
+    !scope.projects.some(
+      (project) =>
+        project.environmentId === reservedDestinationProject.environmentId &&
+        project.id === reservedDestinationProject.id,
+    );
   const scratchStartInFlightRef = useRef(false);
 
-  async function selectProject(project: EnvironmentProject): Promise<void> {
+  async function selectProject(selected: EnvironmentProject): Promise<void> {
+    // A reserved share resumes in its project: an interrupted transfer must
+    // not copy into a second project's draft.
+    const project = reservedDestinationProject ?? selected;
     if (incomingShare?.destination && !reservedDestinationProject) {
       try {
         await releaseShareReservation(incomingShare.id, incomingShare.destination);
@@ -267,38 +268,6 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
     await selectProject(result.value);
     scratchStartInFlightRef.current = false;
   }
-
-  useEffect(() => {
-    const destination = incomingShare?.destination;
-    if (!destination) {
-      resumedDestinationKeyRef.current = null;
-      return;
-    }
-    if (!isFocused) {
-      // Reset on return so reserved-draft resume can retry without leaving project rows disabled.
-      resumedDestinationKeyRef.current = null;
-      return;
-    }
-    const destinationKey = `${incomingShare.id}:${destination.environmentId}:${destination.projectId}`;
-    if (resumedDestinationKeyRef.current === destinationKey) {
-      return;
-    }
-    if (!reservedDestinationProject) {
-      return;
-    }
-    resumedDestinationKeyRef.current = destinationKey;
-    selectDetail({
-      name: "Thread",
-      params: {
-        draft: {
-          environmentId: reservedDestinationProject.environmentId,
-          projectId: reservedDestinationProject.id,
-          title: reservedDestinationProject.title,
-          incomingShareId: incomingShare.id,
-        },
-      },
-    });
-  }, [incomingShare, isFocused, reservedDestinationProject, selectDetail]);
 
   return (
     <View collapsable={false} className="flex-1 bg-sheet">
@@ -477,7 +446,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                       }
                       subtitleNumberOfLines={1}
                       subtitleEllipsizeMode="middle"
-                      disabled={reservedDestinationProject !== null}
+                      disabled={isLockedToOtherProject(scope)}
                       onPress={() => void selectProject(selectionTarget)}
                       leading={
                         <ProjectFavicon
@@ -500,7 +469,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                     <Pressable
                       accessibilityRole="button"
                       accessibilityLabel={scope.title}
-                      disabled={reservedDestinationProject !== null}
+                      disabled={isLockedToOtherProject(scope)}
                       onPress={() => void selectProject(selectionTarget)}
                       className="flex-row items-center gap-3 bg-grouped-card px-4 py-3.5"
                     >

@@ -2,12 +2,7 @@ import { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import type { HomeProjectScope } from "../home/homeThreadList";
-import {
-  newTaskDestination,
-  resolveDraftProjectSelection,
-  resolveEnvironmentProjectMatch,
-} from "./new-task-project-selection";
+import { newTaskDestination, resolveEnvironmentProjectMatch } from "./new-task-project-selection";
 
 function makeProject(
   id: string,
@@ -37,19 +32,6 @@ function makeProject(
     scripts: [],
     createdAt: "2026-07-01T00:00:00.000Z",
     updatedAt: "2026-07-01T00:00:00.000Z",
-  };
-}
-
-function makeScope(projects: ReadonlyArray<EnvironmentProject>): HomeProjectScope {
-  return {
-    key: "github.com/t3tools/t3code",
-    title: "T3 Code",
-    representative: projects[0]!,
-    projects,
-    projectRefs: projects.map((project) => ({
-      environmentId: project.environmentId,
-      projectId: project.id,
-    })),
   };
 }
 
@@ -91,26 +73,6 @@ describe("resolveEnvironmentProjectMatch", () => {
     const unindexed = makeProject("unindexed", "server", { workspaceRoot: "/srv/t3code" });
     expect(resolveEnvironmentProjectMatch([fork, unindexed], selected)).toBe(unindexed);
     expect(resolveEnvironmentProjectMatch([fork], selected)).toBe(fork);
-  });
-});
-
-describe("resolveDraftProjectSelection", () => {
-  it("selects one logical project even when it has multiple physical workspaces", () => {
-    const projects = [makeProject("t3code"), makeProject("t3code-2"), makeProject("t3code-3")];
-    expect(resolveDraftProjectSelection(null, projects, [makeScope(projects)])).toEqual({
-      kind: "select",
-      project: projects[0],
-    });
-  });
-
-  it("does not preserve a project key that is missing from the catalog", () => {
-    const project = makeProject("t3code");
-    expect(
-      resolveDraftProjectSelection("environment:removed", [project], [makeScope([project])]),
-    ).toEqual({
-      kind: "select",
-      project,
-    });
   });
 });
 

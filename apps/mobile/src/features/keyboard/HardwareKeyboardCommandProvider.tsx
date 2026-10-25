@@ -5,7 +5,6 @@ import {
   createContext,
   use,
   useCallback,
-  useEffect,
   useMemo,
   useRef,
   useState,
@@ -23,6 +22,7 @@ import { T3KeyboardCommands } from "../../native/T3KeyboardCommands";
 import { useThreadShell } from "../../state/entities";
 import type { GitActionProgress } from "../../state/use-vcs-action-state";
 import { GitActionProgressOverlay } from "../threads/GitActionProgressOverlay";
+import { withOpenedNewTaskDraft } from "../threads/open-new-task-draft";
 import { CommandPalette } from "./CommandPalette";
 import {
   dispatchHardwareKeyboardCommand,
@@ -89,14 +89,6 @@ export function HardwareKeyboardCommandProvider({
       setCopyFeedback(EMPTY_COPY_FEEDBACK);
     }, COPY_FEEDBACK_DISMISS_MS);
   }, []);
-  useEffect(
-    () => () => {
-      if (copyFeedbackTimerRef.current !== null) {
-        clearTimeout(copyFeedbackTimerRef.current);
-      }
-    },
-    [],
-  );
   const registrationVersion = useSyncExternalStore(
     subscribeToHardwareKeyboardCommandRegistrations,
     getHardwareKeyboardCommandRegistrationVersion,
@@ -154,7 +146,9 @@ export function HardwareKeyboardCommandProvider({
       }
 
       if (command === "newTask") {
-        navigation.dispatch(selectWorkspaceDetail({ name: "Thread", params: { draft: {} } }));
+        navigation.dispatch(
+          selectWorkspaceDetail({ name: "Thread", params: withOpenedNewTaskDraft({ draft: {} }) }),
+        );
         return;
       }
       if (command === "back") {

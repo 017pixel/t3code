@@ -1,7 +1,7 @@
 import type { SubagentPillSegment } from "@t3tools/client-runtime/state/thread-subagents";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { GlassContainer, GlassView } from "expo-glass-effect";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 import {
   type LayoutChangeEvent,
   Pressable,
@@ -16,6 +16,7 @@ import Animated, {
   ReduceMotion,
   type SharedValue,
   useAnimatedStyle,
+  useDerivedValue,
   useSharedValue,
   withTiming,
 } from "react-native-reanimated";
@@ -102,11 +103,10 @@ export function FloatingWorkingControl(props: {
       (hasAgents ? agentsWidth : 0) -
       (hasPreview ? previewWidth : 0),
   );
-  const separationProgress = useSharedValue(props.showScrollToEnd ? 1 : 0);
-
-  useEffect(() => {
-    separationProgress.value = withTiming(props.showScrollToEnd ? 1 : 0, CONTROL_TIMING);
-  }, [props.showScrollToEnd, separationProgress]);
+  const showScrollToEnd = props.showScrollToEnd;
+  const separationProgress = useDerivedValue(() =>
+    withTiming(showScrollToEnd ? 1 : 0, CONTROL_TIMING),
+  );
 
   const lift = props.lift;
   const liftStyle = useAnimatedStyle(() => ({
@@ -133,12 +133,12 @@ export function FloatingWorkingControl(props: {
   };
   const hasStatus = props.status !== null;
   const hasCapsule = hasStatus || hasQueue || hasAgents || hasPreview;
-  useEffect(() => {
-    if (!hasStatus) {
-      measuredWidthRef.current = null;
-      capsuleWidth.value = null;
-    }
-  }, [capsuleWidth, hasStatus]);
+  // The measuring host unmounts with the status, so the next status starts
+  // from its own width instead of animating from the last one.
+  const statusHostRef = () => () => {
+    measuredWidthRef.current = null;
+    capsuleWidth.value = null;
+  };
   const capsuleStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: CONTROL_SEPARATION * (1 - separationProgress.value) }],
   }));
@@ -164,6 +164,7 @@ export function FloatingWorkingControl(props: {
   const statusContent =
     props.status !== null ? (
       <View
+        ref={statusHostRef}
         pointerEvents={statusInteractive ? "box-none" : "none"}
         className="h-11 items-center justify-center"
       >

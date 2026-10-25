@@ -1,5 +1,8 @@
 import type { EnvironmentId } from "@t3tools/contracts";
+import type { NavigationState, PartialState } from "@react-navigation/native";
 import { Atom } from "effect/reactivity";
+
+import { findLinkedRoute } from "../../lib/appLinking";
 
 import { appAtomRegistry } from "../../state/atom-registry";
 import type { ScheduledTaskDraft } from "./scheduledTaskDraft";
@@ -52,4 +55,18 @@ export function readScheduledTaskEditor(
   const session = appAtomRegistry.get(scheduledTaskEditorSessionAtom);
   if (`scheduled-task:${session?.id ?? 0}` !== voiceOwnerKey) return null;
   return session ? session.current : defaultEditor;
+}
+
+/**
+ * A link to the new-task screen starts a fresh editor, like the in-app "New
+ * task" action. Without this a warm app would reopen the last edited task's
+ * draft under the "New" title and save over that task.
+ */
+export function takeScheduledTaskNewLink(
+  state: PartialState<NavigationState> | undefined,
+): PartialState<NavigationState> | undefined {
+  if (findLinkedRoute(state, ["SettingsScheduledTaskNew"])) {
+    appAtomRegistry.set(scheduledTaskEditorSessionAtom, null);
+  }
+  return state;
 }

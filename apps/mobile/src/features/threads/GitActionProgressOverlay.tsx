@@ -1,7 +1,5 @@
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
-import * as Haptics from "expo-haptics";
-import { useEffect, useRef } from "react";
 import Animated, { FadeIn, FadeOut, ReduceMotion } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Toast } from "../../components/ui/Toast";
@@ -17,18 +15,6 @@ export function GitActionProgressOverlay(props: {
   const { progress, onDismiss } = props;
   const openPullRequest = props.onOpenPullRequest;
   const insets = useSafeAreaInsets();
-  const prevPhaseRef = useRef(progress.phase);
-
-  useEffect(() => {
-    const prev = prevPhaseRef.current;
-    prevPhaseRef.current = progress.phase;
-
-    if (prev === "running" && progress.phase === "success") {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } else if (prev === "running" && progress.phase === "error") {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-    }
-  }, [progress.phase]);
 
   const handlePress = () => {
     if (progress.prUrl) {

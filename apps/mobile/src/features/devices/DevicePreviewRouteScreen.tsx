@@ -12,13 +12,14 @@ import * as Cause from "effect/Cause";
 import { useEffect, useRef, useState, type RefObject } from "react";
 import * as Haptics from "expo-haptics";
 import { Accelerometer } from "expo-sensors";
-import { AppState, BackHandler, Pressable, StatusBar, View } from "react-native";
+import { Pressable, StatusBar, View } from "react-native";
 import Animated, { FadeIn, FadeOut, ReduceMotion } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { AppText } from "../../components/ui/AppText";
+import { EmptyState } from "../../components/ui/EmptyState";
 import { ControlPill } from "../../components/ui/ControlPill";
 import { Menu } from "../../components/ui/Menu";
 import { GlassSurface } from "../../components/ui/GlassSurface";
@@ -27,9 +28,12 @@ import {
   findHeaderMenuAction,
 } from "../../components/ui/headerMenu.android";
 import type { AppBarMenuItem } from "../../components/ui/AppBar.types";
+import { useAppForeground } from "../../lib/appState";
+import { backHandlerRef } from "../../lib/backHandler";
 import { deriveBottomControlInsets } from "../../lib/reserved-regions";
 import { useNativeColumnLayoutMetrics } from "../../native/native-layout-metrics";
-import { deviceEnvironment, refreshDeviceHubAccess, useDeviceHubAccess } from "../../state/device";
+import { uuidv4 } from "../../lib/uuid";
+import { deviceEnvironment, useDeviceHubAccess } from "../../state/device";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
@@ -54,10 +58,21 @@ export function DevicePreviewRouteScreen({ route }: DevicePreviewRouteScreenProp
   const onClose = () => navigation.goBack();
   const { environmentId, threadId } = route.params;
   const isBlankLink = environmentId.trim().length === 0 || threadId.trim().length === 0;
-  useEffect(() => {
-    if (isBlankLink) onClose();
-  }, [isBlankLink, onClose]);
-  if (isBlankLink) return null;
+  // A malformed deep link has nothing to show. Navigating away from render is
+  // not allowed, so offer the way out instead.
+  if (isBlankLink) {
+    return (
+      <View className="flex-1 justify-center bg-sheet">
+        <EmptyState
+          variant="plain"
+          title="Thread unavailable"
+          detail="This link doesn't point to a thread."
+          actionLabel="Close"
+          onAction={onClose}
+        />
+      </View>
+    );
+  }
   return (
     <DevicePreviewScreen
       environmentId={EnvironmentId.make(environmentId)}
@@ -81,7 +96,7 @@ function DevicePreviewScreen({
   const handleBounds = deriveBottomControlInsets(useNativeColumnLayoutMetrics());
   const { themeVariables } = useAppearancePreferences();
   const focused = useIsFocused();
-  const [foreground, setForeground] = useState(AppState.currentState !== "background");
+  const foreground = useAppForeground();
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [inputConnected, setInputConnected] = useState(false);
   const [streamAttempt, setStreamAttempt] = useState(0);
@@ -98,12 +113,6 @@ function DevicePreviewScreen({
     if (connected) setControlsVisible(false);
   };
   useEffect(() => {
-    const subscription = AppState.addEventListener("change", (state) =>
-      setForeground(state !== "background"),
-    );
-    return () => subscription.remove();
-  }, []);
-  useEffect(() => {
     if (focused && state.data !== null && previews.length === 0) onClose();
   }, [focused, state.data, previews.length, onClose]);
   useEffect(() => {
@@ -117,14 +126,6 @@ function DevicePreviewScreen({
     });
     return () => subscription.remove();
   }, [focused, foreground]);
-  useEffect(() => {
-    if (controlsVisible) return;
-    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
-      setControlsVisible(true);
-      return true;
-    });
-    return () => subscription.remove();
-  }, [controlsVisible]);
 
   const shutDownDevice = async () => {
     if (!preview || shuttingDown) return;
@@ -317,6 +318,10 @@ function DevicePreviewScreen({
         </Animated.View>
       ) : (
         <Pressable
+          ref={backHandlerRef(() => {
+            setControlsVisible(true);
+            return true;
+          })}
           accessibilityRole="button"
           accessibilityLabel="Show device controls"
           accessibilityHint="Shaking the phone also shows them"
@@ -370,12 +375,9 @@ function OpenDevicePreview({
 }) {
   const { session } = preview;
   const { themeVariables } = useAppearancePreferences();
-  const { access, error, refresh } = useDeviceHubAccess(environmentId, session.hostId);
-  const onUnauthorized = async () => refreshDeviceHubAccess(environmentId);
-  useEffect(() => {
-    refreshDeviceHubAccess(environmentId);
-    return () => void onInputConnected(false);
-  }, [environmentId, onInputConnected]);
+  const [viewer] = useState(uuidv4);
+  const { access, error, refresh } = useDeviceHubAccess(environmentId, session.hostId, viewer);
+  const onUnauthorized = async () => refresh();
   return access ? (
     <DeviceStreamWebView
       ref={streamRef}

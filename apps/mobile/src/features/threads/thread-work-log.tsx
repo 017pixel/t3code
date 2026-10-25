@@ -26,16 +26,13 @@ import {
   useEffect,
   useEffectEvent,
   useId,
-  useLayoutEffect,
   useRef,
   useState,
   type ComponentProps,
   type ReactNode,
 } from "react";
 import {
-  AccessibilityInfo,
   Animated as NativeAnimated,
-  AppState,
   type ColorValue,
   Easing,
   Pressable,
@@ -63,6 +60,7 @@ import { useMarkdownCodeHighlight } from "./markdownCodeHighlightState";
 import { AppText as Text } from "../../components/ui/AppText";
 import { T3Wordmark } from "../../components/T3Wordmark";
 import { BrowserAppIcon } from "./BrowserAppIcon";
+import { useAppActive, useReduceMotionEnabled } from "../../lib/appState";
 import { cn } from "../../lib/cn";
 import { THREAD_WORK_ROW_MIN_HEIGHT, type deriveThreadWorkLogSizing } from "../../lib/layout";
 import {
@@ -100,6 +98,7 @@ import Animated, {
   LinearTransition,
   ReduceMotion,
   useAnimatedStyle,
+  useDerivedValue,
   useSharedValue,
   withTiming,
 } from "react-native-reanimated";
@@ -168,14 +167,13 @@ export function ThreadDisclosureChevron(props: {
   readonly tintColor: ColorValue;
 }) {
   const expandedAngle = props.collapsedDirection === "right" ? 90 : 180;
-  const rotation = useSharedValue(props.expanded ? expandedAngle : 0);
-
-  useLayoutEffect(() => {
-    rotation.value = withTiming(props.expanded ? expandedAngle : 0, {
+  const targetAngle = props.expanded ? expandedAngle : 0;
+  const rotation = useDerivedValue(() =>
+    withTiming(targetAngle, {
       duration: THREAD_DISCLOSURE_TRANSITION_MS,
       reduceMotion: ReduceMotion.System,
-    });
-  }, [expandedAngle, props.expanded, rotation]);
+    }),
+  );
 
   const rotationStyle = useAnimatedStyle(() => ({
     transform: [{ rotate: `${rotation.value}deg` }],
@@ -263,8 +261,8 @@ export function ShimmeringWorkContent(props: {
 }) {
   const [availableWidth, setAvailableWidth] = useState(0);
   const [textWidth, setTextWidth] = useState(0);
-  const [appIsActive, setAppIsActive] = useState(AppState.currentState === "active");
-  const [reducedMotion, setReducedMotion] = useState(true);
+  const appIsActive = useAppActive();
+  const reducedMotion = useReduceMotionEnabled();
   const screenIsFocused = useIsFocused();
   const progress = useAnimatedValue(0);
   const gradientId = `work-shimmer-${useId().replaceAll(":", "")}`;
@@ -272,22 +270,6 @@ export function ShimmeringWorkContent(props: {
     availableWidth,
     (props.showIcon ? SHIMMER_ICON_AND_GAP_WIDTH : 0) + Math.ceil(textWidth),
   );
-
-  useEffect(() => {
-    const subscription = AppState.addEventListener("change", (state) => {
-      setAppIsActive(state === "active");
-    });
-    return () => subscription.remove();
-  }, []);
-
-  useEffect(() => {
-    void AccessibilityInfo.isReduceMotionEnabled().then(setReducedMotion);
-    const subscription = AccessibilityInfo.addEventListener(
-      "reduceMotionChanged",
-      setReducedMotion,
-    );
-    return () => subscription.remove();
-  }, []);
 
   // Runs on React Native's native driver instead of Reanimated, whose
   // per-frame commits starve React's while commit pausing is disabled
@@ -591,6 +573,7 @@ function ThreadWorkGroupList(props: {
   );
   const [restoringPosition, setRestoringPosition] = useState(initialScrollIndex !== undefined);
   const listRef = useRef<LegendListRef>(null);
+  const detachTotalSizeRef = useRef<(() => void) | null>(null);
   const loadedRef = useRef(false);
   const userScrollingRef = useRef(false);
   const pendingAppendHeightRef = useRef<number | null>(null);
@@ -682,17 +665,20 @@ function ThreadWorkGroupList(props: {
     finishPendingAppend();
     rememberPosition();
   });
-  // Native ScrollView reports size after LegendList lays out rows. Use LegendList's JS size
-  // so group height and row measurements settle in the same commit.
-  useLayoutEffect(() => {
-    const list = listRef.current;
+  // LegendList's JS size settles group height and row measurements in one commit.
+  // AnimatedLegendList's combined ref drops React 19 ref cleanups, so the listener
+  // is released on the null call. The callback keeps one identity so the list is
+  // not reattached every commit.
+  const [attachList] = useState(() => (list: LegendListRef | null) => {
+    listRef.current = list;
+    detachTotalSizeRef.current?.();
+    detachTotalSizeRef.current = null;
     if (!list) return;
-    const unsubscribe = list.getState().listen("totalSize", () => {
+    detachTotalSizeRef.current = list.getState().listen("totalSize", () => {
       onContentSizeChange(list.getState().contentLength);
     });
     onContentSizeChange(list.getState().contentLength);
-    return unsubscribe;
-  }, []);
+  });
   const getFixedItemSize = (row: ThreadFeedActivity, index: number) =>
     props.expandedRows[row.id] || props.rowSizing.fixedRowHeight === undefined
       ? undefined
@@ -707,7 +693,7 @@ function ThreadWorkGroupList(props: {
     <View style={{ height, overflow: "hidden" }}>
       {/* oxlint-disable-next-line t3code/require-registered-list-scroll -- Nested in a fixed-height card inside the thread feed, which owns the header's scroll view. */}
       <AnimatedLegendList
-        ref={listRef}
+        ref={attachList}
         data={props.activities}
         keyExtractor={workLogRowKey}
         estimatedItemSize={props.rowSizing.estimatedRowHeight + WORK_ROW_GAP}

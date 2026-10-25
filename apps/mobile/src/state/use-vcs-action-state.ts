@@ -1,8 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
 import { type VcsActionState, type VcsActionTarget } from "@t3tools/client-runtime/state/vcs";
 import { Atom } from "effect/reactivity";
-import { useEffect, useState } from "react";
+import * as Haptics from "expo-haptics";
 
+import { useVisibleSecondClock } from "../features/threads/use-visible-second-clock";
 import { appAtomRegistry } from "./atom-registry";
 import { vcsActionManager } from "./vcs";
 
@@ -32,6 +33,11 @@ function broadcast(result: GitActionResultNotification | null): void {
 export function showGitActionResult(result: GitActionResultNotification): void {
   if (dismissTimer) clearTimeout(dismissTimer);
   broadcast(result);
+  void Haptics.notificationAsync(
+    result.type === "success"
+      ? Haptics.NotificationFeedbackType.Success
+      : Haptics.NotificationFeedbackType.Error,
+  );
   dismissTimer = setTimeout(() => {
     dismissTimer = null;
     broadcast(null);
@@ -78,14 +84,7 @@ export function useGitActionProgress(target: VcsActionTarget): GitActionProgress
   const actionState = useVcsActionState(target);
   const { result } = useGitActionResultNotification();
 
-  // Keep clock state; the compiler caches render-time Date.now() and would freeze the label.
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    if (!actionState.isRunning) return;
-    setNowMs(Date.now());
-    const interval = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(interval);
-  }, [actionState.isRunning]);
+  const nowMs = useVisibleSecondClock(actionState.isRunning);
 
   if (actionState.isRunning) {
     const description =

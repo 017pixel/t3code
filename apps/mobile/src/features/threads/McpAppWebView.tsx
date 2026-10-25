@@ -21,6 +21,7 @@ import {
   type McpAppReference,
 } from "@t3tools/shared/mcpApp";
 import * as Predicate from "effect/Predicate";
+import { AsyncResult } from "effect/reactivity";
 import Constants from "expo-constants";
 import { useNavigation } from "@react-navigation/native";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -34,6 +35,7 @@ import { mobileHtmlRenderTheme } from "../../lib/htmlRenderTheme";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { uuidv4 } from "../../lib/uuid";
 import { useAssetUrlState } from "../../state/assets";
+import { appAtomRegistry } from "../../state/atom-registry";
 import { useThreadShell } from "../../state/entities";
 import { mcpAppEnvironment } from "../../state/mcpApps";
 import { orchestrationEnvironment } from "../../state/orchestration";
@@ -87,6 +89,18 @@ const confirm = (title: string, message: string, action: string) =>
   });
 
 const MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024;
+
+// The feed omits tool input and output; the app needs both.
+function storedToolCall(
+  item: { readonly type: string; readonly input?: unknown; readonly output?: unknown } | null,
+) {
+  if (item?.type !== "dynamic_tool") return undefined;
+  const output = item.output as { readonly result?: unknown } | undefined;
+  return {
+    arguments: item.input,
+    result: output?.result as McpAppCallToolResult | undefined,
+  };
+}
 
 /** WebViews reload when moved; tear down inline before opening fullscreen and recreate it on return. */
 export function ThreadMcpApp(props: {
@@ -166,42 +180,25 @@ export function ThreadMcpApp(props: {
     if (asset._tag === "Success") setUri(asset.url);
     setDocumentKeyState(next);
   };
-  const openNewDocument = useRef(setDocumentKey);
-  useEffect(() => {
-    openNewDocument.current = setDocumentKey;
-  });
-  useEffect(() => {
-    if (!presentedFullscreen) return;
-    return navigation.addListener("focus", () => {
-      openNewDocument.current((value) => value + 1);
-      setPresentedFullscreen(false);
-    });
-  }, [navigation, presentedFullscreen]);
 
-  // The feed omits tool input and output; the app needs both.
-  const detail = useEnvironmentQuery(
-    orchestrationEnvironment.turnItem({
+  const detailAtom = orchestrationEnvironment.turnItem({
+    environmentId: props.environmentId,
+    input: { threadId: props.threadId, itemId: props.itemId, revision: props.revision },
+  });
+  const toolInfo = useEnvironmentQuery(
+    mcpAppEnvironment.toolInfoQuery({
       environmentId: props.environmentId,
-      input: { threadId: props.threadId, itemId: props.itemId, revision: props.revision },
+      input: { threadId: props.threadId, itemId: props.itemId, name: app.tool },
     }),
   );
-  const storedItem = detail.data?.item;
-  const toolCall = useMemo(() => {
-    if (storedItem?.type !== "dynamic_tool") return undefined;
-    const output = storedItem.output as { readonly result?: unknown } | undefined;
-    return {
-      arguments: storedItem.input,
-      result: output?.result as McpAppCallToolResult | undefined,
-    };
-  }, [storedItem]);
+  const toolDefinition = toolInfo.data?.tool;
 
   const callTool = useAtomCommand(mcpAppEnvironment.callTool, { reportFailure: false });
-  const toolInfo = useAtomCommand(mcpAppEnvironment.toolInfo, { reportFailure: false });
+  const toolInfoCommand = useAtomCommand(mcpAppEnvironment.toolInfo, { reportFailure: false });
   const readResource = useAtomCommand(mcpAppEnvironment.readResource, { reportFailure: false });
   const updateModelContext = useAtomCommand(mcpAppEnvironment.updateModelContext, {
     reportFailure: false,
   });
-  const [toolDefinition, setToolDefinition] = useState<unknown>(undefined);
   // Read current context per message without rebuilding the host and losing its session.
   const conversation = useThreadShell(
     scopeThreadRef(props.environmentId, props.conversationThreadId),
@@ -212,8 +209,10 @@ export function ThreadMcpApp(props: {
     awaitingUser,
     theme,
     props,
+    asset,
+    detailAtom,
     callTool,
-    toolInfo,
+    toolInfo: toolInfoCommand,
     readResource,
     updateModelContext,
     insets,
@@ -221,31 +220,26 @@ export function ThreadMcpApp(props: {
     navigation,
   };
   const latest = useRef(live);
+  const hostRef = useRef<McpAppHost | null>(null);
+  // The host diffs the context it last sent, so this resends only what changed.
   useEffect(() => {
     latest.current = live;
+    hostRef.current?.updateHostContext();
   });
-  useEffect(() => {
-    let cancelled = false;
-    void latest.current
-      .toolInfo({
-        environmentId: props.environmentId,
-        input: { threadId: props.threadId, itemId: props.itemId, name: app.tool },
-      })
-      .then((info) => {
-        if (!cancelled && info._tag === "Success" && info.value.tool !== undefined) {
-          setToolDefinition(info.value.tool);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [props.environmentId, props.threadId, props.itemId, app.tool]);
-  const webView = useRef<WebView<object>>(null);
-  const hostRef = useRef<McpAppHost | null>(null);
   const userActive = useRef(false);
 
-  useEffect(() => {
-    if (uri === null) return;
+  // Each WebView document gets its own host: the view is keyed by document,
+  // restart generation and URL, and a changed app re-attaches this callback.
+  const attachWebView = (view: WebView<object> | null) => {
+    if (view === null) return;
+    const reopenDocument = () => {
+      setLoaded(false);
+      setHeight(MCP_APP_INLINE_MAX_HEIGHT);
+      setNavigatedAway(false);
+      const current = latest.current.asset;
+      if (current._tag === "Success") setUri(current.url);
+      setDocumentKeyState((value) => value + 1);
+    };
     const scope = () => {
       const { environmentId, threadId, itemId } = latest.current.props;
       return { environmentId, input: { threadId, itemId } };
@@ -277,11 +271,11 @@ export function ThreadMcpApp(props: {
           : { toolInfo: { tool: current.toolDefinition } }),
       };
     };
-    const next = makeMcpAppHost({
+    const host: McpAppHost = makeMcpAppHost({
       app,
       hostVersion: Constants.expoConfig?.version ?? "0.0.0",
       post: (message) =>
-        webView.current?.injectJavaScript(
+        view.injectJavaScript(
           `window.__t3McpAppReceive&&window.__t3McpAppReceive(${JSON.stringify(message)});true;`,
         ),
       hostContext,
@@ -364,14 +358,21 @@ export function ThreadMcpApp(props: {
           return current.displayMode ?? "inline";
         }
         if (mode === "fullscreen" && current.displayMode !== "fullscreen") {
-          await hostRef.current?.teardown();
+          await host.teardown();
           // Approval arrival or navigation during the wait requires reloading inline.
-          if (latest.current.awaitingUser || !latest.current.navigation.isFocused()) {
-            openNewDocument.current((value) => value + 1);
+          const navigation = latest.current.navigation;
+          if (latest.current.awaitingUser || !navigation.isFocused()) {
+            reopenDocument();
             return "inline";
           }
+          // Coming back from full screen reloads the inline view.
+          const unsubscribe = navigation.addListener("focus", () => {
+            unsubscribe();
+            reopenDocument();
+            setPresentedFullscreen(false);
+          });
           setPresentedFullscreen(true);
-          latest.current.navigation.navigate("ThreadMcpApp", {
+          navigation.navigate("ThreadMcpApp", {
             environmentId: String(current.environmentId),
             threadId: String(current.threadId),
             conversationThreadId: String(current.conversationThreadId),
@@ -381,7 +382,7 @@ export function ThreadMcpApp(props: {
           return "fullscreen";
         }
         if (mode === "inline" && current.displayMode === "fullscreen") {
-          await hostRef.current?.teardown();
+          await host.teardown();
           current.onExitFullscreen?.();
           return "inline";
         }
@@ -424,9 +425,9 @@ export function ThreadMcpApp(props: {
       onRequestTeardown: () => {
         const current = latest.current.props;
         if (current.displayMode === "fullscreen") {
-          void hostRef.current?.teardown().then(() => current.onExitFullscreen?.());
+          void host.teardown().then(() => current.onExitFullscreen?.());
         } else {
-          void hostRef.current?.teardown().then(() => setClosed(true));
+          void host.teardown().then(() => setClosed(true));
         }
       },
       onSizeChanged: (size) => {
@@ -435,23 +436,24 @@ export function ThreadMcpApp(props: {
         if (nextHeight !== undefined) setHeight(nextHeight);
       },
     });
-    hostRef.current = next;
+    hostRef.current = host;
+    // The host keeps the first call it is given, and sends it once the app
+    // initializes, so a stored item that lands late still reaches it.
+    const unsubscribeToolCall = appAtomRegistry.subscribe(
+      latest.current.detailAtom,
+      (result) => {
+        const call = AsyncResult.isSuccess(result) ? storedToolCall(result.value.item) : undefined;
+        if (call !== undefined) host.setToolCall(call);
+      },
+      { immediate: true },
+    );
     return () => {
+      unsubscribeToolCall();
       // An unmount cannot wait: the request goes out before the view does.
-      void next.teardown();
-      hostRef.current = null;
+      void host.teardown();
+      if (hostRef.current === host) hostRef.current = null;
     };
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A restarted view needs a new host.
-  }, [uri, app, generation, documentKey]);
-
-  useEffect(() => {
-    hostRef.current?.updateHostContext();
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Context changes trigger a resend.
-  }, [theme, props.width, props.height, insets, toolDefinition]);
-  useEffect(() => {
-    if (toolCall !== undefined) hostRef.current?.setToolCall(toolCall);
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Each new document needs the call.
-  }, [toolCall, uri, generation, documentKey]);
+  };
 
   const source = useMemo(
     () =>
@@ -505,8 +507,8 @@ export function ThreadMcpApp(props: {
         </View>
       ) : uri !== null && !crashed ? (
         <WebView<object>
-          key={`${documentKey}:${generation}`}
-          ref={webView}
+          key={`${documentKey}:${generation}:${uri}`}
+          ref={attachWebView}
           onContentProcessDidTerminate={restart}
           onRenderProcessGone={restart}
           source={source!}

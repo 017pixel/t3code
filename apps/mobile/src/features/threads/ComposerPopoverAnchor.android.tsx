@@ -14,6 +14,8 @@ export function ComposerPopoverAnchor(props: { readonly children: ReactNode }) {
   const anchorRef = useRef<ViewInstance>(null);
   const [frame, setFrame] = useState<Frame | null>(null);
   const popoverHeight = host?.popoverHeight;
+  // The host value changes on every host layout; the cleanup must only depend on stable parts.
+  const setHostContent = host?.setContent;
 
   const measure = () => {
     const hostView = host?.hostRef.current;
@@ -49,22 +51,20 @@ export function ComposerPopoverAnchor(props: { readonly children: ReactNode }) {
     );
   });
 
-  const setHostContent = host?.setContent;
-  useEffect(
-    () => () => {
-      setHostContent?.(null);
-      popoverHeight?.set(0);
-    },
-    [setHostContent, popoverHeight],
-  );
-
   if (host === null) {
     return <View className="absolute inset-x-0 bottom-full z-10 mb-2">{props.children}</View>;
   }
 
   return (
     <View
-      ref={anchorRef}
+      ref={(node) => {
+        anchorRef.current = node;
+        return () => {
+          anchorRef.current = null;
+          setHostContent?.(null);
+          popoverHeight?.set(0);
+        };
+      }}
       collapsable={false}
       pointerEvents="none"
       className="absolute inset-0"

@@ -5,14 +5,22 @@ import type {
   RunId,
   UploadChatAttachment,
 } from "@t3tools/contracts";
-import { Atom } from "effect/reactivity";
 import { useAtomValue } from "@effect/atom-react";
+import {
+  makeQueuedRunEditStore,
+  resolveQueuedEditExit,
+  type QueuedRunsAtom,
+} from "@t3tools/client-runtime/queued-run-edit";
 
 import { uploadedComposerContext } from "../lib/composerContext";
 import { appAtomRegistry } from "./atom-registry";
+import { abortComposerDraftOperations } from "./composerDraftOperations";
 import { queuedEditDraftKey } from "./queued-edit-draft-key";
+import { setThreadComposerError } from "./thread-composer-error";
 import {
   clearComposerDraft,
+  getComposerDraftSnapshot,
+  mergeComposerDraftContent,
   setComposerDraftContext,
   setComposerDraftText,
 } from "./use-composer-drafts";
@@ -25,56 +33,78 @@ export interface QueuedRunEdit {
   readonly context?: OrchestrationMessageContext;
 }
 
-export const queuedRunEditsAtom = Atom.make<Readonly<Record<string, QueuedRunEdit>>>({}).pipe(
-  Atom.keepAlive,
-  Atom.withLabel("mobile-queued-run-edits"),
-);
+const queuedRunEdits = makeQueuedRunEditStore<QueuedRunEdit>({
+  registry: appAtomRegistry,
+  label: "mobile-queued-run-edits",
+});
 
 export { isQueuedEditDraftKey, queuedEditDraftKey } from "./queued-edit-draft-key";
 
-export function getQueuedRunEdit(threadKey: string | null): QueuedRunEdit | null {
-  if (threadKey === null) return null;
-  return appAtomRegistry.get(queuedRunEditsAtom)[threadKey] ?? null;
-}
+export const getQueuedRunEdit = queuedRunEdits.get;
 
 export function useQueuedRunEdit(threadKey: string | null): QueuedRunEdit | null {
-  const edits = useAtomValue(queuedRunEditsAtom);
+  const edits = useAtomValue(queuedRunEdits.atom);
   return threadKey === null ? null : (edits[threadKey] ?? null);
 }
 
-function setQueuedRunEdit(threadKey: string, edit: QueuedRunEdit | null): void {
-  const current = appAtomRegistry.get(queuedRunEditsAtom);
-  if (edit === null) {
-    if (!current[threadKey]) return;
-    const next = { ...current };
-    delete next[threadKey];
-    appAtomRegistry.set(queuedRunEditsAtom, next);
-    return;
+/**
+ * The run started or was cancelled elsewhere. A changed edit goes back into
+ * the thread's composer when that is empty; otherwise it is dropped. Either
+ * way the thread says so, wherever the user is when it happens.
+ */
+function exitQueuedRunEdit(threadKey: string, edit: QueuedRunEdit): void {
+  const editDraftKey = queuedEditDraftKey(threadKey, edit.runId);
+  const editDraft = getComposerDraftSnapshot(editDraftKey);
+  const threadDraft = getComposerDraftSnapshot(threadKey);
+  const recovery = resolveQueuedEditExit({
+    editChanged:
+      (editDraft.text.trim().length > 0 || editDraft.attachments.length > 0) &&
+      (editDraft.text !== edit.originalText || editDraft.attachments.length > 0),
+    threadDraftEmpty: threadDraft.text.trim().length === 0 && threadDraft.attachments.length === 0,
+  });
+  if (recovery === "kept") {
+    void mergeComposerDraftContent(threadKey, {
+      text: editDraft.text,
+      attachments: editDraft.attachments,
+      ...(editDraft.context ? { context: editDraft.context } : {}),
+    });
   }
-  appAtomRegistry.set(queuedRunEditsAtom, { ...current, [threadKey]: edit });
+  clearComposerDraft(editDraftKey, { deferAttachmentCleanup: recovery === "kept" });
+  if (recovery === "clean") return;
+  setThreadComposerError(
+    threadKey,
+    recovery === "kept"
+      ? "That message already started. Your edit is back in the composer."
+      : "That message already started, so the edit was discarded.",
+  );
 }
 
-export function beginQueuedRunEdit(threadKey: string, edit: QueuedRunEdit): void {
+/** `runs` is the thread's runs; the edit ends when its run leaves the queue. */
+export function beginQueuedRunEdit(
+  threadKey: string,
+  edit: QueuedRunEdit,
+  runs: QueuedRunsAtom,
+): void {
   const previous = getQueuedRunEdit(threadKey);
   if (previous !== null && previous.runId !== edit.runId) {
     clearComposerDraft(queuedEditDraftKey(threadKey, previous.runId));
   }
+  // The composer moves off the thread draft, so a paste or pick still running for it is dropped.
+  abortComposerDraftOperations(threadKey);
   const draftKey = queuedEditDraftKey(threadKey, edit.runId);
   clearComposerDraft(draftKey);
   setComposerDraftText(draftKey, edit.originalText);
   setComposerDraftContext(draftKey, edit.context);
-  setQueuedRunEdit(threadKey, edit);
+  queuedRunEdits.begin(threadKey, edit, { runs, onRunLeftQueue: exitQueuedRunEdit });
 }
 
 export function removeQueuedRunEditAttachment(threadKey: string, attachmentId: string): void {
-  const edit = getQueuedRunEdit(threadKey);
-  if (edit === null) return;
-  setQueuedRunEdit(threadKey, {
+  queuedRunEdits.update(threadKey, (edit) => ({
     ...edit,
     existingAttachments: edit.existingAttachments.filter(
       (attachment) => attachment.id !== attachmentId,
     ),
-  });
+  }));
 }
 
 export function endQueuedRunEdit(
@@ -84,8 +114,12 @@ export function endQueuedRunEdit(
   const edit = getQueuedRunEdit(threadKey);
   if (edit === null) return;
   clearComposerDraft(queuedEditDraftKey(threadKey, edit.runId), options);
-  setQueuedRunEdit(threadKey, null);
+  queuedRunEdits.end(threadKey);
 }
+
+/** While a save is in flight, its result decides the edit's fate. */
+export const suspendQueuedRunEditExit = queuedRunEdits.suspendExitWatch;
+export const resumeQueuedRunEditExit = queuedRunEdits.resumeExitWatch;
 
 /** Attachments replace wholesale; resend kept server attachments with uploads in composer order. */
 export function resolveQueuedEditPayload(input: {

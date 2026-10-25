@@ -36,6 +36,7 @@ import {
   updateComposerDraftSettings,
   waitForComposerDraftsLoaded,
 } from "../../state/use-composer-drafts";
+import { refreshNewTaskDraftBranches } from "../threads/new-task-project-branches";
 import { usePullRequestConnected } from "./usePullRequestConnected";
 import { pullRequestTarget, type PullRequestParams } from "./usePullRequestDiff";
 import {
@@ -160,7 +161,10 @@ export function usePullRequestThreads(
       );
       previousPrompts.current.set(draftKey, pullRequestAgentPrompt(task, terminology));
       if (thread) openThread(thread);
-      else openThreadRoute({ draft: { draftId: draftKey, title: `Ask about #${pr.number}` } });
+      else {
+        refreshNewTaskDraftBranches(draftKey);
+        openThreadRoute({ draft: { draftId: draftKey, title: `Ask about #${pr.number}` } });
+      }
     });
     pending.current = false;
     setBusy(false);

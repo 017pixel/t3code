@@ -28,7 +28,9 @@ import * as Cause from "effect/Cause";
 import { turnItemDetailRevision } from "@t3tools/client-runtime/work-log/item-detail";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { useEffect, useState } from "react";
+import { useState } from "react";
+
+import { useDeadlinePassed } from "../lib/clock";
 
 import { appAtomRegistry } from "./atom-registry";
 import { orchestrationEnvironment } from "./orchestration";
@@ -70,18 +72,15 @@ export interface ComposerPathSearchTarget {
 }
 
 export function useDebouncedValue<A>(value: A, delayMs: number): A {
-  const [debounced, setDebounced] = useState(value);
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebounced(value);
-    }, delayMs);
-    return () => {
-      clearTimeout(timer);
-    };
-  }, [delayMs, value]);
-
-  return debounced;
+  const [latest, setLatest] = useState<{
+    readonly value: A;
+    readonly settled: A;
+    readonly changedAt: number | null;
+  }>({ value, settled: value, changedAt: null });
+  const passed = useDeadlinePassed(latest.changedAt === null ? null : latest.changedAt + delayMs);
+  const settled = passed ? latest.value : latest.settled;
+  if (!Object.is(value, latest.value)) setLatest({ value, settled, changedAt: Date.now() });
+  return settled;
 }
 
 export function useComposerPullRequestSearch(input: {
@@ -221,6 +220,19 @@ export function useBranches(input: {
           },
         })
       : null,
+  );
+}
+
+/** Re-reads the first unfiltered page `usePaginatedBranches` renders for this checkout. */
+export function refreshBranchList(target: {
+  readonly environmentId: EnvironmentId;
+  readonly cwd: string;
+}): void {
+  appAtomRegistry.refresh(
+    vcsEnvironment.listRefs({
+      environmentId: target.environmentId,
+      input: { cwd: target.cwd, limit: VCS_REF_LIST_LIMIT },
+    }),
   );
 }
 

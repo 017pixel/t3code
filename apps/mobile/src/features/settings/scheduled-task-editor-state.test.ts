@@ -7,6 +7,7 @@ import {
   readScheduledTaskEditor,
   scheduledTaskEditorSessionAtom,
   startScheduledTaskEditor,
+  takeScheduledTaskNewLink,
   updateScheduledTaskEditor,
 } from "./scheduled-task-editor-state";
 
@@ -53,5 +54,36 @@ describe("scheduled task voice draft", () => {
     expect(readScheduledTaskEditor(`scheduled-task:${session.id}`, editor)).toBeNull();
     updateScheduledTaskEditor((current) => current, editor);
     expect(appAtomRegistry.get(scheduledTaskEditorSessionAtom)?.current).toBeNull();
+  });
+});
+
+describe("new scheduled task link", () => {
+  const editing = {
+    environmentId: EnvironmentId.make("environment"),
+    environmentLabel: "Environment",
+    draft: createDraft(null, null),
+  };
+  const newTaskLink = {
+    routes: [
+      { name: "Home" },
+      {
+        name: "SettingsSheet",
+        state: {
+          routes: [{ name: "SettingsScheduledTasks" }, { name: "SettingsScheduledTaskNew" }],
+        },
+      },
+    ],
+  };
+
+  it("drops the last edited task so the new-task screen starts from the default", () => {
+    startScheduledTaskEditor(editing);
+    expect(takeScheduledTaskNewLink(newTaskLink)).toBe(newTaskLink);
+    expect(appAtomRegistry.get(scheduledTaskEditorSessionAtom)).toBeNull();
+  });
+
+  it("keeps the editor for links to other screens", () => {
+    startScheduledTaskEditor(editing);
+    takeScheduledTaskNewLink({ routes: [{ name: "SettingsSheet" }] });
+    expect(appAtomRegistry.get(scheduledTaskEditorSessionAtom)?.current).toBe(editing);
   });
 });

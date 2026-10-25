@@ -6,13 +6,20 @@ import type { NavigationState, PartialState } from "@react-navigation/native";
  * the launcher, not app navigation. Without this filter it falls through
  * to the NotFound wildcard route on every dev launch.
  */
-export function shouldHandleAppLink(url: string): boolean {
+export function shouldHandleAppLink(url: string, cloudConfigured: boolean): boolean {
   return (
     !url.includes("expo-development-client") &&
     !url.includes("://expo-sharing") &&
-    !/^t3code(-dev|-preview)?:\/*$/.test(url)
+    !/^t3code(-dev|-preview)?:\/*$/.test(url) &&
+    (cloudConfigured || !CLOUD_ONLY_LINK_PATH.test(url.split(/[?#]/)[0] ?? ""))
   );
 }
+
+/**
+ * Screens that only exist with T3 Connect configured. A build without it has
+ * no entry points to them, so a link must not open one empty.
+ */
+const CLOUD_ONLY_LINK_PATH = /(?:^[a-z][\w+.-]*:\/*|\/)(?:connect-onboarding|settings\/auth)\/*$/i;
 
 /** Keep the published draft URLs while using the root thread screen. */
 export function restoreDraftLinkState(
@@ -28,4 +35,47 @@ export function restoreDraftLinkState(
   routes.push({ name: "Thread", params: { draft } });
   if (pathname !== "new/draft") routes.push(target);
   return { ...state, index: routes.length - 1, routes };
+}
+
+type LinkState = PartialState<NavigationState>;
+type LinkRoute = LinkState["routes"][number];
+
+function isLinkState(value: unknown): value is LinkState {
+  return typeof value === "object" && value !== null && Array.isArray((value as LinkState).routes);
+}
+
+/** The first route named one of `names`, at any nesting depth of a parsed link. */
+export function findLinkedRoute(
+  state: LinkState | undefined,
+  names: ReadonlyArray<string>,
+): LinkRoute | undefined {
+  for (const route of state?.routes ?? []) {
+    if (names.includes(route.name)) return route;
+    const nested = isLinkState(route.state) ? findLinkedRoute(route.state, names) : undefined;
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+/** Rewrites the first route named one of `names`, at any nesting depth of a parsed link. */
+export function updateLinkedRoute(
+  state: LinkState | undefined,
+  names: ReadonlyArray<string>,
+  update: (route: LinkRoute) => LinkRoute,
+): LinkState | undefined {
+  if (!state) return state;
+  for (const [index, route] of state.routes.entries()) {
+    let next: LinkRoute | undefined;
+    if (names.includes(route.name)) next = update(route);
+    else if (isLinkState(route.state)) {
+      const nested = updateLinkedRoute(route.state, names, update);
+      if (nested !== route.state) next = { ...route, state: nested };
+    }
+    if (next) {
+      const routes = state.routes.slice();
+      routes[index] = next;
+      return { ...state, routes };
+    }
+  }
+  return state;
 }

@@ -111,3 +111,43 @@ export function filterNewTaskBranches<T extends { readonly name: string }>(
     ? branches
     : branches.filter((branch) => branch.name.toLowerCase().includes(query));
 }
+
+/**
+ * A worktree with no chosen base starts from the default branch, and a local
+ * selection the user just switched to follows the current checkout until refs
+ * load. Both are derived, never written back, so a late ref list or t3.json
+ * default still wins.
+ */
+export function fillNewTaskWorkspaceBranch(input: {
+  readonly selection: ComposerDraftWorkspaceSelection;
+  readonly branches: ReadonlyArray<{
+    readonly name: string;
+    readonly current: boolean;
+    readonly isDefault: boolean;
+    readonly isRemote?: boolean;
+    readonly worktreePath?: string | null;
+  }>;
+  readonly projectCwd: string | null;
+  readonly worktreeDefaultSettled: boolean;
+}): ComposerDraftWorkspaceSelection {
+  const { selection } = input;
+  if (selection.branch !== null) return selection;
+  if (selection.mode === "worktree") {
+    // The default may only exist as origin/<default>, so search remote refs too.
+    const base =
+      input.branches.find((branch) => branch.isDefault) ??
+      input.branches.find((branch) => !branch.isRemote && branch.current) ??
+      null;
+    return input.worktreeDefaultSettled && base
+      ? { ...selection, branch: base.name, worktreePath: null }
+      : selection;
+  }
+  if (!selection.followsCurrentCheckout || input.projectCwd === null) return selection;
+  const local = resolveNewTaskLocalWorkspaceSelection({
+    branches: input.branches.filter((branch) => !branch.isRemote),
+    projectCwd: input.projectCwd,
+  });
+  return local.awaitsCurrentBranch
+    ? selection
+    : { ...selection, branch: local.branch, worktreePath: local.worktreePath };
+}

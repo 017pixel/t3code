@@ -1,5 +1,4 @@
 import { useFocusEffect } from "@react-navigation/native";
-import { useCallback, useEffect, useRef } from "react";
 import {
   voiceInputBlocksSubmission,
   type VoiceInputState,
@@ -22,45 +21,34 @@ export function useVoiceInputController(input: {
   readonly onChangeSelection: (selection: ComposerEditorSelection) => void;
 }) {
   const global = useGlobalVoiceInput();
-  const { setOwnerFocused, session } = global;
-  const latestInput = useRef(input);
-  latestInput.current = input;
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
+  const { session } = global;
+  const ownerKey = input.ownerKey;
 
-  useFocusEffect(
-    useCallback(() => {
-      const ownerKey = input.ownerKey;
-      if (!ownerKey) return;
-      setOwnerFocused(ownerKey, true);
-      return () => setOwnerFocused(ownerKey, false);
-    }, [input.ownerKey, setOwnerFocused]),
-  );
+  useFocusEffect(() => {
+    if (!ownerKey) return;
+    session.setOwnerFocused(ownerKey, true);
+    return () => session.setOwnerFocused(ownerKey, false);
+  });
 
-  const start = useCallback(() => {
-    const captured = latestInput.current;
-    if (!captured.ownerKey || captured.disabled) return;
+  const start = () => {
+    if (!ownerKey || input.disabled) return;
+    const { onChangeDraftMessage, onChangeSelection } = input;
     void session.start({
       ...createVoiceInputTarget(
-        captured.ownerKey,
-        captured.readDraftMessage,
+        ownerKey,
+        input.readDraftMessage,
+        // Both sinks are keyed by owner, so a late commit cannot move the
+        // cursor of a draft this screen switched to meanwhile.
         (text, selection) => {
-          captured.onChangeDraftMessage(text);
-          if (mounted.current && latestInput.current.ownerKey === captured.ownerKey) {
-            latestInput.current.onChangeSelection(selection);
-          }
+          onChangeDraftMessage(text);
+          onChangeSelection(selection);
         },
-        captured.selection,
-        captured.subscribeToDraftChanges,
+        input.selection,
+        input.subscribeToDraftChanges,
       ),
-      label: captured.label,
+      label: input.label,
     });
-  }, [session]);
+  };
   const state = global.ownerKey === input.ownerKey ? global.state : IDLE_STATE;
   const isBusy = voiceInputBlocksSubmission(state);
   return {

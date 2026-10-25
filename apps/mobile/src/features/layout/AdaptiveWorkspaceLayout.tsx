@@ -1,6 +1,6 @@
 import { SafeAreaInsetsContext, useSafeAreaInsets } from "react-native-safe-area-context";
 import { AdaptiveWorkspaceContext, useAdaptiveWorkspaceLayout } from "./adaptive-workspace-context";
-import { createDeferredNavigation } from "./deferred-navigation";
+import { threadSelectionDeferral } from "./deferred-navigation";
 import { uuidv4 } from "../../lib/uuid";
 import type {
   EnvironmentProject,
@@ -9,17 +9,13 @@ import type {
 import { EnvironmentId, ThreadId, type SidebarProjectGroupingMode } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { useFocusEffect } from "@react-navigation/native";
-import { NavigationContext, NavigationRouteContext, useNavigation } from "@react-navigation/native";
 import {
-  use,
-  useDeferredValue,
-  useEffect,
-  useEffectEvent,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+  NavigationContext,
+  NavigationRouteContext,
+  useNavigation,
+  useNavigationState,
+} from "@react-navigation/native";
+import { use, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Keyboard, Platform, useWindowDimensions, View } from "react-native";
 import { KeyboardController, useKeyboardState } from "react-native-keyboard-controller";
 import Animated, {
@@ -70,6 +66,7 @@ import { startOpeningDetail } from "../workspace/useSelectWorkspaceDetail";
 import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 import { HomeListOptionsProvider } from "../home/home-list-options";
 import { newTaskDestination } from "../threads/new-task-project-selection";
+import { withOpenedNewTaskDraft } from "../threads/open-new-task-draft";
 import { usePendingTaskListActions } from "../home/usePendingTaskListActions";
 import { ThreadNavigationSidebar } from "../threads/ThreadNavigationSidebar";
 import { useOpenThreadPullRequests } from "../threads/use-open-thread-pull-requests";
@@ -124,38 +121,11 @@ export function useRegisterWorkspaceInspector(render: (() => ReactNode) | undefi
     );
   })();
 
-  const focusedRef = useRef(false);
-  const deactivateRef = useRef<(() => void) | null>(null);
-
-  const syncRegistration = useEffectEvent(() => {
-    if (!focusedRef.current || wrappedRender === undefined) {
-      deactivateRef.current?.();
-      return;
-    }
-    deactivateRef.current = registerWorkspaceInspector(wrappedRender);
-  });
-
-  useFocusEffect(() => {
-    focusedRef.current = true;
-    syncRegistration();
-    return () => {
-      focusedRef.current = false;
-      syncRegistration();
-    };
-  });
-
-  useEffect(() => {
-    if (focusedRef.current) {
-      syncRegistration();
-    }
-  }, [wrappedRender]);
-
-  useEffect(
-    () => () => {
-      deactivateRef.current?.();
-      deactivateRef.current = null;
-    },
-    [],
+  // useFocusEffect re-runs when the renderer changes while focused, so the
+  // pane always shows this render's content, and its cleanup deactivates on
+  // blur and unmount.
+  useFocusEffect(() =>
+    wrappedRender === undefined ? undefined : registerWorkspaceInspector(wrappedRender),
   );
 }
 
@@ -351,6 +321,24 @@ function AdaptiveWorkspaceLayoutContent(
       return null;
     }
   })();
+  const workspaceRouteName = useNavigationState(
+    (state) => state?.routes.find((route) => route.key === props.workspaceRouteKey)?.name,
+  );
+  // Opening a review or the files route reveals its inspector once per route
+  // and thread. Coming back to that route from a screen pushed over it keeps
+  // the user's choice, so the last revealed key is not cleared on other routes.
+  const inspectorRevealKey =
+    (workspaceRouteName === "ThreadReview" ||
+      (workspaceRouteName === "ThreadFiles" && fileInspector.supported)) &&
+    selectedThreadKey !== null
+      ? `${props.workspaceRouteKey}:${selectedThreadKey}`
+      : null;
+  const [revealedInspectorKey, setRevealedInspectorKey] = useState<string | null>(null);
+  if (inspectorRevealKey !== null && inspectorRevealKey !== revealedInspectorKey) {
+    setRevealedInspectorKey(inspectorRevealKey);
+    setFocusedAuxiliaryPaneRole("inspector");
+    setFileInspectorPreferredVisible(true);
+  }
   const [workspaceInspector, setWorkspaceInspector] = useState<{
     readonly render: () => ReactNode;
     readonly active: boolean;
@@ -488,10 +476,13 @@ function AdaptiveWorkspaceLayoutContent(
   };
   const handleOpenSettings = () => openWorkspaceTab("settings");
 
-  const deferredThreadSelection = useMemo(() => createDeferredNavigation(), []);
   /** The one way to show a page in the detail column; see `selectWorkspaceDetail`. */
-  function handleSelectDetail(detail: WorkspaceDetail, sheet?: WorkspaceDetailSheet) {
-    deferredThreadSelection.run(() => {
+  function handleSelectDetail(selected: WorkspaceDetail, sheet?: WorkspaceDetailSheet) {
+    threadSelectionDeferral.run(() => {
+      const detail =
+        selected.name === "Thread"
+          ? { ...selected, params: withOpenedNewTaskDraft(selected.params) }
+          : selected;
       if (Platform.OS === "android") Keyboard.dismiss();
       setFileInspectorPreferredVisible(false);
       if (layout.primarySidebarOverlaysContent) setPrimarySidebarVisible(false);
@@ -749,7 +740,6 @@ function AdaptiveWorkspaceLayoutContent(
     fileInspector,
     primarySidebarSearchQuery,
     startNewTask: handleStartNewTask,
-    deferThreadSelectionUntil: deferredThreadSelection.waitFor,
     selectDetail: handleSelectDetail,
     activateAuxiliaryPaneRole,
     registerWorkspaceInspector,
