@@ -14,6 +14,7 @@ import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { OrchestratorMcpTaskRole, ProviderInstanceId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -22,9 +23,11 @@ import * as Path from "effect/Path";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import { Tool } from "effect/ai";
+import * as McpSchema from "effect/ai/McpSchema";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
 import { taskPrompt } from "../src/mcp/OrchestratorMcpService.ts";
+import * as McpInvocationContext from "../src/mcp/McpInvocationContext.ts";
 import { ORCHESTRATOR_MCP_RUNNING_TASK_NEXT } from "@t3tools/contracts";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import { buildCodexAdditionalContext } from "../src/provider/CodexDeveloperInstructions.ts";
@@ -265,7 +268,7 @@ export const normalizeToolInput = (name: string, input: unknown) =>
 
 // McpHttpServer advertises each tool's JSON schema, and Claude Code passes the MCP name,
 // description, and schema through unchanged.
-const t3Tools: ReadonlyArray<ApiTool> = [
+const t3SourceTools: ReadonlyArray<Tool.Any> = [
   OrchestratorToolkit,
   ThreadToolkit,
   AttachmentToolkit,
@@ -277,13 +280,24 @@ const t3Tools: ReadonlyArray<ApiTool> = [
   PreviewToolkit,
   DeviceToolkit,
   HtmlToolkit,
-]
-  .flatMap((toolkit): ReadonlyArray<Tool.Any> => Object.values(toolkit.tools))
-  .map((tool) => ({
-    name: `${T3_PREFIX}${tool.name}`,
-    description: Tool.getDescription(tool) ?? "",
-    input_schema: Tool.getJsonSchema(tool),
-  }));
+].flatMap((toolkit): ReadonlyArray<Tool.Any> => Object.values(toolkit.tools));
+const t3Tools: ReadonlyArray<ApiTool> = t3SourceTools.map((tool) => ({
+  name: `${T3_PREFIX}${tool.name}`,
+  description: Tool.getDescription(tool) ?? "",
+  input_schema: Tool.getJsonSchema(tool),
+}));
+// T3 does not offer these to a delegated child, so its harness never lists them.
+const hiddenFromSubagents = new Set(
+  t3SourceTools
+    .filter(
+      (tool) =>
+        Context.getOrUndefined(tool.annotations, McpSchema.EnabledWhen) ===
+        McpInvocationContext.hiddenFromSubagents,
+    )
+    .map((tool) => `${T3_PREFIX}${tool.name}`),
+);
+const visibleT3Tools = (subagent: boolean) =>
+  subagent ? t3Tools.filter((tool) => !hiddenFromSubagents.has(tool.name)) : t3Tools;
 
 /** Text T3 appends to Claude Code's system prompt. Delegated children get the same text. */
 export const t3SystemAppend = () => {
@@ -342,8 +356,9 @@ const NATIVE_SCHEMAS: Readonly<Record<string, Omit<ApiTool, "name">>> = {
 /** Rebuilds the parts of a captured request that every case shares. */
 export const buildBase = (
   template: typeof MessagesRequest.Type,
-  options: { readonly keepUserInstructions: boolean },
+  options: { readonly keepUserInstructions: boolean; readonly subagent?: boolean },
 ) => {
+  const t3 = visibleT3Tools(options.subagent === true);
   const firstAssistant = template.messages.findIndex((message) => message.role === "assistant");
   const head = template.messages.slice(0, firstAssistant === -1 ? undefined : firstAssistant);
   const systemTexts = [
@@ -357,7 +372,7 @@ export const buildBase = (
     throw new Error(`The template needs one ${RUNTIME_MARKER} block and a deferred tool list.`);
   }
   const nativeDeferred = deferredList.split("\n").filter((name) => name && !isT3Name(name));
-  const names = [...nativeDeferred, ...t3Tools.map((tool) => tool.name)].toSorted().join("\n");
+  const names = [...nativeDeferred, ...t3.map((tool) => tool.name)].toSorted().join("\n");
   const append = t3SystemAppend();
   const sonnet = `You are powered by the model named Sonnet 5.5. The exact model ID is ${MODEL}.`;
   const joined = systemTexts.join("\n");
@@ -399,7 +414,8 @@ export const buildBase = (
     },
     nativeTools: template.tools.filter((tool) => !isT3Name(tool.name)),
     /** Tools ToolSearch loads: T3 tools from source, and native tools the template only names. */
-    deferred: [...t3Tools, ...nativeDeferred.map((name) => ({ name, ...nativeSchema(name) }))],
+    t3,
+    deferred: [...t3, ...nativeDeferred.map((name) => ({ name, ...nativeSchema(name) }))],
   };
 };
 
@@ -411,8 +427,10 @@ const buildCodexBase = (
   options: {
     readonly keepUserInstructions: boolean;
     readonly effort?: string | undefined;
+    readonly subagent?: boolean;
   },
 ): Base => {
+  const t3 = visibleT3Tools(options.subagent === true);
   const contentText = (item: Block) =>
     Array.isArray(item.content)
       ? item.content.map((block: Block) => valueText(block.text)).join("\n")
@@ -467,7 +485,8 @@ const buildCodexBase = (
       date: /<current_date>(.*?)<\/current_date>/.exec(joined)?.[1],
     },
     nativeTools,
-    deferred: [...t3Tools],
+    t3,
+    deferred: [...t3],
     codex: { ...template, input, reasoning: { ...template.reasoning, effort } },
   };
 };
@@ -1189,7 +1208,7 @@ export const executeCodex = async (
 };
 
 const codexCatalog = (base: Base) => [
-  ...t3Tools.map((tool) => ({
+  ...base.t3.map((tool) => ({
     name: tool.name.replace("mcp__t3-code__", "mcp__t3_code__"),
     description: `${valueText(tool.description)}\nInput JSON schema: ${JSON.stringify(tool.input_schema)}`,
   })),
@@ -1612,20 +1631,31 @@ const main = Effect.gen(function* () {
     );
   const template = yield* fs.readFileString(templatePath);
   const keepUserInstructions = flags["user-instructions"] === "keep";
-  const base: Base =
+  const buildFor = (subagent: boolean): Effect.Effect<Base, Schema.SchemaError> =>
     flags.model === SOL
-      ? buildCodexBase((yield* decodeCodexCapture(template)).request.provider_native, {
-          keepUserInstructions,
-          effort: flags.effort,
-        })
-      : buildBase((yield* decodeCapture(template)).request.provider_native, {
-          keepUserInstructions,
-        });
+      ? decodeCodexCapture(template).pipe(
+          Effect.map((capture) =>
+            buildCodexBase(capture.request.provider_native, {
+              keepUserInstructions,
+              effort: flags.effort,
+              subagent,
+            }),
+          ),
+        )
+      : decodeCapture(template).pipe(
+          Effect.map((capture) =>
+            buildBase(capture.request.provider_native, { keepUserInstructions, subagent }),
+          ),
+        );
+  const base = yield* buildFor(false);
+  const childBase = yield* buildFor(true);
+  const baseFor = (testCase: McpToolUseCase) =>
+    testCase.setup.role === "delegated-child" ? childBase : base;
   const effort = flags.effort ?? base.codex?.reasoning.effort ?? "high";
   if (flags["dry-run"]) {
     // One JSON line per case. Without --case this also checks that every case builds.
     for (const testCase of selected) {
-      const sample = makeSample(testCase, base);
+      const sample = makeSample(testCase, baseFor(testCase));
       const messages = buildMessages(sample);
       const body = base.codex
         ? codexRequest(base, codexMessages(messages))
@@ -1661,7 +1691,7 @@ const main = Effect.gen(function* () {
     const privateValues = [config.apiKey, ...Object.values(config.proxy?.headers ?? {})]
       .flatMap((value) => [value, value.replace(/^Bearer /i, "")])
       .filter(Boolean);
-    return runSample(testCase, config, base).pipe(
+    return runSample(testCase, config, baseFor(testCase)).pipe(
       Effect.matchCause({
         onFailure: (cause) => ({
           ...identity,
