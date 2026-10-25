@@ -413,6 +413,10 @@ export const OpenInPicker = memo(function OpenInPicker({
               // Full-color app icons outshout the panel's line icons until the row is in use.
               isPanel &&
                 "grayscale dark:opacity-70 group-hover/details-split:opacity-100 group-hover/details-split:grayscale-0 group-has-[[data-popup-open]]/details-split:opacity-100 group-has-[[data-popup-open]]/details-split:grayscale-0",
+              // A hairline keeps pale app icons from dissolving into the card.
+              isPanel &&
+                primaryOption.kind === "brand" &&
+                "rounded-sm ring-1 ring-black/10 dark:ring-white/15",
             )}
           />
         ) : isPanel ? (

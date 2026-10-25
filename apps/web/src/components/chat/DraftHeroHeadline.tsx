@@ -262,7 +262,7 @@ export function DraftHeroHeadline({
           />
           <ChevronDownIcon
             aria-hidden
-            className="size-[0.55em] shrink-0 self-center text-muted-foreground"
+            className="size-[0.65em] shrink-0 self-center text-foreground/55"
           />
         </TooltipTrigger>
         {activeProjectDisplayName && !isScratchDraft ? (
