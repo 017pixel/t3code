@@ -1072,7 +1072,12 @@ const ConversationTimeline = memo(function ConversationTimeline({
   });
   const renderItem = ({ item }: { item: MessagesTimelineRow }) => (
     <TimelineRowCtx value={sharedState}>
-      <div className="messages-timeline-row-frame">
+      <div
+        className="messages-timeline-row-frame"
+        onPlayCapture={(event) => onAudioPlaybackChange(item.id, event)}
+        onPauseCapture={(event) => onAudioPlaybackChange(item.id, event)}
+        onEndedCapture={(event) => onAudioPlaybackChange(item.id, event)}
+      >
         <div
           className="@container/chat-lane chat-content-lane overflow-x-clip"
           data-timeline-root="true"
