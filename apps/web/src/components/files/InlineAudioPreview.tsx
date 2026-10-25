@@ -42,6 +42,11 @@ export function InlineAudioPreview(props: {
         compact
         name={props.name}
         src={src ?? ""}
+        revision={
+          props.resource
+            ? JSON.stringify([props.environmentId, props.resource])
+            : (props.src ?? null)
+        }
         failed={failed}
         onOpen={props.onOpen}
         onRetry={() => setFailedSrc(null)}
