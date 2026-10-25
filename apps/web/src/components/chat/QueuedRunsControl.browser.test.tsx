@@ -68,6 +68,8 @@ import { QueuedRunsControl } from "./QueuedRunsControl";
 function setup() {
   state.projection = null;
   state.workflow = null;
+  for (const delivery of turnDeliveries.getSnapshot()) turnDeliveries.cancel(delivery.key);
+  expect(turnDeliveries.getSnapshot()).toEqual([]);
 }
 
 const baseProps = {
