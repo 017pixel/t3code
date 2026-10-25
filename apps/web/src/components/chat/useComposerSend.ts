@@ -71,7 +71,6 @@ import {
   clearBackgroundDraftSubmissionByRef,
   finalizePromotedDraftThreadByRef,
   markPromotedDraftThreadByRef,
-  restoreFailedDraftThread,
   composerDraftHasUserContent,
   type ComposerFileAttachment,
   type ComposerImageAttachment,
@@ -123,6 +122,7 @@ import {
   type MultipleModelTarget,
   resolveMultipleModelTargets,
   prepareTurnAttachments,
+  reopenUnsentDraftThread,
   restoreComposerDraft,
 } from "./chatViewSend";
 import type {
@@ -1258,12 +1258,17 @@ export function useComposerSend(input: ComposerSendInput) {
     // `failure` is null when the user cancelled a send that was waiting on a reconnect.
     const restoreUnsentDraft = (failure: TurnDeliveryFailure | null) => {
       let restoredThreadId = threadIdForSend;
+      let restoreTarget = composerDraftTarget;
       if (isLocalDraftThread && draftId && draftThread) {
         // A cancelled launch may still have committed, so its draft must not reuse the thread id.
         if (failure === null || wasBootstrapThreadDeleted(squashAtomCommandFailure(failure))) {
           restoredThreadId = newThreadId();
         }
-        restoreFailedDraftThread(draftId, draftThread, restoredThreadId);
+        restoreTarget = reopenUnsentDraftThread(
+          draftId,
+          draftThread,
+          scopeThreadRef(environmentId, restoredThreadId),
+        );
         clearBackgroundDraftSubmissionByRef(scopeThreadRef(environmentId, threadIdForSend));
       }
       setOptimisticUserMessages((existing) => {
@@ -1274,8 +1279,7 @@ export function useComposerSend(input: ComposerSendInput) {
         const next = existing.filter((message) => message.id !== messageIdForSend);
         return next.length === existing.length ? existing : next;
       });
-      const restore = () =>
-        restoreUnsentComposer(composerDraftTarget, routeThreadKey, sendSnapshot);
+      const restore = () => restoreUnsentComposer(restoreTarget, routeThreadKey, sendSnapshot);
       if (!restore()) {
         unsentMessages.keep({
           environmentId,

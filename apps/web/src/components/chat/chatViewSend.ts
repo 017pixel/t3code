@@ -26,7 +26,9 @@ import { newThreadId } from "~/lib/utils";
 import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
+  type DraftThreadState,
   composerDraftHasUserContent,
+  restoreFailedDraftThread,
   useComposerDraftStore,
   DraftId,
 } from "../../composerDraftStore";
@@ -250,6 +252,19 @@ export async function rewindToMessage(input: {
   } catch (error) {
     return { error: error instanceof Error ? error.message : "Failed to revert thread state." };
   }
+}
+
+/**
+ * Reopens a cancelled launch's draft as `threadRef` and returns where its unsent message
+ * restores. The thread ref still resolves after that draft is sent and promoted.
+ */
+export function reopenUnsentDraftThread(
+  draftId: DraftId,
+  draftThread: DraftThreadState,
+  threadRef: ScopedThreadRef,
+): ScopedThreadRef {
+  restoreFailedDraftThread(draftId, draftThread, threadRef.threadId);
+  return threadRef;
 }
 
 /**

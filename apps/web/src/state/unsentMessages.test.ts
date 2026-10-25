@@ -1,14 +1,21 @@
+import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   EnvironmentId,
   MessageId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
 import { expect, it } from "vite-plus/test";
 
-import { useComposerDraftStore } from "../composerDraftStore";
+import {
+  DraftId,
+  finalizePromotedDraftThreadByRef,
+  markPromotedDraftThreadByRef,
+  useComposerDraftStore,
+} from "../composerDraftStore";
 import { snapshotComposerSend } from "../components/ChatView.logic";
-import { restoreComposerDraft } from "../components/chat/chatViewSend";
+import { reopenUnsentDraftThread, restoreComposerDraft } from "../components/chat/chatViewSend";
 import type { ChatMessage } from "../types";
 import { unsentMessages } from "./unsentMessages";
 
@@ -29,17 +36,14 @@ function image(id: string) {
   };
 }
 
-function keepUnsentBesideFullDraft() {
-  useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
-  const store = useComposerDraftStore.getState();
-  store.setPrompt(target, "Newer draft");
-  store.addImages(
-    target,
-    Array.from({ length: PROVIDER_SEND_TURN_MAX_ATTACHMENTS }, (_, index) =>
-      image(`newer-${index}`),
-    ),
+function newerImages() {
+  return Array.from({ length: PROVIDER_SEND_TURN_MAX_ATTACHMENTS }, (_, index) =>
+    image(`newer-${index}`),
   );
-  const snapshot = snapshotComposerSend({
+}
+
+function unsentSnapshot() {
+  return snapshotComposerSend({
     prompt: "Unsent message",
     images: [image("unsent")],
     files: [],
@@ -49,15 +53,24 @@ function keepUnsentBesideFullDraft() {
     reviewComments: [],
     threadContexts: [],
   });
-  const display: ChatMessage = {
-    id: messageId,
-    role: "user",
-    text: "Unsent message",
-    runId: null,
-    createdAt: "2026-10-25T00:00:00.000Z",
-    updatedAt: "2026-10-25T00:00:00.000Z",
-    streaming: false,
-  };
+}
+
+const display: ChatMessage = {
+  id: messageId,
+  role: "user",
+  text: "Unsent message",
+  runId: null,
+  createdAt: "2026-10-25T00:00:00.000Z",
+  updatedAt: "2026-10-25T00:00:00.000Z",
+  streaming: false,
+};
+
+function keepUnsentBesideFullDraft() {
+  useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
+  const store = useComposerDraftStore.getState();
+  store.setPrompt(target, "Newer draft");
+  store.addImages(target, newerImages());
+  const snapshot = unsentSnapshot();
   const restore = () => restoreComposerDraft(target, snapshot);
   expect(restore()).toBe(false);
   unsentMessages.keep({ environmentId, threadId, display, restore });
@@ -87,4 +100,35 @@ it("drops a kept message only when it is discarded", () => {
 
   expect(unsentMessages.getSnapshot()).toEqual([]);
   expect(store.getComposerDraft(target)?.prompt).toBe("Newer draft");
+});
+
+it("restores a cancelled launch into its thread after the newer draft there is sent", () => {
+  useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
+  const store = useComposerDraftStore.getState();
+  const draftId = DraftId.make("launch-draft");
+  store.setProjectDraftThreadId(scopeProjectRef(environmentId, ProjectId.make("p")), draftId, {
+    threadId: ThreadId.make("launched"),
+  });
+  const launched = store.getDraftSession(draftId)!;
+  markPromotedDraftThreadByRef(scopeThreadRef(environmentId, launched.threadId));
+  store.setPrompt(draftId, "Newer draft");
+  store.addImages(draftId, newerImages());
+
+  const reopenedRef = scopeThreadRef(environmentId, ThreadId.make("reopened"));
+  const restoreTarget = reopenUnsentDraftThread(draftId, launched, reopenedRef);
+  const snapshot = unsentSnapshot();
+  const restore = () => restoreComposerDraft(restoreTarget, snapshot);
+  expect(restore()).toBe(false);
+  unsentMessages.keep({ environmentId, threadId: reopenedRef.threadId, display, restore });
+
+  markPromotedDraftThreadByRef(reopenedRef);
+  store.clearComposerContent(draftId);
+  finalizePromotedDraftThreadByRef(reopenedRef);
+  expect(store.getDraftSession(draftId)).toBeNull();
+
+  expect(unsentMessages.restore(environmentId, messageId)).toBe(true);
+  expect(unsentMessages.getSnapshot()).toEqual([]);
+  const draft = store.getComposerDraft(reopenedRef);
+  expect(draft?.prompt).toBe("Unsent message");
+  expect(draft?.images.map((attachment) => attachment.id)).toEqual(["unsent"]);
 });
