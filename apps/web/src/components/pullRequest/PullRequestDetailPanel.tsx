@@ -36,7 +36,6 @@ import {
 } from "lucide-react";
 import {
   lazy,
-  memo,
   Suspense,
   useEffect,
   useEffectEvent,
@@ -49,7 +48,6 @@ import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { type PullRequestDetailTab, useRightPanelStore } from "~/rightPanelStore";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { useNewThreadHandler } from "~/hooks/useHandleNewThread";
-import { useStableCallback } from "~/hooks/useStableCallback";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { isCommandPaletteOpen } from "~/commandPaletteBus";
 import { resolveShortcutCommand, type ShortcutMatchContext } from "~/keybindings";
@@ -203,9 +201,7 @@ const TABS: ReadonlyArray<{ value: PullRequestDetailTab; label: string }> = [
 
 // Defer the diff viewer's worker pool until Code is approached.
 const loadCodeTab = () => import("./PullRequestCodeTab");
-const PullRequestCodeTab = memo(lazy(loadCodeTab));
-const RetainedSummaryTab = memo(PullRequestSummaryTab);
-const RetainedTimelineTab = memo(PullRequestTimelineTab);
+const PullRequestCodeTab = lazy(loadCodeTab);
 
 // Persist handoffs across unmounts; replace only unchanged contributions to preserve user edits.
 const lastHandoffPromptByDraft = new Map<string, string>();
@@ -333,13 +329,13 @@ export function PullRequestDetailPanel({
   }>(() => ({ pullRequestKey, oid: null }));
   const selectedCodeCommitOid =
     codeCommitScope.pullRequestKey === pullRequestKey ? codeCommitScope.oid : null;
-  const selectCodeCommit = useStableCallback((oid: string | null) => {
+  const selectCodeCommit = (oid: string | null) => {
     setCodeCommitScope({ pullRequestKey, oid });
-  });
-  const openCommit = useStableCallback((oid: string) => {
+  };
+  const openCommit = (oid: string) => {
     selectCodeCommit(oid);
     selectTab("code");
-  });
+  };
   const [codeRevealRequest, setCodeRevealRequest] = useState<{
     readonly path: string;
     readonly nonce: number;
@@ -524,11 +520,11 @@ export function PullRequestDetailPanel({
   });
   const activityPending = activityQuery.isPending && activity === null;
   const activityError = activity === null ? activityQuery.error : null;
-  const refreshDetail = useStableCallback(() => {
+  const refreshDetail = () => {
     detailQuery.refresh();
     activityQuery.refresh();
     nativeStackQuery.refresh();
-  });
+  };
   const [refreshToken, setRefreshToken] = useState(0);
   const [activityRevision, setActivityRevision] = useState<{
     readonly key: string;
@@ -563,14 +559,14 @@ export function PullRequestDetailPanel({
   const invalidate = useAtomCommand(pullRequestEnvironment.invalidate, { reportFailure: false });
   const [isInvalidating, setIsInvalidating] = useState(false);
   const refreshing = isInvalidating || detailQuery.isPending;
-  const refreshFromHost = useStableCallback(async () => {
+  const refreshFromHost = async () => {
     setIsInvalidating(true);
     // Atom commands settle without throwing, so reset always runs.
     await invalidate({ environmentId, input: { reference } });
     refreshDetail();
     setRefreshToken((token) => token + 1);
     setIsInvalidating(false);
-  });
+  };
   const refreshFromHostOnRequest = useEffectEvent(() => void refreshFromHost());
   const appliedForcedToken = useRef(forcedRefreshToken);
   useEffect(() => {
@@ -990,33 +986,34 @@ export function PullRequestDetailPanel({
     );
   };
 
-  const addSelectionToAgent = useStableCallback(
-    (selection: PullRequestAgentSelectionInput, options?: { readonly keepGuide?: boolean }) => {
-      if (!detail) return;
-      void startAsk(
-        `selection:${selection.comment.id}`,
-        buildAddSelectionToAgentHandoff({
-          number: detail.number,
-          title: detail.title,
-          url: detail.url,
-          headBranch: detail.headBranch,
-          baseBranch: detail.baseBranch,
-          state: detail.state,
-          isDraft: detail.isDraft,
-          comment: selection.comment,
-          request: selection.request,
-        }),
-        options,
-      );
-    },
-  );
+  const addSelectionToAgent = (
+    selection: PullRequestAgentSelectionInput,
+    options?: { readonly keepGuide?: boolean },
+  ) => {
+    if (!detail) return;
+    void startAsk(
+      `selection:${selection.comment.id}`,
+      buildAddSelectionToAgentHandoff({
+        number: detail.number,
+        title: detail.title,
+        url: detail.url,
+        headBranch: detail.headBranch,
+        baseBranch: detail.baseBranch,
+        state: detail.state,
+        isDraft: detail.isDraft,
+        comment: selection.comment,
+        request: selection.request,
+      }),
+      options,
+    );
+  };
 
   const startCheckout = (mode: "worktree" | "local") => {
     if (!handoffSummary) return;
     void startHandoff(`checkout:${mode}`, null, mode);
   };
 
-  const startFixFinding = useStableCallback((finding: PullRequestFinding) => {
+  const startFixFinding = (finding: PullRequestFinding) => {
     if (!detail) return;
     void startHandoff(
       pullRequestFindingKey(finding),
@@ -1029,7 +1026,7 @@ export function PullRequestDetailPanel({
         finding,
       }),
     );
-  });
+  };
 
   const startFixFindings = () => {
     if (!detail) return;
@@ -1708,7 +1705,7 @@ export function PullRequestDetailPanel({
           <PullRequestMarkdownContext value={markdownContext}>
             {mountedTabs.has("summary") ? (
               <div className={cn("absolute inset-0", tab !== "summary" && "invisible")}>
-                <RetainedSummaryTab
+                <PullRequestSummaryTab
                   scrollerRef={scrollerRefs.summary}
                   environmentId={environmentId}
                   threadRef={threadRef}
@@ -1765,7 +1762,7 @@ export function PullRequestDetailPanel({
                     onRetry={activityQuery.refresh}
                   />
                 ) : (
-                  <RetainedTimelineTab
+                  <PullRequestTimelineTab
                     scrollerRef={scrollerRefs.timeline}
                     detail={detail}
                     environmentId={environmentId}
