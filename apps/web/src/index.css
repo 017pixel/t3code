@@ -2214,7 +2214,7 @@ code {
 :root {
   --diff-addition: var(--success);
   --diff-deletion: var(--destructive);
-  --diff-addition-foreground: light-dark(var(--color-emerald-600), var(--color-emerald-400));
+  --diff-addition-foreground: light-dark(var(--color-emerald-700), var(--color-emerald-400));
   --diff-deletion-foreground: light-dark(var(--color-red-600), var(--color-red-400));
 }
 

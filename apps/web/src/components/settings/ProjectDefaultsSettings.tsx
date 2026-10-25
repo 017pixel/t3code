@@ -154,7 +154,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
         unavailable || mixedModel || modelSource === "project"
           ? undefined
           : settings.defaultModelSelection === null
-            ? "Automatic"
+            ? "Selected automatically"
             : undefined
       }
       resetAction={
