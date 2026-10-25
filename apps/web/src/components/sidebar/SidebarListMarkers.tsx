@@ -102,6 +102,8 @@ export function SidebarDragBoundary(props: {
 export function SidebarSectionHeader(props: {
   marker: "working-header" | "snoozed-header" | "settled-header";
   label: string;
+  /** Shown as a muted trailing count while the shelf is collapsed. */
+  count: number;
   className?: string;
   dragging?: boolean;
   isDropTarget?: boolean;
@@ -124,6 +126,11 @@ export function SidebarSectionHeader(props: {
         expanded={props.toggle.expanded}
         tone={props.isDropTarget ? "accent" : props.dragging ? "emphasized" : "muted"}
         data-testid={`sidebar-${shelf}-shelf-toggle`}
+        accessory={
+          props.toggle.expanded ? null : (
+            <span className="font-normal tabular-nums">{props.count}</span>
+          )
+        }
       >
         {props.label}
       </CollapsibleSectionHeader>

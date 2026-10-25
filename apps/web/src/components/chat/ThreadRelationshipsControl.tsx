@@ -72,6 +72,7 @@ import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import {
+  THREAD_DETAILS_PANEL_ICON_CLASS,
   THREAD_DETAILS_PANEL_SPLIT_GROUP_CLASS,
   THREAD_DETAILS_PANEL_ROW_CONTENT_CLASS,
   THREAD_DETAILS_PANEL_SPLIT_SEPARATOR_CLASS,
@@ -134,14 +135,23 @@ function ThreadLineageGroup(props: {
       {props.label ? (
         <CollapsibleSectionHeader
           variant="row"
+          icon={<BotIcon aria-hidden className={THREAD_DETAILS_PANEL_ICON_CLASS} />}
           expanded={expanded}
           onClick={() => setExpanded(!expanded)}
           accessory={
-            failedCount > 0 ? <SectionHeaderStatus>{failedCount} failed</SectionHeaderStatus> : null
+            <>
+              {failedCount > 0 ? (
+                <SectionHeaderStatus>{failedCount} failed</SectionHeaderStatus>
+              ) : null}
+              {expanded ? null : (
+                <span className="text-xs font-normal tabular-nums text-muted-foreground">
+                  {props.rows.length}
+                </span>
+              )}
+            </>
           }
         >
           {props.label}
-          {!expanded && ` (${props.rows.length})`}
         </CollapsibleSectionHeader>
       ) : null}
       {expanded ? (

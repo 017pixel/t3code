@@ -412,7 +412,7 @@ export const OpenInPicker = memo(function OpenInPicker({
               getOpenInIconClass(primaryOption.kind),
               // Full-color app icons outshout the panel's line icons until the row is in use.
               isPanel &&
-                "grayscale group-hover/details-split:grayscale-0 group-has-[[data-popup-open]]/details-split:grayscale-0",
+                "grayscale dark:opacity-70 group-hover/details-split:opacity-100 group-hover/details-split:grayscale-0 group-has-[[data-popup-open]]/details-split:opacity-100 group-has-[[data-popup-open]]/details-split:grayscale-0",
             )}
           />
         ) : isPanel ? (

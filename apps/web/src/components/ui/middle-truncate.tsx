@@ -1,5 +1,6 @@
-import type { ComponentProps } from "react";
+import { type ComponentProps, useLayoutEffect, useRef } from "react";
 
+import { observeResize } from "~/lib/observeResize";
 import { cn } from "~/lib/utils";
 
 export function MiddleTruncate({
@@ -16,27 +17,72 @@ export function MiddleTruncate({
   variant?: "default" | "cap-aligned";
 }) {
   const split = splitForMiddleTruncate(value, tail);
+  const headRef = useRef<HTMLSpanElement>(null);
+  const head = split?.head;
+  useLayoutEffect(() => {
+    const element = headRef.current;
+    // A new head can keep the same box size, so refit here, not only on resize.
+    if (!element || head === undefined) return;
+    fitHead(element);
+    return observeResize(element, () => fitHead(element));
+  }, [head]);
   return (
     <span
       {...(showTitle ? { title: value } : {})}
       className={cn(
         "inline-flex min-w-0 max-w-full overflow-hidden whitespace-nowrap",
         variant === "cap-aligned" &&
-          "overflow-x-clip overflow-y-visible [&>span]:[text-box:trim-both_cap_alphabetic] [&>span]:overflow-x-clip [&>span]:overflow-y-visible",
+          // Padding keeps descenders inside the box, so the cut does not clip them.
+          "overflow-x-clip overflow-y-visible [&>span]:[text-box:trim-both_cap_alphabetic] [&>span]:-mb-1 [&>span]:pb-1 [&>span]:overflow-x-clip [&>span]:overflow-y-visible",
         className,
       )}
       {...props}
     >
       {split ? (
         <>
-          <span className="min-w-0 truncate">{split.head}</span>
-          <span className="shrink-0">{split.tail}</span>
+          {/* The tail carries the ellipsis so it sits flush; a CSS ellipsis leaves a ragged gap. */}
+          <span ref={headRef} className="peer min-w-0 overflow-hidden">
+            {split.head}
+          </span>
+          <span className="shrink-0 peer-data-overflow:before:content-['…']">{split.tail}</span>
         </>
       ) : (
         <span className="min-w-0 truncate">{value}</span>
       )}
     </span>
   );
+}
+
+// An overflowing head is cut after its last whole character: clip the partial glyph
+// and slide the tail left over the slack. Neither changes layout, so the observed
+// size stays the true available width.
+
+function fitHead(head: HTMLElement) {
+  const text = head.firstChild;
+  const overflowing = head.scrollWidth > head.clientWidth && text instanceof Text;
+  head.toggleAttribute("data-overflow", overflowing);
+  let slack = 0;
+  if (overflowing) {
+    const range = document.createRange();
+    const left = head.getBoundingClientRect().left;
+    const widthTo = (end: number) => {
+      range.setStart(text, 0);
+      range.setEnd(text, end);
+      return range.getBoundingClientRect().right - left;
+    };
+    let fits = 0;
+    let over = text.length;
+    while (over - fits > 1) {
+      const mid = (fits + over) >> 1;
+      if (widthTo(mid) <= head.clientWidth) fits = mid;
+      else over = mid;
+    }
+    if (/[\uD800-\uDBFF]/.test(text.data[fits - 1] ?? "")) fits -= 1;
+    slack = Math.max(0, head.clientWidth - widthTo(fits));
+  }
+  head.style.clipPath = slack > 0 ? `inset(-0.25em ${slack}px -0.25em 0)` : "";
+  const tail = head.nextElementSibling;
+  if (tail instanceof HTMLElement) tail.style.translate = slack > 0 ? `-${slack}px 0` : "";
 }
 
 const DEFAULT_TAIL = 10;

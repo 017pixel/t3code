@@ -185,7 +185,7 @@ export function SettingsSearchTarget({
 
 // Settings pickers reuse composer controls but match the bordered selects beside them.
 export const SETTINGS_PICKER_TRIGGER_CLASSNAME =
-  "min-w-0 max-w-none shrink-0 border-input bg-background font-normal text-foreground shadow-xs/5 hover:bg-accent/50 dark:bg-input/32";
+  "min-w-0 max-w-none shrink-0 border-input bg-background font-normal text-foreground shadow-xs/5 hover:bg-accent/50 dark:bg-input/32 [&_svg[data-composer-control-chevron]]:stroke-[1.75] [&_svg[data-composer-control-chevron]]:opacity-70";
 
 export function PolicyTooltip({ children }: { readonly children: string }) {
   return (
@@ -502,7 +502,9 @@ export function SettingsRow({
             </span>
           </div>
           {description ? (
-            <p className="max-w-xl text-xs leading-normal text-muted-foreground">{description}</p>
+            <p className="max-w-2xl text-balance text-xs leading-normal text-muted-foreground">
+              {description}
+            </p>
           ) : null}
           {renderedStatus ? (
             <div className="pt-0.5 text-xs text-muted-foreground">{renderedStatus}</div>
