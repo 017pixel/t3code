@@ -712,6 +712,8 @@ export class GhosttyTerminalSurface {
       return;
     }
     this.fit();
+    // A focus request that arrived while hidden parked on the mount.
+    if (document.activeElement === this.mount) this.focus();
   }
 
   write(data: string): void {

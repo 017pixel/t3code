@@ -61,10 +61,16 @@ const deviceState: DeviceServiceState = {
   revision: 1,
 };
 let currentState = deviceState;
-vi.mock("~/state/device", () => ({
-  deviceEnvironment: { list: "list", open: "open", close: "close" },
-  useDeviceState: () => ({ state: currentState, loaded: true }),
-}));
+vi.mock("~/state/device", async () => {
+  const { AsyncResult, Atom } = await import("effect/reactivity");
+  const probe = Atom.make(AsyncResult.initial<void, never>());
+  return {
+    deviceEnvironment: { list: "list", open: "open", close: "close" },
+    deviceHostProbeAtom: () => probe,
+    NO_DEVICE_PROBE_ATOM: probe,
+    useDeviceState: () => ({ state: currentState, loaded: true }),
+  };
+});
 vi.mock("~/state/use-atom-command", () => ({
   useAtomCommand: (command: string) =>
     command === "open"
@@ -76,8 +82,17 @@ vi.mock("~/state/use-atom-command", () => ({
 vi.mock("~/state/query", () => ({ formatEnvironmentQueryError: () => "Device failed" }));
 vi.mock("~/rightPanelStore", () => ({
   useRightPanelStore: {
-    getState: () => ({ openDevice: mocks.openDevice, closeSurface: mocks.closeSurface }),
+    getState: () => ({
+      byThreadKey: {},
+      openDevice: mocks.openDevice,
+      closeSurface: mocks.closeSurface,
+    }),
   },
+  selectThreadRightPanelState: () => ({ isOpen: false, activeSurfaceId: null, surfaces: [] }),
+}));
+vi.mock("~/components/preview/collapseRightPanel", () => ({
+  collapseRightPanel: () => {},
+  collapseRightPanelIfEmptied: () => {},
 }));
 vi.mock("~/components/device/DeviceHostUpdates", () => ({ DeviceHostUpdates: () => null }));
 vi.mock("~/components/device/DeviceWorkspace", () => ({

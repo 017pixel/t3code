@@ -8,6 +8,7 @@ import { agentControlledBrowserCloseConfirmation } from "../components/ChatView.
 import { closePreviewSession } from "../components/preview/closePreviewSession";
 import { useThreadTerminalActions } from "../components/terminal/useThreadTerminalActions";
 import { confirmTerminalClose } from "../lib/terminalCloseConfirm";
+import { focusPanelTerminalAfterClose } from "../lib/terminalFocus";
 import { readLocalApi } from "../localApi";
 import { setActivePreviewTab, useThreadPreviewState } from "../previewStateStore";
 import {
@@ -20,6 +21,7 @@ import { previewEnvironment } from "../state/preview";
 import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useTerminalUiStateStore } from "../terminalUiStateStore";
+import { collapseRightPanelIfEmptied } from "../components/preview/collapseRightPanel";
 import { useStableCallback } from "./useStableCallback";
 
 /** Closing releases preview and terminal sessions. Agent-driven browsers and terminal tabs require confirmation. */
@@ -86,6 +88,7 @@ export function useRightPanelSurfaceClose(input: {
     const ordered = toClose.toSorted(
       (left, right) => Number(left.id === activeId) - Number(right.id === activeId),
     );
+    collapseRightPanelIfEmptied(threadRef, new Set(toClose.map((surface) => surface.id)));
     for (const surface of ordered) {
       releaseSurfaceResources(threadRef, surface);
       store.closeSurface(threadRef, surface.id);
@@ -97,6 +100,7 @@ export function useRightPanelSurfaceClose(input: {
     if (nextActiveSurface?.kind === "preview" && nextActiveSurface.resourceId) {
       setActivePreviewTab(threadRef, nextActiveSurface.resourceId);
     }
+    focusPanelTerminalAfterClose(threadRef, activeId);
   };
   const labelFor = (terminalId: string) =>
     terminalLabelsById.get(terminalId) ?? getTerminalLabel(terminalId);

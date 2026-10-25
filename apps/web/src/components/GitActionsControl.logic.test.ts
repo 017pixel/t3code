@@ -6,7 +6,6 @@ import {
   requiresDefaultBranchConfirmation,
   resolveAutoFeatureBranchName,
   resolveDefaultBranchActionDialogCopy,
-  resolveLiveThreadBranchUpdate,
   resolveQuickAction,
 } from "./GitActionsControl.logic";
 
@@ -169,37 +168,6 @@ describe("requiresDefaultBranchConfirmation", () => {
     assert.isTrue(requiresDefaultBranchConfirmation("commit_push_pr", true));
     assert.isFalse(requiresDefaultBranchConfirmation("commit_push", false));
     assert.isFalse(requiresDefaultBranchConfirmation("push", false));
-  });
-});
-
-describe("resolveLiveThreadBranchUpdate", () => {
-  it("returns a branch update when live git status differs from stored thread metadata", () => {
-    const update = resolveLiveThreadBranchUpdate({
-      threadBranch: "feature/old-ref",
-      gitStatus: status({ refName: "effect-atom" }),
-    });
-
-    assert.deepEqual(update, {
-      branch: "effect-atom",
-    });
-  });
-
-  it("returns null when git status is detached HEAD but the thread already has a ref", () => {
-    const update = resolveLiveThreadBranchUpdate({
-      threadBranch: "effect-atom",
-      gitStatus: status({ refName: null }),
-    });
-
-    assert.equal(update, null);
-  });
-
-  it("does not regress a semantic thread ref back to a temporary worktree ref", () => {
-    const update = resolveLiveThreadBranchUpdate({
-      threadBranch: "t3code/github-query-rate-limit",
-      gitStatus: status({ refName: "t3code/bda76797" }),
-    });
-
-    assert.equal(update, null);
   });
 });
 

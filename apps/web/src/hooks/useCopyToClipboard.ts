@@ -232,13 +232,5 @@ export function useCopyToClipboard<TContext = void>({
     );
   });
 
-  React.useEffect(() => {
-    return (): void => {
-      if (timeoutIdRef.current) {
-        clearTimeout(timeoutIdRef.current);
-      }
-    };
-  }, []);
-
   return { copyToClipboard, isCopied };
 }

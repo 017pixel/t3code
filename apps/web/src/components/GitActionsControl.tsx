@@ -1,5 +1,5 @@
 import { ThreadDetailsControl } from "./chat/ThreadDetailsControl";
-import { useAtomValue } from "@effect/atom-react";
+import { useAtomMount, useAtomValue } from "@effect/atom-react";
 import {
   AuthOrchestrationOperateScope,
   AuthSourceControlWriteScope,
@@ -21,7 +21,9 @@ import type {
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
-import { type MouseEvent, useEffect, useEffectEvent, useRef, useState } from "react";
+import { type MouseEvent, useRef, useState } from "react";
+import { useDeadlinePassed } from "../hooks/useDeadline";
+import { useNowSecond } from "../hooks/useNowSecond";
 import { flushSync } from "react-dom";
 import {
   CheckIcon,
@@ -55,7 +57,6 @@ import {
   resolveFeatureBranchUnavailableReason,
   resolveGitActionProgressPresentation,
   resolveGitActionResultToastTiming,
-  resolveLiveThreadBranchUpdate,
   resolveThreadBranchMetadataPatch,
   resolveQuickAction,
   resolveThreadBranchUpdate,
@@ -105,7 +106,7 @@ import { serverEnvironment } from "~/state/server";
 import { sourceControlEnvironment } from "~/state/sourceControl";
 import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
-import { vcsActionManager, vcsEnvironment } from "~/state/vcs";
+import { vcsActionManager, vcsEnvironment, vcsStatusRevalidation } from "~/state/vcs";
 import { randomUUID } from "~/lib/utils";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
 import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
@@ -157,9 +158,10 @@ interface InlineGitActionSuccess {
   readonly title: string;
   readonly description: string | null;
   readonly scopeKey: string;
+  readonly expiresAtMs: number;
 }
 
-const GIT_STATUS_WINDOW_REFRESH_DEBOUNCE_MS = 250;
+const inlineSuccessExpiresAt = () => Date.now() + GIT_ACTION_SUCCESS_VISIBLE_MS;
 
 type RefreshVcsStatus = (target: {
   readonly environmentId: ScopedThreadRef["environmentId"];
@@ -329,19 +331,19 @@ function GitActionElapsedTime({
   startedAtMs: number | null;
   className?: string;
 }) {
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  return startedAtMs === null ? null : (
+    <RunningGitActionElapsedTime startedAtMs={startedAtMs} className={className} />
+  );
+}
 
-  useEffect(() => {
-    if (startedAtMs === null) {
-      return;
-    }
-
-    const intervalId = window.setInterval(() => {
-      setNowMs(Date.now());
-    }, 1_000);
-    return () => window.clearInterval(intervalId);
-  }, [startedAtMs]);
-
+function RunningGitActionElapsedTime({
+  startedAtMs,
+  className,
+}: {
+  startedAtMs: number;
+  className: string | undefined;
+}) {
+  const nowMs = useNowSecond();
   const elapsed = formatGitActionElapsed(startedAtMs, nowMs);
   if (!elapsed) {
     return null;
@@ -1010,17 +1012,11 @@ export default function GitActionsControl({
     useState<PendingDefaultBranchAction | null>(null);
   const sourceControlScope = { environmentId: activeEnvironmentId, cwd: gitCwd };
   const vcsActionState = useAtomValue(vcsActionManager.stateAtom(sourceControlScope));
-  const visibleInlineSuccess = inlineSuccess?.scopeKey === successScopeKey ? inlineSuccess : null;
+  const inlineSuccessExpired = useDeadlinePassed(inlineSuccess?.expiresAtMs ?? null);
+  const visibleInlineSuccess =
+    inlineSuccess?.scopeKey === successScopeKey && !inlineSuccessExpired ? inlineSuccess : null;
 
-  useEffect(() => {
-    if (!inlineSuccess) return;
-    const timeoutId = window.setTimeout(() => {
-      setInlineSuccess(null);
-    }, GIT_ACTION_SUCCESS_VISIBLE_MS);
-    return () => window.clearTimeout(timeoutId);
-  }, [inlineSuccess]);
-
-  const persistThreadBranchSync = (branch: string | null, manualSelection = false) => {
+  const persistThreadBranchSync = (branch: string | null) => {
     if (!activeThreadRef) {
       return;
     }
@@ -1051,15 +1047,9 @@ export default function GitActionsControl({
     setDraftThreadContext(draftId ?? activeThreadRef, {
       branch,
       worktreePath: activeDraftThread.worktreePath,
-      environmentSelection: manualSelection
-        ? "manual"
-        : (activeDraftThread.environmentSelection ??
-          (activeDraftThread.branch ? "manual" : "auto")),
+      environmentSelection: "manual",
     });
   };
-  const persistLiveThreadBranch = useEffectEvent((branch: string | null) => {
-    persistThreadBranchSync(branch);
-  });
 
   const syncThreadBranchAfterGitAction = (result: GitRunStackedActionResult) => {
     const branchUpdate = resolveThreadBranchUpdate(result);
@@ -1067,7 +1057,7 @@ export default function GitActionsControl({
       return;
     }
 
-    persistThreadBranchSync(branchUpdate.branch, true);
+    persistThreadBranchSync(branchUpdate.branch);
   };
 
   const gitStatusQuery = useEnvironmentQuery(
@@ -1105,33 +1095,6 @@ export default function GitActionsControl({
     sourceControlScope,
     RUNNING_SOURCE_CONTROL_ACTIONS,
   );
-  const isSelectingWorktreeBase =
-    !activeServerThread &&
-    activeDraftThread?.envMode === "worktree" &&
-    activeDraftThread.worktreePath === null;
-
-  useEffect(() => {
-    if (isGitActionRunning || isSelectingWorktreeBase || activeServerThread) {
-      return;
-    }
-
-    const branchUpdate = resolveLiveThreadBranchUpdate({
-      threadBranch: activeDraftThread?.branch ?? null,
-      gitStatus: gitStatusForActions,
-    });
-    if (!branchUpdate) {
-      return;
-    }
-
-    persistLiveThreadBranch(branchUpdate.branch);
-  }, [
-    activeServerThread,
-    activeDraftThread?.branch,
-    gitStatusForActions,
-    isGitActionRunning,
-    isSelectingWorktreeBase,
-  ]);
-
   const isDefaultRef = gitStatusForActions?.isDefaultRef ?? false;
 
   const gitActionMenuItems = buildMenuItems(
@@ -1167,38 +1130,13 @@ export default function GitActionsControl({
       })
     : null;
 
-  useEffect(() => {
-    if (gitCwd === null) {
-      return;
-    }
-
-    let refreshTimeout: number | null = null;
-    const scheduleRefreshCurrentGitStatus = () => {
-      if (refreshTimeout !== null) {
-        window.clearTimeout(refreshTimeout);
-      }
-      refreshTimeout = window.setTimeout(() => {
-        refreshTimeout = null;
-        requestVcsStatusRefresh(refreshVcsStatus, activeEnvironmentId, gitCwd);
-      }, GIT_STATUS_WINDOW_REFRESH_DEBOUNCE_MS);
-    };
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        scheduleRefreshCurrentGitStatus();
-      }
-    };
-
-    window.addEventListener("focus", scheduleRefreshCurrentGitStatus);
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-
-    return () => {
-      if (refreshTimeout !== null) {
-        window.clearTimeout(refreshTimeout);
-      }
-      window.removeEventListener("focus", scheduleRefreshCurrentGitStatus);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [activeEnvironmentId, gitCwd, refreshVcsStatus]);
+  useAtomMount(
+    vcsStatusRevalidation(
+      activeEnvironmentId !== null && gitCwd !== null
+        ? { environmentId: activeEnvironmentId, cwd: gitCwd }
+        : null,
+    ),
+  );
 
   // Toast actions must retain their original checkout/thread, so do not use an effect event.
   async function runGitActionWithToast({
@@ -1291,6 +1229,7 @@ export default function GitActionsControl({
         title: actionResult.toast.title,
         description: actionResult.toast.description ?? null,
         scopeKey: successScopeKey,
+        expiresAtMs: inlineSuccessExpiresAt(),
       });
       return;
     }
@@ -1424,7 +1363,12 @@ export default function GitActionsControl({
             ? `Updated ${pullResult.refName} from ${pullResult.upstreamRef ?? "upstream"}`
             : `${pullResult.refName} is already synchronized.`;
         if (isPanel) {
-          setInlineSuccess({ title, description, scopeKey: successScopeKey });
+          setInlineSuccess({
+            title,
+            description,
+            scopeKey: successScopeKey,
+            expiresAtMs: inlineSuccessExpiresAt(),
+          });
           return;
         }
         const successToastTiming = resolveGitActionResultToastTiming("success");
