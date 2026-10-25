@@ -93,13 +93,20 @@ async function pathExists(target: string): Promise<boolean> {
  * the copy and the truncate are lost.
  */
 export async function boundServiceLog(baseDir: string): Promise<void> {
-  // The unit and plist render `<home>/userdata/logs`; the service never runs with a dev state dir.
+  // Installs render `<home>/userdata/logs`; a maintainer install from a dev config renders
+  // `<home>/dev/logs`, which is left unbounded.
   const logPath = NodePath.join(baseDir, "userdata", "logs", SERVICE_LOG_FILE);
+  const archivePath = `${logPath}.1`;
   try {
     if ((await NodeFSP.stat(logPath)).size <= SERVICE_LOG_MAX_BYTES) return;
-    await NodeFSP.copyFile(logPath, `${logPath}.1`);
-    await NodeFSP.truncate(logPath, 0);
-  } catch {}
+  } catch {
+    return;
+  }
+  // The archive is best effort: on a full disk the copy fails, and the truncate is what frees space.
+  await NodeFSP.copyFile(logPath, archivePath).catch(() =>
+    NodeFSP.rm(archivePath, { force: true }).catch(() => undefined),
+  );
+  await NodeFSP.truncate(logPath, 0).catch(() => undefined);
 }
 
 const MANAGED_SERVICE_ENV_NAMES = new Set([
@@ -489,7 +496,7 @@ export class Launcher {
     process.once("SIGTERM", onSigterm);
     process.once("SIGINT", onSigint);
     this.#logTimer = setInterval(
-      () => void boundServiceLog(this.#baseDir),
+      () => this.#enqueue(() => boundServiceLog(this.#baseDir)),
       SERVICE_LOG_CHECK_INTERVAL_MS,
     ).unref();
     try {
