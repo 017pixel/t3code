@@ -28,7 +28,8 @@ import {
   projectScriptTerminalInput,
   resolveProjectScripts,
 } from "@t3tools/shared/projectScripts";
-import { Platform, ScrollView } from "react-native";
+import { Platform } from "react-native";
+import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useConnectionsReady } from "../../state/workspace";
 import { useEnvironmentShellReadiness } from "../../state/shell";
@@ -98,6 +99,7 @@ import {
   useWorkspaceBackNavigation,
 } from "../workspace/useAndroidWorkspaceNavigation";
 import { openSettings } from "../settings/settings-navigation";
+import { useSelectWorkspaceDetail } from "../workspace/useSelectWorkspaceDetail";
 
 interface ThreadInspectorSelection {
   readonly routeThreadIdentity: string | null;
@@ -339,6 +341,7 @@ function ThreadRouteContent(
     };
   })();
   const navigation = useNavigation();
+  const selectDetail = useSelectWorkspaceDetail();
   const openPullRequest = useOpenPullRequest();
   const mergeBack = useAtomCommand(threadEnvironment.mergeBack, "merge thread back");
   const mergeBackTargetThreadId = resolveMergeBackTargetThreadId(selectedThreadDetail);
@@ -366,9 +369,9 @@ function ThreadRouteContent(
     });
     mergeBackBusyRef.current = false;
     if (result._tag !== "Success") return;
-    navigation.navigate("Thread", {
-      environmentId: selectedThread.environmentId,
-      threadId: mergeBackTargetThreadId,
+    selectDetail({
+      name: "Thread",
+      params: { environmentId: selectedThread.environmentId, threadId: mergeBackTargetThreadId },
     });
   };
   const params = props.route.params ?? {};
@@ -758,9 +761,7 @@ function ThreadRouteContent(
     if (!creation?.creation || routeThreadIdentity === null) {
       return;
     }
-    // The drain restored the prompt and attachments into the recovery draft
-    // the rejected creation owns. Open that draft by id: without it the sheet
-    // mints a fresh empty one and the restored content is unreachable.
+    // Open recovery by draft id or the sheet creates an empty draft and strands restored content.
     try {
       await recoverFailedThreadDraft(creation);
     } catch (error) {
@@ -827,8 +828,7 @@ function ThreadRouteContent(
       localResendBusy.current = false;
       return;
     }
-    // V2 accepts the launch before setup runs, so cancellation never rejects
-    // the original outbox delivery. Reuse the server-owned prompt and uploads.
+    // V2 accepts launch before setup; cancellation cannot reject that delivery, so reuse server-owned prompt and uploads.
     const metadata = makeTurnCommandMetadata();
     const launched = await startLocalThread({
       environmentId: selectedThread.environmentId,
@@ -886,9 +886,7 @@ function ThreadRouteContent(
     return <OpeningThreadLoadingScreen />;
   }
 
-  // A queued creation renders as ready content: its prompt is the whole
-  // conversation until the server creates the thread. The subscription's
-  // not-found error for that window is expected, not a load failure.
+  // Queued creation displays its prompt before server creation; temporary not-found is expected.
   const contentPresentation =
     creationState !== null
       ? { kind: "ready" as const }
