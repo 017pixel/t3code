@@ -6,7 +6,7 @@ import {
   derivePendingUserInputProgress,
   type PendingUserInputDraftAnswer,
 } from "../../pendingUserInput";
-import { Checkbox } from "../ui/checkbox";
+import { CheckboxMark } from "../ui/checkbox";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Kbd } from "../ui/kbd";
 import { cn } from "~/lib/utils";
@@ -263,7 +263,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                   <>
                     <span className="pointer-events-none flex h-5 shrink-0 items-center">
                       {activeQuestion.multiSelect ? (
-                        <Checkbox checked={isSelected} tabIndex={-1} aria-hidden />
+                        <CheckboxMark checked={isSelected} />
                       ) : (
                         <OptionRadio checked={isSelected} />
                       )}
