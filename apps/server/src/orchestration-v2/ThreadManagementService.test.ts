@@ -445,12 +445,16 @@ it.effect.each([
 );
 
 // https://git.cafe/pingdotgg/t3code/issues/24667
+const SHELL_TEXT = 'Run printf "%s" "$HOME" > /tmp/report.txt, then budget $20, $1.5k, and $5M.';
 it.effect.each([
   { text: "PREFIX: $technical-writing mid-sentence. SUFFIX", mode: "auto", agent: true },
   { text: "PREFIX: €technical-writing mid-sentence. SUFFIX", mode: "steer", agent: true },
   { text: "PREFIX: 𑿝technical-writing mid-sentence. SUFFIX", mode: "auto", agent: true },
   { text: "/technical-writing PREFIX: report the text.", mode: "auto", agent: true },
   { text: "/technical-writing PREFIX: report the text.", mode: "steer", agent: true },
+  { text: `${SHELL_TEXT} Use $technical-writing now.`, mode: "steer", agent: true },
+  { text: SHELL_TEXT, mode: "auto", agent: true },
+  { text: "/tmp/report.txt holds the output. SUFFIX", mode: "steer", agent: true },
   { text: "PREFIX: $technical-writing mid-sentence. SUFFIX", mode: "auto", agent: false },
 ] as const)(
   "sendToThread with agent=$agent mode=$mode keeps skill dispatch only for the user: $text",
@@ -529,7 +533,10 @@ it.effect.each([
         planClaudeSkillDispatch(providerText, skills) !== undefined ||
         /^\s*\/technical-writing(?:\s|$)/u.test(providerText) ||
         [...providerText.matchAll(SKILL_MENTION_PATTERN)].length > 0;
-      expect(providerText).toContain("technical-writing");
-      expect(dispatchesSkill).toBe(!agent);
+      expect(dispatchesSkill).toBe(!agent && text.includes("technical-writing"));
+      // Only a word joiner right after the skill's sigil or leading slash may change.
+      expect(providerText).toBe(
+        agent ? text.replace(/([\p{Sc}/])(technical-writing)/u, "$1\u2060$2") : text,
+      );
     }),
 );

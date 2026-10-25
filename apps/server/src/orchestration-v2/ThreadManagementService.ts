@@ -36,6 +36,7 @@ import {
   ThreadId,
   type TurnItemId,
 } from "@t3tools/contracts";
+import { SKILL_MENTION_PATTERN } from "@t3tools/shared/composerInlineTokens";
 import { threadTranscriptHeader } from "@t3tools/shared/threadTranscript";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -61,9 +62,19 @@ import * as ServerSettings from "../serverSettings.ts";
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
 // Another agent's message must not invoke skills on the recipient: Claude and Codex expand a
-// currency sign before a name and Claude runs a leading `/name`. A word joiner breaks both, as
-// webhook prompts do, while the recipient still reads the same text.
-const AGENT_SKILL_SYNTAX = /\p{Sc}(?=[a-zA-Z0-9])|^\s*\//gu;
+// skill mention and Claude runs a leading `/name`. A word joiner breaks both, as webhook prompts
+// do, while the recipient still reads the same text. Quoted `"$HOME"`, amounts like `$20`, and
+// paths like `/tmp/out.txt` are not skill tokens and stay byte-identical.
+const LEADING_SLASH_COMMAND = /^\s*\/(?=[^\s/]+(?:\s|$))/u;
+
+function breakAgentSkillSyntax(text: string): string {
+  return text
+    .replace(
+      SKILL_MENTION_PATTERN,
+      (match, _prefix: string, name: string) => `${match.slice(0, -name.length)}\u2060${name}`,
+    )
+    .replace(LEADING_SLASH_COMMAND, "$&\u2060");
+}
 
 export interface ThreadManagementProvenance {
   readonly createdBy: OrchestrationV2Actor;
@@ -814,10 +825,7 @@ const make = Effect.gen(function* () {
       messageId: input.messageId,
       ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
       ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
-      text:
-        input.senderThreadId === undefined
-          ? input.text
-          : input.text.replace(AGENT_SKILL_SYNTAX, "$&\u2060"),
+      text: input.senderThreadId === undefined ? input.text : breakAgentSkillSyntax(input.text),
       attachments: input.attachments,
       ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
       dispatchMode,
