@@ -997,6 +997,39 @@ async function handle(input: OfficeWorkerRequest) {
       id,
       bytes: new Uint8Array(presentation!.mediaBytes(id)),
     }));
+    if (input.thumbnailRatio !== undefined) {
+      const ratio = Math.max(1, Math.min(3, input.thumbnailRatio));
+      const scale = (208 * ratio) / frame.width;
+      const canvas = new OffscreenCanvas(Math.ceil(208 * ratio), Math.ceil(112 * ratio));
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Canvas unavailable.");
+      const decoded = new Map<string, ImageBitmap>();
+      try {
+        for (const image of images) {
+          const bitmap = await createImageBitmap(new Blob([image.bytes]), {
+            resizeWidth: 624,
+            resizeQuality: "high",
+          }).catch(() => null);
+          if (bitmap) decoded.set(image.id, bitmap);
+        }
+        const { paintSlide } = await import("@betteroffice/pptx");
+        await paintSlide(context as unknown as CanvasRenderingContext2D, frame, 1, scale, {
+          resolveImage: (id) => decoded.get(id) ?? null,
+          maxShadowPixels: canvas.width * canvas.height * 4,
+        });
+        const count = presentation.snapshot().slides.length;
+        self.postMessage(
+          {
+            blob: await canvas.convertToBlob({ type: "image/webp", quality: 0.85 }),
+            label: `PPTX · ${count} ${count === 1 ? "slide" : "slides"}`,
+          },
+          { transfer: [] },
+        );
+      } finally {
+        for (const bitmap of decoded.values()) bitmap.close();
+      }
+      return;
+    }
     const slide = presentation.snapshot().slides[input.index];
     const text =
       slide?.shapes
@@ -1171,6 +1204,8 @@ async function handle(input: OfficeWorkerRequest) {
     const response = await fetch(fontUrl.default);
     if (!response.ok) throw new Error("Could not load the presentation font.");
     const font = await response.arrayBuffer();
+    const face = await new FontFace("Carlito", font).load();
+    (self as unknown as { fonts: FontFaceSet }).fonts.add(face);
     await initWasm();
     presentation = openPresentation(new Uint8Array(bytes), {
       fonts: [{ family: "Carlito", bytes: new Uint8Array(font) }],

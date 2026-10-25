@@ -1,3 +1,5 @@
+import { documentThumbnailKind } from "../files/documentThumbnailProtocol";
+import { DocumentAttachmentThumbnail } from "./DocumentAttachmentThumbnail";
 import { formatProviderSkillDisplayName } from "@t3tools/shared/inlineSkills";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
@@ -2096,8 +2098,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerOtherFiles = composerOtherFilesForPresentation(
     composerFiles,
     environmentId,
-    inlineFileIdSet,
+    new Set(
+      composerFiles
+        .filter((file) => inlineFileIdSet.has(file.id) && !documentThumbnailKind(file))
+        .map((file) => file.id),
+    ),
   );
+  const composerThumbnailFiles = composerOtherFiles.filter((file) => documentThumbnailKind(file));
+  const composerPlainFiles = composerOtherFiles.filter((file) => !documentThumbnailKind(file));
   const composerTerminalContexts = composerDraft.terminalContexts;
   const composerPreviewAnnotations = composerDraft.previewAnnotations;
   const composerReviewComments = composerDraft.reviewComments;
@@ -6400,6 +6408,129 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ],
   );
 
+  const renderComposerOtherFile = (file: (typeof composerOtherFiles)[number]) => {
+    const fileCanUpload =
+      supportsAttachmentUploads &&
+      maxFileAttachmentBytes !== null &&
+      file.sizeBytes <= maxFileAttachmentBytes;
+    const upload = fileCanUpload ? uploadsByImageId[file.id] : undefined;
+    const needsReattach = composerFileNeedsReattach(file);
+    const canReattachFile = fileStagingLimit !== null && file.sizeBytes <= fileStagingLimit;
+    return (
+      <DocumentAttachmentThumbnail
+        key={file.id}
+        file={file}
+        environmentId={file.uploadEnvironmentId ?? environmentId}
+        attachmentId={file.uploadedAttachmentId}
+        onOpen={() => setPreviewFileId(file.id)}
+        detailClassName={
+          upload?.status === "uploading"
+            ? "bottom-4"
+            : upload?.status === "failed"
+              ? "bottom-8"
+              : undefined
+        }
+        fallback={
+          <div
+            key={file.id}
+            className="flex min-w-0 items-center gap-2 py-1 text-sm text-foreground"
+          >
+            <PierreEntryIcon pathValue={file.name} kind="file" theme={resolvedTheme} />
+            <button
+              type="button"
+              disabled={needsReattach}
+              className="min-w-0 flex-1 truncate text-left hover:underline focus-visible:outline-2"
+              onClick={() => setPreviewFileId(file.id)}
+            >
+              {file.name}
+            </button>
+            <span className="shrink-0 text-xs text-secondary-label">
+              {needsReattach
+                ? canReattachFile
+                  ? "Attach again"
+                  : "Remove to send"
+                : upload?.status === "uploading"
+                  ? formatAttachmentUploadProgress(upload.progress)
+                  : formatAttachmentSize(file.sizeBytes)}
+            </span>
+            {!needsReattach && upload?.status === "failed" ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      onClick={() =>
+                        retryAttachmentUpload({
+                          environmentId,
+                          image: file,
+                          draftTarget: attachmentDraftTarget,
+                        })
+                      }
+                      disabled={!canOperateThread}
+                      aria-label={`Retry upload for ${file.name}`}
+                    />
+                  }
+                >
+                  <RefreshIcon />
+                </TooltipTrigger>
+                <TooltipPopup side="top">{upload.reason}</TooltipPopup>
+              </Tooltip>
+            ) : null}
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={() => removeComposerFileFromDraft(file.id)}
+              aria-label={`Remove ${file.name}`}
+            >
+              <XIcon />
+            </Button>
+          </div>
+        }
+      >
+        {upload?.status === "uploading" ? (
+          <span className="pointer-events-none absolute inset-x-0 bottom-0 bg-background/85 px-1 text-center text-3xs text-foreground">
+            {formatAttachmentUploadProgress(upload.progress)}
+          </span>
+        ) : upload?.status === "failed" ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="overlay"
+                  size="icon-xs"
+                  className="absolute bottom-1 left-1"
+                  onClick={() =>
+                    retryAttachmentUpload({
+                      environmentId,
+                      image: file,
+                      draftTarget: attachmentDraftTarget,
+                    })
+                  }
+                  disabled={!canOperateThread}
+                  aria-label={`Retry upload for ${file.name}`}
+                />
+              }
+            >
+              <RefreshIcon />
+            </TooltipTrigger>
+            <TooltipPopup side="top">{upload.reason}</TooltipPopup>
+          </Tooltip>
+        ) : null}
+        <span className="absolute right-1 top-1 opacity-0 transition-opacity pointer-coarse:opacity-100 group-hover/attachment:opacity-100 group-focus-within/attachment:opacity-100">
+          <Button
+            variant="media-close"
+            size="icon-xs"
+            onClick={() => removeComposerFileFromDraft(file.id)}
+            aria-label={`Remove ${file.name}`}
+          >
+            <XIcon />
+          </Button>
+        </span>
+      </DocumentAttachmentThumbnail>
+    );
+  };
+
   return (
     <form
       ref={composerFormRef}
@@ -6762,11 +6893,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 !isComposerApprovalState &&
                 (uncommittedSnapShotIds.length > 0 ||
                   composerVideos.length > 0 ||
+                  composerThumbnailFiles.length > 0 ||
                   expandedComposerImages.length > 0) && (
                   <div
                     className={cn(
                       "mb-3 flex max-w-full gap-2",
-                      pendingSnapShotIds.length > 0 ||
+                      composerThumbnailFiles.length > 0 ||
+                        pendingSnapShotIds.length > 0 ||
                         expandedComposerImages.some((image) => image.source?.kind === "snap-shot")
                         ? "snap-x snap-proximity overflow-x-auto overscroll-x-contain pb-1 scrollbar-thumb-foreground/18 scrollbar-track-transparent [scrollbar-width:thin] [&::-webkit-scrollbar]:h-2.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border-3 [&::-webkit-scrollbar-thumb]:border-transparent [&::-webkit-scrollbar-thumb]:bg-foreground/18 [&::-webkit-scrollbar-thumb]:bg-clip-content [&::-webkit-scrollbar-thumb:hover]:bg-foreground/28 [&::-webkit-scrollbar-track]:mx-1 [&::-webkit-scrollbar-track]:bg-transparent"
                         : "flex-wrap",
@@ -7013,84 +7146,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         </div>
                       );
                     })}
+                    {composerThumbnailFiles.map(renderComposerOtherFile)}
                   </div>
                 )}
 
               {!isComposerCollapsedMobile &&
                 !isComposerApprovalState &&
-                composerOtherFiles.length > 0 && (
+                composerPlainFiles.length > 0 && (
                   <div className="mb-3 flex flex-col gap-1">
-                    {composerOtherFiles.map((file) => {
-                      const fileCanUpload =
-                        supportsAttachmentUploads &&
-                        maxFileAttachmentBytes !== null &&
-                        file.sizeBytes <= maxFileAttachmentBytes;
-                      const upload = fileCanUpload ? uploadsByImageId[file.id] : undefined;
-                      const needsReattach = composerFileNeedsReattach(file);
-                      const canReattachFile =
-                        fileStagingLimit !== null && file.sizeBytes <= fileStagingLimit;
-                      return (
-                        <div
-                          key={file.id}
-                          className="flex min-w-0 items-center gap-2 py-1 text-sm text-foreground"
-                        >
-                          <PierreEntryIcon
-                            pathValue={file.name}
-                            kind="file"
-                            theme={resolvedTheme}
-                          />
-                          <button
-                            type="button"
-                            disabled={needsReattach}
-                            className="min-w-0 flex-1 truncate text-left hover:underline focus-visible:outline-2"
-                            onClick={() => setPreviewFileId(file.id)}
-                          >
-                            {file.name}
-                          </button>
-                          <span className="shrink-0 text-xs text-secondary-label">
-                            {needsReattach
-                              ? canReattachFile
-                                ? "Attach again"
-                                : "Remove to send"
-                              : upload?.status === "uploading"
-                                ? formatAttachmentUploadProgress(upload.progress)
-                                : formatAttachmentSize(file.sizeBytes)}
-                          </span>
-                          {!needsReattach && upload?.status === "failed" ? (
-                            <Tooltip>
-                              <TooltipTrigger
-                                render={
-                                  <Button
-                                    variant="ghost"
-                                    size="icon-xs"
-                                    onClick={() =>
-                                      retryAttachmentUpload({
-                                        environmentId,
-                                        image: file,
-                                        draftTarget: attachmentDraftTarget,
-                                      })
-                                    }
-                                    disabled={!canOperateThread}
-                                    aria-label={`Retry upload for ${file.name}`}
-                                  />
-                                }
-                              >
-                                <RefreshIcon />
-                              </TooltipTrigger>
-                              <TooltipPopup side="top">{upload.reason}</TooltipPopup>
-                            </Tooltip>
-                          ) : null}
-                          <Button
-                            variant="ghost"
-                            size="icon-xs"
-                            onClick={() => removeComposerFileFromDraft(file.id)}
-                            aria-label={`Remove ${file.name}`}
-                          >
-                            <XIcon />
-                          </Button>
-                        </div>
-                      );
-                    })}
+                    {composerPlainFiles.map(renderComposerOtherFile)}
                   </div>
                 )}
 

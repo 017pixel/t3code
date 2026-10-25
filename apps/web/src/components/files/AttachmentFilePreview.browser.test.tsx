@@ -1807,3 +1807,99 @@ it("toggles a Mermaid attachment between diagram and source through the lazy pre
   );
   expect(screen.container.querySelector('[role="alert"]')).toBeNull();
 });
+
+it("paints and caches a bounded CSV thumbnail without opening the viewer", async () => {
+  const { loadDocumentThumbnail } = await import("./documentThumbnail");
+  const file = new Blob(["Team,Status\nPlatform,Ready\nExperience,Review\n"], { type: "text/csv" });
+  const source = vi.fn<() => Promise<string | null>>();
+  const input = { kind: "csv" as const, file, source, ratio: 2 };
+  const first = await loadDocumentThumbnail("csv-thumbnail-test", input);
+  expect(first?.label).toBe("CSV · First rows");
+  expect(source).not.toHaveBeenCalled();
+  const bitmap = await createImageBitmap(first!.blob);
+  expect([bitmap.width, bitmap.height]).toEqual([416, 224]);
+  bitmap.close();
+  expect(await loadDocumentThumbnail("csv-thumbnail-test", input)).toBe(first);
+  expect(
+    await loadDocumentThumbnail("bad-pdf-thumbnail-test", { ...input, kind: "pdf" }),
+  ).toBeNull();
+});
+
+it("renders PDF thumbnails and navigates, searches, zooms, and selects PDF pages", async () => {
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Count 3 /Kids [3 0 R 5 0 R 7 0 R] >>",
+  ];
+  for (const [index, title] of [
+    "Quarterly outlook",
+    "Delivery milestones",
+    "Budget and risks",
+  ].entries()) {
+    const text = `BT /F1 24 Tf 30 700 Td (${title}) Tj ET`;
+    objects.push(
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 9 0 R >> >> /Contents ${4 + index * 2} 0 R >>`,
+      `<< /Length ${text.length} >>\nstream\n${text}\nendstream`,
+    );
+  }
+  objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  let source = "%PDF-1.4\n";
+  const offsets = [0];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(source.length);
+    source += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  }
+  const xref = source.length;
+  source += `xref\n0 10\n0000000000 65535 f \n${offsets
+    .slice(1)
+    .map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`)
+    .join("")}trailer\n<< /Size 10 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  const file = new Blob([source], { type: "application/pdf" });
+  const { loadDocumentThumbnail } = await import("./documentThumbnail");
+  const thumbnail = await loadDocumentThumbnail("pdf-thumbnail-test", {
+    kind: "pdf",
+    file,
+    source: async () => null,
+    ratio: 2,
+  });
+  expect(thumbnail?.label).toBe("PDF · 3 pages");
+  const bitmap = await createImageBitmap(thumbnail!.blob);
+  expect(bitmap.width).toBe(416);
+  bitmap.close();
+  const { default: PdfViewer } = await import("./PdfViewer");
+  const url = URL.createObjectURL(file);
+  try {
+    await using screen = await render(
+      <div style={{ display: "flex", height: 600, width: 500 }}>
+        <PdfViewer src={url} title="Planning PDF" />
+      </div>,
+    );
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("1 / 3 pages"), {
+      timeout: 15_000,
+    });
+    await screen.getByRole("button", { name: "Next page", exact: true }).click();
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("2 / 3 pages"));
+    await screen.getByRole("button", { name: "Zoom in", exact: true }).click();
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("125%"));
+    await screen.getByRole("button", { name: "Fit width", exact: true }).click();
+    await screen.getByRole("searchbox", { name: "Find in PDF" }).fill("Budget");
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("3 / 3 pages"), {
+      timeout: 15_000,
+    });
+    await vi.waitFor(() => {
+      const span = Array.from(screen.container.querySelectorAll("[data-pdf-text-layer] span")).find(
+        (node) => node.textContent === "Budget and risks",
+      );
+      expect(span).toBeDefined();
+      const range = document.createRange();
+      range.selectNodeContents(span!);
+      const selection = window.getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      expect(selection.toString()).toBe("Budget and risks");
+      expect(getComputedStyle(span!).userSelect).toBe("text");
+      selection.removeAllRanges();
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+});

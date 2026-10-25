@@ -7,7 +7,7 @@ export const OFFICE_PREVIEW_MAX_COLUMNS = 1024;
 
 export type OfficeWorkerRequest =
   | { readonly type: "open"; readonly kind: OfficePreviewKind; readonly bytes: ArrayBuffer }
-  | { readonly type: "slide"; readonly index: number }
+  | { readonly type: "slide"; readonly index: number; readonly thumbnailRatio?: number }
   | { readonly type: "sheet-page"; readonly sheet: number; readonly index: number };
 
 export type NotebookCell = {
