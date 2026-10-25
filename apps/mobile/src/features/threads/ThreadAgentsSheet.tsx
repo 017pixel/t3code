@@ -51,10 +51,16 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
   const subagents = turn?.subagents ?? [];
   const hasLiveAgent = (turn?.liveCount ?? 0) > 0;
 
-  const openChildThread = (childThreadId: ThreadId, environmentId = target.environmentId) => {
+  // A remote child names its own environment; a local child is in this thread's.
+  const openChildThread = (childThreadId: ThreadId, childEnvironmentId?: EnvironmentId) => {
     void Haptics.selectionAsync();
     // Replace this leaf sheet so the child enters the workspace stack expected by Home's Back button.
-    navigation.dispatch(StackActions.replace("Thread", { environmentId, threadId: childThreadId }));
+    navigation.dispatch(
+      StackActions.replace("Thread", {
+        environmentId: childEnvironmentId ?? target.environmentId,
+        threadId: childThreadId,
+      }),
+    );
   };
 
   const content = (

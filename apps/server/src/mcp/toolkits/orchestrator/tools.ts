@@ -216,7 +216,7 @@ const CreateThreadsTool = Tool.make("create_threads", {
 
 const ThreadListTool = Tool.make("t3_thread_list", {
   description:
-    "List threads in a project, newest first. Omit `projectId` for yours. Filter by status, title, settled, or snoozed. Page with the cursor. Mesh: a `projectId` from another machine lists there; `machine` lists that machine's project for this repository (the error lists its projects); `machine: \"all\"` returns one section per machine.",
+    'List threads in a project, newest first. Omit `projectId` for yours. Filter by status, title, settled, or snoozed. Page with the cursor. Mesh: a `projectId` from another machine lists there; `machine` lists that machine\'s project for this repository (the error lists its projects); `machine: "all"` returns one section per machine.',
   parameters: OrchestratorMcpThreadListInput,
   success: orchestratorMcpMachineListResult(OrchestratorMcpThreadListResult),
   failure: OrchestratorMcpFailure,
