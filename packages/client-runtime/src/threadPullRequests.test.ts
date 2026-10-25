@@ -12,6 +12,7 @@ import {
   resolveThreadPullRequestChains,
   resolveThreadPullRequestBadge,
   threadPullRequestKeysEqual,
+  threadPullRequestsOpenFirst,
 } from "./threadPullRequests.ts";
 
 // Remove ES2023 array methods to match Hermes on mobile.
@@ -429,6 +430,20 @@ describe("threadPullRequestSearchTerms", () => {
     expect(terms).toContain("Fix login");
     expect(terms).toContain("#34");
     expect(terms.join(" ")).not.toContain("56");
+  });
+});
+
+describe("threadPullRequestsOpenFirst", () => {
+  it("puts open links first, newest first, and drops dismissed links", () => {
+    const at = (updatedAt: string) => ({ updatedAt: `2026-01-0${updatedAt}T00:00:00.000Z` });
+    const ordered = threadPullRequestsOpenFirst([
+      link(1, { snapshot: snapshot({ state: "merged", ...at("9") }) }),
+      link(2, { snapshot: snapshot(at("2")) }),
+      link(3, { snapshot: snapshot({ state: "closed", ...at("3") }) }),
+      link(4, { snapshot: snapshot({ isDraft: true, ...at("4") }) }),
+      link(5, { source: "stack-dismissed", snapshot: snapshot(at("8")) }),
+    ]);
+    expect(ordered.map((entry) => entry.number)).toEqual([4, 2, 1, 3]);
   });
 });
 

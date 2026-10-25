@@ -26,9 +26,11 @@ import {
   resolveThreadPullRequestBadge,
   resolveThreadPullRequestChains,
   type ThreadPullRequestBadge,
+  threadPullRequestsOpenFirst,
   visibleThreadPullRequests,
 } from "@t3tools/client-runtime/thread-pull-requests";
 import { useRender } from "@base-ui/react/use-render";
+import { InlineButton } from "./ui/button";
 import { type ReactNode, type AnimationEvent, type MouseEvent, type ReactElement } from "react";
 import { cn } from "../lib/utils";
 import { revealThreadTerminal } from "../lib/revealThreadTerminal";
@@ -239,6 +241,80 @@ export function ThreadPullRequestBadgeControl({
       onOpenList={onOpenList}
       onOpenPullRequest={onOpenPullRequest}
     />
+  );
+}
+
+const SHOWN_PULL_REQUEST_NUMBERS = 2;
+
+/** Compact form for threads with several PRs: the first numbers, then a count that opens the list. */
+export function ThreadPullRequestNumbers({
+  badge,
+  pullRequests,
+  onOpenList,
+  onOpenPullRequest,
+}: {
+  badge: ThreadPullRequestBadge;
+  pullRequests: ReadonlyArray<ThreadPullRequestLink>;
+  onOpenList: () => void;
+  onOpenPullRequest: (event: MouseEvent<HTMLElement>, url: string) => void;
+}) {
+  const ordered = threadPullRequestsOpenFirst(pullRequests);
+  const shown = ordered.slice(0, SHOWN_PULL_REQUEST_NUMBERS);
+  const hidden = ordered.length - shown.length;
+  const aggregate = PULL_REQUEST_STATE_PRESENTATION[badge.state];
+  const Icon = badge.kind === "stack" ? PullRequestGlyph.stack : aggregate.Icon;
+  const terminology = changeRequestTerminologyForUrl(shown[0]?.url);
+  return (
+    <span className="flex min-w-0 items-center gap-1 text-xs tabular-nums">
+      <Icon aria-hidden className={cn("size-3 shrink-0", aggregate.toneClassName)} />
+      {shown.map((link) => {
+        const state =
+          link.snapshot === null
+            ? null
+            : resolvePullRequestState({
+                state: link.snapshot.state,
+                isDraft: link.snapshot.isDraft,
+              });
+        return (
+          <InlineButton
+            key={link.url}
+            render={<a href={link.url} target="_blank" rel="noopener noreferrer" />}
+            aria-label={[
+              `${terminology.shortLabel} #${link.number}`,
+              state?.label,
+              link.snapshot?.title,
+            ]
+              .filter(Boolean)
+              .join(", ")}
+            onPointerDown={(event: MouseEvent<HTMLElement>) => event.stopPropagation()}
+            onClick={(event: MouseEvent<HTMLElement>) => onOpenPullRequest(event, link.url)}
+          >
+            <span
+              className={cn(
+                "contents font-normal",
+                state?.toneClassName ?? "text-muted-foreground",
+              )}
+            >
+              {link.number}
+            </span>
+          </InlineButton>
+        );
+      })}
+      {hidden > 0 ? (
+        <InlineButton
+          tone="muted"
+          aria-label={`Show all ${ordered.length} ${terminology.plural}`}
+          onPointerDown={(event: MouseEvent<HTMLElement>) => event.stopPropagation()}
+          onClick={(event: MouseEvent<HTMLElement>) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onOpenList();
+          }}
+        >
+          <span className="contents font-normal">+{hidden}</span>
+        </InlineButton>
+      ) : null}
+    </span>
   );
 }
 

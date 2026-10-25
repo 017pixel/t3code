@@ -4,6 +4,7 @@ import { sourceControlClients } from "./sourceControlClients.ts";
 
 export {
   threadPullRequestSearchTerms,
+  threadPullRequestsOpenFirst,
   visibleThreadPullRequests,
 } from "@t3tools/shared/threadPullRequests";
 export {
