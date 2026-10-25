@@ -113,7 +113,6 @@ export function SidebarSectionHeader(props: {
       : props.marker === "snoozed-header"
         ? "snoozed"
         : "settled";
-  const snoozed = shelf === "snoozed";
   return (
     <SortableSidebarMarker
       marker={props.marker}
@@ -123,9 +122,7 @@ export function SidebarSectionHeader(props: {
       <CollapsibleSectionHeader
         onClick={props.toggle.onToggle}
         expanded={props.toggle.expanded}
-        tone={
-          props.isDropTarget ? "accent" : props.dragging ? "emphasized" : snoozed ? "info" : "muted"
-        }
+        tone={props.isDropTarget ? "accent" : props.dragging ? "emphasized" : "muted"}
         data-testid={`sidebar-${shelf}-shelf-toggle`}
       >
         {props.label}
