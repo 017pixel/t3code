@@ -1002,6 +1002,7 @@ export default function FilePreviewPanel({
   const relativePath =
     attachment === undefined ? resolveFilePreviewPath(requestedPath, cwd) : requestedPath;
   const draft = typeof composerDraftTarget === "string";
+  const [documentRefreshId, setDocumentRefreshId] = useState(0);
   const { resolvedTheme } = useTheme();
   const wordWrap = useClientSettings((settings) => settings.wordWrap);
   const canOperatePreview = useEnvironmentScope(environmentId, AuthPreviewOperateScope);
@@ -1389,7 +1390,7 @@ export default function FilePreviewPanel({
             absolutePath &&
             (isDocument || file.readError?.failure === "binary_file") ? (
             <AttachmentFilePreview
-              key={`${environmentId}:${absolutePath}:${workspaceMutationId}`}
+              key={`${environmentId}:${absolutePath}:${workspaceMutationId}:${documentRefreshId}`}
               name={relativePath.split(/[\\/]/).at(-1) || relativePath}
               mimeType="application/octet-stream"
               sizeBytes={0}
@@ -1512,8 +1513,12 @@ export default function FilePreviewPanel({
               selectedPathRevealId={revealRequestId}
               onOpenFile={onOpenFile}
               workspaceMutationId={workspaceMutationId}
-              {...(previewPath && !isMedia && !isPdf && !isDocument
-                ? { onRefreshSelectedFile: file.refresh }
+              {...(previewPath && !isMedia && !isPdf
+                ? {
+                    onRefreshSelectedFile: isDocument
+                      ? () => setDocumentRefreshId((revision) => revision + 1)
+                      : file.refresh,
+                  }
                 : {})}
             />
           </aside>

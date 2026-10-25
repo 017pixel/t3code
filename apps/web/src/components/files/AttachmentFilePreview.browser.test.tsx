@@ -1047,6 +1047,49 @@ describe("standalone Mermaid previews", () => {
   });
 });
 
+it("reloads a workspace Word file after a preview remount", async () => {
+  const { default: JSZip } = await import("jszip");
+  let heading = "Original outlook";
+  using _fetch = stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      const archive = new JSZip().file(
+        "word/document.xml",
+        `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${heading}</w:t></w:r></w:p></w:body></w:document>`,
+      );
+      return new Response(await archive.generateAsync({ type: "arraybuffer" }));
+    }),
+  );
+  refresh.mockReset().mockResolvedValue("https://example.com/workspace.docx");
+  const asset = { environmentId: EnvironmentId.make("test-environment"), attachmentId: "word" };
+  await using screen = await render(
+    <AttachmentFilePreview
+      key="original"
+      name="outlook.docx"
+      mimeType="application/octet-stream"
+      sizeBytes={0}
+      asset={asset}
+    />,
+  );
+  await vi.waitFor(() => expect(screen.container.textContent).toContain("Original outlook"), {
+    timeout: 10_000,
+  });
+  heading = "Revised outlook";
+  await screen.rerender(
+    <AttachmentFilePreview
+      key="refreshed"
+      name="outlook.docx"
+      mimeType="application/octet-stream"
+      sizeBytes={0}
+      asset={asset}
+    />,
+  );
+  await vi.waitFor(() => expect(screen.container.textContent).toContain("Revised outlook"), {
+    timeout: 10_000,
+  });
+  expect(screen.container.textContent).not.toContain("Original outlook");
+});
+
 it("clears an Office metadata error when the same URL becomes previewable", async () => {
   const src = "data:application/octet-stream,invalid-office-file";
   let resolveResponse!: (response: Response) => void;
