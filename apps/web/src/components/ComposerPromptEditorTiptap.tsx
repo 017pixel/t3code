@@ -1839,7 +1839,7 @@ function ComposerPromptEditorTiptapInner(
             {isEmpty && contextRecords.size === 0 && placeholder ? (
               <div
                 className={cn(
-                  "pointer-events-none absolute inset-0 leading-relaxed text-placeholder/85",
+                  "pointer-events-none absolute inset-0 leading-relaxed text-placeholder dark:text-placeholder/85",
                   placeholderClassName,
                 )}
               >
