@@ -194,7 +194,7 @@ describe("large text preview recovery", () => {
   });
 
   it("reveals and highlights requested source lines again for a new request", async () => {
-    const view = (line: number, request: number) => (
+    const view = (line: number, request: number, loaded = true) => (
       <div style={{ display: "flex", height: 400, width: 600 }}>
         <VirtualTablePreview
           name="log.txt"
@@ -205,14 +205,22 @@ describe("large text preview recovery", () => {
           revealLine={line}
           revealRequestId={request}
           getRows={(page) =>
-            Array.from({ length: 32 }, (_, i) => [
-              "line-" + (page * 32 + i + 1) + " wrapped source text".repeat(20),
-            ])
+            loaded || page === 0
+              ? Array.from({ length: 32 }, (_, i) => [
+                  "line-" + (page * 32 + i + 1) + " wrapped source text".repeat(20),
+                ])
+              : undefined
           }
         />
       </div>
     );
-    await using screen = await render(view(500, 1));
+    await using screen = await render(view(500, 1, false));
+    await vi.waitFor(() =>
+      expect(screen.container.querySelector('[data-preview-reveal="true"]')?.textContent).toBe(
+        "500",
+      ),
+    );
+    await screen.rerender(view(500, 1));
     await vi.waitFor(() =>
       expect(screen.container.querySelector('[data-preview-reveal="true"]')?.textContent).toContain(
         "line-500",
@@ -244,6 +252,54 @@ describe("large text preview recovery", () => {
     );
     await vi.waitFor(checkVisible);
   });
+
+  it.each([5, 100, 10_000])(
+    "preserves the source row when indexing grows beyond %i lines",
+    async (count) => {
+      const view = (count: number) => (
+        <div style={{ display: "flex", height: 400, width: 600 }}>
+          <VirtualTablePreview
+            name="growing.txt"
+            count={count}
+            columns={1}
+            source
+            wrap
+            getRows={(page) =>
+              Array.from({ length: 32 }, (_, i) => [
+                `line-${page * 32 + i + 1} ` + "wrapped source text ".repeat(20),
+              ])
+            }
+          />
+        </div>
+      );
+      await using screen = await render(view(count));
+      const viewport = () => screen.container.querySelector<HTMLElement>('[tabindex="0"]')!;
+      await vi.waitFor(() => expect(viewport()?.scrollHeight).toBeGreaterThan(400));
+      await act(() => {
+        viewport().scrollTop = 1200;
+        viewport().dispatchEvent(new Event("scroll", { bubbles: true }));
+      });
+      const visibleRow = () =>
+        [...screen.container.querySelectorAll<HTMLElement>("[data-preview-row]")].find(
+          (row) => row.getBoundingClientRect().bottom > viewport().getBoundingClientRect().top + 1,
+        )!;
+      await vi.waitFor(() => expect(visibleRow()).toBeDefined());
+      const before = visibleRow().dataset.previewRow;
+      const offset =
+        visibleRow().getBoundingClientRect().top - viewport().getBoundingClientRect().top;
+      await screen.rerender(view(1_000_000));
+      await vi.waitFor(() => {
+        expect(visibleRow().dataset.previewRow).toBe(before);
+        expect(
+          Math.abs(
+            visibleRow().getBoundingClientRect().top -
+              viewport().getBoundingClientRect().top -
+              offset,
+          ),
+        ).toBeLessThan(5);
+      });
+    },
+  );
 
   it("recovers from a failed worker load when its source changes", async () => {
     await using screen = await render(
@@ -1380,6 +1436,11 @@ it("copies every indexed line rather than the mounted preview rows", async () =>
   );
   await vi.waitFor(() => expect(screen.container.textContent).toContain("line-0"));
   await vi.waitFor(async () => expect(await copyContents.current!()).toBe(text));
+  const first = copyContents.current!();
+  await expect(copyContents.current!()).rejects.toThrow("Another copy is in progress.");
+  expect(await first).toBe(text);
+  expect(await copyContents.current!()).toBe(text);
+  expect(screen.container.querySelector('[role="alert"]')).toBeNull();
 });
 
 it("loads a font attachment through the lazy preview", async () => {
