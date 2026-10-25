@@ -1,4 +1,4 @@
-import { isTransportConnectionErrorMessage } from "@t3tools/client-runtime/errors";
+import { isRetryableDeliveryFailure } from "@t3tools/client-runtime/errors";
 import {
   clampFileAttachmentUploadBytes,
   fileAttachmentTooLargeMessage,
@@ -242,34 +242,7 @@ export function isQueuedThreadCreationSendable(message: QueuedThreadMessage): bo
   return message.creation.workspaceMode !== "worktree" || Boolean(message.creation.branch);
 }
 
-function errorMessage(error: unknown): string | null {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  if (typeof error === "object" && error !== null && "message" in error) {
-    return typeof error.message === "string" ? error.message : null;
-  }
-  return typeof error === "string" ? error : null;
-}
-
-/** Dispatch/auth rejections invalidate payloads; other typed failures may be disconnected transports and must retry. */
-export function shouldRetryThreadOutboxDelivery(error: unknown): boolean {
-  if (typeof error === "object" && error !== null && "_tag" in error) {
-    switch (error._tag) {
-      case "OrchestrationDispatchCommandError":
-      case "EnvironmentAuthorizationError":
-        return false;
-      case "ConnectionTransientError":
-      case "RpcClientError":
-      case "EnvironmentRpcUnavailableError":
-      case "EnvironmentNotRegisteredError":
-        return true;
-      default:
-        break;
-    }
-  }
-  return isTransportConnectionErrorMessage(errorMessage(error));
-}
+export const shouldRetryThreadOutboxDelivery = isRetryableDeliveryFailure;
 
 export type ThreadOutboxCommandStage = "settings-sync" | "start-turn";
 export type ThreadOutboxFailureAction = "retry" | "restore";

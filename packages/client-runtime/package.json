@@ -275,6 +275,10 @@
       "types": "./src/state/threads.ts",
       "default": "./src/state/threads.ts"
     },
+    "./state/turn-delivery": {
+      "types": "./src/state/turnDelivery.ts",
+      "default": "./src/state/turnDelivery.ts"
+    },
     "./state/subagent-display": {
       "types": "./src/state/subagentDisplay.ts",
       "default": "./src/state/subagentDisplay.ts"
