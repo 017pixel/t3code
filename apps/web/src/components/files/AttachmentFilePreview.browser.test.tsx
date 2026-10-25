@@ -2390,3 +2390,79 @@ it.each(["rtf", "epub", "ods"] as const)(
     expect(screen.container.querySelector('[role="alert"]')).toBeNull();
   },
 );
+
+it.each(["epub", "odt", "ipynb"] as const)(
+  "bounds %s image pixels before returning browser markup",
+  async (kind) => {
+    const canvas = new OffscreenCanvas(2, 3);
+    canvas.getContext("2d");
+    const blob = await canvas.convertToBlob({ type: "image/png" });
+    for (const width of [2, 12000]) {
+      const image = await blob.arrayBuffer();
+      new DataView(image).setUint32(16, width);
+      new DataView(image).setUint32(20, width === 2 ? 3 : 12000);
+      const archive = new JSZip();
+      archive.file("cover.png", image);
+      if (kind === "epub") {
+        archive.file(
+          "META-INF/container.xml",
+          '<container><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>',
+        );
+        archive.file(
+          "book.opf",
+          '<package><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>',
+        );
+        archive.file(
+          "chapter.xhtml",
+          '<html><body><p>retained caption</p><img src="cover.png"/></body></html>',
+        );
+      } else
+        archive.file(
+          "content.xml",
+          '<office:document><office:text><text:p>retained caption</text:p><draw:image xlink:href="cover.png"/></office:text></office:document>',
+        );
+      const base64 = btoa(String.fromCharCode(...new Uint8Array(image)));
+      const bytes =
+        kind === "ipynb"
+          ? new TextEncoder().encode(
+              JSON.stringify({
+                nbformat: 4,
+                cells: [
+                  {
+                    cell_type: "code",
+                    source: "plot()",
+                    outputs: [{ data: { "image/png": base64, "text/plain": "retained caption" } }],
+                  },
+                ],
+              }),
+            ).buffer
+          : await archive.generateAsync({ type: "arraybuffer" });
+      const worker = new Worker(new URL("./officePreview.worker.ts", import.meta.url), {
+        type: "module",
+      });
+      try {
+        const result = await new Promise<OfficeWorkerResult>((resolve) => {
+          worker.addEventListener(
+            "message",
+            (event: MessageEvent<OfficeWorkerResult>) => resolve(event.data),
+            { once: true },
+          );
+          worker.postMessage({ type: "open", kind, bytes }, [bytes]);
+        });
+        if (result.type === "notebook") {
+          expect(result.cells[0]!.outputs.some((output) => output.kind === "image")).toBe(
+            width === 2,
+          );
+          if (width !== 2) expect(result.cells[0]!.outputs[0]!.text).toBe("retained caption");
+        } else {
+          expect(result.type).toBe("document");
+          if (result.type !== "document") throw new Error("Expected document");
+          expect(result.pages[0]!.html.includes("<img")).toBe(width === 2);
+          expect(result.pages[0]!.html).toContain("retained caption");
+        }
+      } finally {
+        worker.terminate();
+      }
+    }
+  },
+);

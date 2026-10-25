@@ -1,3 +1,7 @@
+import {
+  IMAGE_DIMENSIONS_HEADER_BYTES,
+  readImageDimensions,
+} from "@t3tools/shared/imageDimensions";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { decodeHTMLStrict as decodeEntities } from "entities";
 import type JSZip from "jszip";
@@ -130,6 +134,10 @@ function archivePath(base: string, href: string): string | null {
   }
   return parts.join("/");
 }
+function imageFits(bytes: Uint8Array) {
+  const size = readImageDimensions(bytes.subarray(0, IMAGE_DIMENSIONS_HEADER_BYTES));
+  return size !== null && size.width <= 16_777_216 / size.height;
+}
 async function imageData(archive: JSZip, path: string | null): Promise<string> {
   if (!path) return "";
   const mime = (
@@ -138,7 +146,7 @@ async function imageData(archive: JSZip, path: string | null): Promise<string> {
   const entry = archive.file(path);
   if (!mime || !entry) return "";
   const bytes = await entry.async("uint8array");
-  if (bytes.length > 4 * 1024 * 1024) return "";
+  if (bytes.length > 4 * 1024 * 1024 || !imageFits(bytes)) return "";
   reserveMarkup(4 * Math.ceil(bytes.length / 3) + 100);
   return `data:image/${mime};base64,${await entry.async("base64")}`;
 }
@@ -394,7 +402,17 @@ export function openNotebook(bytes: ArrayBuffer): OfficeWorkerResult {
           for (const mime of ["image/png", "image/jpeg", "image/gif", "image/webp"]) {
             if (data[mime]) {
               const base64 = notebookText(data[mime], 4 * 1024 * 1024).replaceAll(/\s/g, "");
-              if (/^[a-z\d+/]*={0,2}$/i.test(base64))
+              if (
+                /^[a-z\d+/]*={0,2}$/i.test(base64) &&
+                base64.length % 4 !== 1 &&
+                (!base64.endsWith("=") || base64.length % 4 === 0) &&
+                imageFits(
+                  Uint8Array.from(
+                    atob(base64.slice(0, 4 * Math.ceil(IMAGE_DIMENSIONS_HEADER_BYTES / 3))),
+                    (char) => char.charCodeAt(0),
+                  ),
+                )
+              )
                 return { kind: "image" as const, text: `data:${mime};base64,${base64}` };
             }
           }

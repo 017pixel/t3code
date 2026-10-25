@@ -228,6 +228,13 @@ describe("document preview contents", () => {
   });
 
   it("stops repeated slide images before encoding beyond the output budget", async () => {
+    const pixels = new Uint8Array(4 * 1024 * 1024);
+    pixels.set(
+      Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==",
+        "base64",
+      ),
+    );
     const archive = new JSZip()
       .file(
         "content.xml",
@@ -235,7 +242,7 @@ describe("document preview contents", () => {
           '<d:page><d:image l:href="picture.png"/></d:page>'.repeat(500) +
           "</o:body></o:document-content>",
       )
-      .file("picture.png", new Uint8Array(4 * 1024 * 1024));
+      .file("picture.png", pixels);
     const image = archive.file("picture.png")!;
     const read = vi.spyOn(image, "async");
     await expect(openDocument(archive, "odp")).rejects.toThrow("too large");
@@ -344,7 +351,13 @@ describe("document preview contents", () => {
         "Book/two&&&.xhtml",
         '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html><head><title>Second</title></head><body><h1>Second chapter</h1><p>A&nbsp;B &copy; &mdash; &NotEqualTilde; &amp;lt;</p><img src="cover.png" alt="&copy; &NotEqualTilde;"/></body></html>',
       )
-      .file("Book/cover.png", new Uint8Array([137, 80, 78, 71]));
+      .file(
+        "Book/cover.png",
+        Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==",
+          "base64",
+        ),
+      );
     const result = await openEpub(archive);
     expect(result.type).toBe("document");
     if (result.type !== "document") throw new Error("Expected document");
