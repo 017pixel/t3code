@@ -12,7 +12,6 @@ import {
 import { ChevronDownIcon } from "lucide-react";
 import {
   memo,
-  useEffect,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -39,7 +38,7 @@ import {
 import { observeResize } from "~/lib/observeResize";
 import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
-import { useClientSettings } from "../../hooks/useSettings";
+import { subscribeClientSettings } from "../../hooks/useSettings";
 import { GuestShareIndicator } from "./GuestShareControls";
 
 interface ChatHeaderProps {
@@ -81,8 +80,6 @@ export const ChatHeader = memo(function ChatHeader({
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.isScratch ? "No project" : activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
-  const interfaceFont = useClientSettings((settings) => settings.fontFamilySans);
-  const breadcrumbContainerRef = useRef<HTMLDivElement>(null);
   const [collapseParentTitle, setCollapseParentTitle] = useState(false);
   const activeThreadRef = scopeThreadRef(activeThreadEnvironmentId, activeThreadId);
   const canOperateThread = useEnvironmentScope(
@@ -112,10 +109,13 @@ export const ChatHeader = memo(function ChatHeader({
     renaming.environmentId === activeThreadEnvironmentId
       ? renaming.title
       : null;
-  const isRenamingTitle = renamingTitle !== null;
-  useEffect(() => {
-    const list = breadcrumbContainerRef.current?.querySelector("ol");
-    if (!list || !parentThreadLink) return;
+  const hasParentThreadLink = parentThreadLink !== null;
+  // Titles, interface font settings and the rename field change text widths
+  // without resizing a shrunk list, so item resizes, text or structure mutations
+  // and settings writes re-measure.
+  const measureBreadcrumb = (container: HTMLDivElement | null) => {
+    const list = container?.querySelector("ol");
+    if (!list || !hasParentThreadLink) return;
     const measure = () => {
       const gap = Number.parseFloat(getComputedStyle(list).columnGap) || 0;
       const width = Array.from(list.children).reduce(
@@ -135,23 +135,31 @@ export const ChatHeader = memo(function ChatHeader({
       );
       setCollapseParentTitle(width > list.clientWidth);
     };
-    measure();
-    const frame = requestAnimationFrame(measure);
+    // Item contents carry the widths being summed; the list itself rarely resizes.
+    let stopObserving = () => {};
+    const observe = () => {
+      stopObserving();
+      const contents = Array.from(list.children, (item) => item.firstElementChild).filter(
+        (element) => element !== null,
+      );
+      stopObserving = observeResize([list, ...contents], measure);
+    };
+    const mutations = new MutationObserver(() => {
+      observe();
+      measure();
+    });
+    mutations.observe(list, { childList: true, subtree: true, characterData: true });
     document.fonts.addEventListener("loadingdone", measure);
-    const stopObserving = observeResize(list, measure);
+    // appInit applies font variables from an earlier settings subscriber, so they are set here.
+    const stopSettings = subscribeClientSettings(measure);
+    observe();
     return () => {
-      cancelAnimationFrame(frame);
+      mutations.disconnect();
+      stopSettings();
       document.fonts.removeEventListener("loadingdone", measure);
       stopObserving();
     };
-  }, [
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Title, font and rename changes resize the breadcrumb text without resizing the list, so it re-measures.
-    activeProjectName,
-    activeThreadTitle,
-    parentThreadLink,
-    interfaceFont,
-    isRenamingTitle,
-  ]);
+  };
   const renameCommittedRef = useRef(false);
   const startRename = () => {
     if (
@@ -202,15 +210,14 @@ export const ChatHeader = memo(function ChatHeader({
     clearTimeout(titleMenuTimerRef.current);
     titleMenuTimerRef.current = null;
   };
-  useEffect(
-    () => () => {
-      if (titleMenuTimerRef.current === null) return;
-      clearTimeout(titleMenuTimerRef.current);
-      titleMenuTimerRef.current = null;
-    },
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A pending title menu belongs to the thread that was clicked, so switching threads drops it.
-    [activeThreadEnvironmentId, activeThreadId],
-  );
+  // The button is keyed by thread, so a pending menu dies with the thread that was clicked.
+  const attachTitleButton = (node: HTMLButtonElement | null) => {
+    titleButtonRef.current = node;
+    return () => {
+      cancelPendingTitleMenu();
+      titleButtonRef.current = null;
+    };
+  };
   const openTitleMenuNow = () => {
     cancelPendingTitleMenu();
     const rect = titleButtonRef.current?.getBoundingClientRect();
@@ -270,7 +277,7 @@ export const ChatHeader = memo(function ChatHeader({
   };
   return (
     <div
-      ref={breadcrumbContainerRef}
+      ref={measureBreadcrumb}
       className={cn(
         "flex min-w-0 flex-1 items-center gap-2 sm:gap-3",
         rightPanelOpen ? "pr-10" : "pr-24",
@@ -365,11 +372,11 @@ export const ChatHeader = memo(function ChatHeader({
               onKeyDown={handleRenameKeyDown}
             />
           ) : isServerThread ? (
-            <Tooltip>
+            <Tooltip key={`${activeThreadEnvironmentId}:${activeThreadId}`}>
               <TooltipTrigger
                 render={
                   <button
-                    ref={titleButtonRef}
+                    ref={attachTitleButton}
                     type="button"
                     aria-label={`Thread actions for ${activeThreadTitle}`}
                     aria-haspopup="menu"

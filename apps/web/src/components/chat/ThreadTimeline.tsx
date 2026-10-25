@@ -1,14 +1,12 @@
 import type { ScopedThreadRef } from "@t3tools/contracts";
-import { type ComponentProps, useLayoutEffect } from "react";
-import { useIncrementalTimelineEntries } from "../../hooks/useIncrementalTimelineEntries";
+import type { ComponentProps } from "react";
+import {
+  peekReadyThreadTimeline,
+  useIncrementalTimelineEntries,
+} from "../../hooks/useIncrementalTimelineEntries";
 import type { TimelineEntriesInput, TimelineEntry } from "../../session-logic";
 import { useThreadVisibleTurnItems } from "../../state/entities";
-import {
-  peekRememberedThreadTimeline,
-  rememberReadyThreadTimeline,
-  resolveThreadSwitchTimeline,
-  timelineHasEphemeralPreviewUrls,
-} from "../ChatView.logic";
+import { resolveThreadSwitchTimeline } from "../ChatView.logic";
 import { MessagesTimeline } from "./MessagesTimeline";
 
 /**
@@ -39,27 +37,17 @@ export function ThreadTimeline({
   readyWorkspaceRoot: string | null;
 }) {
   const visibleTurnItems = useThreadVisibleTurnItems(threadDetailRef);
-  const serverEntries = useIncrementalTimelineEntries(activeThreadKey, {
-    ...entriesInput,
-    visibleTurnItems,
-  });
+  const serverEntries = useIncrementalTimelineEntries(
+    activeThreadKey,
+    { ...entriesInput, visibleTurnItems },
+    detailLoading ? null : { markdownCwd: readyMarkdownCwd, workspaceRoot: readyWorkspaceRoot },
+  );
   const entries = draftEntries ?? serverEntries;
   const displayed = resolveThreadSwitchTimeline({
     loading: entries.length === 0 && syncing,
     activeThreadKey,
     nextEntries: entries,
-    rememberedForActive: peekRememberedThreadTimeline<typeof entries>(activeThreadKey),
+    rememberedForActive: peekReadyThreadTimeline(activeThreadKey),
   });
-  useLayoutEffect(() => {
-    if (detailLoading || entries.length === 0 || timelineHasEphemeralPreviewUrls(entries)) {
-      return;
-    }
-    rememberReadyThreadTimeline({
-      threadKey: activeThreadKey,
-      entries,
-      markdownCwd: readyMarkdownCwd,
-      workspaceRoot: readyWorkspaceRoot,
-    });
-  }, [activeThreadKey, detailLoading, entries, readyMarkdownCwd, readyWorkspaceRoot]);
   return <MessagesTimeline {...timelineProps} timelineEntries={displayed.entries} />;
 }

@@ -348,6 +348,8 @@ export function AssistantCitationSource({
   children: ReactNode;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
+  // Z: the lifetime is (virtualized row mounted) x (active request); a root ref
+  // callback would restart only through compiler memo identity.
   useEffect(() => {
     const root = rootRef.current;
     const list = listRef.current;

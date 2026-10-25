@@ -1,4 +1,4 @@
-import { useEffect, useRef, type KeyboardEvent } from "react";
+import type { KeyboardEvent } from "react";
 import { ChevronDownIcon, ChevronUpIcon, XIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "../ui/input-group";
@@ -23,19 +23,12 @@ interface ThreadFindBarProps {
 
 export const THREAD_FIND_BAR_RESERVED_HEIGHT = 36 + THREAD_DETAILS_CARD_GAP;
 
+const focusAndSelect = (input: HTMLInputElement | null) => {
+  input?.focus();
+  input?.select();
+};
+
 export function ThreadFindBar(props: ThreadFindBarProps) {
-  const inputRef = useRef<HTMLInputElement | null>(null);
-
-  useEffect(() => {
-    if (!props.open) return;
-    inputRef.current?.focus();
-    inputRef.current?.select();
-  }, [
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Each find shortcut bumps the request id, so an already-open bar refocuses and reselects its query.
-    props.focusRequestId,
-    props.open,
-  ]);
-
   if (!props.open) return null;
 
   const hasQuery = props.query.trim().length > 0;
@@ -73,7 +66,10 @@ export function ThreadFindBar(props: ThreadFindBarProps) {
         className="w-full"
       >
         <InputGroupInput
-          ref={inputRef}
+          // Each find request remounts the input, so an already-open bar
+          // refocuses and reselects its query.
+          key={props.focusRequestId}
+          ref={focusAndSelect}
           type="search"
           size="sm"
           value={props.query}

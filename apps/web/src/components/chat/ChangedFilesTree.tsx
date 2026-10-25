@@ -1,5 +1,5 @@
 import { type RunId } from "@t3tools/contracts";
-import { type MouseEvent, type ReactNode, memo, useLayoutEffect, useRef, useState } from "react";
+import { type MouseEvent, type ReactNode, memo, useState } from "react";
 import { type TurnDiffFileChange } from "../../types";
 import {
   buildTurnDiffTree,
@@ -256,15 +256,14 @@ function ChangedFilesRows({
   renderRow: (row: ChangedFileRow) => ReactNode;
   virtualized: boolean;
 }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const rowSizeRef = useRef<HTMLDivElement>(null);
   const [range, setRange] = useState({ start: 0, end: 40, rowHeight: 28 });
   const [focusedPath, setFocusedPath] = useState<string | null>(null);
 
-  useLayoutEffect(() => {
-    const container = containerRef.current;
-    const rowSize = rowSizeRef.current;
-    if (!virtualized || !container || !rowSize) return;
+  // Re-attached when the row count or virtualization changes, both of which the measurement reads.
+  const rowCount = rows.length;
+  const observeRows = (container: HTMLDivElement) => {
+    const rowSize = container.querySelector<HTMLElement>(":scope > [data-row-size]");
+    if (!virtualized || !rowSize) return;
 
     // The card is inside a virtualized timeline item, so its own scrollTop is always zero.
     // Observe its ancestors too: streaming text and timeline layout can move the card.
@@ -288,12 +287,12 @@ function ChangedFilesRows({
       const viewportHeight = scrollElement?.clientHeight ?? document.documentElement.clientHeight;
       const start = Math.max(
         0,
-        Math.min(rows.length, Math.floor((viewportTop - listTop) / rowHeight) - ROW_OVERSCAN),
+        Math.min(rowCount, Math.floor((viewportTop - listTop) / rowHeight) - ROW_OVERSCAN),
       );
       const end = Math.max(
         start,
         Math.min(
-          rows.length,
+          rowCount,
           Math.ceil((viewportTop + viewportHeight - listTop) / rowHeight) + ROW_OVERSCAN,
         ),
       );
@@ -322,7 +321,7 @@ function ChangedFilesRows({
       if (frame) cancelAnimationFrame(frame);
       stopObserving();
     };
-  }, [virtualized, rows.length]);
+  };
 
   const focusedIndex =
     focusedPath === null ? -1 : rows.findIndex((row) => row.node.path === focusedPath);
@@ -335,7 +334,7 @@ function ChangedFilesRows({
   return (
     <div className="p-2">
       <div
-        ref={containerRef}
+        ref={observeRows}
         className="relative"
         style={virtualized ? { height: rows.length * range.rowHeight } : undefined}
         onFocusCapture={(event) => {
@@ -348,7 +347,7 @@ function ChangedFilesRows({
       >
         {virtualized && (
           <div
-            ref={rowSizeRef}
+            data-row-size=""
             aria-hidden="true"
             className="pointer-events-none invisible absolute h-7"
           />

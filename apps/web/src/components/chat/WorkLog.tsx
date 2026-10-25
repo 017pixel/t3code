@@ -1,11 +1,5 @@
-import {
-  createContext,
-  use,
-  useLayoutEffect,
-  useRef,
-  type ComponentProps,
-  type ReactNode,
-} from "react";
+import { createContext, use, useRef, type ComponentProps, type ReactNode } from "react";
+import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
 
 const GroupedRows = createContext(false);
@@ -137,17 +131,18 @@ export function WorkLogDetails({
 
   followLive?: boolean;
 }) {
-  const scrollerRef = useRef<HTMLDivElement>(null);
   const atLiveEdgeRef = useRef(true);
-  useLayoutEffect(() => {
-    const scroller = scrollerRef.current;
-    if (followLive && atLiveEdgeRef.current && scroller) {
-      scroller.scrollTop = scroller.scrollHeight;
-    }
-  });
+  // Resize observations land after layout and before paint, so pinning there
+  // shows each streamed chunk without a visible jump.
+  const followContent = (content: HTMLDivElement | null) => {
+    const scroller = content?.parentElement;
+    if (!content || !scroller || !followLive) return;
+    return observeResize(content, () => {
+      if (atLiveEdgeRef.current) scroller.scrollTop = scroller.scrollHeight;
+    });
+  };
   return (
     <div
-      ref={scrollerRef}
       onScroll={(event) => {
         const { scrollHeight, scrollTop, clientHeight } = event.currentTarget;
         atLiveEdgeRef.current = scrollHeight - scrollTop - clientHeight <= LIVE_EDGE_PX;
@@ -155,7 +150,7 @@ export function WorkLogDetails({
       className={cn(
         "cursor-auto",
         kind === "text"
-          ? "ms-7 flex max-h-96 flex-col gap-3 overflow-auto px-0.5 py-1 select-text"
+          ? "ms-7 max-h-96 overflow-auto px-0.5 py-1 select-text"
           : kind === "panel"
             ? "mt-0.5 mb-1.5 pb-2"
             : "mt-1",
@@ -163,7 +158,13 @@ export function WorkLogDetails({
       onClick={(event) => event.stopPropagation()}
       onPointerDown={(event) => event.stopPropagation()}
     >
-      {children}
+      {kind === "text" ? (
+        <div ref={followContent} className="flex flex-col gap-3">
+          {children}
+        </div>
+      ) : (
+        children
+      )}
     </div>
   );
 }

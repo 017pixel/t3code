@@ -5,13 +5,8 @@ import {
 } from "@t3tools/shared/assistantCitations";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ArrowUpRightIcon, PencilIcon, QuoteIcon } from "lucide-react";
-import {
-  useEffect,
-  useEffectEvent,
-  useRef,
-  useState,
-  type MouseEvent as ReactMouseEvent,
-} from "react";
+import type { Popover as PopoverPrimitive } from "@base-ui/react/popover";
+import { useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import {
   findAssistantCitationSourceAnchor,
   type AssistantCitationSourceAnchor,
@@ -53,15 +48,19 @@ export function AssistantCitationChip({
   const navigate = useNavigate();
   const commentInputRef = useRef<HTMLTextAreaElement>(null);
   const commentPopupRef = useRef<HTMLDivElement>(null);
+  // Mirrors the editor's text, so it lives exactly as long as the editor's input.
   const draftCommentRef = useRef<string | null>(null);
+  const attachCommentInput = (input: HTMLTextAreaElement) => {
+    commentInputRef.current = input;
+    return () => {
+      commentInputRef.current = null;
+      draftCommentRef.current = null;
+    };
+  };
   const [unavailableSourceAnchor, setUnavailableSourceAnchor] =
     useState<AssistantCitationSourceAnchor | null>(null);
-  const commentOpen = commentEditor?.open ?? false;
   const sourceAnchor = commentEditor?.sourceAnchor;
   const activeSourceAnchor = sourceAnchor === unavailableSourceAnchor ? undefined : sourceAnchor;
-  useEffect(() => {
-    if (!commentOpen) draftCommentRef.current = null;
-  }, [commentOpen]);
   const settleDraftOnClose = (reason: string): boolean => {
     const dismissal = resolveAssistantCitationCommentDismissal({
       reason,
@@ -71,24 +70,30 @@ export function AssistantCitationChip({
     if (dismissal.kind === "commit") return commentEditor?.onSave(dismissal.comment) ?? true;
     return dismissal.kind !== "keep-open";
   };
-  const onSourceUnavailable = useEffectEvent(() => {
-    if (!sourceAnchor) return;
-    if (settleDraftOnClose("none")) {
-      commentEditor?.onOpenChange(false);
-    } else {
-      setUnavailableSourceAnchor(sourceAnchor);
-    }
-  });
-  useEffect(() => {
-    if (!commentOpen || sourceAnchor === unavailableSourceAnchor) return;
-    const anchor = sourceAnchor ?? findAssistantCitationSourceAnchor(document, citation);
-    if (!anchor) return;
-    return observeAssistantCitationCommentSource({
-      anchor,
-      citation,
-      onUnavailable: onSourceUnavailable,
-    });
-  }, [citation, commentOpen, sourceAnchor, unavailableSourceAnchor]);
+  const popoverActionsRef = useRef<PopoverPrimitive.Root.Actions | null>(null);
+  // The popup exists only while the editor is open, so its lifetime is the
+  // observation's. Losing the source closes through the popover, whose
+  // onOpenChange settles the draft like any other close.
+  const attachCommentPopup = (popup: HTMLDivElement) => {
+    commentPopupRef.current = popup;
+    const anchor =
+      sourceAnchor === unavailableSourceAnchor
+        ? null
+        : (sourceAnchor ?? findAssistantCitationSourceAnchor(document, citation));
+    const stopObserving = anchor
+      ? observeAssistantCitationCommentSource({
+          anchor,
+          citation,
+          onUnavailable: () => {
+            if (sourceAnchor) popoverActionsRef.current?.close();
+          },
+        })
+      : undefined;
+    return () => {
+      stopObserving?.();
+      if (commentPopupRef.current === popup) commentPopupRef.current = null;
+    };
+  };
   const popupAnchor = activeSourceAnchor
     ? {
         contextElement: activeSourceAnchor.source,
@@ -163,9 +168,15 @@ export function AssistantCitationChip({
       {commentEditor ? (
         <Popover
           open={commentEditor.open}
+          actionsRef={popoverActionsRef}
           onOpenChange={(open, eventDetails) => {
             if (!open && !settleDraftOnClose(eventDetails.reason)) {
               eventDetails.cancel();
+              // Only a vanished source closes imperatively; keep the draft at
+              // the composer without the stale anchor.
+              if (eventDetails.reason === "imperative-action" && sourceAnchor) {
+                setUnavailableSourceAnchor(sourceAnchor);
+              }
               return;
             }
             commentEditor.onOpenChange(open);
@@ -202,7 +213,7 @@ export function AssistantCitationChip({
                     }
                   : undefined
               }
-              ref={commentPopupRef}
+              ref={attachCommentPopup}
               aria-label="Edit citation comment"
               width="md"
               padding="compact"
@@ -211,7 +222,7 @@ export function AssistantCitationChip({
               <AssistantCitationCommentEditor
                 key={serializeAssistantCitation(citation)}
                 citation={citation}
-                inputRef={commentInputRef}
+                inputRef={attachCommentInput}
                 onDraftChange={(comment) => {
                   draftCommentRef.current = comment;
                   commentEditor.onDraftChange?.(comment);

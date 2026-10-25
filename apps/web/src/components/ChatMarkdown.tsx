@@ -74,7 +74,6 @@ import React, {
   type ClipboardEvent as ReactClipboardEvent,
   use,
   memo,
-  useLayoutEffect,
   useRef,
   useState,
   type ReactNode,
@@ -453,36 +452,17 @@ function useChatMarkdownState({
   const resolvedTheme = useRenderedAppearance();
   const markdownRef = useRef<HTMLElement>(null);
   const mediaRequestId = useRef(0);
-  const mediaScopeKey = [
-    threadRef?.environmentId,
-    threadRef?.threadId,
-    explicitEnvironmentId,
-    cwd,
-    imageBaseDir,
-  ].join("\u0000");
-  // Hide requests from an old scope even if they resolve before effect cleanup.
-  const [localMedia, setLocalMedia] = useState<{
-    scope: string;
-    preview: ExpandedImagePreview;
-  } | null>(null);
-  const localMediaPreview = localMedia?.scope === mediaScopeKey ? localMedia.preview : null;
-  const closeLocalMediaPreview = () => setLocalMedia(null);
-  const expandMedia =
-    onImageExpand ??
-    ((preview: ExpandedImagePreview) => setLocalMedia({ scope: mediaScopeKey, preview }));
-  const [mediaScope, setMediaScope] = useState(mediaScopeKey);
-  if (mediaScope !== mediaScopeKey) {
-    setMediaScope(mediaScopeKey);
-    setLocalMedia(null);
-  }
-  // Layout cleanup blocks stale requests from reaching onImageExpand before paint.
-  useLayoutEffect(
-    () => () => {
+  const [localMediaPreview, setLocalMediaPreview] = useState<ExpandedImagePreview | null>(null);
+  const closeLocalMediaPreview = () => setLocalMediaPreview(null);
+  const expandMedia = onImageExpand ?? setLocalMediaPreview;
+  // Unmounting, which a media scope change does through the key, drops requests still loading.
+  const bindMarkdownRoot = (node: HTMLElement | null) => {
+    markdownRef.current = node;
+    return () => {
+      markdownRef.current = null;
       mediaRequestId.current += 1;
-    },
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Leaving the scope invalidates media requests still loading for it.
-    [mediaScopeKey],
-  );
+    };
+  };
   const createAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
     refresh: true,
@@ -909,7 +889,7 @@ function useChatMarkdownState({
   return {
     componentState,
     handleCopy,
-    markdownRef,
+    bindMarkdownRoot,
     markdownUrlTransform,
     localMediaPreview,
     closeLocalMediaPreview,
@@ -1551,7 +1531,22 @@ const CHAT_MARKDOWN_COMPONENTS = {
   },
 } satisfies Components;
 
-function ChatMarkdown({
+/** A media preview, or a media request still loading, never carries over to another thread or workspace. */
+function chatMarkdownMediaScope(props: ChatMarkdownProps): string {
+  return [
+    props.threadRef?.environmentId,
+    props.threadRef?.threadId,
+    props.environmentId,
+    props.cwd,
+    props.imageBaseDir,
+  ].join("\u0000");
+}
+
+function ChatMarkdown(props: ChatMarkdownProps) {
+  return <ChatMarkdownContent key={chatMarkdownMediaScope(props)} {...props} />;
+}
+
+function ChatMarkdownContent({
   text,
   className,
   inline = false,
@@ -1563,7 +1558,7 @@ function ChatMarkdown({
   const {
     componentState,
     handleCopy,
-    markdownRef,
+    bindMarkdownRoot,
     markdownUrlTransform,
     localMediaPreview,
     closeLocalMediaPreview,
@@ -1573,9 +1568,6 @@ function ChatMarkdown({
     extraRemarkPlugins.length === 0 &&
     /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(text);
   const Root = inline ? "span" : "div";
-  const bindMarkdownRef = (node: HTMLElement | null) => {
-    markdownRef.current = node;
-  };
   const remarkPlugins = [
     ...(lineBreaks ? CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS : CHAT_MARKDOWN_REMARK_PLUGINS),
     ...extraRemarkPlugins,
@@ -1586,7 +1578,7 @@ function ChatMarkdown({
 
   return (
     <Root
-      ref={bindMarkdownRef}
+      ref={bindMarkdownRoot}
       className={cn(
         "chat-markdown w-full min-w-0 [overflow-wrap:anywhere] [word-break:break-word]",
         !inline &&

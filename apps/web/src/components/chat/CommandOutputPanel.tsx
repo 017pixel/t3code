@@ -1,9 +1,10 @@
 import type { CommandOutputView } from "@t3tools/client-runtime/state/command-output";
 import type { EnvironmentId, ThreadId, TurnItemId } from "@t3tools/contracts";
 import { TERMINAL_PALETTES, terminalOutputSpans } from "@t3tools/shared/terminalOutput";
-import { useLayoutEffect, useRef } from "react";
+import { useRef } from "react";
 
 import { useTheme } from "../../hooks/useTheme";
+import { observeResize } from "../../lib/observeResize";
 import { useServerConfigs } from "../../state/entities";
 import { orchestrationEnvironment } from "../../state/orchestration";
 import { useEnvironmentQuery } from "../../state/query";
@@ -35,22 +36,25 @@ export function CommandOutputPanel(props: {
       ? props.source(input)
       : orchestrationEnvironment.v2.commandOutput({ environmentId: props.environmentId, input }),
   );
-  const scrollRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
   const text = data?.output.text ?? "";
   const { resolvedTheme } = useTheme();
 
-  useLayoutEffect(() => {
-    const element = scrollRef.current;
-    if (element && followRef.current) element.scrollTop = element.scrollHeight;
-  });
+  // Output only grows the content, so its resizes are exactly the moments to keep the end in view.
+  const followOutput = (content: HTMLDivElement | null) => {
+    const scroller = content?.parentElement;
+    if (!content || !scroller) return;
+    return observeResize(content, () => {
+      if (followRef.current) scroller.scrollTop = scroller.scrollHeight;
+    });
+  };
 
   if (text.length === 0) {
     if (error) return <div className="text-destructive">Couldn&apos;t load output: {error}</div>;
     if (data === null) return <div className="text-muted-foreground italic">Loading output…</div>;
     return data.running ? null : <div className="text-muted-foreground italic">No output.</div>;
   }
-  // Parse after all hooks to preserve the text/theme compiler cache.
+  // Parsed after the last hook, so the compiler caches it on text and theme.
   const spans = terminalOutputSpans(text, TERMINAL_PALETTES[resolvedTheme]);
   return (
     <div>
@@ -58,7 +62,6 @@ export function CommandOutputPanel(props: {
         <div className="text-muted-foreground italic">Earlier output not shown</div>
       ) : null}
       <div
-        ref={scrollRef}
         onScroll={(event) => {
           const element = event.currentTarget;
           followRef.current =
@@ -66,17 +69,19 @@ export function CommandOutputPanel(props: {
         }}
         className="max-h-80 overflow-auto text-muted-foreground"
       >
-        {spans.map((span, index) =>
-          span.style === null ? (
-            span.text
-          ) : (
-            // Spans never reorder and are rebuilt on each update.
-            // oxlint-disable-next-line react/no-array-index-key
-            <span key={index} style={span.style}>
-              {span.text}
-            </span>
-          ),
-        )}
+        <div ref={followOutput}>
+          {spans.map((span, index) =>
+            span.style === null ? (
+              span.text
+            ) : (
+              // Spans never reorder and are rebuilt on each update.
+              // oxlint-disable-next-line react/no-array-index-key
+              <span key={index} style={span.style}>
+                {span.text}
+              </span>
+            ),
+          )}
+        </div>
       </div>
     </div>
   );
