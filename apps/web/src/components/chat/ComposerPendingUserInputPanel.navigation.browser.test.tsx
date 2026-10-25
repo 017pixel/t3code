@@ -6,8 +6,10 @@ import {
   TurnItemId,
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
+import { makeThreadRequestsResolvedAnnouncer } from "@t3tools/client-runtime/state/thread-requests";
 import { useLayoutEffect, useRef, type ComponentProps } from "react";
 import { expect, it, vi } from "vite-plus/test";
+import { userEvent } from "vite-plus/test/browser";
 
 vi.mock(import("../ChatMarkdown"), async (importOriginal) => ({
   ...(await importOriginal()),
@@ -17,6 +19,7 @@ vi.mock(import("../ChatMarkdown"), async (importOriginal) => ({
 import { act, fakeTimers, render } from "../../../test/render";
 import { makeThreadProjectionFixture } from "../../test-fixtures";
 import { usePendingThreadRequests } from "./usePendingThreadRequests";
+import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 
 const threadRef = { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") };
 
@@ -83,17 +86,14 @@ function PendingRequestsProbe({
   projection: OrchestrationV2ThreadProjection;
   loading?: boolean;
 }) {
-  const promptRef = useRef("");
   const composerRef = useRef(null);
   const state = usePendingThreadRequests({
     environmentId,
     activeThreadId: projection.thread.id,
-    activeThread: projection.thread,
     serverProjection: loading ? null : projection,
     supportsQuestionAttachments: false,
     composerDraftTarget: { environmentId, threadId: projection.thread.id },
     setComposerDraftPrompt: () => {},
-    promptRef,
     composerRef,
     setThreadError: () => {},
   });
@@ -161,6 +161,7 @@ it("isolates drafts by environment, thread and request and discards only resolve
     await act(() => requests.onAdvanceActivePendingUserInput());
   }
 
+  // "first" was answered on another device.
   await show({
     environmentId,
     projection: {
@@ -173,6 +174,12 @@ it("isolates drafts by environment, thread and request and discards only resolve
     },
   });
   expect(requests.activePendingUserInput?.requestId).toBe("second");
+  await act(() =>
+    makeThreadRequestsResolvedAnnouncer(
+      environmentId,
+      threadRef.threadId,
+    )([RuntimeRequestId.make("second")]),
+  );
   for (const [index, scope] of scopes.entries()) {
     await show(scope);
     expect(requests.activePendingQuestionIndex).toBe(index === 0 ? 0 : 1);
@@ -180,4 +187,33 @@ it("isolates drafts by environment, thread and request and discards only resolve
       index === 0 ? undefined : `Answer ${index}`,
     );
   }
+});
+
+it("drops a pending auto-advance when the question changes, even if it comes back", async () => {
+  using _timers = fakeTimers();
+  const onAdvance = vi.fn();
+  const panel = (questionIndex: number) => (
+    <ComposerPendingUserInputPanel
+      pendingUserInputs={[prompt]}
+      cwd={undefined}
+      threadRef={threadRef}
+      respondingRequestIds={[]}
+      answers={{}}
+      questionIndex={questionIndex}
+      onToggleOption={() => {}}
+      onAdvance={onAdvance}
+      onDismiss={() => {}}
+    />
+  );
+  await using screen = await render(panel(1));
+  await userEvent.click(screen.getByRole("button", { name: /Incremental/ }));
+  // Previous then Next from the composer actions, inside the 200ms window.
+  await screen.rerender(panel(0));
+  await screen.rerender(panel(1));
+  await act(() => vi.advanceTimersByTime(250));
+  expect(onAdvance).not.toHaveBeenCalled();
+
+  await userEvent.click(screen.getByRole("button", { name: /Incremental/ }));
+  await act(() => vi.advanceTimersByTime(250));
+  expect(onAdvance).toHaveBeenCalledOnce();
 });

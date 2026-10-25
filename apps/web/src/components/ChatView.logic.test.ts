@@ -8,7 +8,6 @@ import {
   deriveAvailableRevertTurnCounts,
   deriveWorkspaceMutationId,
 } from "./ChatView.logic";
-import { recallCheckoutIsRepo, rememberCheckoutIsRepo } from "./ChatView.logic";
 import { ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
 import { deriveProviderInstanceEntries } from "../providerInstances";
 import { ensureInlineContextReferences } from "../lib/composerContextReferences";
@@ -41,9 +40,6 @@ import {
   getAntigravitySendBlockReason,
   resolveComposerProviderSelection,
   resolveWorktreeSetupProgress,
-  peekRememberedThreadTimeline,
-  rememberReadyThreadTimeline,
-  resetHeldThreadTimeline,
   resolveThreadSwitchTimeline,
   threadKeysShareEnvironment,
   timelineHasEphemeralPreviewUrls,
@@ -52,7 +48,6 @@ import {
   deriveComposerSendState,
   deriveLockedProvider,
   hasServerAcknowledgedLocalDispatch,
-  resolveDraftPromotionNavigationTarget,
   waitForRevertedMessage,
 } from "./ChatView.logic";
 
@@ -104,51 +99,6 @@ const readySession = {
   lastError: null,
   updatedAt: "2026-03-29T00:00:10.000Z",
 };
-
-describe("resolveDraftPromotionNavigationTarget", () => {
-  const serverThreadRef = { environmentId, threadId };
-  const preparingRun = {
-    ...completedTurn,
-    status: "preparing" as const,
-    startedAt: null,
-    completedAt: null,
-  };
-
-  it("stays on the draft until the server owns the send", () => {
-    expect(
-      resolveDraftPromotionNavigationTarget({
-        serverThreadRef,
-        serverThread: makeThread({ latestRun: preparingRun }),
-        backgroundSubmissionPending: false,
-      }),
-    ).toBeNull();
-    expect(
-      resolveDraftPromotionNavigationTarget({
-        serverThreadRef,
-        serverThread: makeThread(),
-        backgroundSubmissionPending: false,
-      }),
-    ).toBeNull();
-  });
-
-  it("promotes a persisted send while its worktree is still preparing", () => {
-    const serverThread = makeThread({ latestRun: preparingRun, latestUserMessageAt: now });
-    expect(
-      resolveDraftPromotionNavigationTarget({
-        serverThreadRef,
-        serverThread,
-        backgroundSubmissionPending: false,
-      }),
-    ).toBe(serverThreadRef);
-    expect(
-      resolveDraftPromotionNavigationTarget({
-        serverThreadRef,
-        serverThread,
-        backgroundSubmissionPending: true,
-      }),
-    ).toBeNull();
-  });
-});
 
 describe("deriveComposerSendState", () => {
   it("keeps text sendable while excluding expired terminal pills", () => {
@@ -401,23 +351,23 @@ describe("deriveCommittedServerUserMessageIds", () => {
 });
 
 describe("resolveThreadSwitchTimeline", () => {
-  afterEach(() => {
-    resetHeldThreadTimeline();
-  });
-
-  const held = { threadKey: "env-1:thread-a", entries: ["a1", "a2"] };
-
-  it("paints a remembered destination instead of the last-viewed thread", () => {
-    rememberReadyThreadTimeline(held);
-    rememberReadyThreadTimeline({ threadKey: "env-1:thread-b", entries: ["b1", "b2"] });
-    expect(peekRememberedThreadTimeline<string[]>("env-1:thread-a")).toEqual(["a1", "a2"]);
+  it("paints the destination's remembered timeline while it loads", () => {
     expect(
       resolveThreadSwitchTimeline({
         loading: true,
         activeThreadKey: "env-1:thread-a",
         nextEntries: [],
+        rememberedForActive: ["a1", "a2"],
       }),
     ).toEqual({ entries: ["a1", "a2"], displayThreadKey: "env-1:thread-a" });
+    expect(
+      resolveThreadSwitchTimeline({
+        loading: false,
+        activeThreadKey: "env-1:thread-a",
+        nextEntries: [],
+        rememberedForActive: ["a1", "a2"],
+      }),
+    ).toEqual({ entries: [], displayThreadKey: "env-1:thread-a" });
   });
 
   it("does not hold another environment's timeline across a jump", () => {
@@ -427,7 +377,7 @@ describe("resolveThreadSwitchTimeline", () => {
         loading: true,
         activeThreadKey: "env-2:thread-b",
         nextEntries: [],
-        lastReady: held,
+        rememberedForActive: null,
       }),
     ).toEqual({ entries: [], displayThreadKey: "env-2:thread-b" });
   });
@@ -665,13 +615,6 @@ describe("resolveComposerProviderSelection", () => {
     });
 
     expect(selection.selectedProviderEntry).toBeUndefined();
-  });
-});
-
-describe("checkout Git memory", () => {
-  it("does not confuse an environment id containing the separator with a path", () => {
-    rememberCheckoutIsRepo(EnvironmentId.make("env"), "a:b", false);
-    expect(recallCheckoutIsRepo(EnvironmentId.make("env:a"), "b")).toBeUndefined();
   });
 });
 

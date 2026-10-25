@@ -107,11 +107,6 @@ export type DiffOpenSelection =
 
 interface RightPanelStoreState {
   byThreadKey: Record<string, ThreadRightPanelState>;
-  // Compat shim for the base ChatView until the web-chat-view layer.
-  pendingMaximizeThreadKey: string | null;
-  requestMaximize: (ref: ScopedThreadRef) => void;
-  consumeMaximizeRequest: (ref: ScopedThreadRef) => boolean;
-  reconcileFileSurfaces: (ref: ScopedThreadRef, workspaceAvailable: boolean) => void;
   threadPanelVisibilityByThreadKey: Record<string, ThreadPanelVisibility>;
   userActionRevisionByThreadKey: Record<string, number>;
   closeRevisionByThreadKey: Record<string, number>;
@@ -619,20 +614,6 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
   persist(
     (set, get) => ({
       byThreadKey: {},
-      // Compat shim for the base ChatView until the web-chat-view layer.
-      pendingMaximizeThreadKey: null,
-      requestMaximize: (ref) => set({ pendingMaximizeThreadKey: scopedThreadKey(ref) }),
-      consumeMaximizeRequest: (ref) => {
-        if (get().pendingMaximizeThreadKey !== scopedThreadKey(ref)) return false;
-        set({ pendingMaximizeThreadKey: null });
-        return true;
-      },
-      reconcileFileSurfaces: (ref, workspaceAvailable) =>
-        set((state) =>
-          automaticUpdate(state, scopedThreadKey(ref), (current) =>
-            workspaceAvailable ? current : withoutWorkspaceFileSurfaces(current),
-          ),
-        ),
       threadPanelVisibilityByThreadKey: {},
       userActionRevisionByThreadKey: {},
       closeRevisionByThreadKey: {},

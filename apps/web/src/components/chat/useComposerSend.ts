@@ -5,7 +5,6 @@ import {
   restorePlanFollowUpComposer,
   buildExpiredTerminalContextToastCopy,
   deriveComposerSendState,
-  revokeUserMessagePreviewUrls,
   boundAttachmentIds,
   formatOutgoingPrompt,
   optimisticMessageAttachments,
@@ -43,7 +42,7 @@ import {
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
 import { createModelSelection } from "@t3tools/shared/model";
-import { type SetStateAction, useLayoutEffect, useRef } from "react";
+import { type SetStateAction, useRef } from "react";
 import { flushSync } from "react-dom";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -70,13 +69,13 @@ import {
   markPromotedDraftThreadByRef,
   restoreFailedDraftThread,
   composerDraftHasUserContent,
-  type ComposerFileAttachment,
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
   useComposerDraftStore,
   DraftId,
+  selectEffectiveDraftBranch,
 } from "../../composerDraftStore";
-import { type TerminalContextDraft } from "../../lib/terminalContext";
+import { readLoadedDefaultRefName } from "../../state/queries";
 import { ensureInlineContextReferences } from "../../lib/composerContextReferences";
 import {
   buildMessageContext,
@@ -134,7 +133,11 @@ import type { useLogicalProjectEnvironments } from "../../hooks/useLogicalProjec
 import type { LatestProposedPlanState } from "../../session-logic";
 import type { useDraftEnvironmentRouting } from "./useDraftEnvironmentRouting";
 import type { useLocalDispatchState } from "./useLocalDispatchState";
-import type { usePendingThreadRequests } from "./usePendingThreadRequests";
+import {
+  getPendingApprovals,
+  getRespondingApprovalIds,
+  type usePendingThreadRequests,
+} from "./usePendingThreadRequests";
 import type { useQueuedRunEdit } from "./useQueuedRunEdit";
 import type { useTimelineFollow } from "./useTimelineFollow";
 import type { useUsageLimitsPanel } from "./useUsageLimitsPanel";
@@ -168,6 +171,7 @@ interface ComposerSendInput {
   readonly activeThread: EnvironmentThreadShell | undefined;
   readonly activeThreadKey: string | null;
   readonly activeThreadBranch: string | null;
+  readonly gitStatus: { readonly refName: string | null } | null;
   readonly activeProject: EnvironmentProject | null;
   readonly activeProjectDefaultModelSelection: ModelSelection | null;
   readonly activeProposedPlan: LatestProposedPlanState | null;
@@ -187,10 +191,6 @@ interface ComposerSendInput {
   readonly providerInstanceEntries: ReadonlyArray<ProviderInstanceEntry>;
   readonly composerRef: ComposerHandleRef;
   readonly composerDraftTarget: ComposerThreadTarget;
-  readonly promptRef: { current: string };
-  readonly composerImagesRef: { current: ComposerImageAttachment[] };
-  readonly composerFilesRef: { current: ComposerFileAttachment[] };
-  readonly composerTerminalContextsRef: { current: TerminalContextDraft[] };
   readonly feedbackUploadsInFlightRef: { readonly current: Set<string> };
   readonly queuedRunEdit: ReturnType<typeof useQueuedRunEdit>;
   readonly isConnecting: boolean;
@@ -212,8 +212,6 @@ interface ComposerSendInput {
   readonly needsLoadBalancing: boolean;
   readonly loadBalancing: DraftEnvironmentRouting["loadBalancing"];
   readonly readPendingEnvironmentChange: DraftEnvironmentRouting["readPendingEnvironmentChange"];
-  readonly pendingApprovals: PendingThreadRequests["pendingApprovals"];
-  readonly respondingRequestIds: PendingThreadRequests["respondingRequestIds"];
   readonly activePendingProgress: PendingThreadRequests["activePendingProgress"];
   readonly onAdvanceActivePendingUserInput: PendingThreadRequests["onAdvanceActivePendingUserInput"];
   readonly onRespondToApproval: PendingThreadRequests["onRespondToApproval"];
@@ -224,6 +222,11 @@ interface ComposerSendInput {
   readonly setDockedDraftHeroThreadKey: Dispatch<SetStateAction<string | null>>;
   readonly setSetupQueueSendThreadKey: Dispatch<SetStateAction<string | null>>;
   readonly setOptimisticUserMessages: Dispatch<SetStateAction<ChatMessage[]>>;
+  /** Takes ownership of, and later releases, an optimistic message's blob previews. */
+  readonly optimisticBlobPreviews: {
+    readonly track: (message: ChatMessage) => void;
+    readonly release: (message: ChatMessage) => void;
+  };
   readonly setFeedbackSubmissionsByThreadKey: Dispatch<
     SetStateAction<Record<string, ReadonlyArray<CodexFeedbackSubmission>>>
   >;
@@ -258,6 +261,7 @@ export function useComposerSend(input: ComposerSendInput) {
     activeThread,
     activeThreadKey,
     activeThreadBranch,
+    gitStatus,
     activeProject,
     activeProjectDefaultModelSelection,
     activeProposedPlan,
@@ -274,10 +278,6 @@ export function useComposerSend(input: ComposerSendInput) {
     providerInstanceEntries,
     composerRef,
     composerDraftTarget,
-    promptRef,
-    composerImagesRef,
-    composerFilesRef,
-    composerTerminalContextsRef,
     feedbackUploadsInFlightRef,
     queuedRunEdit,
     isConnecting,
@@ -299,8 +299,6 @@ export function useComposerSend(input: ComposerSendInput) {
     needsLoadBalancing,
     loadBalancing,
     readPendingEnvironmentChange,
-    pendingApprovals,
-    respondingRequestIds,
     activePendingProgress,
     onAdvanceActivePendingUserInput,
     onRespondToApproval: onRespondToApprovalStable,
@@ -311,6 +309,7 @@ export function useComposerSend(input: ComposerSendInput) {
     setDockedDraftHeroThreadKey,
     setSetupQueueSendThreadKey,
     setOptimisticUserMessages,
+    optimisticBlobPreviews,
     setFeedbackSubmissionsByThreadKey,
     setThreadError,
     setKeepFullHistory,
@@ -347,7 +346,6 @@ export function useComposerSend(input: ComposerSendInput) {
     draftId,
     composerDraftTarget,
     composerRef,
-    promptRef,
     runtimeMode,
     startFromOrigin,
     resetLocalDispatch,
@@ -375,14 +373,13 @@ export function useComposerSend(input: ComposerSendInput) {
   const { sendInFlight: sendInFlightRef } = draftSendState(routeThreadKey);
   const composerSendGenerationRef = useRef(0);
   const environmentUnavailableSendToastSlotRef = useRef(0);
-  // A send awaits uploads before it declines, so it reads the approvals pending by then.
-  const pendingApprovalsRef = useRef(pendingApprovals);
-  const respondingRequestIdsRef = useRef(respondingRequestIds);
-  useLayoutEffect(() => {
-    pendingApprovalsRef.current = pendingApprovals;
-    respondingRequestIdsRef.current = respondingRequestIds;
-  }, [pendingApprovals, respondingRequestIds]);
 
+  const sendBranchCwd = activeThread?.worktreePath ?? activeProject?.workspaceRoot ?? null;
+  // The composer reads what its editor shows; with no composer mounted, the draft is all there is.
+  const readPrompt = () =>
+    composerRef.current?.readPrompt() ??
+    useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.prompt ??
+    "";
   const onSend = async (
     e?: { preventDefault: () => void },
     dispatchMode: ComposerDispatchMode = "auto",
@@ -395,16 +392,15 @@ export function useComposerSend(input: ComposerSendInput) {
     e?.preventDefault();
     // What the user pressed send on; uploads below can take a while, and a redirect must not
     // decline approvals for a draft that changed meanwhile.
-    const promptAtSend = promptRef.current;
+    const promptAtSend = readPrompt();
     if (
       usageLimitsOffered &&
       usageLimitsKey !== null &&
       !directAnnotation &&
       !draftHasNonPromptContent(composerDraftTarget) &&
-      isUsageLimitsCommand(promptRef.current)
+      isUsageLimitsCommand(readPrompt())
     ) {
       if (openUsageLimits()) {
-        promptRef.current = "";
         setComposerDraftPrompt(composerDraftTarget, "");
         composerRef.current?.resetCursorState();
       }
@@ -478,7 +474,33 @@ export function useComposerSend(input: ComposerSendInput) {
       return;
     }
     const multipleModelSelections = sendCtx.multipleModelSelections;
-    const approvalFeedbackTarget = pendingApprovalsRef.current.find(
+    const baseBranchCandidate =
+      sendBranchCwd === null
+        ? null
+        : readLoadedDefaultRefName(activeThread.environmentId, sendBranchCwd);
+    // An empty server thread's unpicked worktree base is derived like a draft's
+    // and reaches the server through the send's prepareWorktree bootstrap.
+    const sendBranch = isLocalDraftThread
+      ? selectEffectiveDraftBranch(
+          (draftId ? useComposerDraftStore.getState().getDraftSession(draftId) : null) ??
+            draftThread,
+          gitStatus,
+          baseBranchCandidate,
+        )
+      : sendEnvMode === "worktree" && !activeThread.worktreePath
+        ? selectEffectiveDraftBranch(
+            {
+              branch: activeThreadBranch,
+              worktreePath: activeThread.worktreePath,
+              envMode: sendEnvMode,
+            },
+            gitStatus,
+            baseBranchCandidate,
+          )
+        : activeThreadBranch;
+    // A send awaits uploads before it declines, so it reads the approvals pending by then.
+    const approvalThreadId = activeThread.id;
+    const approvalFeedbackTarget = getPendingApprovals(environmentId, approvalThreadId).find(
       (approval) =>
         approval.supportsFeedback && approval.requestId === sendCtx.shownPendingApprovalIds[0],
     );
@@ -492,7 +514,7 @@ export function useComposerSend(input: ComposerSendInput) {
                 .capabilities.requiredWorktreeBootstrap === true,
             isLocalDraftThread,
             isGitRepo,
-            branch: activeThreadBranch,
+            branch: sendBranch,
           });
     if (multipleModelBlock === "server-outdated") {
       setThreadError(activeThread.id, "Update this server before starting multiple models.");
@@ -534,10 +556,10 @@ export function useComposerSend(input: ComposerSendInput) {
     // A direct "send annotation" writes the draft and sends in the same tick; the reference
     // must be in the text now, not after the next render.
     const promptForSend = directAnnotation
-      ? ensureInlineContextReferences(promptRef.current, [
+      ? ensureInlineContextReferences(readPrompt(), [
           previewAnnotationContextReference(directAnnotation.annotation),
         ])
-      : promptRef.current;
+      : readPrompt();
     const strandedThread = threadContextsOutsideEnvironment({
       text: promptForSend,
       records: composerThreadContexts,
@@ -616,7 +638,6 @@ export function useComposerSend(input: ComposerSendInput) {
           createdAt: new Date().toISOString(),
         },
         clearDraft: () => {
-          promptRef.current = "";
           clearComposerDraftContent(composerDraftTarget);
           composerRef.current?.resetCursorState();
         },
@@ -665,12 +686,11 @@ export function useComposerSend(input: ComposerSendInput) {
       if (composerRef.current?.validateProviderInput(outgoingFollowUpText) === false) {
         return;
       }
-      const followUpPromptSnapshot = promptRef.current;
+      const followUpPromptSnapshot = readPrompt();
       const followUpTerminalContexts = [...sendableComposerTerminalContexts];
       const followUpReviewComments = [...composerReviewComments];
       const followUpPreviewAnnotations = [...composerPreviewAnnotations];
       const followUpThreadContexts = [...composerThreadContexts];
-      promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
       const followUpSent = await submitPlanFollowUp({
@@ -684,8 +704,6 @@ export function useComposerSend(input: ComposerSendInput) {
         interactionMode: followUp.interactionMode,
       });
       if (!followUpSent) {
-        promptRef.current = followUpPromptSnapshot;
-        composerTerminalContextsRef.current = [...followUpTerminalContexts];
         restorePlanFollowUpComposer({
           snapshot: {
             prompt: followUpPromptSnapshot,
@@ -725,7 +743,6 @@ export function useComposerSend(input: ComposerSendInput) {
         : null;
     if (standaloneSlashCommand && multipleModelSelections === null) {
       handleInteractionModeChange(standaloneSlashCommand);
-      promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
       return;
@@ -789,7 +806,7 @@ export function useComposerSend(input: ComposerSendInput) {
       activeMessageCount,
       sendEnvMode,
       worktreePath: activeThread.worktreePath,
-      activeThreadBranch,
+      activeThreadBranch: sendBranch,
       resumeCompactionTokens,
       keepFullHistory,
       phase,
@@ -948,7 +965,7 @@ export function useComposerSend(input: ComposerSendInput) {
     // are another thread's, so this send leaves them alone too.
     const approvalsToDecline =
       currentRouteThreadKeyRef.current === routeThreadKey
-        ? pendingApprovalsRef.current.filter((approval) =>
+        ? getPendingApprovals(environmentId, approvalThreadId).filter((approval) =>
             sendCtx?.shownPendingApprovalIds.includes(approval.requestId),
           )
         : [];
@@ -970,8 +987,8 @@ export function useComposerSend(input: ComposerSendInput) {
         const attachmentIds = sendContext
           ? [...sendContext.images, ...sendContext.files].map((attachment) => attachment.id)
           : attachmentIdsAtSend;
-        const promptUnchanged =
-          promptRef.current === promptAtSend || promptRef.current === promptForSend;
+        const promptNow = readPrompt();
+        const promptUnchanged = promptNow === promptAtSend || promptNow === promptForSend;
         const attachmentsUnchanged =
           sameIds(attachmentIds, attachmentIdsAtSend) ||
           (annotationImageId !== undefined &&
@@ -982,11 +999,11 @@ export function useComposerSend(input: ComposerSendInput) {
         .getState()
         .getComposerDraft(composerDraftTarget);
       const changedBeforeDecline = draftChangedSinceSend();
-      const pendingIdsBeforeDecline = pendingApprovalsRef.current.map(
+      const pendingIdsBeforeDecline = getPendingApprovals(environmentId, approvalThreadId).map(
         (approval) => approval.requestId,
       );
       const approvalResponding = approvalsToDecline.some((approval) =>
-        respondingRequestIdsRef.current.includes(approval.requestId),
+        getRespondingApprovalIds(environmentId, approvalThreadId).includes(approval.requestId),
       );
       if (approvalFeedbackTarget !== undefined) {
         if (composerAttachmentsSnapshot.length > 0 || outgoingMessageContext !== undefined) {
@@ -1018,7 +1035,6 @@ export function useComposerSend(input: ComposerSendInput) {
           useComposerDraftStore.getState().getComposerDraft(composerDraftTarget) ===
             draftBeforeDecline
         ) {
-          promptRef.current = "";
           clearComposerDraftContent(composerDraftTarget);
           composerRef.current?.resetCursorState();
         }
@@ -1037,7 +1053,7 @@ export function useComposerSend(input: ComposerSendInput) {
           draftBeforeDecline;
       // An approval that arrived during the decline would block the redirect; keep the draft so
       // the next send declines it too.
-      const approvalArrived = pendingApprovalsRef.current.some(
+      const approvalArrived = getPendingApprovals(environmentId, approvalThreadId).some(
         (approval) => !pendingIdsBeforeDecline.includes(approval.requestId),
       );
       if (
@@ -1092,7 +1108,7 @@ export function useComposerSend(input: ComposerSendInput) {
       await sendToMultipleModels({
         threadId: threadIdForSend,
         project: activeProject,
-        branch: activeThreadBranch!,
+        branch: sendBranch!,
         selections: multipleModelSelections,
         targets: multipleTargets,
         sendSnapshot,
@@ -1112,25 +1128,24 @@ export function useComposerSend(input: ComposerSendInput) {
         messageIdForSend,
       );
     }
-    setOptimisticUserMessages((existing) => [
-      ...existing,
-      {
-        id: messageIdForSend,
-        role: "user",
-        text: outgoingMessageText,
-        ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
-        ...(outgoingMessageContext !== undefined ? { context: outgoingMessageContext } : {}),
-        runId: null,
-        createdAt: messageCreatedAt,
-        updatedAt: messageCreatedAt,
-        streaming: false,
-        ...(shouldQueueBehindActiveRun
-          ? { inputIntent: "queued_turn" as const }
-          : phase === "running" && dispatchMode === "steer"
-            ? { inputIntent: "steer" as const }
-            : {}),
-      },
-    ]);
+    const optimisticMessage: ChatMessage = {
+      id: messageIdForSend,
+      role: "user",
+      text: outgoingMessageText,
+      ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
+      ...(outgoingMessageContext !== undefined ? { context: outgoingMessageContext } : {}),
+      runId: null,
+      createdAt: messageCreatedAt,
+      updatedAt: messageCreatedAt,
+      streaming: false,
+      ...(shouldQueueBehindActiveRun
+        ? { inputIntent: "queued_turn" as const }
+        : phase === "running" && dispatchMode === "steer"
+          ? { inputIntent: "steer" as const }
+          : {}),
+    };
+    optimisticBlobPreviews.track(optimisticMessage);
+    setOptimisticUserMessages((existing) => [...existing, optimisticMessage]);
     setThreadError(threadIdForSend, null);
     if (expiredTerminalContextCount > 0) {
       const toastCopy = buildExpiredTerminalContextToastCopy(
@@ -1150,7 +1165,6 @@ export function useComposerSend(input: ComposerSendInput) {
       : null;
     // Keep new-thread flows from reusing this draft while attachments and worktree setup settle.
     if (sentDraftThreadRef) markPromotedDraftThreadByRef(sentDraftThreadRef);
-    promptRef.current = "";
     clearComposerDraftContent(composerDraftTarget);
     composerRef.current?.resetCursorState();
 
@@ -1230,7 +1244,7 @@ export function useComposerSend(input: ComposerSendInput) {
                       modelSelection: threadCreateModelSelection,
                       runtimeMode,
                       interactionMode: sendInteractionMode,
-                      branch: activeThreadBranch,
+                      branch: sendBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
                     },
@@ -1289,7 +1303,7 @@ export function useComposerSend(input: ComposerSendInput) {
               scopeProjectRef(activeProject.environmentId, activeProject.id),
               resolveBackgroundDraftWorkspaceOptions({
                 envMode: sendEnvMode,
-                branch: activeThreadBranch,
+                branch: sendBranch,
                 startFromOrigin,
               }),
             ),
@@ -1369,19 +1383,13 @@ export function useComposerSend(input: ComposerSendInput) {
         )
       ) {
         setOptimisticUserMessages((existing) => {
-          const removed = existing.filter((message) => message.id === messageIdForSend);
-          for (const message of removed) {
-            revokeUserMessagePreviewUrls(message);
-          }
           const next = existing.filter((message) => message.id !== messageIdForSend);
           return next.length === existing.length ? existing : next;
         });
+        // The restored draft clones its images, so the sent copies are no longer used.
+        optimisticBlobPreviews.release(optimisticMessage);
         const retryComposerImages = restoreComposerDraft(composerDraftTarget, sendSnapshot);
         if (currentRouteThreadKeyRef.current === routeThreadKey) {
-          promptRef.current = messageTextForSend;
-          composerImagesRef.current = retryComposerImages;
-          composerFilesRef.current = composerFilesSnapshot;
-          composerTerminalContextsRef.current = composerTerminalContextsSnapshot;
           composerRef.current?.resetCursorState({
             cursor: collapseExpandedComposerCursor(messageTextForSend, messageTextForSend.length),
             prompt: messageTextForSend,

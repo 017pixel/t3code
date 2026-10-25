@@ -10,7 +10,10 @@ import {
   type ThreadContextRecord,
 } from "@t3tools/contracts";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useAtomValue } from "@effect/atom-react";
+import { useRouter } from "@tanstack/react-router";
+import { Atom } from "effect/reactivity";
+import { useEffect } from "react";
 import { toastManager } from "../ui/toast";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -19,7 +22,20 @@ import {
 import { useComposerDraftStore, DraftId } from "../../composerDraftStore";
 import { type EnvironmentPresentation, useEnvironmentProviders } from "../../state/environments";
 import { useProjects } from "../../state/entities";
+import { resolveThreadRouteTarget } from "../../threadRoutes";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
 import type { DraftSessionState } from "../../composerDraftStore";
+
+interface PendingEnvironmentChange {
+  readonly environmentId: EnvironmentId;
+  readonly scope: string;
+}
+
+// Kept per draft, not per ChatView instance, so a view remounted on the same draft while a
+// switch is in flight still shows it as busy and blocks sends until it settles.
+const pendingEnvironmentChangeAtom = Atom.family((_draftId: DraftId) =>
+  Atom.make<PendingEnvironmentChange | null>(null).pipe(Atom.keepAlive),
+);
 
 interface DraftEnvironmentRoutingInput {
   readonly draftId: DraftId | null;
@@ -72,6 +88,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     (store) => store.setLogicalProjectDraftThreadId,
   );
   const allProjects = useProjects();
+  const router = useRouter();
   const { openScratchProject } = useScratchProject();
   const needsLoadBalancing = automaticEnvironment && !draftThread?.loadBalancedEnvironmentId;
   const loadBalancingCandidates = needsLoadBalancing
@@ -111,6 +128,9 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     loadBalancingCandidates,
     loadBalancingSettings.loadBalancingWeights,
   );
+  // Pins the choice into the draft once host snapshots settle. It cannot be derived at render:
+  // snapshots go stale after 15s, and the whole draft view (branch, providers, attachments,
+  // sidebar) reads the pinned project, so the decision has to persist the moment it exists.
   useEffect(() => {
     if (!needsLoadBalancing || loadBalancing.pending || !draftId || sendInFlightRef.current) return;
     const target = logicalProjectEnvironments.find(
@@ -164,36 +184,18 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
           : "Auto balance"
     : undefined;
 
-  // A change in flight belongs to the draft and project it started on.
+  // A change in flight is reported only while the draft is on the project it started from. If
+  // the draft moves to another project and back before the switch completes, the switch is
+  // reported and applied again: the draft is back where the user asked for the switch.
   const environmentChangeScope = `${draftId ?? ""}:${activeProjectKey ?? ""}`;
-  const environmentChangeRef = useRef<{
-    readonly environmentId: EnvironmentId;
-    readonly scope: string;
-  } | null>(null);
-  const environmentChangeScopeRef = useRef("");
-  useLayoutEffect(() => {
-    environmentChangeScopeRef.current = environmentChangeScope;
-  });
-  // Leaving the scope, or unmounting, abandons a change still in flight.
-  useLayoutEffect(
-    () => () => {
-      if (environmentChangeRef.current?.scope === environmentChangeScope) {
-        environmentChangeRef.current = null;
-      }
-    },
-    [environmentChangeScope],
-  );
+  const pendingAtom = pendingEnvironmentChangeAtom(draftId ?? DraftId.make(""));
+  const pendingEnvironmentChange = useAtomValue(pendingAtom);
   const readPendingEnvironmentChange = () => {
-    const pending = environmentChangeRef.current;
-    return pending !== null && pending.scope === environmentChangeScopeRef.current ? pending : null;
+    const pending = draftId ? appAtomRegistry.get(pendingAtom) : null;
+    return pending !== null && pending.scope === environmentChangeScope ? pending : null;
   };
-  // The busy state belongs to the request that set it, so an older request settling late
-  // (abandoned, or superseded by a newer switch) can never clear a newer one's.
-  const [busyEnvironmentChange, setBusyEnvironmentChange] = useState<{
-    readonly environmentId: EnvironmentId;
-    readonly scope: string;
-  } | null>(null);
-  const isEnvironmentChanging = busyEnvironmentChange?.scope === environmentChangeScope;
+  const isEnvironmentChanging =
+    draftId !== null && pendingEnvironmentChange?.scope === environmentChangeScope;
 
   const onEnvironmentChange = (nextEnvironmentId: EnvironmentId) => {
     if (envLocked || !draftId || sendInFlightRef.current) return;
@@ -203,14 +205,21 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
       (env) => env.environmentId === nextEnvironmentId,
     );
     if (!target) return;
-    const request = { environmentId: target.environmentId, scope: environmentChangeScope };
-    environmentChangeRef.current = request;
-    setBusyEnvironmentChange(null);
+    const request: PendingEnvironmentChange = {
+      environmentId: target.environmentId,
+      scope: environmentChangeScope,
+    };
+    // The request object is the token: a newer switch replaces it, and an older one settling
+    // late then neither applies nor clears the newer one.
+    appAtomRegistry.set(pendingAtom, request);
     const retarget = (project: (typeof allProjects)[number]) => {
       const currentDraft = getDraftSession(draftId);
+      // Read at completion: leaving the draft, or the draft leaving its project, abandons it.
+      const routeTarget = resolveThreadRouteTarget(router.state.matches.at(-1)?.params ?? {});
       if (
-        environmentChangeRef.current !== request ||
-        environmentChangeScopeRef.current !== request.scope ||
+        appAtomRegistry.get(pendingAtom) !== request ||
+        routeTarget?.kind !== "draft" ||
+        routeTarget.draftId !== draftId ||
         sendInFlightRef.current ||
         !currentDraft ||
         currentDraft.promotedTo ||
@@ -235,8 +244,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
       }
     };
     const finish = () => {
-      if (environmentChangeRef.current === request) environmentChangeRef.current = null;
-      setBusyEnvironmentChange((busy) => (busy === request ? null : busy));
+      if (appAtomRegistry.get(pendingAtom) === request) appAtomRegistry.set(pendingAtom, null);
     };
     if (target.projectId !== null) {
       const project = allProjects.find(
@@ -247,7 +255,6 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
       finish();
       return;
     }
-    setBusyEnvironmentChange(request);
     void openScratchProject(target.environmentId, "Could not switch machine")
       .then((project) => {
         if (project) retarget(project);

@@ -1,27 +1,23 @@
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import type { Dispatch } from "react";
 import type { ThreadPreviewState } from "../../previewStateStore";
 import { formatFilePathForClipboard } from "@t3tools/client-runtime/media-actions";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
-import { resolveExplicitDiffOpenOnActivate } from "../ChatView.logic";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import { type ScopedThreadRef, type RunId } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { type SetStateAction, useEffect } from "react";
+import { useEffect } from "react";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { useDiffPanelStore } from "../../diffPanelStore";
 import { type ThreadPanelPresentation } from "../../rightPanelLayout";
-import {
-  selectActiveRightPanel,
-  type RightPanelSurface,
-  useRightPanelStore,
-} from "../../rightPanelStore";
+import { type RightPanelSurface, useRightPanelStore } from "../../rightPanelStore";
 import { setActivePreviewTab } from "../../previewStateStore";
 import { BrowserSettingsReadError } from "../../browser/openFileInPreview";
 import { addBrowserSurface } from "../preview/addBrowserSurface";
+import { floatDeviceSurface } from "../preview/agentOpenedPreviews";
+import { collapseRightPanel } from "../preview/collapseRightPanel";
+import { focusActivePanelTerminal, focusTerminal } from "../../lib/terminalFocus";
 import { subscribePreviewAction } from "../preview/previewActionBus";
 import { browserMiniPlayerSource, usePreviewMiniPlayerStore } from "../../previewMiniPlayerStore";
 import type { threadPullRequestPanelTarget } from "../pullRequest/pullRequestDetail.logic";
@@ -52,8 +48,6 @@ interface RightPanelActionsInput {
   readonly pullRequestsSurfaceAvailable: boolean;
   readonly gitCwd: string | null;
   readonly activeProjectCwd: string | null;
-  readonly explicitDiffOpenRef: { current: ScopedThreadRef | null };
-  readonly setTerminalFocusRequestId: Dispatch<SetStateAction<number>>;
   readonly onDiffPanelOpen: (() => void) | undefined;
   readonly closeRightPanelSurface: (surface: RightPanelSurface) => void;
 }
@@ -85,8 +79,6 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
     pullRequestsSurfaceAvailable,
     gitCwd,
     activeProjectCwd,
-    explicitDiffOpenRef,
-    setTerminalFocusRequestId,
     onDiffPanelOpen,
   } = input;
 
@@ -98,9 +90,12 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
     if (!diffOpen) {
       onDiffPanelOpen?.();
     }
-    if (activeThreadRef) {
-      useRightPanelStore.getState().toggle(activeThreadRef, "diff");
+    if (!activeThreadRef) return;
+    if (rightPanelOpen && activeRightPanelSurface?.kind === "diff") {
+      collapseRightPanel(activeThreadRef);
+      return;
     }
+    useRightPanelStore.getState().openDiff(activeThreadRef);
   };
   const onToggleDiffStable = useStableCallback(onToggleDiff);
   const createBrowserSurface = (profileId?: string) => {
@@ -126,8 +121,7 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
   const createBrowserSurfaceStable = useStableCallback(createBrowserSurface);
   const addDiffSurface = () => {
     if (!activeThreadRef || !isServerThread || !isGitRepo) return;
-    useDiffPanelStore.getState().selectGitScope(activeThreadRef, "branch");
-    useRightPanelStore.getState().open(activeThreadRef, "diff");
+    useRightPanelStore.getState().openDiff(activeThreadRef);
     onDiffPanelOpen?.();
   };
   const addDiffSurfaceStable = useStableCallback(addDiffSurface);
@@ -166,12 +160,10 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
           .getState()
           .open(activeThreadRef, browserMiniPlayerSource(activeRightPanelSurface.resourceId));
       } else if (activeRightPanelSurface?.kind === "device" && activeRightPanelSurface.target) {
-        usePreviewMiniPlayerStore
-          .getState()
-          .open(activeThreadRef, { kind: "device", ...activeRightPanelSurface.target });
+        floatDeviceSurface(activeThreadRef, { kind: "device", ...activeRightPanelSurface.target });
       }
       useRightPanelStore.getState().setMaximized(activeThreadRef, false);
-      useRightPanelStore.getState().close(activeThreadRef);
+      collapseRightPanel(activeThreadRef);
     }
   };
   const closePreviewPanelStable = useStableCallback(closePreviewPanel);
@@ -192,17 +184,12 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
   const togglePreviewPanelStable = useStableCallback(togglePreviewPanel);
   const activateRightPanelSurface = (surface: RightPanelSurface) => {
     if (!activeThreadRef) return;
-    explicitDiffOpenRef.current = resolveExplicitDiffOpenOnActivate({
-      surfaceKind: surface.kind,
-      diffOpen,
-      activeThreadRef,
-    });
     useRightPanelStore.getState().activateSurface(activeThreadRef, surface.id);
     if (surface.kind === "preview" && surface.resourceId) {
       setActivePreviewTab(activeThreadRef, surface.resourceId);
     }
     if (surface.kind === "terminal") {
-      setTerminalFocusRequestId((value) => value + 1);
+      focusTerminal(activeThreadRef, surface.activeTerminalId);
     }
     if (surface.kind === "diff" && !diffOpen) {
       onDiffPanelOpen?.();
@@ -216,6 +203,7 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
       return;
     }
     useRightPanelStore.getState().toggleVisibility(activeThreadRef);
+    focusActivePanelTerminal(activeThreadRef);
   };
   const toggleRightPanelStable = useStableCallback(toggleRightPanel);
   const toggleThreadPanel = () => {
@@ -277,11 +265,7 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
   const addPullRequestSurfaceStable = useStableCallback(addPullRequestSurface);
   const onOpenTurnDiff = (runId: RunId, filePath?: string) => {
     if (!isServerThread || !activeThreadRef) return;
-    const diffOpen =
-      selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, activeThreadRef) === "diff";
-    explicitDiffOpenRef.current = diffOpen ? null : activeThreadRef;
-    useDiffPanelStore.getState().selectTurn(activeThreadRef, runId, filePath);
-    useRightPanelStore.getState().open(activeThreadRef, "diff");
+    useRightPanelStore.getState().openDiff(activeThreadRef, { turnId: runId, filePath });
     onDiffPanelOpen?.();
   };
   const onOpenTurnDiffStable = useStableCallback(onOpenTurnDiff);

@@ -5,7 +5,7 @@ import {
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { QuoteIcon } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   captureAssistantTextSelection,
@@ -19,32 +19,32 @@ import {
 } from "~/lib/selectionActions";
 import { Button } from "../ui/button";
 
+/**
+ * Mount inside the `data-assistant-citation-viewport` element; selections there
+ * get a cite action.
+ */
 export function AssistantSelectionToolbar({
-  viewport,
   threadRef,
   onCite,
 }: {
-  viewport: HTMLElement | null;
   threadRef: ScopedThreadRef;
   onCite: (citation: AssistantCitation, sourceAnchor: AssistantCitationSourceAnchor) => boolean;
 }) {
-  const [selection, setSelection] = useState<{
-    citation: AssistantCitation;
-    position: SelectionActionPoint;
-    sourceAnchor: AssistantCitationSourceAnchor;
-  } | null>(null);
+  const [selection, setSelection] = useState<AssistantSelection | null>(null);
   const toolbarRef = useRef<HTMLButtonElement>(null);
   const actionsRef = useRef<ReturnType<typeof observeSelectionActions> | null>(null);
 
-  useLayoutEffect(() => {
-    const toolbar = toolbarRef.current;
+  // Clamped after layout, because the toolbar's own size decides how far it can sit.
+  const placeToolbar = (toolbar: HTMLButtonElement | null) => {
+    toolbarRef.current = toolbar;
     if (!toolbar || !selection) return;
     const rect = toolbar.getBoundingClientRect();
     toolbar.style.left = `${Math.max(8, Math.min(selection.position.x, window.innerWidth - rect.width - 8))}px`;
     toolbar.style.top = `${Math.max(8, Math.min(selection.position.y, window.innerHeight - rect.height - 8))}px`;
-  }, [selection]);
+  };
 
-  useEffect(() => {
+  const observeViewport = (sentinel: HTMLSpanElement | null) => {
+    const viewport = sentinel?.closest<HTMLElement>("[data-assistant-citation-viewport]");
     if (!viewport) return;
     const clear = () => setSelection(null);
     const update = (pointer: SelectionActionPoint | null) => {
@@ -169,18 +169,50 @@ export function AssistantSelectionToolbar({
       actions.dispose();
       actionsRef.current = null;
     };
-  }, [threadRef, viewport]);
-
-  if (!selection) return null;
-  const tooLong = selection.citation.text.length > ASSISTANT_CITATION_MAX_TEXT_LENGTH;
-  const dismiss = () => {
-    actionsRef.current?.cancel();
-    setSelection(null);
   };
+
+  // The sentinel stays at the same tree position so a selection never remounts it,
+  // which would restart the observer.
+  return (
+    <>
+      <span ref={observeViewport} hidden />
+      {selection ? (
+        <SelectionCiteButton
+          selection={selection}
+          toolbarRef={placeToolbar}
+          onCite={onCite}
+          onDismiss={() => {
+            actionsRef.current?.cancel();
+            setSelection(null);
+          }}
+        />
+      ) : null}
+    </>
+  );
+}
+
+type AssistantSelection = {
+  citation: AssistantCitation;
+  position: SelectionActionPoint;
+  sourceAnchor: AssistantCitationSourceAnchor;
+};
+
+function SelectionCiteButton({
+  selection,
+  toolbarRef,
+  onCite,
+  onDismiss,
+}: {
+  selection: AssistantSelection;
+  toolbarRef: (toolbar: HTMLButtonElement | null) => void;
+  onCite: (citation: AssistantCitation, sourceAnchor: AssistantCitationSourceAnchor) => boolean;
+  onDismiss: () => void;
+}) {
+  const tooLong = selection.citation.text.length > ASSISTANT_CITATION_MAX_TEXT_LENGTH;
   const cite = () => {
     if (tooLong || !onCite(selection.citation, selection.sourceAnchor)) return false;
     window.getSelection()?.removeAllRanges();
-    dismiss();
+    onDismiss();
     return true;
   };
   return createPortal(
@@ -199,7 +231,7 @@ export function AssistantSelectionToolbar({
         event.stopPropagation();
         if (event.key === "Escape" && !event.nativeEvent.isComposing) {
           event.preventDefault();
-          dismiss();
+          onDismiss();
         }
       }}
     >

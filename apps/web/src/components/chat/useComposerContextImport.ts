@@ -69,12 +69,11 @@ export function useComposerContextImport(input: {
   readonly composerDraftTarget: ChatComposerProps["composerDraftTarget"];
   readonly attachmentDraftTarget: ChatComposerProps["composerDraftTarget"];
   readonly attachmentTargetKey: string;
-  readonly attachmentTargetKeyRef: RefObject<string>;
+  readonly isAttachmentTargetDisplaced: (targetKey: string) => boolean;
   readonly questionAttachmentTarget: DraftId | null;
   readonly pendingUserInputs: ReadonlyArray<PendingUserInput>;
   readonly composerContextRecords: ComposerDraftContextRecords;
   readonly composerImages: ReadonlyArray<ComposerImageAttachment>;
-  readonly composerFilesRef: ChatComposerProps["composerFilesRef"];
   readonly pendingThreadImportsRef: RefObject<Map<string, number>>;
   readonly addComposerFilesToDraft: (files: ComposerFileAttachment[]) => string[];
 }) {
@@ -85,12 +84,11 @@ export function useComposerContextImport(input: {
     composerDraftTarget,
     attachmentDraftTarget,
     attachmentTargetKey,
-    attachmentTargetKeyRef,
+    isAttachmentTargetDisplaced,
     questionAttachmentTarget,
     pendingUserInputs,
     composerContextRecords,
     composerImages,
-    composerFilesRef,
     pendingThreadImportsRef,
     addComposerFilesToDraft,
   } = input;
@@ -172,12 +170,12 @@ export function useComposerContextImport(input: {
       }
       file = new File([blob], record.name, { type: record.mimeType || blob.type });
     }
-    // The draft these bytes belong to may have been sent or switched away from while they
-    // downloaded. Dropping them here keeps them out of whatever draft is open now.
-    if (attachmentTargetKeyRef.current !== importTargetKey) return;
+    // The composer may have switched to another draft while these bytes downloaded. Dropping
+    // them here keeps them out of whatever draft is open now.
+    if (isAttachmentTargetDisplaced(importTargetKey)) return;
     const replacesFileMarker =
       record.kind === "file" &&
-      composerFilesRef.current.some(
+      (getComposerDraft(attachmentDraftTarget)?.files ?? []).some(
         (candidate) =>
           composerFileNeedsReattach(candidate) &&
           composerFileMatchesReattachMarker(candidate, {
@@ -213,6 +211,7 @@ export function useComposerContextImport(input: {
             getComposerDraft(composerDraftTarget)?.previewAnnotations.some(
               (annotation) => annotation.id === localId,
             ) ?? false,
+          environmentId,
         },
       );
       if (!accepted.includes(localId))

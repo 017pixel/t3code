@@ -1,17 +1,17 @@
 import { useAuth } from "@clerk/react";
-import type { EnvironmentId } from "@t3tools/contracts";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { Link } from "@tanstack/react-router";
 import { CheckIcon } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useContext, useState } from "react";
 
 import { APP_DISPLAY_NAME, DESKTOP_DOWNLOAD_URL } from "~/branding";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 import { isElectron } from "../env";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
-import { useRelayEnvironmentDiscovery } from "../state/environments";
 import { CommandBlock } from "./CommandBlock";
 import { useT3ConnectAuthPrompt } from "./clerk/useT3ConnectAuthPrompt";
 import { CloudEnvironmentConnectRows } from "./cloud/CloudEnvironmentConnectList";
+import { createComputerSelection, resolveSelectedComputers } from "./cloud/relayDiscoveryStore";
 import { Button } from "./ui/button";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty";
 import { SidebarInset } from "./ui/sidebar";
@@ -66,13 +66,13 @@ export function HostedEmptyState() {
 function T3ConnectSteps() {
   const { isLoaded, isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
   const { openAuthPrompt } = useT3ConnectAuthPrompt();
+  const registry = useContext(RegistryContext);
   // Adding the first computer unmounts this screen. Wait for all health checks
   // so every compatible registration is queued before that happens.
-  const [autoAddedComputers] = useState(() => new Set<EnvironmentId>());
-  const [selectedIds, setSelectedIds] = useState<ReadonlySet<EnvironmentId>>(() => new Set());
-  const discovered = [...useRelayEnvironmentDiscovery().environments.values()];
-  const discoverySettled =
-    discovered.length > 0 && discovered.every(({ availability }) => availability !== "checking");
+  const [computerSelection] = useState(() =>
+    createComputerSelection(registry, { waitForHealthChecks: true, refreshWhileHidden: false }),
+  );
+  const selectedIds = resolveSelectedComputers([], useAtomValue(computerSelection.choicesAtom));
   return (
     <>
       <SetupStep number={1}>
@@ -94,18 +94,7 @@ function T3ConnectSteps() {
             <CloudEnvironmentConnectRows
               primaryEnvironmentId={null}
               savedEnvironments={[]}
-              refreshWhileEmpty
-              selection={{
-                ...(discoverySettled ? { autoSelectedComputers: autoAddedComputers } : {}),
-                selectedIds,
-                onChange: (environmentId, selected) =>
-                  setSelectedIds((current) => {
-                    const next = new Set(current);
-                    if (selected) next.add(environmentId);
-                    else next.delete(environmentId);
-                    return next;
-                  }),
-              }}
+              selection={{ store: computerSelection, selectedIds }}
               empty={<p className="text-xs text-muted-foreground">Waiting for your computer…</p>}
             />
           </div>

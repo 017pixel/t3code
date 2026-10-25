@@ -1,6 +1,6 @@
 import { observeResize } from "~/lib/observeResize";
 import { shouldAnimateComposerRestingTransition } from "../composerFooterLayout";
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 
 const COMPOSER_RESTING_TRANSITION_CLEANUP_BUFFER_MS = 50;
 const COMPOSER_RESTING_TRANSITION_EASING = "cubic-bezier(0.32, 0.72, 0, 1)";
@@ -11,11 +11,12 @@ export function useComposerRestingTransition(
   isResting: boolean,
   restingControlsRef: React.RefObject<HTMLDivElement | null>,
   onOverlayHeightChange: (height: number) => void,
+  onOverlaySeriesStart: () => void,
+  onOverlaySeriesEnd: () => void,
   animationsActive: boolean,
   animationDurationMs: number,
 ) {
-  const elementRef = useRef<HTMLDivElement>(null);
-  const isCollapsedRef = useRef(isCollapsed);
+  const elementRef = useRef<HTMLDivElement | null>(null);
   const previousCollapsedRef = useRef(isCollapsed);
   const previousRestingRef = useRef(isResting);
   const previousHeightRef = useRef<number | null>(null);
@@ -90,16 +91,16 @@ export function useComposerRestingTransition(
     clearOverlayPin();
   };
 
-  useLayoutEffect(() => {
-    isCollapsedRef.current = isCollapsed;
-  });
+  // Read from the committed DOM, so resize callbacks between renders see the layout they measure.
+  const isCollapsedInDom = (element: HTMLElement) =>
+    element.dataset.composerControlsCollapsed === "true";
 
   const transitionToCurrentGeometry = (stateChanged: boolean) => {
     const element = elementRef.current;
     const surface = element?.querySelector<HTMLElement>('[data-chat-composer-surface="true"]');
     if (!element || !surface) return;
 
-    const nextIsCollapsed = isCollapsedRef.current;
+    const nextIsCollapsed = isCollapsedInDom(element);
 
     const visibleTransitionElement = (selector: string) =>
       Array.from(element.querySelectorAll<HTMLElement>(selector)).find(
@@ -421,6 +422,7 @@ export function useComposerRestingTransition(
       animationTargetHeightRef.current = null;
     }
 
+    hasCompletedInitialLayoutRef.current = true;
     previousCollapsedRef.current = nextIsCollapsed;
     previousHeightRef.current = nextHeight;
     previousModelStripHeightRef.current = nextModelStripHeight;
@@ -452,6 +454,8 @@ export function useComposerRestingTransition(
     };
   }, [isCollapsed, transitionToCurrentGeometry]);
 
+  // Resting also flips on a breakpoint crossing that keeps the controls
+  // collapsed, which runs no transition to republish the overlay.
   useLayoutEffect(() => {
     if (previousRestingRef.current === isResting) return;
     previousRestingRef.current = isResting;
@@ -460,12 +464,13 @@ export function useComposerRestingTransition(
     if (overlay) onOverlayHeightChange(overlay.getBoundingClientRect().height);
   }, [isResting, onOverlayHeightChange]);
 
-  useLayoutEffect(() => {
-    const element = elementRef.current;
-    if (!element) return;
-
+  return (element: HTMLDivElement) => {
+    elementRef.current = element;
+    // The overlay's held heights describe this composer; mounting or
+    // unmounting it starts a new measurement series.
+    onOverlaySeriesStart();
     const body = element.querySelector<HTMLElement>('[data-chat-composer-body="true"]');
-    return observeResize(body ? [element, body] : element, (entries) => {
+    const stopObserving = observeResize(body ? [element, body] : element, (entries) => {
       if (animationRef.current) {
         if (body && entries.some((entry) => entry.target === body)) {
           transitionToCurrentGeometry(false);
@@ -484,7 +489,7 @@ export function useComposerRestingTransition(
         '[data-chat-composer-transition-actions="true"]',
       )?.getBoundingClientRect().top;
       const controlsRect = (
-        isCollapsedRef.current
+        isCollapsedInDom(element)
           ? restingControlsRef.current
           : visibleTransitionElement('[data-chat-composer-controls="left"]')
       )?.getBoundingClientRect();
@@ -502,11 +507,8 @@ export function useComposerRestingTransition(
             ?.getBoundingClientRect().bottom ?? elementRect.bottom) - elementRect.bottom,
       };
     });
-  }, [restingControlsRef, transitionToCurrentGeometry]);
-
-  useEffect(() => {
-    hasCompletedInitialLayoutRef.current = true;
     return () => {
+      stopObserving();
       if (transitionCleanupTimeoutRef.current !== null) {
         window.clearTimeout(transitionCleanupTimeoutRef.current);
         transitionCleanupTimeoutRef.current = null;
@@ -518,9 +520,10 @@ export function useComposerRestingTransition(
       contentAnimationsRef.current = [];
       for (const animation of stateChangeAnimationsRef.current) animation.cancel();
       stateChangeAnimationsRef.current = [];
+      // The element is still attached here, so its styles and the overlay pin can be cleared.
       clearTransitionStyles();
+      elementRef.current = null;
+      onOverlaySeriesEnd();
     };
-  }, [clearTransitionStyles]);
-
-  return elementRef;
+  };
 }

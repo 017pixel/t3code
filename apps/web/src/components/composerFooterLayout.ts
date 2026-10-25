@@ -71,13 +71,6 @@ export function resolveComposerTimelineInset(input: {
     : overlayHeight;
 }
 
-export function overlayComposerIsResting(input: {
-  composerMounted: boolean;
-  composerReportedResting: boolean;
-}): boolean {
-  return input.composerMounted && input.composerReportedResting;
-}
-
 export function shouldAnimateComposerRestingTransition(input: {
   hasCompletedInitialLayout: boolean;
   stateChanged: boolean;

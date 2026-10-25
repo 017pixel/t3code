@@ -1,29 +1,15 @@
-import { findErrorTraceId } from "@t3tools/client-runtime/errors";
-import {
-  type EnvironmentConnectionPresentation,
-  RelayConnectionRegistration,
-  RelayConnectionTarget,
-  orchestrationProtocolCompatibilityError,
-} from "@t3tools/client-runtime/connection";
+import { RegistryContext, useAtomMount, useAtomValue } from "@effect/atom-react";
+import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { relayOfflineReasonMessage } from "@t3tools/client-runtime/relay";
-import {
-  isAtomCommandInterrupted,
-  settlePromise,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
 import {
   type EnvironmentId,
   resolveEnvironmentMachineKind,
   type ServerConfig,
 } from "@t3tools/contracts";
-import type {
-  RelayClientEnvironmentRecord,
-  RelayEnvironmentStatusResponse,
-} from "@t3tools/contracts/relay";
 import * as Option from "effect/Option";
-import { type ReactNode, useEffect, useEffectEvent, useState } from "react";
+import type { RelayClientEnvironmentRecord } from "@t3tools/contracts/relay";
+import { type ReactNode, useContext, useState } from "react";
 
-import { environmentCatalog } from "~/connection/catalog";
 import { cn } from "~/lib/utils";
 import { relayEnvironmentDiscovery } from "~/state/relay";
 import { useRelayEnvironmentDiscovery } from "~/state/environments";
@@ -34,18 +20,15 @@ import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "../settings/itemRo
 import { Checkbox } from "../ui/checkbox";
 import { Button } from "../ui/button";
 import { Skeleton } from "../ui/skeleton";
-import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipTrigger, TooltipPopup } from "../ui/tooltip";
 import { presentSavedCloudEnvironmentConnection } from "./cloudEnvironmentConnectionPresentation";
-
-const EMPTY_DISCOVERY_REFRESH_INTERVAL_MS = 5_000;
-
-function discoveredCompatibilityError(
-  status: Option.Option<RelayEnvironmentStatusResponse> | undefined,
-) {
-  const descriptor = status === undefined ? undefined : Option.getOrNull(status)?.descriptor;
-  return descriptor === undefined ? null : orchestrationProtocolCompatibilityError(descriptor);
-}
+import {
+  type ComputerSelection,
+  connectRelayEnvironment,
+  discoveredCompatibilityError,
+  relayConnectingIdsAtom,
+  makeRelayDiscoveryRefreshAtom,
+} from "./relayDiscoveryStore";
 
 export interface SavedCloudEnvironmentConnection {
   readonly environmentId: EnvironmentId;
@@ -72,46 +55,29 @@ export function CloudEnvironmentConnectRows({
   primaryEnvironmentId,
   savedEnvironments,
   showSavedEnvironments = false,
-  refreshWhileEmpty = false,
   empty = null,
   selection,
-  onDiscoveryReady,
 }: {
   readonly primaryEnvironmentId: EnvironmentId | null;
   readonly savedEnvironments: ReadonlyArray<SavedCloudEnvironmentConnection>;
   readonly showSavedEnvironments?: boolean;
-  readonly refreshWhileEmpty?: boolean;
   readonly empty?: ReactNode;
-  readonly onDiscoveryReady?: () => void;
+  /** Onboarding pick list: auto-selects new computers and polls discovery while none is listed. */
   readonly selection?: {
-    readonly autoSelectedComputers?: Set<EnvironmentId>;
+    readonly store: ComputerSelection;
     readonly selectedIds: ReadonlySet<EnvironmentId>;
-    readonly onChange: (environmentId: EnvironmentId, selected: boolean) => void;
   };
 }) {
+  const registry = useContext(RegistryContext);
   const environmentsState = useRelayEnvironmentDiscovery();
-  const registerEnvironment = useAtomCommand(environmentCatalog.register, {
-    reportFailure: false,
-  });
+  const [refreshOnViewAtom] = useState(makeRelayDiscoveryRefreshAtom);
+  useAtomMount(selection?.store.discoveryAtom ?? refreshOnViewAtom);
   const refreshRelayEnvironments = useAtomCommand(relayEnvironmentDiscovery.refresh, {
     reportFailure: false,
   });
-  const refreshDiscoveryWhenIdle = useEffectEvent(async () => {
-    if (environmentsState.refreshing || environmentsState.offline) return;
-    await refreshRelayEnvironments();
-  });
-  const connectRelayEnvironment = (environment: RelayClientEnvironmentRecord) =>
-    registerEnvironment(
-      new RelayConnectionRegistration({
-        target: new RelayConnectionTarget({
-          environmentId: environment.environmentId,
-          label: environment.label,
-        }),
-      }),
-    );
-  const [connectingEnvironmentIds, setConnectingEnvironmentIds] = useState<
-    ReadonlySet<EnvironmentId>
-  >(new Set());
+  const connectingEnvironmentIds = useAtomValue(relayConnectingIdsAtom);
+  const connectEnvironment = (environment: RelayClientEnvironmentRecord) =>
+    connectRelayEnvironment(registry, environment);
   const savedById = new Map(
     savedEnvironments
       .filter((environment) => environment.relayManaged)
@@ -123,68 +89,6 @@ export function CloudEnvironmentConnectRows({
       .map((environment) => environment.environmentId),
   );
 
-  useEffect(() => {
-    let active = true;
-    if (onDiscoveryReady || !refreshWhileEmpty || document.visibilityState === "visible") {
-      void refreshRelayEnvironments().then(() => {
-        if (active) onDiscoveryReady?.();
-      });
-    }
-    return () => {
-      active = false;
-    };
-  }, [refreshRelayEnvironments, refreshWhileEmpty, onDiscoveryReady]);
-
-  const connectEnvironment = async (environment: RelayClientEnvironmentRecord) => {
-    if (
-      discoveredCompatibilityError(
-        environmentsState.environments.get(environment.environmentId)?.status,
-      ) !== null
-    )
-      return false;
-    setConnectingEnvironmentIds((current) => new Set([...current, environment.environmentId]));
-    const result = await connectRelayEnvironment(environment);
-    setConnectingEnvironmentIds((current) => {
-      const next = new Set(current);
-      next.delete(environment.environmentId);
-      return next;
-    });
-    if (result._tag === "Success") {
-      toastManager.add({
-        type: "success",
-        title: savedWithoutRelay.has(environment.environmentId)
-          ? "T3 Connect route added"
-          : "Environment added",
-        description: savedWithoutRelay.has(environment.environmentId)
-          ? `${environment.label} falls back to T3 Connect when its other routes are unreachable.`
-          : `Connecting to ${environment.label} through T3 Connect.`,
-      });
-      return true;
-    }
-    if (isAtomCommandInterrupted(result)) {
-      return false;
-    }
-    const cause = squashAtomCommandFailure(result);
-    const message =
-      cause instanceof Error ? cause.message : "Could not connect the T3 Connect environment.";
-    const traceId = findErrorTraceId(cause);
-    console.error("[t3-connect] Could not connect environment", { message, traceId, cause });
-    toastManager.add({
-      type: "error",
-      title: "Could not connect environment",
-      description: message,
-      data: traceId
-        ? {
-            secondaryActionProps: {
-              children: "Copy trace ID",
-              onClick: () => void navigator.clipboard?.writeText(traceId),
-            },
-          }
-        : undefined,
-    });
-    return false;
-  };
-
   // Omit machines saved over other routes; onboarding selection must not add a T3 Connect route.
   const isVisibleEnvironment = (environmentId: EnvironmentId) =>
     environmentId !== primaryEnvironmentId &&
@@ -193,83 +97,10 @@ export function CloudEnvironmentConnectRows({
   const visibleEnvironments = [...environmentsState.environments.values()].filter(
     ({ environment }) => isVisibleEnvironment(environment.environmentId),
   );
-  const selectNewComputers = useEffectEvent(
-    (environments: typeof environmentsState.environments) => {
-      const seen = selection?.autoSelectedComputers;
-      if (!selection || !seen) return;
-      for (const { environment, status, availability } of environments.values()) {
-        if (!isVisibleEnvironment(environment.environmentId)) continue;
-        const id = environment.environmentId;
-        if (availability === "checking") continue;
-        if (
-          discoveredCompatibilityError(status) !== null ||
-          savedById.get(id)?.connection.phase === "unsupported"
-        ) {
-          seen.add(id);
-          if (selection.selectedIds.has(id)) selection.onChange(id, false);
-          continue;
-        }
-        if (seen.has(id)) continue;
-        seen.add(id);
-        selection.onChange(id, true);
-        if (!savedById.has(id)) {
-          void connectEnvironment(environment).then((connected) => {
-            if (!connected) selection.onChange(id, false);
-          });
-        }
-      }
-    },
-  );
-  useEffect(() => {
-    // oxlint-disable-next-line react/set-state-in-effect -- Discovery results arrive from an external store and auto-selection starts relay connections, which mark themselves connecting.
-    selectNewComputers(environmentsState.environments);
-  }, [environmentsState.environments]);
-
-  // Discovery clears its list on refresh, so poll only until a machine appears.
-  const shouldRefreshWhileEmpty =
-    refreshWhileEmpty && visibleEnvironments.length === 0 && !environmentsState.offline;
-
-  useEffect(() => {
-    if (!shouldRefreshWhileEmpty) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let disposed = false;
-    let pending = false;
-    const visible = () => document.visibilityState === "visible";
-    const schedule = () => {
-      clearTimeout(timer);
-      if (!disposed && visible()) {
-        timer = setTimeout(() => void refresh(), EMPTY_DISCOVERY_REFRESH_INTERVAL_MS);
-      }
-    };
-    const refresh = async () => {
-      if (disposed || pending || !visible()) return;
-      clearTimeout(timer);
-      pending = true;
-      await settlePromise(() => refreshDiscoveryWhenIdle());
-      pending = false;
-      schedule();
-    };
-    const onFocus = () => void refresh();
-    const onVisibilityChange = () => {
-      clearTimeout(timer);
-      if (visible()) void refresh();
-    };
-
-    schedule();
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => {
-      disposed = true;
-      clearTimeout(timer);
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
-  }, [shouldRefreshWhileEmpty]);
-
   const standalone = showSavedEnvironments || savedEnvironments.length === 0;
 
   if (
-    !refreshWhileEmpty &&
+    !selection &&
     standalone &&
     visibleEnvironments.length === 0 &&
     environmentsState.refreshing &&
@@ -373,10 +204,10 @@ export function CloudEnvironmentConnectRows({
             disabled={unsupported || connectingEnvironmentIds.has(environment.environmentId)}
             onCheckedChange={async (checked) => {
               if (unsupported) return;
-              selection.onChange(environment.environmentId, checked);
+              selection.store.choose(environment.environmentId, checked);
               if (checked && !savedEnvironment) {
                 const connected = await connectEnvironment(environment);
-                if (!connected) selection.onChange(environment.environmentId, false);
+                if (!connected) selection.store.choose(environment.environmentId, false);
               }
             }}
           />

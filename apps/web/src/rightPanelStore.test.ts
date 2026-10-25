@@ -1,8 +1,9 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { type EnvironmentId, RunId, ThreadId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { useClosedViewStore } from "./closedViewStore";
+import { useDiffPanelStore } from "./diffPanelStore";
 import { reopenClosedView } from "./reopenClosedView";
 import {
   migratePersistedRightPanelState,
@@ -464,7 +465,7 @@ describe("rightPanelStore", () => {
     store.openFile(refA, "src/app.ts");
     const revision = store.getUserActionRevision(refA);
     store.reconcileBrowserSurfaces(refA, ["agent-browser"]);
-    store.reconcileFileSurfaces(refA, false);
+    store.reconcileAllFileSurfaces(() => false);
 
     expect(store.openProactive(refA, completedDiff, revision)).toBe(true);
     expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("diff");
@@ -926,16 +927,22 @@ describe("rightPanelStore", () => {
     useRightPanelStore.getState().open(refA, "device");
     useRightPanelStore.getState().openFile(refA, "README.md");
 
-    useRightPanelStore.getState().reconcileFileSurfaces(refA, false);
+    useRightPanelStore.getState().openFile(refB, "conductor.json");
+    // Thread B's workspace is not known yet, so its tabs wait.
+    useRightPanelStore
+      .getState()
+      .reconcileAllFileSurfaces((ref) => (ref.threadId === refA.threadId ? false : null));
 
     expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
       isOpen: true,
       activeSurfaceId: "device",
       surfaces: [{ id: "device", kind: "device" }],
     });
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refB).surfaces,
+    ).toHaveLength(1);
 
-    useRightPanelStore.getState().openFile(refB, "conductor.json");
-    useRightPanelStore.getState().reconcileFileSurfaces(refB, false);
+    useRightPanelStore.getState().reconcileAllFileSurfaces(() => false);
     expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refB)).toEqual({
       isOpen: false,
       activeSurfaceId: null,
@@ -954,7 +961,7 @@ describe("rightPanelStore", () => {
     useRightPanelStore.getState().openFile(refA, "README.md");
     useRightPanelStore.getState().openAttachment(refA, attachment);
 
-    useRightPanelStore.getState().reconcileFileSurfaces(refA, false);
+    useRightPanelStore.getState().reconcileAllFileSurfaces(() => false);
 
     expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
       isOpen: true,
@@ -1201,5 +1208,26 @@ describe("rightPanelStore", () => {
     store.reconcileBrowserSurfaces(refA, ["tab-a", "tab-b"]);
     expect(surfaceIds()).toEqual(["browser:tab-a", "terminal:term-1", "diff", "browser:tab-b"]);
     expect(store.getUserActionRevision(refA)).toBe(revision);
+  });
+});
+
+describe("openDiff", () => {
+  it("opens the branch diff unless a scope or turn is chosen", () => {
+    const threadKey = scopedThreadKey(refA);
+    const turnId = RunId.make("run-1");
+    const store = useRightPanelStore.getState();
+    store.openDiff(refA, { scope: "unstaged" });
+    expect(useDiffPanelStore.getState().byThreadKey[threadKey]).toEqual({ kind: "unstaged" });
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("diff");
+
+    store.openDiff(refA);
+    expect(useDiffPanelStore.getState().byThreadKey[threadKey]).toMatchObject({ kind: "branch" });
+
+    store.openDiff(refA, { turnId, filePath: "src/a.ts" });
+    expect(useDiffPanelStore.getState().byThreadKey[threadKey]).toMatchObject({
+      kind: "turn",
+      turnId,
+      filePath: "src/a.ts",
+    });
   });
 });

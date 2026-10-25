@@ -4371,14 +4371,6 @@ export function subscribeComposerDraftModelReconciliation(input: {
   };
 }
 
-// Compat shim: the base ThreadRouteView reads this until the web-chat-view layer.
-export function useBackgroundDraftSubmissionPending(threadRef: ScopedThreadRef | null): boolean {
-  const threadKey = threadRef ? scopedThreadKey(threadRef) : null;
-  return useComposerDraftStore(
-    (state) => threadKey !== null && state.backgroundSubmissionThreadKeys[threadKey] === true,
-  );
-}
-
 export function beginBackgroundDraftSubmissionByRef(threadRef: ScopedThreadRef): void {
   const threadKey = scopedThreadKey(threadRef);
   useComposerDraftStore.setState((state) => ({

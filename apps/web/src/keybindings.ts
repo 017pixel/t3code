@@ -264,14 +264,6 @@ export function threadJumpIndexFromCommand(command: string): number | null {
   return index === -1 ? null : index;
 }
 
-export function threadTraversalDirectionFromCommand(
-  command: string | null,
-): "previous" | "next" | null {
-  if (command === "thread.previous") return "previous";
-  if (command === "thread.next") return "next";
-  return null;
-}
-
 export function shouldShowThreadJumpHintsForModifiers(
   modifiers: ShortcutModifierStateLike,
   keybindings: ResolvedKeybindingsConfig,

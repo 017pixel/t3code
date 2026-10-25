@@ -1,12 +1,15 @@
-import { ApprovalRequestId, EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { beforeEach, expect, it, vi } from "vite-plus/test";
+import { ApprovalRequestId, EnvironmentId, RuntimeRequestId, ThreadId } from "@t3tools/contracts";
+import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { useComposerDraftStore } from "./composerDraftStore";
 import {
   questionAttachmentDraftId,
   countQuestionAttachments,
   questionAttachmentDraftPrefix,
+  questionAttachmentDraftThreadRef,
+  resolveOpenQuestionAttachmentDraft,
   changeQuestionAttachmentPreparation,
   clearQuestionAttachmentDraft,
+  pruneResolvedQuestionAttachmentDrafts,
   useQuestionAttachmentPreparation,
 } from "./questionAttachments";
 
@@ -113,4 +116,83 @@ it("counts files, images, and pending preparation across the shared question bud
   expect(countQuestionAttachments([second])).toBe(7);
   changeQuestionAttachmentPreparation(second, -1);
   expect(countQuestionAttachments([first, second])).toBe(7);
+});
+
+it("clears attachment drafts for the thread's resolved requests only", () => {
+  const store = useComposerDraftStore.getState();
+  const pending = RuntimeRequestId.make("pending");
+  const resolved = RuntimeRequestId.make("resolved");
+  const otherThread = ThreadId.make("thread-2");
+  const keep = questionAttachmentDraftId(environmentId, threadId, pending, "first");
+  const drop = questionAttachmentDraftId(environmentId, threadId, resolved, "first");
+  const elsewhere = questionAttachmentDraftId(environmentId, otherThread, resolved, "first");
+  for (const key of [keep, drop, elsewhere]) store.setPrompt(key, "Answer context");
+  changeQuestionAttachmentPreparation(drop, 1);
+
+  pruneResolvedQuestionAttachmentDrafts(environmentId, threadId, [pending]);
+
+  expect(store.getComposerDraft(keep)?.prompt).toBe("Answer context");
+  expect(store.getComposerDraft(drop)).toBeNull();
+  expect(store.getComposerDraft(elsewhere)?.prompt).toBe("Answer context");
+  expect(useQuestionAttachmentPreparation.getState().counts[drop]).toBeUndefined();
+});
+
+it("reads the thread back out of a question draft key, even when ids contain dashes", () => {
+  const dashedThread = ThreadId.make("thread-with-dash-es");
+  const key = questionAttachmentDraftId(environmentId, dashedThread, "request-1", "q-1");
+  expect(questionAttachmentDraftThreadRef(key)).toEqual({ environmentId, threadId: dashedThread });
+  expect(questionAttachmentDraftThreadRef("not-a-question-key")).toBeNull();
+});
+
+describe("open question attachment draft", () => {
+  const requestId = RuntimeRequestId.make("question-request");
+  const question = (id: string, allowCustomAnswer?: boolean) => ({
+    id,
+    header: id,
+    question: `Question ${id}?`,
+    options: [],
+    multiSelect: false,
+    ...(allowCustomAnswer === undefined ? {} : { allowCustomAnswer }),
+  });
+  const request = {
+    requestId,
+    createdAt: "2026-10-24T00:00:00.000Z",
+    questions: [question("q1"), question("q2"), question("q3", false)],
+    responseCapability: "live" as const,
+    dismissible: true,
+  };
+  const open = {
+    threadRef: { environmentId, threadId },
+    request,
+    questionIndex: 0,
+    held: false,
+    responding: false,
+    questionAttachmentsEnabled: true,
+  };
+  const draftFor = (questionId: string) =>
+    questionAttachmentDraftId(environmentId, threadId, requestId, questionId);
+
+  it("follows the active question and spans the whole request", () => {
+    expect(resolveOpenQuestionAttachmentDraft(open)).toEqual({
+      draftId: draftFor("q1"),
+      requestKeys: [draftFor("q1"), draftFor("q2"), draftFor("q3")],
+    });
+    expect(resolveOpenQuestionAttachmentDraft({ ...open, questionIndex: 1 })?.draftId).toBe(
+      draftFor("q2"),
+    );
+  });
+
+  it.each([
+    ["no pending question", { request: null }],
+    ["a held question", { held: true }],
+    ["a question being answered", { responding: true }],
+    [
+      "a question that cannot resume",
+      { request: { ...request, responseCapability: "not_resumable" as const } },
+    ],
+    ["an environment without question attachments", { questionAttachmentsEnabled: false }],
+    ["an active question without a custom answer", { questionIndex: 2 }],
+  ])("claims nothing for %s", (_name, overrides) => {
+    expect(resolveOpenQuestionAttachmentDraft({ ...open, ...overrides })).toBeNull();
+  });
 });

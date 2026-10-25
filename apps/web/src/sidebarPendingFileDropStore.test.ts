@@ -1,84 +1,97 @@
-import { beforeEach, describe, expect, it } from "vite-plus/test";
+import { describe, expect, it } from "vite-plus/test";
 
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { type EnvironmentId, ThreadId } from "@t3tools/contracts";
 
 import {
-  useSidebarPendingFileDropStore,
-  type SidebarPendingFileDrop,
+  clearPendingFileDrop,
+  queuePendingFileDrop,
+  registerSidebarFileDropReceiver,
+  retainPendingFileDropsForThread,
 } from "./sidebarPendingFileDropStore";
 
 function makeFiles(...names: string[]): File[] {
   return names.map((name) => new File(["x"], name));
 }
 
-function makeEntry(
-  environmentId: string,
-  threadId: string,
-  files: File[],
-): Omit<SidebarPendingFileDrop, "id"> {
-  return {
-    threadRef: scopeThreadRef(environmentId as EnvironmentId, ThreadId.make(threadId)),
-    files,
-  };
-}
-
-function fileNames(files: File[]): string[] {
-  return files.map((file) => file.name);
-}
-
 function refOf(environmentId: string, threadId: string) {
-  return makeEntry(environmentId, threadId, []).threadRef;
+  return scopeThreadRef(environmentId as EnvironmentId, ThreadId.make(threadId));
 }
 
-beforeEach(() => {
-  useSidebarPendingFileDropStore.setState({ pending: [] });
-});
+/** Registers a receiver for the thread and returns the names it was handed, per delivery. */
+function receive(environmentId: string, threadId: string) {
+  const deliveries: string[][] = [];
+  const unregister = registerSidebarFileDropReceiver(refOf(environmentId, threadId), (files) => {
+    deliveries.push(files.map((file) => file.name));
+  });
+  return { deliveries, [Symbol.dispose]: unregister };
+}
+
+function setup() {
+  retainPendingFileDropsForThread(null);
+}
 
 describe("sidebarPendingFileDropStore", () => {
-  it("accumulates repeat drops onto the same thread instead of replacing", () => {
-    const store = useSidebarPendingFileDropStore.getState();
-    store.queuePendingFileDrop(makeEntry("env-1", "thread-1", makeFiles("a.png")));
-    store.queuePendingFileDrop(makeEntry("env-1", "thread-1", makeFiles("b.png")));
+  it("hands repeat drops to the composer that mounts later, in one delivery", () => {
+    setup();
+    queuePendingFileDrop({ threadRef: refOf("env-1", "thread-1"), files: makeFiles("a.png") });
+    queuePendingFileDrop({ threadRef: refOf("env-1", "thread-1"), files: makeFiles("b.png") });
+
+    using receiver = receive("env-1", "thread-1");
+    expect(receiver.deliveries).toEqual([["a.png", "b.png"]]);
+    using again = receive("env-1", "thread-1");
+    expect(again.deliveries).toEqual([]);
+  });
+
+  it("delivers straight to a mounted composer and stops once it unregisters", () => {
+    setup();
+    {
+      using receiver = receive("env-1", "thread-1");
+      expect(
+        queuePendingFileDrop({ threadRef: refOf("env-1", "thread-1"), files: makeFiles("a.png") }),
+      ).toBeNull();
+      expect(receiver.deliveries).toEqual([["a.png"]]);
+    }
 
     expect(
-      fileNames(
-        useSidebarPendingFileDropStore
-          .getState()
-          .consumePendingFileDrop(refOf("env-1", "thread-1")) ?? [],
-      ),
-    ).toEqual(["a.png", "b.png"]);
-    expect(useSidebarPendingFileDropStore.getState().pending).toEqual([]);
+      queuePendingFileDrop({ threadRef: refOf("env-1", "thread-1"), files: makeFiles("b.png") }),
+    ).not.toBeNull();
+    using later = receive("env-1", "thread-1");
+    expect(later.deliveries).toEqual([["b.png"]]);
   });
 
   it("keeps a newer drop deliverable after the first navigation fails", () => {
-    const store = useSidebarPendingFileDropStore.getState();
-    const firstId = store.queuePendingFileDrop(makeEntry("env-1", "thread-1", makeFiles("a.png")));
-    const secondId = store.queuePendingFileDrop(makeEntry("env-1", "thread-1", makeFiles("b.png")));
+    setup();
+    const firstId = queuePendingFileDrop({
+      threadRef: refOf("env-1", "thread-1"),
+      files: makeFiles("a.png"),
+    });
+    queuePendingFileDrop({ threadRef: refOf("env-1", "thread-1"), files: makeFiles("b.png") });
 
-    useSidebarPendingFileDropStore.getState().clearPendingFileDrop(firstId);
-    const remaining = useSidebarPendingFileDropStore.getState().pending;
-    expect(remaining).toHaveLength(1);
-    expect(remaining[0]?.id).toBe(secondId);
-    expect(fileNames(remaining[0]?.files ?? [])).toEqual(["b.png"]);
-
-    expect(
-      fileNames(
-        useSidebarPendingFileDropStore
-          .getState()
-          .consumePendingFileDrop(refOf("env-1", "thread-1")) ?? [],
-      ),
-    ).toEqual(["b.png"]);
-    expect(useSidebarPendingFileDropStore.getState().pending).toEqual([]);
+    clearPendingFileDrop(firstId);
+    using receiver = receive("env-1", "thread-1");
+    expect(receiver.deliveries).toEqual([["b.png"]]);
   });
 
   it("does not confuse refs whose joined keys collide on colons", () => {
-    const store = useSidebarPendingFileDropStore.getState();
-    store.queuePendingFileDrop(makeEntry("a", "b:c", makeFiles("a.png")));
+    setup();
+    using other = receive("a:b", "c");
+    queuePendingFileDrop({ threadRef: refOf("a", "b:c"), files: makeFiles("a.png") });
+    expect(other.deliveries).toEqual([]);
 
-    expect(
-      useSidebarPendingFileDropStore.getState().consumePendingFileDrop(refOf("a:b", "c")),
-    ).toBeNull();
-    expect(useSidebarPendingFileDropStore.getState().pending).toHaveLength(1);
+    using receiver = receive("a", "b:c");
+    expect(receiver.deliveries).toEqual([["a.png"]]);
+  });
+
+  it("discards drops for every thread but the one the route now shows", () => {
+    setup();
+    queuePendingFileDrop({ threadRef: refOf("env-1", "thread-1"), files: makeFiles("a.png") });
+    queuePendingFileDrop({ threadRef: refOf("env-1", "thread-2"), files: makeFiles("b.png") });
+
+    retainPendingFileDropsForThread(refOf("env-1", "thread-2"));
+    using first = receive("env-1", "thread-1");
+    using second = receive("env-1", "thread-2");
+    expect(first.deliveries).toEqual([]);
+    expect(second.deliveries).toEqual([["b.png"]]);
   });
 });

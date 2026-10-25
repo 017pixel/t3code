@@ -49,7 +49,6 @@ interface MultipleModelSendInput {
   readonly draftId: DraftId | null;
   readonly composerDraftTarget: ComposerThreadTarget;
   readonly composerRef: ComposerHandleRef;
-  readonly promptRef: { current: string };
   readonly runtimeMode: RuntimeMode;
   readonly startFromOrigin: boolean;
   readonly resetLocalDispatch: ReturnType<typeof useLocalDispatchState>["resetLocalDispatch"];
@@ -69,7 +68,6 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
     draftId,
     composerDraftTarget,
     composerRef,
-    promptRef,
     runtimeMode,
     startFromOrigin,
     resetLocalDispatch,
@@ -133,7 +131,6 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
         text: messageText,
         attachments: attachmentsSnapshot,
       });
-      promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
       clearedDraft = true;
@@ -239,7 +236,6 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
       if (clearedDraft) {
         restoreComposerDraft(composerDraftTarget, sendSnapshot);
         if (composerRef.current && currentRouteThreadKeyRef.current === routeThreadKey) {
-          promptRef.current = messageText;
           composerRef.current.resetCursorState({
             cursor: collapseExpandedComposerCursor(messageText, messageText.length),
             prompt: messageText,

@@ -1,5 +1,4 @@
-import { useLocation, useNavigate } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useNavigate, type AnyRouter } from "@tanstack/react-router";
 
 export function isSidebarUtilityPage(pathname: string) {
   return (
@@ -11,16 +10,20 @@ export function isSidebarUtilityPage(pathname: string) {
   );
 }
 
+// Pages the root route renders without the app shell, so they are never the app to return to.
+const SHELL_LESS_PATHS = new Set(["/pair", "/connect", "/connect-agent"]);
+
 let mainAppHref: string | null = null;
 
-export function MainAppLocationTracker() {
-  const href = useLocation({
-    select: (location) => (isSidebarUtilityPage(location.pathname) ? null : location.href),
-  });
-  useEffect(() => {
-    if (href !== null) mainAppHref = href;
-  }, [href]);
-  return null;
+/** Remembers the last app location outside utility pages, for their way back. */
+export function startMainAppLocationTracking(router: AnyRouter): () => void {
+  const record = () => {
+    const { pathname, href } = router.state.location;
+    if (isSidebarUtilityPage(pathname) || SHELL_LESS_PATHS.has(pathname)) return;
+    mainAppHref = href;
+  };
+  record();
+  return router.subscribe("onResolved", record);
 }
 
 export function useNavigateToMainApp() {

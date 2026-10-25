@@ -1,5 +1,5 @@
 import { useAuth } from "@clerk/react";
-import { useAtomValue } from "@effect/atom-react";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import type {
   AgentSessionProjectCandidate,
   EnvironmentId,
@@ -32,7 +32,7 @@ import {
   MonitorIcon,
   TerminalIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 
 import { TYPOGRAPHY_ADVANCED_STORAGE_KEY } from "../../appearanceFonts";
 import { useLocalStorage } from "../../hooks/useLocalStorage";
@@ -57,8 +57,8 @@ import {
 } from "../../onboarding/providerReadiness.logic";
 import { newProjectId, randomUUID } from "../../lib/utils";
 import { agentSessionImport } from "../../state/agentSessions";
-import { readProjects, useProjects } from "../../state/entities";
-import { useEnvironments, usePrimaryEnvironment } from "../../state/environments";
+import { readProjects, waitForProject } from "../../state/entities";
+import { useEnvironments } from "../../state/environments";
 import {
   isOnboardingRelayEnvironment,
   resolveOnboardingSetup,
@@ -82,6 +82,11 @@ import { readCodexSetupMode } from "../settings/CodexSetupSection.logic";
 import { buildProviderInstanceUpdatePatch } from "../settings/SettingsPanels.logic";
 import { TerminalViewport } from "../ThreadTerminalDrawer";
 import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
+import {
+  type ComputerSelection,
+  createComputerSelection,
+  resolveSelectedComputers,
+} from "../cloud/relayDiscoveryStore";
 import { presentSavedCloudEnvironmentConnection } from "../cloud/cloudEnvironmentConnectionPresentation";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { T3Wordmark } from "../T3Wordmark";
@@ -118,37 +123,29 @@ export function WelcomeWizard({
 }) {
   const [step, setStep] = useState<WizardStep>(resumeEnvironmentId ? "agents" : "connection");
   const { environments } = useEnvironments();
-  const [selection, setSelection] = useState<ReadonlySet<EnvironmentId> | null>(null);
-  // Share the registry for the wizard's lifetime so unchecked computers are not auto-selected again.
-  const [autoSelectedComputers] = useState(() => new Set<EnvironmentId>());
+  const registry = useContext(RegistryContext);
+  // One selection for the wizard's lifetime, shared with the connect list, so a computer is
+  // auto-selected once even after the user unchecks it.
+  const [computerSelection] = useState(() =>
+    createComputerSelection(registry, { waitForHealthChecks: false, refreshWhileHidden: true }),
+  );
+  const selectedIds = resolveSelectedComputers(
+    environments,
+    useAtomValue(computerSelection.choicesAtom),
+  );
+  const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
+    reportFailure: false,
+  });
+  const enterAgentsStep = (ids: readonly EnvironmentId[]) => {
+    for (const environmentId of ids) void refreshProviders({ environmentId, input: {} });
+    setStep("agents");
+  };
   const [setupIds, setSetupIds] = useState<readonly EnvironmentId[]>(
     resumeEnvironmentId ? [resumeEnvironmentId] : [],
   );
   const [isImporting, setIsImporting] = useState(false);
   const finishingPromiseRef = useRef<Promise<boolean> | null>(null);
   const completionErrorToastIdRef = useRef<ReturnType<typeof toastManager.add> | null>(null);
-  const primaryEnvironment = usePrimaryEnvironment();
-  useEffect(() => {
-    const newComputers = environments.filter(
-      (environment) => !autoSelectedComputers.has(environment.environmentId),
-    );
-    if (newComputers.length === 0) return;
-    for (const environment of newComputers) {
-      autoSelectedComputers.add(environment.environmentId);
-    }
-    const enabledComputers = newComputers.filter((environment) => environment.entry.enabled);
-    if (enabledComputers.length === 0) return;
-    // oxlint-disable-next-line react/set-state-in-effect -- The registry marks each computer once, and only after commit; render must not mutate it.
-    setSelection(
-      (current) =>
-        new Set([
-          ...(current ?? []),
-          ...enabledComputers.map((environment) => environment.environmentId),
-        ]),
-    );
-  }, [autoSelectedComputers, environments]);
-  const selectedIds =
-    selection ?? new Set(primaryEnvironment ? [primaryEnvironment.environmentId] : []);
   const scans = useProjectScans(step === "import" ? setupIds : NO_ENVIRONMENTS);
   const isLoadingProjects =
     step === "import" &&
@@ -157,7 +154,7 @@ export function WelcomeWizard({
   const startSetup = (ids: readonly EnvironmentId[]) => {
     if (ids.length === 0) return;
     setSetupIds(ids);
-    setStep("agents");
+    enterAgentsStep(ids);
   };
   const stageIndex = step === "agents" ? 1 : step === "import" ? 2 : 0;
   const finish = (
@@ -246,7 +243,8 @@ export function WelcomeWizard({
             isStepDisabled={(index) => isImporting || index >= stageIndex}
             onStepChange={(index) => {
               if (isImporting || index > stageIndex) return;
-              setStep(index === 0 ? "connection" : "agents");
+              if (index === 0) setStep("connection");
+              else enterAgentsStep(setupIds);
             }}
           />
         </WizardHeader>
@@ -256,22 +254,11 @@ export function WelcomeWizard({
             <ConnectionStep
               expandPairingInitially={!localAvailable && !hasCloudPublicConfig()}
               selectedIds={selectedIds}
-              autoSelectedComputers={autoSelectedComputers}
-              onSelectionChange={setSelection}
-              onToggleEnvironment={(environmentId, checked) =>
-                setSelection((current) => {
-                  const next = new Set(current ?? selectedIds);
-                  if (checked) next.add(environmentId);
-                  else next.delete(environmentId);
-                  return next;
-                })
-              }
+              computerSelection={computerSelection}
               onContinue={() =>
                 startSetup(resolveOnboardingSetup(environments, selectedIds).environmentIds)
               }
-              onPaired={(environmentId) => {
-                setSelection(new Set([...selectedIds, environmentId]));
-              }}
+              onPaired={(environmentId) => computerSelection.choose(environmentId, true)}
             />
           ) : step === "agents" ? (
             <AgentsStep environmentIds={setupIds} onContinue={() => setStep("import")} />
@@ -291,19 +278,15 @@ export function WelcomeWizard({
 }
 
 function ConnectionStep({
-  autoSelectedComputers,
+  computerSelection,
   expandPairingInitially,
   selectedIds,
-  onSelectionChange,
-  onToggleEnvironment,
   onContinue,
   onPaired,
 }: {
-  readonly autoSelectedComputers: Set<EnvironmentId>;
+  readonly computerSelection: ComputerSelection;
   readonly expandPairingInitially: boolean;
   readonly selectedIds: ReadonlySet<EnvironmentId>;
-  readonly onSelectionChange: (ids: ReadonlySet<EnvironmentId>) => void;
-  readonly onToggleEnvironment: (environmentId: EnvironmentId, checked: boolean) => void;
   readonly onContinue: () => void;
   readonly onPaired: (environmentId: EnvironmentId) => void;
 }) {
@@ -319,15 +302,18 @@ function ConnectionStep({
     .filter((environment) => skippedIds.includes(environment.environmentId))
     .map((environment) => environment.label);
   const continueRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
+  // Re-attached when `ready` flips, so the button takes idle focus the moment it can act.
+  const attachContinue = (button: HTMLButtonElement | null) => {
+    continueRef.current = button;
     if (
+      button &&
       ready &&
       (document.activeElement === document.body ||
         document.activeElement?.getAttribute("role") === "dialog")
     ) {
-      continueRef.current?.focus();
+      button.focus();
     }
-  }, [ready]);
+  };
   return (
     <>
       <h1 className="text-2xl font-semibold tracking-tight text-foreground">
@@ -346,12 +332,9 @@ function ConnectionStep({
             >
               <Checkbox
                 checked={selectedIds.has(environment.environmentId)}
-                onCheckedChange={(checked) => {
-                  const next = new Set(selectedIds);
-                  if (checked) next.add(environment.environmentId);
-                  else next.delete(environment.environmentId);
-                  onSelectionChange(next);
-                }}
+                onCheckedChange={(checked) =>
+                  computerSelection.choose(environment.environmentId, checked)
+                }
               />
               <MonitorIcon className="size-4 shrink-0 text-muted-foreground" />
               <span className="min-w-0 flex-1">
@@ -383,10 +366,9 @@ function ConnectionStep({
       <div className="mt-4 space-y-2">
         {cloudEnabled ? (
           <ConnectAccountOption
-            autoSelectedComputers={autoSelectedComputers}
+            computerSelection={computerSelection}
             disabled={isPairing}
             selectedIds={selectedIds}
-            onToggleEnvironment={onToggleEnvironment}
           />
         ) : null}
         <div className="rounded-lg border border-border bg-background">
@@ -445,7 +427,7 @@ function ConnectionStep({
         </p>
         <Button
           className="shrink-0 self-end"
-          ref={continueRef}
+          ref={attachContinue}
           autoFocus={!expandPairingInitially}
           disabled={!ready || isPairing}
           onClick={onContinue}
@@ -459,22 +441,19 @@ function ConnectionStep({
 }
 
 function ConnectAccountOption({
-  autoSelectedComputers,
+  computerSelection,
   disabled,
   selectedIds,
-  onToggleEnvironment,
 }: {
-  readonly autoSelectedComputers: Set<EnvironmentId>;
+  readonly computerSelection: ComputerSelection;
   readonly disabled: boolean;
   readonly selectedIds: ReadonlySet<EnvironmentId>;
-  readonly onToggleEnvironment: (environmentId: EnvironmentId, checked: boolean) => void;
 }) {
   const { environments } = useEnvironments();
   const { isLoaded, isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
   const { openAuthPrompt } = useT3ConnectAuthPrompt();
   const [expanded, setExpanded] = useState(true);
-  const [discoveryReady, setDiscoveryReady] = useState(false);
-  const onDiscoveryReady = () => setDiscoveryReady(true);
+  const discoveryReady = useAtomValue(computerSelection.discoveryReadyAtom);
 
   return (
     <div className="rounded-lg border border-border bg-background">
@@ -515,9 +494,7 @@ function ConnectAccountOption({
                   primaryEnvironmentId={null}
                   savedEnvironments={environments}
                   showSavedEnvironments
-                  onDiscoveryReady={onDiscoveryReady}
-                  selection={{ selectedIds, onChange: onToggleEnvironment, autoSelectedComputers }}
-                  refreshWhileEmpty
+                  selection={{ store: computerSelection, selectedIds }}
                   empty={
                     <p className="py-3 text-sm text-muted-foreground">No computers linked yet.</p>
                   }
@@ -550,21 +527,11 @@ function PairingForm({
   const connectPairingEnvironment = useAtomCommand(connectPairing, { reportFailure: false });
   const [pairingUrl, setPairingUrl] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
-  const mountedRef = useRef(true);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
   const submit = async () => {
     if (isPairing || pairingUrl.trim().length === 0) return;
     setIsPairing(true);
     setErrorMessage("");
     const result = await connectPairingEnvironment({ pairingUrl: pairingUrl.trim() });
-    if (!mountedRef.current) return;
     setIsPairing(false);
     if (result._tag === "Success") {
       onPaired(result.value);
@@ -717,10 +684,6 @@ function ConnectedAgentsStep({
     autoStart: boolean;
   } | null>(null);
   const canOperateTerminal = useEnvironmentScope(environmentId, AuthTerminalOperateScope);
-
-  useEffect(() => {
-    void refreshProviders({ environmentId, input: {} });
-  }, [environmentId, refreshProviders]);
 
   const byDriver = selectOnboardingProvidersByDriver(providers);
 
@@ -1155,11 +1118,8 @@ function AgentInstallTerminal({
             providerInstanceId={providerInstanceId}
             advancedTypography={advancedTypography}
             onSessionExited={onClose}
-            focusRequestId={1}
             autoFocus
             visible
-            resizeEpoch={0}
-            drawerHeight={256}
             keybindings={keybindings}
           />
         ) : null}
@@ -1189,44 +1149,25 @@ function ImportStep({
   const writableEnvironments = useEnvironmentsWithScope(scans, AuthOrchestrationOperateScope);
   const createProject = useAtomCommand(projectEnvironment.create, { reportFailure: false });
   const importThreads = useAtomCommand(agentSessionImport, { reportFailure: false });
-  const projects = useProjects();
   const [selectedPaths, setSelectedPaths] = useState<ReadonlySet<string> | null>(null);
   const importWarningRef = useRef("");
   const importedThreadCountRef = useRef(0);
-  const [landingProject, setLandingProject] = useState<ScopedProjectRef | null>(null);
   const importedProjectsRef = useRef(new Map<string, ScopedProjectRef>());
   const projectsWithImportedHistoryRef = useRef(new Map<string, ScopedProjectRef>());
   const lastImportSelectionRef = useRef<ReadonlyArray<string>>([]);
   const projectAttemptsRef = useRef(
     new Map<string, { readonly projectId: ProjectId; readonly commandId: CommandId }>(),
   );
-  const importGenerationRef = useRef(0);
-
-  useEffect(() => {
-    importGenerationRef.current += 1;
-    return () => {
-      importGenerationRef.current += 1;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (
-      landingProject !== null &&
-      projects.some(
-        (project) =>
-          project.id === landingProject.projectId &&
-          project.environmentId === landingProject.environmentId,
-      )
-    ) {
-      // oxlint-disable-next-line react/set-state-in-effect -- The landing project is known only once the projects subscription delivers it.
-      setLandingProject(null);
-      void onDone(landingProject, importWarningRef.current, importedThreadCountRef.current).then(
-        (completed) => {
-          if (!completed) setIsImporting(false);
-        },
-      );
-    }
-  }, [landingProject, onDone, projects, setIsImporting]);
+  // Aborted when the step unmounts, so an import or landing in flight stops
+  // instead of creating projects behind a closed wizard. The ref sits on a
+  // wrapper both render branches share, so falling back to the scanning view
+  // does not abort it.
+  const stepAbortRef = useRef(new AbortController());
+  const abortWhenUnmounted = () => {
+    const controller = new AbortController();
+    stepAbortRef.current = controller;
+    return () => controller.abort();
+  };
 
   const { available: candidates, recent } = partitionOnboardingProjects(
     scans.flatMap((scan) =>
@@ -1261,7 +1202,22 @@ function ImportStep({
       return;
     }
     setIsImporting(true);
-    setLandingProject(projectRef);
+    const signal = stepAbortRef.current.signal;
+    void waitForProject(projectRef)
+      .then(
+        (project) => project,
+        () => null,
+      )
+      .then(async (project) => {
+        if (signal.aborted) return;
+        // A project that never reaches the client still finishes setup, just without landing in it.
+        const completed = await onDone(
+          project === null ? undefined : projectRef,
+          importWarningRef.current,
+          importedThreadCountRef.current,
+        );
+        if (!completed) setIsImporting(false);
+      });
   };
 
   const runImport = async (selection: typeof candidates) => {
@@ -1286,7 +1242,7 @@ function ImportStep({
     importWarningRef.current = "";
     importedThreadCountRef.current = 0;
     lastImportSelectionRef.current = selection.map((candidate) => candidate.key);
-    const importGeneration = importGenerationRef.current;
+    const signal = stepAbortRef.current.signal;
     const importedProjects = importedProjectsRef.current;
     const projectAttempts = projectAttemptsRef.current;
     let importedProjectsCount =
@@ -1298,10 +1254,7 @@ function ImportStep({
     const refreshEnvironments = new Set<EnvironmentId>();
     for (const candidate of selection) {
       const { environmentId } = candidate;
-      if (
-        importGeneration !== importGenerationRef.current ||
-        importedProjects !== importedProjectsRef.current
-      ) {
+      if (signal.aborted) {
         return;
       }
       if (!hasAccess()) {
@@ -1332,10 +1285,7 @@ function ImportStep({
             defaultModelSelection: null,
           },
         });
-        if (
-          importGeneration !== importGenerationRef.current ||
-          importedProjects !== importedProjectsRef.current
-        ) {
+        if (signal.aborted) {
           return;
         }
         if (result._tag !== "Success") {
@@ -1355,10 +1305,7 @@ function ImportStep({
         environmentId,
         input: { projectId, expectedWorkspaceRoot: candidate.path },
       });
-      if (
-        importGeneration !== importGenerationRef.current ||
-        importedProjects !== importedProjectsRef.current
-      ) {
+      if (signal.aborted) {
         return;
       }
       if (threadImportResult._tag === "Success") {
@@ -1398,126 +1345,127 @@ function ImportStep({
     finishAfterImport();
   };
 
-  if (scans.every((scan) => scan.data === null) && scans.some((scan) => scan.isPending)) {
-    return (
-      <div className="flex h-full min-h-40 flex-col">
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">Your projects</h1>
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 py-6">
-          <Spinner size="lg" tone="muted" />
-          <p className="text-center text-sm text-muted-foreground">
-            Looking for projects from Claude Code and Codex…
-          </p>
-        </div>
-        <div className="flex justify-end">
-          <Button variant="ghost-muted" onClick={() => void onDone()}>
-            Do not import projects
-          </Button>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <StepShell
-      title="Import your projects"
-      description="Import projects and conversations from Claude Code and Codex on your selected computers."
-    >
-      {candidates.length > 0 ? (
-        <div className="mt-5 flex items-center justify-between gap-3 text-xs text-muted-foreground">
-          <span role="status">
-            {selected.length} of {candidates.length} selected
-          </span>
-          <div className="flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="xs"
-              disabled={isImporting || selected.length === candidates.length}
-              onClick={() => setSelectedPaths(new Set(candidates.map((item) => item.key)))}
-            >
-              Select all
-            </Button>
-            <Button
-              variant="ghost"
-              size="xs"
-              disabled={isImporting || selected.length === 0}
-              onClick={() => setSelectedPaths(new Set())}
-            >
-              Select none
+    <div ref={abortWhenUnmounted} className="contents">
+      {scans.every((scan) => scan.data === null) && scans.some((scan) => scan.isPending) ? (
+        <div className="flex h-full min-h-40 flex-col">
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">Your projects</h1>
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 py-6">
+            <Spinner size="lg" tone="muted" />
+            <p className="text-center text-sm text-muted-foreground">
+              Looking for projects from Claude Code and Codex…
+            </p>
+          </div>
+          <div className="flex justify-end">
+            <Button variant="ghost-muted" onClick={() => void onDone()}>
+              Do not import projects
             </Button>
           </div>
         </div>
-      ) : null}
-      <ScrollArea scrollFade className="mt-2 h-auto max-h-80">
-        <div className="space-y-5 pr-3">
-          {scans.map((scan) => {
-            const scanCandidates = candidates.filter(
-              (candidate) => candidate.environmentId === scan.environmentId,
-            );
-            const label =
-              environments.find((environment) => environment.environmentId === scan.environmentId)
-                ?.label ?? "Computer";
-            return (
-              <fieldset
-                key={scan.environmentId}
-                className="min-w-0 space-y-0.5"
-                disabled={isImporting}
-              >
-                {scans.length > 1 ? (
-                  <legend className="mb-2 text-sm font-medium">{label}</legend>
-                ) : null}
-                {scan.isPending && scan.data === null ? (
-                  <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground">
-                    <Spinner size="md" />
-                    Looking for projects…
-                  </div>
-                ) : scan.error !== null ? (
-                  <div
-                    role="alert"
-                    className="flex items-center justify-between gap-3 text-sm text-muted-foreground"
-                  >
-                    <span>Could not check projects. {scan.error}</span>
-                    <Button variant="ghost" size="sm" onClick={scan.refresh}>
-                      Retry
-                    </Button>
-                  </div>
-                ) : scanCandidates.length === 0 ? (
-                  <p className="py-2 text-sm text-muted-foreground">
-                    No existing Claude Code or Codex projects found.
-                  </p>
-                ) : null}
-                {scan.data?.truncated ? (
-                  <p className="text-xs text-muted-foreground" role="status">
-                    {SCAN_LIMIT_MESSAGE}
-                  </p>
-                ) : null}
-                <ImportCandidateList
-                  candidates={scanCandidates}
-                  selectedKeys={selectedKeys}
-                  onSelectionChange={setSelectedPaths}
-                />
-              </fieldset>
-            );
-          })}
-        </div>
-      </ScrollArea>
-      {visibleImportError ? (
-        <p className="mt-3 text-sm text-destructive">{visibleImportError}</p>
-      ) : null}
-      <div className="mt-6 flex flex-wrap items-center justify-end gap-3">
-        <Button variant="ghost-muted" disabled={isImporting} onClick={finishAfterImport}>
-          Do not import projects
-        </Button>
-        <Button
-          autoFocus
-          disabled={!canImport || isImporting || selected.length === 0}
-          onClick={() => void runImport(selected)}
+      ) : (
+        <StepShell
+          title="Import your projects"
+          description="Import projects and conversations from Claude Code and Codex on your selected computers."
         >
-          {isImporting
-            ? "Importing…"
-            : `Import ${selected.length} ${selected.length === 1 ? "project" : "projects"}`}
-        </Button>
-      </div>
-    </StepShell>
+          {candidates.length > 0 ? (
+            <div className="mt-5 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+              <span role="status">
+                {selected.length} of {candidates.length} selected
+              </span>
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  disabled={isImporting || selected.length === candidates.length}
+                  onClick={() => setSelectedPaths(new Set(candidates.map((item) => item.key)))}
+                >
+                  Select all
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  disabled={isImporting || selected.length === 0}
+                  onClick={() => setSelectedPaths(new Set())}
+                >
+                  Select none
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          <ScrollArea scrollFade className="mt-2 h-auto max-h-80">
+            <div className="space-y-5 pr-3">
+              {scans.map((scan) => {
+                const scanCandidates = candidates.filter(
+                  (candidate) => candidate.environmentId === scan.environmentId,
+                );
+                const label =
+                  environments.find(
+                    (environment) => environment.environmentId === scan.environmentId,
+                  )?.label ?? "Computer";
+                return (
+                  <fieldset
+                    key={scan.environmentId}
+                    className="min-w-0 space-y-0.5"
+                    disabled={isImporting}
+                  >
+                    {scans.length > 1 ? (
+                      <legend className="mb-2 text-sm font-medium">{label}</legend>
+                    ) : null}
+                    {scan.isPending && scan.data === null ? (
+                      <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground">
+                        <Spinner size="md" />
+                        Looking for projects…
+                      </div>
+                    ) : scan.error !== null ? (
+                      <div
+                        role="alert"
+                        className="flex items-center justify-between gap-3 text-sm text-muted-foreground"
+                      >
+                        <span>Could not check projects. {scan.error}</span>
+                        <Button variant="ghost" size="sm" onClick={scan.refresh}>
+                          Retry
+                        </Button>
+                      </div>
+                    ) : scanCandidates.length === 0 ? (
+                      <p className="py-2 text-sm text-muted-foreground">
+                        No existing Claude Code or Codex projects found.
+                      </p>
+                    ) : null}
+                    {scan.data?.truncated ? (
+                      <p className="text-xs text-muted-foreground" role="status">
+                        {SCAN_LIMIT_MESSAGE}
+                      </p>
+                    ) : null}
+                    <ImportCandidateList
+                      candidates={scanCandidates}
+                      selectedKeys={selectedKeys}
+                      onSelectionChange={setSelectedPaths}
+                    />
+                  </fieldset>
+                );
+              })}
+            </div>
+          </ScrollArea>
+          {visibleImportError ? (
+            <p className="mt-3 text-sm text-destructive">{visibleImportError}</p>
+          ) : null}
+          <div className="mt-6 flex flex-wrap items-center justify-end gap-3">
+            <Button variant="ghost-muted" disabled={isImporting} onClick={finishAfterImport}>
+              Do not import projects
+            </Button>
+            <Button
+              autoFocus
+              disabled={!canImport || isImporting || selected.length === 0}
+              onClick={() => void runImport(selected)}
+            >
+              {isImporting
+                ? "Importing…"
+                : `Import ${selected.length} ${selected.length === 1 ? "project" : "projects"}`}
+            </Button>
+          </div>
+        </StepShell>
+      )}
+    </div>
   );
 }
 

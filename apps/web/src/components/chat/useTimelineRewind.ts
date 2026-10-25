@@ -49,7 +49,6 @@ interface TimelineRewindInput {
   readonly supportsConversationRollback: boolean;
   readonly activeEnvironmentUnavailable: boolean;
   readonly activeEnvironmentUnavailableLabel: string | null;
-  readonly promptRef: { current: string };
   readonly composerRef: ComposerHandleRef;
   readonly composerDraftTarget: ComposerThreadTarget;
   readonly setThreadError: ReturnType<typeof makeThreadErrorSetter>;
@@ -76,7 +75,6 @@ export function useTimelineRewind(input: TimelineRewindInput) {
     supportsConversationRollback,
     activeEnvironmentUnavailable,
     activeEnvironmentUnavailableLabel,
-    promptRef,
     composerRef,
     composerDraftTarget,
     setThreadError,
@@ -162,7 +160,6 @@ export function useTimelineRewind(input: TimelineRewindInput) {
     }
     if (currentRouteThreadKeyRef.current === routeThreadKey) {
       const nextPrompt = rewind.prompt;
-      promptRef.current = nextPrompt;
       composerRef.current?.resetCursorState({ prompt: nextPrompt, cursor: nextPrompt.length });
       requestAnimationFrame(() => {
         if (currentRouteThreadKeyRef.current === routeThreadKey) composerRef.current?.focusAtEnd();

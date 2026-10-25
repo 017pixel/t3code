@@ -30,6 +30,8 @@ import {
 import type { SidebarThreadSummary, Thread } from "../types";
 import { normalizeSearchText } from "../lib/utils";
 import { isLatestRunSettled } from "../session-logic";
+import { observeIntersection } from "../lib/observeIntersection";
+import { useDeadlinePassed } from "../hooks/useDeadline";
 
 export function shouldNavigateAfterThreadPark(input: {
   readonly threadKey: string;
@@ -68,32 +70,67 @@ const SIDEBAR_ROW_SUBSCRIPTION_OVERSCAN_PX = 160;
 
 export function useSidebarRowSubscriptionLease(isActive: boolean): {
   readonly leaseLiveStatus: boolean;
-  readonly rowRef: React.Dispatch<React.SetStateAction<HTMLElement | null>>;
+  readonly rowRef: (row: HTMLElement | null) => (() => void) | undefined;
 } {
-  const [row, setRow] = React.useState<HTMLElement | null>(null);
   const [isNearViewport, setIsNearViewport] = React.useState(isActive);
   if (isActive && !isNearViewport) setIsNearViewport(true);
   const canObserve = typeof IntersectionObserver !== "undefined";
 
-  React.useEffect(() => {
-    if (isActive || row === null || !canObserve) return;
-
-    const scrollRoot = row.closest<HTMLElement>('[data-slot="scroll-area-viewport"]');
-    const observer = new IntersectionObserver(
-      ([entry]) => setIsNearViewport(entry?.isIntersecting === true),
-      {
-        root: scrollRoot,
-        rootMargin: `${SIDEBAR_ROW_SUBSCRIPTION_OVERSCAN_PX}px 0px`,
-      },
-    );
-    observer.observe(row);
-    return () => observer.disconnect();
-  }, [canObserve, isActive, row]);
-
   return {
     leaseLiveStatus: isActive || isNearViewport || !canObserve,
-    rowRef: setRow,
+    rowRef: (row) => {
+      if (row === null || isActive || !canObserve) return undefined;
+      // The overscan has to apply to the sidebar's own scroller; a viewport-rooted
+      // margin is still clipped by it.
+      return observeIntersection(row, (entry) => setIsNearViewport(entry.isIntersecting), {
+        root: row.closest('[data-slot="scroll-area-viewport"]'),
+        rootMargin: `${SIDEBAR_ROW_SUBSCRIPTION_OVERSCAN_PX}px 0px`,
+      });
+    },
   };
+}
+
+const fileDragClears = new Set<(active: false) => void>();
+function clearFileDrags() {
+  const clears = [...fileDragClears];
+  fileDragClears.clear();
+  for (const clear of clears) clear(false);
+}
+
+/**
+ * A file drag that ends outside every drop target (Escape, or a drop elsewhere)
+ * sends no dragleave to the row it last entered, so the window's dragend clears it.
+ */
+export function setFileDragActive(setActive: (active: boolean) => void, active: boolean) {
+  setActive(active);
+  if (!active || typeof window === "undefined") return;
+  if (fileDragClears.size === 0) window.addEventListener("dragend", clearFileDrags, { once: true });
+  fileDragClears.add(setActive);
+}
+
+/**
+ * A clock that advances exactly when a snooze wake time passes, so a woken
+ * thread leaves the shelf on time without a per-second clock.
+ */
+export function useSnoozeWakeClock(
+  threads: ReadonlyArray<{ readonly snoozedUntil?: string | null | undefined }>,
+): number {
+  const [clockMs, setClockMs] = React.useState(() => Date.now());
+  let nextWakeAt: number | null = null;
+  for (const thread of threads) {
+    const wakeAt = thread.snoozedUntil == null ? Number.NaN : Date.parse(thread.snoozedUntil);
+    if (wakeAt > clockMs && (nextWakeAt === null || wakeAt < nextWakeAt)) nextWakeAt = wakeAt;
+  }
+  const woke = useDeadlinePassed(nextWakeAt);
+  // Jumping to now (read only once a wake passed, like useNowAfter) skips every
+  // wake that elapsed meanwhile, e.g. across a laptop sleep. Stepping one wake
+  // at a time would re-render once per elapsed wake and hit React's limit.
+  if (woke && nextWakeAt !== null) {
+    const nextClockMs = Math.max(nextWakeAt, Date.now());
+    setClockMs(nextClockMs);
+    return nextClockMs;
+  }
+  return clockMs;
 }
 
 export function useRetainedValue<T>(key: string | null, value: T | null): T | null {
@@ -516,10 +553,14 @@ export function isSidebarSubagentThread(thread: Pick<SidebarThreadSummary, "line
 export function resolveSidebarRowThreadId(
   threadId: ThreadId,
   environmentId: EnvironmentId,
-  threads: readonly Pick<SidebarThreadSummary, "id" | "environmentId" | "lineage">[],
+  threads:
+    | readonly Pick<SidebarThreadSummary, "id" | "environmentId" | "lineage">[]
+    | ((id: ThreadId) => Pick<SidebarThreadSummary, "id" | "lineage"> | null),
 ): ThreadId {
   const findThread = (id: ThreadId) =>
-    threads.find((thread) => thread.id === id && thread.environmentId === environmentId);
+    typeof threads === "function"
+      ? (threads(id) ?? undefined)
+      : threads.find((thread) => thread.id === id && thread.environmentId === environmentId);
   const visited = new Set<ThreadId>();
   let thread = findThread(threadId);
   while (thread !== undefined && isSidebarSubagentThread(thread)) {
@@ -614,89 +655,16 @@ type ThreadStatusInput = Pick<
   blockedOnThreadWait?: boolean | undefined;
 };
 
-export interface ThreadJumpHintVisibilityController {
-  sync: (shouldShow: boolean) => void;
-  dispose: () => void;
-}
-
-function createThreadJumpHintVisibilityController(input: {
-  delayMs: number;
-  onVisibilityChange: (visible: boolean) => void;
-  setTimeoutFn?: typeof globalThis.setTimeout;
-  clearTimeoutFn?: typeof globalThis.clearTimeout;
-}): ThreadJumpHintVisibilityController {
-  const setTimeoutFn = input.setTimeoutFn ?? globalThis.setTimeout;
-  const clearTimeoutFn = input.clearTimeoutFn ?? globalThis.clearTimeout;
-  let isVisible = false;
-  let timeoutId: NodeJS.Timeout | null = null;
-
-  const clearPendingShow = () => {
-    if (timeoutId === null) {
-      return;
-    }
-    clearTimeoutFn(timeoutId);
-    timeoutId = null;
-  };
-
-  return {
-    sync: (shouldShow) => {
-      if (!shouldShow) {
-        clearPendingShow();
-        if (isVisible) {
-          isVisible = false;
-          input.onVisibilityChange(false);
-        }
-        return;
-      }
-
-      if (isVisible || timeoutId !== null) {
-        return;
-      }
-
-      timeoutId = setTimeoutFn(() => {
-        timeoutId = null;
-        isVisible = true;
-        input.onVisibilityChange(true);
-      }, input.delayMs);
-    },
-    dispose: () => {
-      clearPendingShow();
-    },
-  };
-}
-
-export function useThreadJumpHintVisibility(): {
-  showThreadJumpHints: boolean;
-  updateThreadJumpHintsVisibility: (shouldShow: boolean) => void;
-} {
-  const [showThreadJumpHints, setShowThreadJumpHints] = React.useState(false);
-  const controllerRef = React.useRef<ThreadJumpHintVisibilityController | null>(null);
-
-  React.useEffect(() => {
-    const controller = createThreadJumpHintVisibilityController({
-      delayMs: THREAD_JUMP_HINT_SHOW_DELAY_MS,
-      onVisibilityChange: (visible) => {
-        setShowThreadJumpHints(visible);
-      },
-      setTimeoutFn: window.setTimeout.bind(window),
-      clearTimeoutFn: window.clearTimeout.bind(window),
-    });
-    controllerRef.current = controller;
-
-    return () => {
-      controller.dispose();
-      controllerRef.current = null;
-    };
-  }, []);
-
-  const updateThreadJumpHintsVisibility = (shouldShow: boolean) => {
-    controllerRef.current?.sync(shouldShow);
-  };
-
-  return {
-    showThreadJumpHints,
-    updateThreadJumpHintsVisibility,
-  };
+/**
+ * Thread jump hints appear once the jump modifier has been held for a moment,
+ * so a quick shortcut never flashes them, and hide as soon as it is released.
+ */
+export function useThreadJumpHintsVisible(shouldShow: boolean): boolean {
+  const [showAt, setShowAt] = React.useState<number | null>(null);
+  let nextShowAt = shouldShow ? showAt : null;
+  if (shouldShow && showAt === null) nextShowAt = Date.now() + THREAD_JUMP_HINT_SHOW_DELAY_MS;
+  if (nextShowAt !== showAt) setShowAt(nextShowAt);
+  return useDeadlinePassed(nextShowAt);
 }
 
 export function resolveThreadLastVisitedAt(

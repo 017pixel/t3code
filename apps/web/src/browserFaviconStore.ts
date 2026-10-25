@@ -171,15 +171,6 @@ function mergeBrowserFaviconState(
   };
 }
 
-/**
- * Compat shim for the base ChatView until the web-chat-view layer. The store
- * now reads a thread's project from the shell or draft, so this is a no-op.
- */
-export function registerFaviconProjectForThread(
-  _threadRef: ScopedThreadRef,
-  _projectRef: ScopedProjectRef,
-): void {}
-
 /** Server threads name their project in the shell; drafts in the composer draft store. */
 function useFaviconProjectRefForThread(threadRef: ScopedThreadRef): ScopedProjectRef | null {
   const shell = useQuietThreadShell(threadRef);

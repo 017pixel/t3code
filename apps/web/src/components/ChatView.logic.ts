@@ -111,7 +111,7 @@ type ThreadStructureRow = ThreadStructure["visibleTurnItems"][number];
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
 export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
 
-const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
+export const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
 
 export function agentControlledBrowserCloseConfirmation(
   surfaces: readonly RightPanelSurface[],
@@ -240,14 +240,6 @@ export function resolveProactiveTurnDiffAction(input: {
 
 /** Mark reactivated Diff tabs to preserve review scope. Already-active tabs must not leave a marker for
  * the next open. */
-export function resolveExplicitDiffOpenOnActivate(input: {
-  readonly surfaceKind: RightPanelSurface["kind"];
-  readonly diffOpen: boolean;
-  readonly activeThreadRef: ScopedThreadRef;
-}): ScopedThreadRef | null {
-  return input.surfaceKind === "diff" && !input.diffOpen ? input.activeThreadRef : null;
-}
-
 export function codexArtifactTemplatePromptToAppend(
   currentDraft: string,
   template: CodexArtifactTemplate,
@@ -342,75 +334,6 @@ export function resolveDraftHeroState(input: {
   );
 }
 
-/** Remounting or initially emptying LegendList flashes the chat pane, even for cached threads. */
-export type HeldThreadTimeline<T extends readonly unknown[]> = {
-  threadKey: string | null;
-  entries: T;
-  markdownCwd?: string | null;
-  workspaceRoot?: string | null;
-};
-
-const MAX_REMEMBERED_THREAD_TIMELINES = 16;
-
-let rememberedThreadTimelines = new Map<string, HeldThreadTimeline<readonly unknown[]>>();
-let rememberedThreadTimelineOrder: string[] = [];
-let lastReadyThreadKey: string | null = null;
-
-function rememberThreadTimelineEntries(held: HeldThreadTimeline<readonly unknown[]>): void {
-  if (held.threadKey === null) {
-    return;
-  }
-  rememberedThreadTimelines.set(held.threadKey, held);
-  rememberedThreadTimelineOrder = [
-    ...rememberedThreadTimelineOrder.filter((key) => key !== held.threadKey),
-    held.threadKey,
-  ];
-  while (rememberedThreadTimelineOrder.length > MAX_REMEMBERED_THREAD_TIMELINES) {
-    const evicted = rememberedThreadTimelineOrder.shift();
-    if (evicted !== undefined) {
-      rememberedThreadTimelines.delete(evicted);
-    }
-  }
-  lastReadyThreadKey = held.threadKey;
-}
-
-export function rememberReadyThreadTimeline<T extends readonly unknown[]>(
-  held: HeldThreadTimeline<T>,
-): void {
-  if (held.threadKey === null || held.entries.length === 0) {
-    return;
-  }
-  rememberThreadTimelineEntries(held);
-}
-
-export function peekRememberedThreadTimeline<T extends readonly unknown[]>(
-  threadKey: string | null,
-): T | null {
-  if (threadKey === null) {
-    return null;
-  }
-  return (rememberedThreadTimelines.get(threadKey)?.entries as T | undefined) ?? null;
-}
-
-export function peekHeldThreadTimeline<
-  T extends readonly unknown[],
->(): HeldThreadTimeline<T> | null {
-  if (lastReadyThreadKey === null) {
-    return null;
-  }
-  const held = rememberedThreadTimelines.get(lastReadyThreadKey);
-  if (held === undefined || held.entries.length === 0) {
-    return null;
-  }
-  return held as HeldThreadTimeline<T>;
-}
-
-export function resetHeldThreadTimeline(): void {
-  rememberedThreadTimelines = new Map();
-  rememberedThreadTimelineOrder = [];
-  lastReadyThreadKey = null;
-}
-
 export function threadKeysShareEnvironment(left: string | null, right: string | null): boolean {
   if (left === null || right === null) {
     return false;
@@ -429,54 +352,26 @@ export function isPaintOnlyThreadTimeline(
   );
 }
 
+/**
+ * While a switched-to thread's detail resyncs, paint the timeline it last had
+ * ready instead of an empty list.
+ */
 export function resolveThreadSwitchTimeline<T extends readonly unknown[]>(input: {
   loading: boolean;
   activeThreadKey: string | null;
   nextEntries: T;
-  rememberedForActive?: T | null;
-  lastReady?: HeldThreadTimeline<T> | null;
+  rememberedForActive: T | null;
 }): { entries: T; displayThreadKey: string | null } {
-  if (input.nextEntries.length > 0) {
-    return { entries: input.nextEntries, displayThreadKey: input.activeThreadKey };
-  }
-
-  const rememberedForActive =
-    input.rememberedForActive ?? peekRememberedThreadTimeline<T>(input.activeThreadKey);
-  if (input.loading && rememberedForActive !== null && rememberedForActive.length > 0) {
+  const { rememberedForActive } = input;
+  if (
+    input.nextEntries.length === 0 &&
+    input.loading &&
+    rememberedForActive !== null &&
+    rememberedForActive.length > 0
+  ) {
     return { entries: rememberedForActive, displayThreadKey: input.activeThreadKey };
   }
-
   return { entries: input.nextEntries, displayThreadKey: input.activeThreadKey };
-}
-
-export function resolveDraftPromotionNavigationTarget(input: {
-  serverThreadRef: ScopedThreadRef | null;
-  serverThread: Pick<Thread, "latestRun" | "latestUserMessageAt"> | null | undefined;
-  backgroundSubmissionPending: boolean;
-}): ScopedThreadRef | null {
-  if (input.backgroundSubmissionPending) {
-    return null;
-  }
-  const latestRun = input.serverThread?.latestRun ?? null;
-  const runStarted = latestRun?.startedAt != null;
-  const startupStopped =
-    latestRun?.status === "failed" ||
-    latestRun?.status === "interrupted" ||
-    latestRun?.status === "cancelled";
-  const messagePersisted = input.serverThread?.latestUserMessageAt != null;
-  return runStarted || startupStopped || messagePersisted ? input.serverThreadRef : null;
-}
-
-export function scheduleEnvironmentReconnectWarning(showWarning: () => void): () => void {
-  const timeoutId = globalThis.setTimeout(showWarning, ENVIRONMENT_RECONNECT_WARNING_GRACE_MS);
-  return () => globalThis.clearTimeout(timeoutId);
-}
-
-export function hasEnvironmentReconnectWarningGraceElapsed(
-  activeEnvironmentId: EnvironmentId | null,
-  elapsedEnvironmentId: EnvironmentId | null,
-): boolean {
-  return activeEnvironmentId !== null && activeEnvironmentId === elapsedEnvironmentId;
 }
 
 export function startNewThreadForProject(
@@ -697,13 +592,6 @@ export function resolveTerminalWorktreePath(input: {
   return input.threadWorktreePath;
 }
 
-export function revokeBlobPreviewUrl(previewUrl: string | undefined): void {
-  if (!previewUrl || typeof URL === "undefined" || !previewUrl.startsWith("blob:")) {
-    return;
-  }
-  URL.revokeObjectURL(previewUrl);
-}
-
 export async function resolveFileAttachmentUrl(input: {
   attachment: ChatFileAttachment;
   environmentId: EnvironmentId;
@@ -761,18 +649,6 @@ export async function prepareRevertedMessageAttachments(input: {
       return new File([await response.blob()], attachment.name, { type: attachment.mimeType });
     }),
   );
-}
-
-export function revokeUserMessagePreviewUrls(message: ChatMessage): void {
-  if (message.role !== "user" || !message.attachments) {
-    return;
-  }
-  for (const attachment of message.attachments) {
-    if (!isImageAttachment(attachment)) {
-      continue;
-    }
-    revokeBlobPreviewUrl(attachment.previewUrl);
-  }
 }
 
 export function timelineHasEphemeralPreviewUrls(
@@ -936,31 +812,7 @@ export function isBranchMismatchDismissedForSession(key: string | null): boolean
   return key !== null && sessionDismissedBranchMismatchKeys.has(key);
 }
 
-// Remember non-Git checkouts to avoid flashing the branch strip before delayed Git status arrives.
-const sessionCheckoutIsRepo = new Map<string, boolean>();
-
-function checkoutIsRepoKey(environmentId: EnvironmentId, cwd: string): string {
-  return JSON.stringify([environmentId, cwd]);
-}
-
-export function rememberCheckoutIsRepo(
-  environmentId: EnvironmentId,
-  cwd: string,
-  isRepo: boolean,
-): void {
-  sessionCheckoutIsRepo.set(checkoutIsRepoKey(environmentId, cwd), isRepo);
-}
-
-export function recallCheckoutIsRepo(
-  environmentId: EnvironmentId,
-  cwd: string | null,
-): boolean | undefined {
-  return cwd === null
-    ? undefined
-    : sessionCheckoutIsRepo.get(checkoutIsRepoKey(environmentId, cwd));
-}
-
-export function threadHasStarted(thread: Thread | null | undefined): boolean {
+function threadHasStarted(thread: Thread | null | undefined): boolean {
   return Boolean(thread && (thread.latestRun !== null || thread.itemCount > 0 || thread.runtime));
 }
 

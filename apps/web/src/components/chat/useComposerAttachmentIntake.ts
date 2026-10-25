@@ -13,6 +13,7 @@ import {
 import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
+  type ComposerThreadDraftState,
   type DraftId,
   composerFileMatchesReattachMarker,
   composerFileNeedsReattach,
@@ -68,11 +69,10 @@ export function useComposerAttachmentIntake(input: {
   readonly questionAttachmentTarget: DraftId | null;
   readonly attachmentTargetKey: string;
   readonly fileStagingLimit: number | null;
-  readonly promptRef: ChatComposerProps["promptRef"];
-  readonly composerImagesRef: ChatComposerProps["composerImagesRef"];
-  readonly composerFilesRef: ChatComposerProps["composerFilesRef"];
+  readonly readPrompt: () => string;
+  readonly readAttachmentDraft: () => Pick<ComposerThreadDraftState, "images" | "files">;
   readonly composerEditorRef: RefObject<ComposerPromptEditorHandle | null>;
-  readonly isRevertingCheckpointRef: RefObject<boolean>;
+  readonly isRevertingCheckpoint: () => boolean;
   readonly setThreadError: ChatComposerProps["setThreadError"];
   readonly countReservedAttachments: () => number;
   readonly addComposerImage: (image: ComposerImageAttachment) => string[];
@@ -96,11 +96,10 @@ export function useComposerAttachmentIntake(input: {
     questionAttachmentTarget,
     attachmentTargetKey,
     fileStagingLimit,
-    promptRef,
-    composerImagesRef,
-    composerFilesRef,
+    readPrompt,
+    readAttachmentDraft,
     composerEditorRef,
-    isRevertingCheckpointRef,
+    isRevertingCheckpoint,
     setThreadError,
     countReservedAttachments,
     addComposerImage,
@@ -122,7 +121,7 @@ export function useComposerAttachmentIntake(input: {
       readonly skipImageInlineChip?: boolean;
     },
   ): Promise<boolean> => {
-    if (!activeThreadId || files.length === 0 || isRevertingCheckpointRef.current) return false;
+    if (!activeThreadId || files.length === 0 || isRevertingCheckpoint()) return false;
     if (
       pendingUserInputs.length > 0 &&
       (!supportsQuestionAttachments ||
@@ -145,7 +144,7 @@ export function useComposerAttachmentIntake(input: {
         isConnecting ||
         pendingUserInputs.length > 0 ||
         projectSelectionRequired ||
-        stripInlineContextReferences(promptRef.current).trim().length > 0);
+        stripInlineContextReferences(readPrompt()).trim().length > 0);
 
     // Validation happens synchronously so concurrent pastes see each other:
     // accepted files reserve their attachment slots (as preparing images)
@@ -154,7 +153,7 @@ export function useComposerAttachmentIntake(input: {
     // A pick that matches a needs-reattach marker replaces it in the draft, so
     // it must not consume a slot; a draft full of markers would otherwise hit
     // the capacity error before the replacement path could run.
-    const reattachMarkers = composerFilesRef.current.filter(composerFileNeedsReattach);
+    const reattachMarkers = readAttachmentDraft().files.filter(composerFileNeedsReattach);
     const replacedReattachMarkerIds = new Set<string>();
     const acceptedImages: File[] = [];
     const acceptedFiles: ComposerFileAttachment[] = [];
@@ -338,8 +337,8 @@ export function useComposerAttachmentIntake(input: {
         changeQuestionAttachmentPreparation(questionAttachmentTarget, -1);
       return;
     }
-    const image = composerImagesRef.current.find((candidate) => candidate.id === imageId);
-    const referenced = collectInlineContextIds(promptRef.current).includes(
+    const image = readAttachmentDraft().images.find((candidate) => candidate.id === imageId);
+    const referenced = collectInlineContextIds(readPrompt()).includes(
       image ? imageContextReference(image).contextId : "",
     );
     if (!referenced) {
@@ -373,7 +372,7 @@ export function useComposerAttachmentIntake(input: {
     const hasAttachmentSlot = countReservedAttachments() < PROVIDER_SEND_TURN_MAX_ATTACHMENTS;
     const selection = selectionOverride ?? composerEditorRef.current?.readSelectionRange();
     const wouldExceedInputLimit = wouldTextPasteExceedLimit({
-      valueLength: promptRef.current.length,
+      valueLength: readPrompt().length,
       selection: selection ?? { start: 0, end: 0 },
       textLength: plainText.length,
       maxLength: PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
@@ -390,10 +389,7 @@ export function useComposerAttachmentIntake(input: {
     }
 
     const canStageAttachment =
-      Boolean(activeThreadId) &&
-      !isRevertingCheckpointRef.current &&
-      questionCanAttach &&
-      hasAttachmentSlot;
+      Boolean(activeThreadId) && !isRevertingCheckpoint() && questionCanAttach && hasAttachmentSlot;
     if (!canStageAttachment || fileStagingLimit === null) {
       if (!wouldExceedInputLimit) {
         return false;
@@ -411,7 +407,7 @@ export function useComposerAttachmentIntake(input: {
       pastedTextFileNamesRef.current = { targetKey: attachmentTargetKey, names: new Set() };
     }
     const reservedNames = pastedTextFileNamesRef.current.names;
-    for (const file of composerFilesRef.current) reservedNames.add(file.name);
+    for (const file of readAttachmentDraft().files) reservedNames.add(file.name);
     const foldedFileName = nextPastedTextFileName([...reservedNames]);
     reservedNames.add(foldedFileName);
     const foldedFile = new File([plainText], foldedFileName, {

@@ -44,7 +44,6 @@ import { hasHostedPairingAttempt } from "../components/auth/pairingRouteEntry";
 
 import { getDesktopSnapShotBridge } from "../lib/desktopSnapShot";
 import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
-import { SnapShotCoordinator } from "../components/desktop/SnapShotCoordinator";
 
 export const Route = createRootRoute({
   beforeLoad: async ({ location, preload }) => {
@@ -186,8 +185,6 @@ function RootRouteBranch() {
         <RelayClientInstallDialog />
         <ConnectOnboardingDialog />
         <SshPasswordPromptDialog />
-        {/* Compat shim until the web-chat-view layer starts it from appInit. */}
-        <SnapShotCoordinator />
         <ConfirmDialogHost />
         <CustomSnoozeDialogHost />
         <GuestShareDialogHost />
