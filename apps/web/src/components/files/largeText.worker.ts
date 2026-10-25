@@ -149,7 +149,7 @@ async function open(input: Extract<TextPreviewRequest, { type: "open" }>) {
       }
       size += value.length;
       if (!first && entries > 1) {
-        reply({ type: "meta", count: entries - 1, columns, complete: false });
+        reply({ type: "meta", count: entries - 1, columns, complete: false, sizeBytes: size });
         await page(0);
         first = true;
       }
@@ -163,7 +163,7 @@ async function open(input: Extract<TextPreviewRequest, { type: "open" }>) {
       columns = Math.min(LARGE_TEXT_MAX_COLUMNS, Math.max(columns, rowColumns));
     }
     complete = true;
-    reply({ type: "meta", count: entries - 1, columns, complete });
+    reply({ type: "meta", count: entries - 1, columns, complete, sizeBytes: size });
     await page(0);
   } finally {
     await reader.cancel();

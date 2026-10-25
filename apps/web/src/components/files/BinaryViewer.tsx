@@ -82,6 +82,7 @@ export default function BinaryViewer(props: {
   readonly kind: "archive" | "sqlite";
   readonly onRetry?: () => void;
 }) {
+  const [sizeBytes, setSizeBytes] = useState<number | null>(null);
   const [archive, setArchive] = useState<Archive | null>(null);
   const [database, setDatabase] = useState<Database | null>(null);
   const [rows, setRows] = useState<Rows | null>(null);
@@ -148,8 +149,10 @@ export default function BinaryViewer(props: {
     });
     void readBinaryPreview(props.src, controller.signal)
       .then((bytes) => {
-        if (!controller.signal.aborted)
+        if (!controller.signal.aborted) {
+          setSizeBytes(bytes.byteLength);
           worker.postMessage({ type: "open", name: props.name, kind: props.kind, bytes }, [bytes]);
+        }
       })
       .catch((cause: unknown) =>
         fail(cause instanceof Error ? cause.message : "Could not read this file."),
@@ -206,13 +209,14 @@ export default function BinaryViewer(props: {
           </span>
           <span className="shrink-0 text-muted-foreground">
             {archive.entries.length.toLocaleString()} entries
+            {sizeBytes !== null ? ` · ${formatAttachmentSize(sizeBytes)}` : ""}
           </span>
         </div>
       ) : null}
       {database && table ? (
         <>
-          <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border/60 px-3 text-xs">
-            <div className="min-w-0 flex-1">
+          <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b border-border/60 px-3 py-1 text-xs">
+            <div className="min-w-32 flex-1">
               <Select
                 value={selectedTable}
                 onValueChange={(value) => {
@@ -252,6 +256,13 @@ export default function BinaryViewer(props: {
             >
               <ChevronRightIcon className="size-3.5" />
             </FileSurfaceAction>
+          </div>
+          <div
+            className="border-b border-border/60 px-3 py-2 text-xs text-muted-foreground tabular-nums"
+            role="status"
+          >
+            {table.count.toLocaleString()} rows · {rows?.columns.length ?? "…"} columns
+            {sizeBytes !== null ? ` · ${formatAttachmentSize(sizeBytes)}` : ""}
           </div>
           <FileSurfaceNotice>
             Read-only. Up to 50 columns and 1,024 characters per cell. Blob contents are omitted.
@@ -346,7 +357,7 @@ export default function BinaryViewer(props: {
                   <th
                     key={name}
                     scope="col"
-                    className="border-b border-border/60 px-3 py-2 text-left font-medium whitespace-nowrap"
+                    className="border-r border-b border-border/60 px-3 py-2 text-left font-medium whitespace-nowrap"
                   >
                     {name}
                   </th>
@@ -359,7 +370,7 @@ export default function BinaryViewer(props: {
                   {row.map((cell, column) => (
                     <td
                       key={column}
-                      className="max-w-80 min-w-24 border-b border-border/60 px-3 py-1.5 align-top whitespace-pre-wrap break-words tabular-nums"
+                      className="max-w-80 min-w-32 border-r border-b border-border/60 px-3 py-1.5 align-top whitespace-pre-wrap break-words tabular-nums"
                     >
                       {cell}
                     </td>
