@@ -236,3 +236,36 @@ it("answers an option with Space on keyup, once per press, and not after focus l
   expect(modifiedEnter.defaultPrevented).toBe(false);
   expect(onToggleOption).toHaveBeenCalledTimes(2);
 });
+
+it("ignores a pointer click that ends a text selection but still answers assistive activation", async () => {
+  const onToggleOption = vi.fn();
+  await using screen = await render(
+    <ComposerPendingUserInputPanel
+      pendingUserInputs={[
+        { ...prompt, questions: [{ ...prompt.questions[0]!, multiSelect: true }] },
+      ]}
+      cwd={undefined}
+      threadRef={threadRef}
+      respondingRequestIds={[]}
+      answers={{}}
+      questionIndex={0}
+      onToggleOption={onToggleOption}
+      onAdvance={() => {}}
+      onDismiss={() => {}}
+    />,
+  );
+  const option = screen.getByRole("button", { name: /Incremental/ }).element() as HTMLElement;
+  const range = document.createRange();
+  range.selectNodeContents(option);
+  window.getSelection()!.removeAllRanges();
+  window.getSelection()!.addRange(range);
+  const click = (detail: number) =>
+    act(() => {
+      option.dispatchEvent(new MouseEvent("click", { detail, bubbles: true }));
+    });
+
+  await click(1);
+  expect(onToggleOption).not.toHaveBeenCalled();
+  await click(0);
+  expect(onToggleOption).toHaveBeenCalledTimes(1);
+});

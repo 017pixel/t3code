@@ -289,8 +289,10 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                     aria-disabled={disabled || isResponding}
                     onClick={(event) => {
                       // A drag that selected text in the option ends in a click; it must not answer.
+                      // Assistive technology activates with detail 0 and still answers.
                       const selection = window.getSelection();
                       if (
+                        event.detail > 0 &&
                         selection &&
                         !selection.isCollapsed &&
                         selection.containsNode(event.currentTarget, true)
