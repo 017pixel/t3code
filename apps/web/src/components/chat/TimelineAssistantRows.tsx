@@ -297,7 +297,7 @@ const AssistantChangedFilesSection = memo(function AssistantChangedFilesSection(
   routeThreadKey: string;
   resolvedTheme: "light" | "dark";
   displayThreadKey?: string;
-  onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
+  onOpenTurnDiff: (runId: RunId, filePath?: string, fromTurnCount?: number) => void;
 }) {
   if (!turnSummary) return null;
   const checkpointFiles = turnSummary.files;
@@ -326,7 +326,7 @@ function AssistantChangedFilesSectionInner({
   routeThreadKey: string;
   resolvedTheme: "light" | "dark";
   displayThreadKey?: string;
-  onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
+  onOpenTurnDiff: (runId: RunId, filePath?: string, fromTurnCount?: number) => void;
 }) {
   const ctx = use(TimelineRowCtx);
   const persistedExpanded = useUiStateStore(
@@ -342,6 +342,12 @@ function AssistantChangedFilesSectionInner({
       : null,
   );
   const onFileContextMenu = useFileContextMenuHandler(ctx.activeThreadEnvironmentId);
+  const { rangeFromTurnCount } = turnSummary;
+  // A response group's card opens the diff for the whole group, not its last run.
+  const openTurnDiff =
+    rangeFromTurnCount === undefined
+      ? onOpenTurnDiff
+      : (runId: RunId, filePath?: string) => onOpenTurnDiff(runId, filePath, rangeFromTurnCount);
 
   return (
     <ChangedFilesCard
@@ -352,7 +358,7 @@ function AssistantChangedFilesSectionInner({
       onToggleAllDirectories={() =>
         setExpanded(routeThreadKey, turnSummary.runId, !allDirectoriesExpanded)
       }
-      onOpenTurnDiff={onOpenTurnDiff}
+      onOpenTurnDiff={openTurnDiff}
       onFileContextMenu={(filePath, event) =>
         onFileContextMenu(
           {

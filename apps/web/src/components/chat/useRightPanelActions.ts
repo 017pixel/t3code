@@ -275,12 +275,12 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
     useRightPanelStore.getState().openPullRequest(activeThreadRef, pullRequestPanelTarget);
   };
   const addPullRequestSurfaceStable = useStableCallback(addPullRequestSurface);
-  const onOpenTurnDiff = (runId: RunId, filePath?: string) => {
+  const onOpenTurnDiff = (runId: RunId, filePath?: string, fromTurnCount?: number) => {
     if (!isServerThread || !activeThreadRef) return;
     const diffOpen =
       selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, activeThreadRef) === "diff";
     explicitDiffOpenRef.current = diffOpen ? null : activeThreadRef;
-    useDiffPanelStore.getState().selectTurn(activeThreadRef, runId, filePath);
+    useDiffPanelStore.getState().selectTurn(activeThreadRef, runId, filePath, fromTurnCount);
     useRightPanelStore.getState().open(activeThreadRef, "diff");
     onDiffPanelOpen?.();
   };

@@ -23,6 +23,8 @@ export interface ThreadCheckpointSummary {
   }>;
   readonly assistantMessageId: MessageId | null;
   readonly completedAt: string;
+  /** Set on a response group's merged summary: its diff starts after this turn, not one before. */
+  readonly rangeFromTurnCount?: number;
 }
 
 export function deriveThreadCheckpointSummaries(

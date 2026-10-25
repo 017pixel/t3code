@@ -212,7 +212,7 @@ interface MessagesTimelineProps {
   paintOnly?: boolean;
   /** Off where another region already speaks the thread's status, like a subagent's bar. */
   announceTurnStatus?: boolean;
-  onOpenTurnDiff?: (runId: RunId, filePath?: string) => void;
+  onOpenTurnDiff?: (runId: RunId, filePath?: string, fromTurnCount?: number) => void;
   onOpenThread: (threadId: OrchestrationV2TurnItem["threadId"]) => void;
   renderHtmlRender?: TimelineRowSharedState["renderHtmlRender"];
   turnItemSource?: TimelineRowSharedState["turnItemSource"];
@@ -403,8 +403,10 @@ const ConversationTimeline = memo(function ConversationTimeline({
   }
   const citationThreadRef = parseScopedThreadKey(routeThreadKey);
   const openPullRequest = useOpenPrLink(citationThreadRef ?? undefined);
-  const expandCitedRun = (runId: RunId) => {
-    setExpandedRunIds((current) => (current.has(runId) ? current : new Set([...current, runId])));
+  const expandCitedRun = (runIds: ReadonlyArray<RunId>) => {
+    setExpandedRunIds((current) =>
+      runIds.every((runId) => current.has(runId)) ? current : new Set([...current, ...runIds]),
+    );
   };
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
@@ -488,17 +490,25 @@ const ConversationTimeline = memo(function ConversationTimeline({
   };
 
   const autoExpandedRunIdRef = useRef<RunId | null>(null);
-  const onToggleTurnFold = (runId: RunId) => {
-    suspendEndScrollMaintenanceForDisclosure(`turn-fold:${runId}`);
-    if (autoExpandedRunIdRef.current === runId) {
+  // A response's only run answers to both its own key and its group's, so a
+  // fold opened before the first background wake stays open after it.
+  const onToggleTurnFold = (row: {
+    id: string;
+    foldKeys: ReadonlyArray<RunId>;
+    expanded: boolean;
+  }) => {
+    suspendEndScrollMaintenanceForDisclosure(row.id);
+    if (
+      autoExpandedRunIdRef.current !== null &&
+      row.foldKeys.includes(autoExpandedRunIdRef.current)
+    ) {
       autoExpandedRunIdRef.current = null;
     }
     setExpandedRunIds((existing) => {
       const next = new Set(existing);
-      if (next.has(runId)) {
-        next.delete(runId);
-      } else {
-        next.add(runId);
+      for (const key of row.foldKeys) {
+        if (row.expanded) next.delete(key);
+        else next.add(key);
       }
       return next;
     });
@@ -580,21 +590,18 @@ const ConversationTimeline = memo(function ConversationTimeline({
         runlessWorkActive,
       })
     : null;
-  const activeFindRunId =
+  const activeFindRunIds =
     findActive && activeFindMatch ? findFoldRunIds?.get(activeFindMatch.entryId) : undefined;
-  const [expandedFindRunId, setExpandedFindRunId] = useState<RunId | undefined>();
-  if (expandedFindRunId !== activeFindRunId) {
-    setExpandedFindRunId(activeFindRunId);
-    if (activeFindRunId) {
-      setExpandedRunIds((previous) =>
-        previous.has(activeFindRunId) ? previous : new Set(previous).add(activeFindRunId),
-      );
-    }
+  const activeFindRunKey = activeFindRunIds?.join("\0");
+  const [expandedFindRunKey, setExpandedFindRunKey] = useState<string | undefined>();
+  if (expandedFindRunKey !== activeFindRunKey) {
+    setExpandedFindRunKey(activeFindRunKey);
+    if (activeFindRunIds) expandCitedRun(activeFindRunIds);
   }
   const visibleExpandedRunIds =
-    !activeFindRunId || paintedExpandedRunIds.has(activeFindRunId)
+    !activeFindRunIds || activeFindRunIds.every((runId) => paintedExpandedRunIds.has(runId))
       ? paintedExpandedRunIds
-      : new Set(paintedExpandedRunIds).add(activeFindRunId);
+      : new Set([...paintedExpandedRunIds, ...activeFindRunIds]);
 
   const activeFindAttemptId = activeFindMatch
     ? timelineEntries.find((entry) => entry.id === activeFindMatch.entryId)?.attempt?.id
@@ -669,7 +676,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     viewport: timelineViewportElement,
     historyLoading: citationHistoryLoading,
     loadEarlier,
-    getTurnFoldRunId: (entryId) =>
+    getTurnFoldRunIds: (entryId) =>
       (
         findFoldRunIds ??
         timelineTurnFoldRunIdsByEntryId({
@@ -1404,7 +1411,7 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
         type="button"
         aria-expanded={row.expanded}
         data-scroll-anchor-ignore
-        onClick={() => ctx.onToggleTurnFold(row.runId)}
+        onClick={() => ctx.onToggleTurnFold(row)}
         className="flex cursor-pointer select-none items-center gap-1 rounded-md px-1 text-sm leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
       >
         <span>{row.label}</span>

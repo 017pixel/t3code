@@ -295,6 +295,10 @@
       "types": "./src/state/threadRelationships.ts",
       "default": "./src/state/threadRelationships.ts"
     },
+    "./state/response-groups": {
+      "types": "./src/state/responseGroups.ts",
+      "default": "./src/state/responseGroups.ts"
+    },
     "./state/thread-checkpoints": {
       "types": "./src/state/threadCheckpoints.ts",
       "default": "./src/state/threadCheckpoints.ts"

@@ -190,6 +190,47 @@ it.effect.each([false, true])(
   },
 );
 
+it.effect.each([false, true])(
+  "diffs a multi-turn range that starts after a stopped run (stopped run captured: %s)",
+  (stoppedRunCheckpoint) => {
+    const fourthRunId = RunId.make("run:checkpoint-diff-v2:4");
+    const projection = makeProjectionAfterStoppedRun(stoppedRunCheckpoint);
+    const diffCheckpoints = vi.fn((_input: CheckpointStore.DiffCheckpointsInput) =>
+      Effect.succeed("diff --git a/file b/file"),
+    );
+    const layer = layerFor({
+      projection: Effect.succeed({
+        ...projection,
+        runs: [...projection.runs, { id: fourthRunId, ordinal: 4, status: "completed" as const }],
+        checkpoints: [
+          ...projection.checkpoints,
+          {
+            scopeId: firstScopeId,
+            runId: fourthRunId,
+            ordinalWithinScope: 4,
+            appRunOrdinal: 4,
+            status: "ready" as const,
+            ref: CheckpointRef.make("refs/t3/test/ordinal/4"),
+          },
+        ],
+      }),
+      diffCheckpoints,
+    });
+
+    return Effect.gen(function* () {
+      const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+      yield* query.getTurnDiff({ threadId, fromTurnCount: 2, toTurnCount: 4 });
+      assert.deepEqual(
+        diffCheckpoints.mock.calls.map(([input]) => ({
+          from: input.fromCheckpointRef,
+          to: input.toCheckpointRef,
+        })),
+        [{ from: "refs/t3/test/ordinal/2", to: "refs/t3/test/ordinal/4" }],
+      );
+    }).pipe(Effect.provide(layer));
+  },
+);
+
 const layerVcsProcess = VcsProcess.layer.pipe(Layer.provide(NodeServices.layer));
 const layerStore = CheckpointStore.layer.pipe(
   Layer.provide(VcsDriverRegistry.layer.pipe(Layer.provide(layerVcsProcess))),

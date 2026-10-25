@@ -283,29 +283,44 @@ export default function DiffPanel({
       : (orderedTurnDiffSummaries.find((summary) => summary.runId === selectedRunId) ??
         orderedTurnDiffSummaries[0]);
   const selectedCheckpointTurnCount = selectedTurn?.checkpointTurnCount;
+  // A response group's changed-files card asks for every turn since its prompt.
+  const selectedRangeFromTurnCount =
+    diffSelection.kind === "turn" &&
+    diffSelection.fromTurnCount !== undefined &&
+    selectedTurn?.runId === diffSelection.turnId &&
+    selectedCheckpointTurnCount !== undefined &&
+    diffSelection.fromTurnCount < selectedCheckpointTurnCount - 1
+      ? diffSelection.fromTurnCount
+      : null;
+  const selectedTurnLabel =
+    selectedRangeFromTurnCount === null
+      ? `Turn ${selectedCheckpointTurnCount ?? "?"}`
+      : `Turns ${selectedRangeFromTurnCount + 1}–${selectedCheckpointTurnCount}`;
   const latestTurn = orderedTurnDiffSummaries[0];
   const selectedScopeLabel =
     selectedRunId === null
       ? selectedGitScope === "unstaged"
         ? "Uncommitted"
         : "Changes"
-      : selectedTurn?.runId === latestTurn?.runId
+      : selectedTurn?.runId === latestTurn?.runId && selectedRangeFromTurnCount === null
         ? "Latest turn"
-        : `Turn ${selectedCheckpointTurnCount ?? "?"}`;
-  const reviewSectionId = selectedTurn ? `turn:${selectedTurn.runId}` : selectedGitScope;
+        : selectedTurnLabel;
+  const reviewSectionId = selectedTurn
+    ? `turn:${selectedTurn.runId}${selectedRangeFromTurnCount === null ? "" : `:from:${selectedRangeFromTurnCount}`}`
+    : selectedGitScope;
   const collapseScopeKey = routeThreadRef
     ? `${routeThreadRef.environmentId}:${routeThreadRef.threadId}:${reviewSectionId}`
     : null;
   const codeViewMountKey = `${collapseScopeKey ?? reviewSectionId}:${codeViewRevision}`;
   const reviewSectionTitle = selectedTurn
-    ? `Turn ${selectedCheckpointTurnCount ?? "?"}`
+    ? selectedTurnLabel
     : selectedGitScope === "unstaged"
       ? "Uncommitted"
       : "Changes";
   const selectedCheckpointRange =
     typeof selectedCheckpointTurnCount === "number"
       ? {
-          fromTurnCount: Math.max(0, selectedCheckpointTurnCount - 1),
+          fromTurnCount: selectedRangeFromTurnCount ?? Math.max(0, selectedCheckpointTurnCount - 1),
           toTurnCount: selectedCheckpointTurnCount,
         }
       : null;
@@ -316,7 +331,7 @@ export default function DiffPanel({
       fromTurnCount: selectedCheckpointRange?.fromTurnCount ?? null,
       toTurnCount: selectedCheckpointRange?.toTurnCount ?? null,
       ignoreWhitespace: diffIgnoreWhitespace,
-      cacheScope: selectedTurn ? `turn:${selectedTurn.runId}` : null,
+      cacheScope: selectedTurn ? reviewSectionId : null,
     },
     { enabled: isGitRepo && selectedTurn !== undefined },
   );

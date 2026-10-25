@@ -163,17 +163,40 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      // Capture compares against the preceding scope ordinal, even when that
-      // checkpoint belongs to a stopped run or has no run.
-      const parentCheckpoint =
-        input.fromTurnCount === input.toTurnCount - 1
-          ? projection.checkpoints.find(
+      type ProjectedCheckpoint = (typeof projection.checkpoints)[number];
+      const parentOf = (child: ProjectedCheckpoint | undefined) =>
+        child === undefined
+          ? undefined
+          : projection.checkpoints.find(
               (checkpoint) =>
                 checkpoint.status === "ready" &&
-                checkpoint.scopeId === toCheckpoint.scopeId &&
-                checkpoint.ordinalWithinScope === toCheckpoint.ordinalWithinScope - 1,
-            )
-          : undefined;
+                checkpoint.scopeId === child.scopeId &&
+                checkpoint.ordinalWithinScope === child.ordinalWithinScope - 1,
+            );
+      // Capture compares against the preceding scope ordinal, even when that
+      // checkpoint belongs to a stopped run or has no run. A wider range starts
+      // at its `from` turn even when that run stopped; when ordinals skip
+      // (queued runs, rewinds), at the parent of the range's first checkpoint.
+      const rangeStartCheckpoint =
+        input.fromTurnCount === input.toTurnCount - 1
+          ? parentOf(toCheckpoint)
+          : (projection.checkpoints.find(
+              (checkpoint) =>
+                checkpoint.status === "ready" && checkpoint.appRunOrdinal === input.fromTurnCount,
+            ) ??
+            parentOf(
+              projection.checkpoints
+                .filter(
+                  (checkpoint) =>
+                    checkpoint.status === "ready" &&
+                    checkpoint.appRunOrdinal !== null &&
+                    checkpoint.appRunOrdinal > input.fromTurnCount &&
+                    checkpoint.appRunOrdinal <= input.toTurnCount,
+                )
+                .toSorted(
+                  (left, right) => (left.appRunOrdinal ?? 0) - (right.appRunOrdinal ?? 0),
+                )[0],
+            ));
 
       const firstScope =
         input.fromTurnCount === 0
@@ -188,7 +211,7 @@ export const make = Effect.gen(function* () {
                 ordinalWithinScope: 0,
               }).pipe(Effect.provideService(Crypto.Crypto, crypto))
           : (
-              parentCheckpoint ??
+              rangeStartCheckpoint ??
               readyCheckpoints.find(
                 (checkpoint) => checkpoint.appRunOrdinal === input.fromTurnCount,
               )

@@ -20,7 +20,7 @@ export function useAssistantCitationTarget({
   viewport,
   historyLoading,
   loadEarlier,
-  getTurnFoldRunId,
+  getTurnFoldRunIds,
   onExpandTurn,
   onManualNavigation,
 }: {
@@ -31,8 +31,8 @@ export function useAssistantCitationTarget({
   viewport: HTMLElement | null;
   historyLoading: boolean;
   loadEarlier: CitationHistoryPage | null;
-  getTurnFoldRunId: (entryId: string) => RunId | undefined;
-  onExpandTurn: (runId: RunId) => void;
+  getTurnFoldRunIds: (entryId: string) => ReadonlyArray<RunId> | undefined;
+  onExpandTurn: (runIds: ReadonlyArray<RunId>) => void;
   onManualNavigation: () => void;
 }) {
   const [ready, setReady] = useState<AssistantCitationTarget | null>(null);
@@ -124,14 +124,14 @@ export function useAssistantCitationTarget({
       (row) => row.kind === "message" && row.message.id === navigation.target.citation.messageId,
     );
     if (index < 0) {
-      const foldRunId = getTurnFoldRunId(source.id);
-      if (foldRunId) onExpandTurn(foldRunId);
+      const foldRunIds = getTurnFoldRunIds(source.id);
+      if (foldRunIds) onExpandTurn(foldRunIds);
       return;
     }
     if (listLoaded && listRef.current) setReady(navigation.target);
   }, [
     entries,
-    getTurnFoldRunId,
+    getTurnFoldRunIds,
     historyLoading,
     listLoaded,
     listRef,

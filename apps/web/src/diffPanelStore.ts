@@ -8,7 +8,14 @@ import { resolveStorage } from "./lib/storage";
 export type DiffPanelSelection =
   | { kind: "branch"; baseRef: string | null }
   | { kind: "unstaged" }
-  | { kind: "turn"; turnId: RunId; filePath: string | null; revealRequestId: number };
+  | {
+      kind: "turn";
+      turnId: RunId;
+      filePath: string | null;
+      revealRequestId: number;
+      /** Set when a response group's card opened the diff: it spans from here to `turnId`. */
+      fromTurnCount?: number;
+    };
 
 const DEFAULT_SELECTION: DiffPanelSelection = { kind: "branch", baseRef: null };
 
@@ -17,7 +24,12 @@ interface DiffPanelStoreState {
   branchBaseRefByThreadKey: Record<string, string | null>;
   selectGitScope: (ref: ScopedThreadRef, scope: "branch" | "unstaged") => void;
   selectBranchBaseRef: (ref: ScopedThreadRef, baseRef: string | null) => void;
-  selectTurn: (ref: ScopedThreadRef, turnId: RunId, filePath?: string) => void;
+  selectTurn: (
+    ref: ScopedThreadRef,
+    turnId: RunId,
+    filePath?: string,
+    fromTurnCount?: number,
+  ) => void;
   reconcileTurnSelection: (ref: ScopedThreadRef, availableTurnIds: ReadonlyArray<RunId>) => void;
   removeThread: (ref: ScopedThreadRef) => void;
 }
@@ -69,7 +81,7 @@ export const useDiffPanelStore = create<DiffPanelStoreState>()(
             },
           };
         }),
-      selectTurn: (ref, turnId, filePath) =>
+      selectTurn: (ref, turnId, filePath, fromTurnCount) =>
         set((state) => {
           const threadKey = scopedThreadKey(ref);
           const previous = state.byThreadKey[threadKey];
@@ -81,6 +93,7 @@ export const useDiffPanelStore = create<DiffPanelStoreState>()(
                 turnId,
                 filePath: filePath?.trim() || null,
                 revealRequestId: previous?.kind === "turn" ? previous.revealRequestId + 1 : 1,
+                ...(fromTurnCount === undefined ? {} : { fromTurnCount }),
               },
             },
           };
@@ -97,10 +110,11 @@ export const useDiffPanelStore = create<DiffPanelStoreState>()(
           ) {
             return state;
           }
+          const { fromTurnCount: _staleRange, ...selection } = previous;
           return {
             byThreadKey: {
               ...state.byThreadKey,
-              [threadKey]: { ...previous, turnId: latestTurnId },
+              [threadKey]: { ...selection, turnId: latestTurnId },
             },
           };
         }),
