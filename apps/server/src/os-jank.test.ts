@@ -3,6 +3,7 @@ import { it as effectIt } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { CommandAvailability, WindowsShellEnvironment } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Observe the existing synchronous shell probe without launching the user's login shell.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeOS from "node:os";
@@ -60,6 +61,63 @@ effectIt.effect("hydrates PATH when the desktop handoff is absent", () =>
         assert.equal(probe.mock.calls.length, 1);
         assert.equal(env.PATH, "/opt/tools/bin:/usr/bin");
       }),
+    (probe) => Effect.sync(() => probe.mockRestore()),
+  ),
+);
+
+// The inherited PATH already holds the absolute fallback dirs, so only the fixture
+// HOME's ~/.local/bin depends on the fallback, whatever this host has installed.
+effectIt.effect(
+  "appends existing user CLI dirs after the inherited PATH when probes return none",
+  () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => vi.spyOn(NodeChildProcess, "execFileSync").mockReturnValue("")),
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const home = yield* fileSystem.makeTempDirectoryScoped();
+          yield* fileSystem.makeDirectory(`${home}/.local/bin`, { recursive: true });
+          const env: NodeJS.ProcessEnv = {
+            HOME: home,
+            SHELL: "/bin/zsh",
+            PATH: `${home}/.nvm/bin:/usr/local/bin:/usr/bin:/opt/homebrew/bin:/usr/bin`,
+          };
+
+          yield* fixPath().pipe(
+            Effect.provideService(HostProcess.Platform, "darwin"),
+            Effect.provideService(HostProcess.Environment, env),
+          );
+
+          assert.equal(
+            env.PATH,
+            `${home}/.nvm/bin:/usr/local/bin:/usr/bin:/opt/homebrew/bin:${home}/.local/bin`,
+          );
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      (probe) => Effect.sync(() => probe.mockRestore()),
+    ),
+);
+
+effectIt.effect("does not add user CLI dirs when the login shell returns a PATH", () =>
+  Effect.acquireUseRelease(
+    Effect.sync(() =>
+      vi
+        .spyOn(NodeChildProcess, "execFileSync")
+        .mockReturnValue("__T3CODE_ENV_PATH_START__\n/opt/tools/bin\n__T3CODE_ENV_PATH_END__\n"),
+    ),
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const home = yield* fileSystem.makeTempDirectoryScoped();
+        yield* fileSystem.makeDirectory(`${home}/.local/bin`, { recursive: true });
+        const env: NodeJS.ProcessEnv = { HOME: home, SHELL: "/bin/bash", PATH: "/usr/bin" };
+
+        yield* fixPath().pipe(
+          Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.provideService(HostProcess.Environment, env),
+        );
+
+        assert.equal(env.PATH, "/opt/tools/bin:/usr/bin");
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     (probe) => Effect.sync(() => probe.mockRestore()),
   ),
 );
