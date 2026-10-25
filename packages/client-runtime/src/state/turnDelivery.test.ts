@@ -334,6 +334,27 @@ describe("turn deliveries", () => {
     expect(harness.deliveries.getSnapshot()).toEqual([]);
   });
 
+  it("never replays a committed launch whose live thread does not show the message yet", async () => {
+    const harness = setup([LOST_ACK, ACCEPTED], thread("live"));
+    const { settled } = await deliverUntilWaiting(harness, LAUNCH);
+
+    harness.emitShell(shell("synchronizing"));
+    harness.emitShell(shell("live", [THREAD_ID]));
+
+    expect(await settled).toEqual({ type: "delivered", value: null });
+    expect(harness.sent).toEqual([LAUNCH]);
+    expect(harness.deliveries.getSnapshot()).toEqual([
+      expect.objectContaining({ state: "delivered", display: "optimistic row" }),
+    ]);
+    harness.emitThread(thread("synchronizing"));
+    harness.emitThread(thread("live"));
+    expect(harness.sent).toEqual([LAUNCH]);
+    harness.emitThread(HELD);
+    expect(harness.deliveries.getSnapshot()).toEqual([]);
+    expect(harness.released).toEqual(["optimistic row"]);
+    expect(harness.activeObservers()).toBe(0);
+  });
+
   it("stops watching a committed launch whose thread already shows the message", async () => {
     const harness = setup([LOST_ACK], HELD);
     const { settled } = await deliverUntilWaiting(harness, LAUNCH);

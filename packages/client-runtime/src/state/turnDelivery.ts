@@ -171,7 +171,7 @@ export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, 
     entry.state = "delivered";
     publish();
     if (entry.unborn) {
-      // Acknowledged, so the thread exists now.
+      // Acknowledged or held by the shell, so the thread exists now.
       entry.unborn = false;
       observeThread(entry);
       return;
@@ -195,8 +195,7 @@ export function createTurnDeliveries<A, E, M>(deps: TurnDeliveryDependencies<A, 
       if (!entry.resynced || entry.shell?.status !== "live") return;
       if (shellHoldsThread(entry.shell, entry.input.threadId)) {
         // The launch committed; its pending uploads may have expired, so reconcile, never replay.
-        entry.unborn = false;
-        observeThread(entry);
+        finish(entry, { type: "delivered", value: null });
         return;
       }
     } else {
