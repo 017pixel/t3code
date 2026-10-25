@@ -81,13 +81,25 @@ function PdfPage(props: {
     const node = text.current;
     if (!node) return;
     const mark = () => {
-      for (const span of node.querySelectorAll("span"))
-        span.classList.toggle(
+      const runs = Array.from(node.querySelectorAll('span[role="presentation"], br')).map(
+        (element) => ({
+          element,
+          text: element.tagName === "BR" ? "\n" : (element.textContent ?? "").toLowerCase(),
+        }),
+      );
+      const text = runs.map((run) => run.text).join("");
+      const query = props.query.toLowerCase();
+      let match = query.trim() ? text.indexOf(query) : -1;
+      let offset = 0;
+      for (const run of runs) {
+        while (match !== -1 && match + query.length <= offset)
+          match = text.indexOf(query, match + query.length);
+        run.element.classList.toggle(
           "pdf-find-match",
-          Boolean(
-            props.query && span.textContent?.toLowerCase().includes(props.query.toLowerCase()),
-          ),
+          match !== -1 && match < offset + run.text.length,
         );
+        offset += run.text.length;
+      }
     };
     mark();
     const observer = new MutationObserver(mark);
@@ -114,6 +126,7 @@ export default function PdfViewer(props: { src: string; title: string }) {
   const [query, setQuery] = useState("");
   const [matches, setMatches] = useState<number[]>([]);
   const [finding, setFinding] = useState(false);
+  const [findError, setFindError] = useState<string | null>(null);
   const [match, setMatch] = useState(0);
   const scroll = useRef<HTMLDivElement>(null);
   const find = useRef<HTMLInputElement>(null);
@@ -208,6 +221,7 @@ export default function PdfViewer(props: { src: string; title: string }) {
     let cancelled = false;
     const timer = setTimeout(() => {
       setFinding(true);
+      setFindError(null);
       setMatches([]);
       setMatch(0);
       void (async () => {
@@ -216,7 +230,9 @@ export default function PdfViewer(props: { src: string; title: string }) {
         for (let index = 0; index < pdf.numPages; index++) {
           if (cancelled) return;
           const content = await (await pdf.getPage(index + 1)).getTextContent();
-          const text = content.items.map((item) => ("str" in item ? item.str : "")).join(" ");
+          const text = content.items
+            .map((item) => ("str" in item ? item.str + (item.hasEOL ? "\n" : "") : ""))
+            .join("");
           size += text.length;
           if (size > MAX_FIND_TEXT)
             throw new Error(
@@ -230,7 +246,7 @@ export default function PdfViewer(props: { src: string; title: string }) {
       })()
         .catch((cause: unknown) => {
           if (!cancelled)
-            setError(cause instanceof Error ? cause.message : "Could not search this PDF.");
+            setFindError(cause instanceof Error ? cause.message : "Could not search this PDF.");
         })
         .finally(() => {
           if (!cancelled) setFinding(false);
@@ -298,13 +314,16 @@ export default function PdfViewer(props: { src: string; title: string }) {
             onChange={(event) => {
               setQuery(event.target.value);
               setMatches([]);
+              setFindError(null);
             }}
           />
         </div>
         {query ? (
           <>
             <span role="status">
-              {finding ? "Searching…" : `${matches.length ? match + 1 : 0}/${matches.length}`}
+              {finding
+                ? "Searching…"
+                : (findError ?? `${matches.length ? match + 1 : 0}/${matches.length}`)}
             </span>
             <FileSurfaceAction
               label="Next matching page"

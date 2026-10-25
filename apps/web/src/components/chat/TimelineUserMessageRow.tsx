@@ -1,5 +1,6 @@
 import { documentThumbnailKind } from "../files/documentThumbnailProtocol";
 import { FileChip } from "../contextChipParts";
+import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import { InlineAudioPreview } from "../files/InlineAudioPreview";
 import { filePreviewKind } from "@t3tools/shared/filePreview";
 import { findRevealRef } from "./markdownFindContext";

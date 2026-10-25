@@ -112,6 +112,7 @@ const browserTestProject = {
       "dompurify",
       "heic-to/next",
       "jszip",
+      "pdfjs-dist",
       "sql.js",
       "tiff",
     ],

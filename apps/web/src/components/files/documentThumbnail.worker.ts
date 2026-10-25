@@ -43,9 +43,10 @@ async function render(bytes: ArrayBuffer, kind: DocumentThumbnailKind, ratio: nu
         });
         if (!bitmap) throw new Error("Page unavailable.");
         context.drawImage(bitmap, 0, 0);
-        label = document.loading
-          ? ""
-          : `${document.pages.length} ${document.pages.length === 1 ? "page" : "pages"}`;
+        label =
+          prepared.truncated || document.loading
+            ? ""
+            : `${document.pages.length} ${document.pages.length === 1 ? "page" : "pages"}`;
       } finally {
         bitmap?.close();
         client.close();

@@ -80,7 +80,6 @@ export function openPdf(bytes: ArrayBuffer) {
     ...(inWorker
       ? { CanvasFactory: ThumbnailCanvasFactory, FilterFactory: ThumbnailFilterFactory }
       : {}),
-    maxImageSize: 16 * 1024 * 1024,
     canvasMaxAreaInBytes: 32 * 1024 * 1024,
     useWasm: true,
   });
