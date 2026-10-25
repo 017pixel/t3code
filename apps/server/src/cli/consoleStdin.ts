@@ -5,12 +5,9 @@ import * as NodeTty from "node:tty";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 /**
- * Electron's Windows executable is a GUI program, so `t3.cmd` under
- * `ELECTRON_RUN_AS_NODE` gets the console for stdout and stderr but no stdin.
- * Node replaces missing descriptors with NUL, an open non-console character
- * device. Piped input, files, and runs whose output is not a console are left alone.
- * Explicit `< NUL` is indistinguishable from missing launcher stdin and
- * also reattaches when output is a console.
+ * Electron's Windows launcher has no stdin; Node substitutes a non-console NUL device.
+ * Preserve pipes, files, console input, and runs without console output.
+ * Explicit `< NUL` is indistinguishable from missing launcher stdin and also reattaches.
  */
 function needsConsoleStdin(input: {
   readonly platform: NodeJS.Platform;
