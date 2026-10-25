@@ -1159,9 +1159,9 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --sidebar-control-surface: var(--color-zinc-100);
   --sidebar-row-hover: var(--color-zinc-25);
   /* The current row and settings page carry the accent: blue means "you are here". */
-  --sidebar-row-active: color-mix(in oklab, var(--primary) 10%, var(--color-white));
-  --sidebar-row-selected: color-mix(in oklab, var(--primary) 7%, var(--color-white));
-  --sidebar-row-ring: color-mix(in oklab, var(--primary) 15%, transparent);
+  --sidebar-row-active: color-mix(in oklab, var(--primary) 18%, var(--color-white));
+  --sidebar-row-selected: color-mix(in oklab, var(--primary) 12%, var(--color-white));
+  --sidebar-row-ring: color-mix(in oklab, var(--primary) 35%, transparent);
   --sidebar-border: var(--border);
   --sidebar-stage-fade: var(--sidebar);
   --code-background: color-mix(in srgb, var(--card) 90%, var(--background));
@@ -1235,9 +1235,9 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --sidebar-muted-foreground: var(--color-zinc-500);
   --sidebar-control-surface: var(--color-zinc-100);
   --sidebar-row-hover: var(--color-zinc-25);
-  --sidebar-row-active: color-mix(in oklab, var(--primary) 10%, var(--color-white));
-  --sidebar-row-selected: color-mix(in oklab, var(--primary) 7%, var(--color-white));
-  --sidebar-row-ring: color-mix(in oklab, var(--primary) 15%, transparent);
+  --sidebar-row-active: color-mix(in oklab, var(--primary) 18%, var(--color-white));
+  --sidebar-row-selected: color-mix(in oklab, var(--primary) 12%, var(--color-white));
+  --sidebar-row-ring: color-mix(in oklab, var(--primary) 35%, transparent);
   --sidebar-border: var(--color-zinc-200);
   --sidebar-stage-fade: var(--sidebar);
 
@@ -1331,7 +1331,17 @@ html[data-theme-id]:not([data-theme-id=""]) {
   --sidebar-row-hover: var(--app-theme-sidebar-row-hover);
   --sidebar-row-active: var(--app-theme-sidebar-row-active);
   --sidebar-row-selected: var(--app-theme-sidebar-row-selected);
-  --sidebar-row-ring: color-mix(in srgb, var(--contrast-sidebar-border) 70%, transparent);
+  --sidebar-row-ring: color-mix(in oklab, var(--primary) 30%, transparent);
+
+  /* Light theme row fills can sit near white, so the current row also takes
+     the theme's action color. */
+  @variant light {
+    --sidebar-row-active: color-mix(
+      in oklab,
+      var(--primary) 16%,
+      var(--app-theme-sidebar-row-active)
+    );
+  }
   --sidebar-border: var(--app-theme-sidebar-border);
   --sidebar-stage-fade: var(--app-theme-sidebar);
   --code-background: var(--app-theme-code-background);
@@ -1532,7 +1542,17 @@ html[data-theme-id] [data-app-sidebar] {
   --sidebar-row-hover: var(--app-theme-sidebar-row-hover);
   --sidebar-row-active: var(--app-theme-sidebar-row-active);
   --sidebar-row-selected: var(--app-theme-sidebar-row-selected);
-  --sidebar-row-ring: color-mix(in srgb, var(--contrast-sidebar-border) 70%, transparent);
+  --sidebar-row-ring: color-mix(in oklab, var(--primary) 30%, transparent);
+
+  /* Light theme row fills can sit near white, so the current row also takes
+     the theme's action color. */
+  @variant light {
+    --sidebar-row-active: color-mix(
+      in oklab,
+      var(--primary) 16%,
+      var(--app-theme-sidebar-row-active)
+    );
+  }
   --sidebar-border: var(--app-theme-sidebar-border);
   --sidebar-stage-fade: var(--app-theme-sidebar);
   border-color: color-mix(in srgb, var(--contrast-sidebar-foreground) 10%, transparent);
