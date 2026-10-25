@@ -3,7 +3,7 @@ import {
   readImageDimensions,
 } from "@t3tools/shared/imageDimensions";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
-import { decodeHTMLStrict as decodeEntities } from "entities";
+import { decodeHTMLAttribute, decodeHTMLStrict as decodeEntities } from "entities";
 import type JSZip from "jszip";
 
 import { type OfficeWorkerResult, type NotebookCell } from "./officePreviewProtocol";
@@ -137,6 +137,27 @@ function archivePath(base: string, href: string): string | null {
 function imageFits(bytes: Uint8Array) {
   const size = readImageDimensions(bytes.subarray(0, IMAGE_DIMENSIONS_HEADER_BYTES));
   return size !== null && size.width <= 16_777_216 / size.height;
+}
+function base64ImageFits(base64: string) {
+  return (
+    /^[a-z\d+/]*={0,2}$/i.test(base64) &&
+    base64.length % 4 !== 1 &&
+    (!base64.endsWith("=") || base64.length % 4 === 0) &&
+    imageFits(
+      Uint8Array.from(
+        atob(base64.slice(0, 4 * Math.ceil(IMAGE_DIMENSIONS_HEADER_BYTES / 3))),
+        (char) => char.charCodeAt(0),
+      ),
+    )
+  );
+}
+function htmlImagesFit(html: string) {
+  // HTML attribute entities can obscure a data URL until the client parses it.
+  for (const match of decodeHTMLAttribute(html).matchAll(
+    /data:image\/(?:png|jpeg|gif|webp);base64,([a-z\d+/]*={0,2})/gi,
+  ))
+    if (!base64ImageFits(match[1]!)) return false;
+  return true;
 }
 async function imageData(archive: JSZip, path: string | null): Promise<string> {
   if (!path) return "";
@@ -402,22 +423,12 @@ export function openNotebook(bytes: ArrayBuffer): OfficeWorkerResult {
           for (const mime of ["image/png", "image/jpeg", "image/gif", "image/webp"]) {
             if (data[mime]) {
               const base64 = notebookText(data[mime], 4 * 1024 * 1024).replaceAll(/\s/g, "");
-              if (
-                /^[a-z\d+/]*={0,2}$/i.test(base64) &&
-                base64.length % 4 !== 1 &&
-                (!base64.endsWith("=") || base64.length % 4 === 0) &&
-                imageFits(
-                  Uint8Array.from(
-                    atob(base64.slice(0, 4 * Math.ceil(IMAGE_DIMENSIONS_HEADER_BYTES / 3))),
-                    (char) => char.charCodeAt(0),
-                  ),
-                )
-              )
+              if (base64ImageFits(base64))
                 return { kind: "image" as const, text: `data:${mime};base64,${base64}` };
             }
           }
           const html = notebookText(data["text/html"]);
-          if (html.trim()) return { kind: "html" as const, text: html };
+          if (html.trim() && htmlImagesFit(html)) return { kind: "html" as const, text: html };
           return {
             kind: "text" as const,
             text: notebookText(output.text ?? data["text/plain"] ?? output.traceback),

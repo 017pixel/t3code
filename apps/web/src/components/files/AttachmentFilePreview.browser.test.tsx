@@ -2686,7 +2686,7 @@ it.each(["rtf", "epub", "ods"] as const)(
   },
 );
 
-it.each(["epub", "odt", "ipynb"] as const)(
+it.each(["epub", "odt", "ipynb", "html", "encoded-html"] as const)(
   "bounds %s image pixels before returning browser markup",
   async (kind) => {
     const canvas = new OffscreenCanvas(2, 3);
@@ -2718,7 +2718,7 @@ it.each(["epub", "odt", "ipynb"] as const)(
         );
       const base64 = btoa(String.fromCharCode(...new Uint8Array(image)));
       const bytes =
-        kind === "ipynb"
+        kind === "ipynb" || kind === "html" || kind === "encoded-html"
           ? new TextEncoder().encode(
               JSON.stringify({
                 nbformat: 4,
@@ -2726,7 +2726,18 @@ it.each(["epub", "odt", "ipynb"] as const)(
                   {
                     cell_type: "code",
                     source: "plot()",
-                    outputs: [{ data: { "image/png": base64, "text/plain": "retained caption" } }],
+                    outputs: [
+                      {
+                        data: {
+                          ...(kind === "html" || kind === "encoded-html"
+                            ? {
+                                "text/html": `<table><tr><td>retained caption</td></tr></table><img src="${kind === "encoded-html" ? "&#100ata" : "data"}:image/png;base64,${base64}">`,
+                              }
+                            : { "image/png": base64 }),
+                          "text/plain": "retained caption",
+                        },
+                      },
+                    ],
                   },
                 ],
               }),
@@ -2742,12 +2753,28 @@ it.each(["epub", "odt", "ipynb"] as const)(
             (event: MessageEvent<OfficeWorkerResult>) => resolve(event.data),
             { once: true },
           );
-          worker.postMessage({ type: "open", kind, bytes }, [bytes]);
+          worker.postMessage(
+            {
+              type: "open",
+              kind: kind === "html" || kind === "encoded-html" ? "ipynb" : kind,
+              bytes,
+            },
+            [bytes],
+          );
         });
         if (result.type === "notebook") {
-          expect(result.cells[0]!.outputs.some((output) => output.kind === "image")).toBe(
-            width === 2,
+          const output = result.cells[0]!.outputs[0]!;
+          expect(output.kind).toBe(
+            width === 2 ? (kind === "html" || kind === "encoded-html" ? "html" : "image") : "text",
           );
+          if (output.kind === "html") {
+            const rendered = new DOMParser().parseFromString(
+              sanitizeDocumentHtml(output.text),
+              "text/html",
+            );
+            expect(rendered.images).toHaveLength(1);
+            expect(rendered.querySelector("td")!.textContent).toBe("retained caption");
+          }
           if (width !== 2) expect(result.cells[0]!.outputs[0]!.text).toBe("retained caption");
         } else {
           expect(result.type).toBe("document");
