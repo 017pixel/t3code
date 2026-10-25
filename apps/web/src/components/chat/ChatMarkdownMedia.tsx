@@ -321,7 +321,7 @@ export const ChatMarkdownAssetImage = memo(function ChatMarkdownAssetImage(props
         | "tool-output-image";
     }
   >;
-  readonly kind?: "image" | "video" | "audio";
+  readonly kind?: "image" | "video";
   readonly alt: string;
   readonly copyMarkdown?: string;
   readonly srcFragment?: string;

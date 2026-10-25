@@ -996,12 +996,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
         TIMELINE_LIST_HEADER
       )
     ) : (
-      <div
-        className="messages-timeline-row-frame"
-        onPlayCapture={(event) => onAudioPlaybackChange(item.id, event)}
-        onPauseCapture={(event) => onAudioPlaybackChange(item.id, event)}
-        onEndedCapture={(event) => onAudioPlaybackChange(item.id, event)}
-      >
+      <div className="messages-timeline-row-frame">
         <div className="chat-content-lane pt-1 sm:pt-2">
           <TimelineSystemDivider
             label="Subagent of"
