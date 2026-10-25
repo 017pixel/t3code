@@ -35,7 +35,9 @@ export function SettingsScreen(
     props.workspaceRoot ||
     (Platform.OS === "android" && workspace !== null && route.name === "Settings");
 
-  const surfaceClassName = workspaceRoot || cover ? surface.className : "bg-sheet";
+  // Settings' grouped cards only lift off the screen surface, so the folded Duo doesn't take
+  // the workspace's drawer surface here.
+  const surfaceClassName = cover ? "bg-screen" : workspaceRoot ? surface.className : "bg-sheet";
 
   return (
     <View collapsable={false} className={`flex-1 ${surfaceClassName}`}>
