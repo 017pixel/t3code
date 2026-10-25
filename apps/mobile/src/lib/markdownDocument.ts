@@ -337,7 +337,8 @@ function transformNativeMarkdown(
           start?.offset !== undefined &&
           previous.position?.end.line === start.line - 1
         ) {
-          const lineStart = start.offset - start.column + 1;
+          let lineStart = start.offset;
+          while (lineStart > 0 && !/[\r\n]/.test(markdown[lineStart - 1]!)) lineStart -= 1;
           // Replace only the container prefix, leaving cell edits disjoint from the table break.
           const [, header = "", , ending = "\n", markers = ""] =
             /^([ \t>]*)([^\r\n]*)(\r\n|\r|\n)([ \t>]*)/.exec(markdown.slice(lineStart)) ?? [];
@@ -367,7 +368,6 @@ function isTableDelimiterRow(line: string): boolean {
     .every((cell) => /^:?-+:?$/.test(cell.trim()));
 }
 
-// Cheap pre-check for a delimiter row two lines below text, so most messages skip the parse.
 function mayHaveTableUnderText(markdown: string): boolean {
   if (!markdown.includes("|")) return false;
   const lines = markdown.split(/\r\n|\r|\n/);
@@ -377,11 +377,7 @@ function mayHaveTableUnderText(markdown: string): boolean {
   return false;
 }
 
-/**
- * GFM lets a table interrupt a paragraph, but the native parser (md4c) only starts a table
- * on a paragraph's first line, so a table right under a line of text renders as one
- * run-on paragraph. Insert the blank line md4c needs before each such table.
- */
+/** md4c starts tables only at paragraph starts; insert breaks to match GFM. */
 export function markdownWithTableBreaks(markdown: string): string {
   return transformNativeMarkdown(markdown, undefined, true);
 }
