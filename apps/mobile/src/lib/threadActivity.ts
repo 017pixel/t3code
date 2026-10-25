@@ -350,6 +350,25 @@ const presentedActivityGroupsCache = new WeakMap<
     readonly rows: ReadonlyArray<ThreadFeedEntry>;
   }
 >();
+/** Summaries can be rebuilt per event, and a re-capture can rewrite files under one ref. */
+function sameRunCheckpoint(left: ThreadCheckpointSummary, right: ThreadCheckpointSummary) {
+  return (
+    left.checkpointRef === right.checkpointRef &&
+    left.status === right.status &&
+    left.files.length === right.files.length &&
+    left.files.every((file, index) => {
+      const other = right.files[index];
+      return (
+        other !== undefined &&
+        file.path === other.path &&
+        file.kind === other.kind &&
+        file.additions === other.additions &&
+        file.deletions === other.deletions
+      );
+    })
+  );
+}
+
 type RunFoldRow = Extract<ThreadFeedEntry, { readonly type: "run-fold" }>;
 const runCheckpointGroupsCache = new WeakMap<
   ThreadFeedEntry,
@@ -2733,10 +2752,8 @@ export function buildThreadFeed(
     // Keep the group's identity across builds: caches and restarts compare by reference.
     const cached = runCheckpointGroupsCache.get(entry);
     if (
-      cached !== undefined &&
-      cached.runCheckpoint?.checkpointRef === runCheckpoint.checkpointRef &&
-      cached.runCheckpoint.status === runCheckpoint.status &&
-      cached.runCheckpoint.files.length === runCheckpoint.files.length
+      cached?.runCheckpoint !== undefined &&
+      sameRunCheckpoint(cached.runCheckpoint, runCheckpoint)
     ) {
       grouped[index] = cached;
       continue;

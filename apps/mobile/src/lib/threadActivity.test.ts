@@ -1967,6 +1967,13 @@ describe("response groups", () => {
     const first = rebuild();
     const second = rebuild();
     expect(second.at(-1)).toBe(first.at(-1));
+    const recaptured = buildThreadFeed(feedItems, {
+      checkpointSummaries: [checkpoint("wake-a", 5, null, "c.ts")],
+    }).at(-1);
+    expect(recaptured).not.toBe(first.at(-1));
+    expect(recaptured?.type === "activity-group" && recaptured.runCheckpoint?.files[0]?.path).toBe(
+      "c.ts",
+    );
     expect(rows[0]).toMatchObject({
       label: "Worked · 1 update",
       checkpointSummary: {
