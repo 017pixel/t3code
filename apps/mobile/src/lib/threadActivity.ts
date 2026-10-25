@@ -351,6 +351,10 @@ const presentedActivityGroupsCache = new WeakMap<
   }
 >();
 type RunFoldRow = Extract<ThreadFeedEntry, { readonly type: "run-fold" }>;
+const runCheckpointGroupsCache = new WeakMap<
+  ThreadFeedEntry,
+  Extract<ThreadFeedEntry, { readonly type: "activity-group" }>
+>();
 const runFoldRowsCache = new WeakMap<ThreadFeedEntry, RunFoldRow>();
 // A response group's row and its first run's row can share an anchor entry.
 const groupFoldRowsCache = new WeakMap<ThreadFeedEntry, RunFoldRow>();
@@ -2726,7 +2730,20 @@ export function buildThreadFeed(
         : undefined;
     if (entry.type !== "activity-group" || runCheckpoint === undefined) continue;
     answerlessCheckpointByRun.delete(runCheckpoint.runId);
-    grouped[index] = { ...entry, runCheckpoint };
+    // Keep the group's identity across builds: caches and restarts compare by reference.
+    const cached = runCheckpointGroupsCache.get(entry);
+    if (
+      cached !== undefined &&
+      cached.runCheckpoint?.checkpointRef === runCheckpoint.checkpointRef &&
+      cached.runCheckpoint.status === runCheckpoint.status &&
+      cached.runCheckpoint.files.length === runCheckpoint.files.length
+    ) {
+      grouped[index] = cached;
+      continue;
+    }
+    const withCheckpoint = { ...entry, runCheckpoint };
+    runCheckpointGroupsCache.set(entry, withCheckpoint);
+    grouped[index] = withCheckpoint;
   }
   const feed = prefix.length === 0 ? grouped : prefix.concat(grouped);
   if (cache) {

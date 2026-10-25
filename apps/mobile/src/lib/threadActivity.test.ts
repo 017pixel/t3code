@@ -1946,23 +1946,27 @@ describe("response groups", () => {
   });
 
   it("folds runs before the first loaded prompt, and counts a tools-only wake's files", () => {
-    const feed = buildThreadFeed(
-      [
-        step("initial", "launch", 1),
-        answer("initial", "launched", 5),
-        wake("wake-a", "wake-a-notice", 20),
-        step("wake-a", "read-a", 21),
-      ].map((item, position) => projected(item, position)),
-      {
-        checkpointSummaries: [
-          checkpoint("initial", 4, "launched", "a.ts"),
-          checkpoint("wake-a", 5, null, "b.ts"),
-        ],
-      },
-    );
+    const feedItems = [
+      step("initial", "launch", 1),
+      answer("initial", "launched", 5),
+      wake("wake-a", "wake-a-notice", 20),
+      step("wake-a", "read-a", 21),
+    ].map((item, position) => projected(item, position));
+    const feed = buildThreadFeed(feedItems, {
+      checkpointSummaries: [
+        checkpoint("initial", 4, "launched", "a.ts"),
+        checkpoint("wake-a", 5, null, "b.ts"),
+      ],
+    });
     const rows = deriveThreadFeedPresentation(feed, completed("wake-a", 20, 22), new Set());
     expect(ids(rows)).toEqual(["run-fold:group:partial:start", "launched"]);
     expect(messageFoldRunIds(feed, "launched")).toEqual(["initial", "group:partial:start"]);
+    // A rebuild keeps the checkpoint-carrying group's identity.
+    const rebuild = () =>
+      buildThreadFeed(feedItems, { checkpointSummaries: [checkpoint("wake-a", 5, null, "b.ts")] });
+    const first = rebuild();
+    const second = rebuild();
+    expect(second.at(-1)).toBe(first.at(-1));
     expect(rows[0]).toMatchObject({
       label: "Worked · 1 update",
       checkpointSummary: {
