@@ -305,6 +305,29 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         });
       }),
     );
+
+    it.effect("finds ignored files that sort past the listing limit", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir({ git: true });
+        yield* writeTextFile(cwd, ".gitignore", "*.secret\n");
+        const folders = Array.from(
+          { length: 205 },
+          (_, index) => `folder-${String(index + 1).padStart(3, "0")}`,
+        );
+        // A tracked file keeps each folder from collapsing into one wholly ignored entry.
+        for (const folder of folders) {
+          yield* writeTextFile(cwd, `${folder}/anchor.txt`, "a");
+          yield* writeTextFile(cwd, `${folder}/local.secret`, "s");
+        }
+        yield* git(cwd, ["add", "."]);
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        expect(yield* workspaceEntries.listIgnoredFiles({ cwd, query: "folder-205" })).toEqual({
+          files: [{ path: "folder-205/local.secret", byteLength: 1 }],
+          truncated: false,
+        });
+      }),
+    );
   });
 
   describe("search", () => {
