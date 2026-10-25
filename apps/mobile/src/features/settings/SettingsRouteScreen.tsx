@@ -81,7 +81,8 @@ export function SettingsRouteScreen() {
 function ConfiguredSettingsRouteScreen() {
   // UIKit's scroll-edge material takes the scroll view's own color; like the chat list, match
   // the sidebar's surface so the bar doesn't darken over content at rest.
-  const listSurface = use(NativePrimaryColumnContext) ? "bg-drawer" : "bg-screen";
+  const surface = useWorkspaceSurface();
+  const listSurface = use(NativePrimaryColumnContext) ? "bg-drawer" : surface.className;
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const { isLoaded, isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
@@ -130,7 +131,8 @@ function ConfiguredSettingsRouteScreen() {
 function LocalSettingsRouteScreen() {
   // UIKit's scroll-edge material takes the scroll view's own color; like the chat list, match
   // the sidebar's surface so the bar doesn't darken over content at rest.
-  const listSurface = use(NativePrimaryColumnContext) ? "bg-drawer" : "bg-screen";
+  const surface = useWorkspaceSurface();
+  const listSurface = use(NativePrimaryColumnContext) ? "bg-drawer" : surface.className;
   const insets = useSafeAreaInsets();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const environmentCount = Object.keys(savedConnectionsById).length;
