@@ -273,6 +273,21 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
   const first = Math.min(maxFirst, Math.floor(position.top / scale / 29)) + headerRows;
   // The final mounted rows keep their measured height and scroll natively.
   const nativeTail = first - headerRows === maxFirst;
+  const scrollModel = useRef({ scale, maxFirst, rowHeight: layout.rowHeight });
+  useLayoutEffect(() => {
+    const previous = scrollModel.current;
+    scrollModel.current = { scale, maxFirst, rowHeight: layout.rowHeight };
+    const node = ref.current;
+    if (!node || (previous.scale === scale && previous.maxFirst === maxFirst)) return;
+    const previousEnd = previous.maxFirst * 29 * previous.scale;
+    const logicalTop =
+      Math.min(previous.maxFirst * 29, node.scrollTop / previous.scale) +
+      (Math.max(0, node.scrollTop - previousEnd) * 29) / previous.rowHeight;
+    node.scrollTop =
+      Math.min(maxFirst * 29, logicalTop) * scale +
+      (Math.max(0, logicalTop - maxFirst * 29) * layout.rowHeight) / 29;
+    setTop(node.scrollTop);
+  }, [scale, maxFirst, layout.rowHeight]);
   useLayoutEffect(() => {
     const node = ref.current;
     if (props.revealLine == null) {
@@ -336,7 +351,13 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
     const row =
       pending &&
       contentRef.current?.querySelector<HTMLElement>(`[data-preview-row="${pending.row}"]`);
-    if (!pending || !node || !row || !row.textContent) return;
+    if (
+      !pending ||
+      !node ||
+      !row ||
+      !props.getRows(Math.floor(pending.row / PREVIEW_PAGE_ROWS))?.[pending.row % PREVIEW_PAGE_ROWS]
+    )
+      return;
     const content = contentRef.current!;
     const firstRow = content.querySelector<HTMLElement>(`[data-preview-row="${first}"]`);
     if (

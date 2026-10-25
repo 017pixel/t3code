@@ -188,19 +188,8 @@ export function shiftGrid(
 }
 
 /** The sheet row or column at a position in a frame's grid: its indices when tracks are skipped, else consecutive. */
-export function trackIndex(
-  start: number,
-  indices: readonly number[] | undefined,
-  position: number,
-) {
+function trackIndex(start: number, indices: readonly number[] | undefined, position: number) {
   return indices?.[position] ?? start + position;
-}
-
-/** The width of the row headers that fits row numbers up to `rows`, as Excel widens them for longer numbers. */
-export function rowHeaderWidth(context: CanvasRenderingContext2D, rows: number) {
-  context.font = font;
-
-  return Math.max(28, Math.ceil(context.measureText(String(rows)).width) + 12);
 }
 
 /**

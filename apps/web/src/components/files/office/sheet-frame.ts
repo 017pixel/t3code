@@ -97,12 +97,17 @@ export function paintFrame(
   // SAFETY: the painter draws through the members a worker's 2D context shares with the window's. Only the window's
   // context type is declared, and it has focus and attribute members the worker's lacks, hence the double cast.
   const painter = context as unknown as CanvasRenderingContext2D;
+  const tiled = frame.tiles.length > 1;
+  const text = tiled ? new OffscreenCanvas(context.canvas.width, context.canvas.height) : undefined;
+  const textContext = text?.getContext("2d");
 
   frame.tiles.forEach((tile) => {
     const at = { x: origin.x + tile.x * ratio, y: origin.y + tile.y * ratio };
+    const list = tiled
+      ? { ...tile.list, commands: tile.list.commands.filter((command) => command.op !== "text") }
+      : tile.list;
 
-    if (tile.clipX === 0 && tile.clipY === 0)
-      return paintDisplayList(painter, tile.list, ratio, at);
+    if (tile.clipX === 0 && tile.clipY === 0) return paintDisplayList(painter, list, ratio, at);
 
     context.save();
     context.setTransform(1, 0, 0, 1, 0, 0);
@@ -114,9 +119,37 @@ export function paintFrame(
       context.canvas.height,
     );
     context.clip();
-    paintDisplayList(painter, tile.list, ratio, at);
+    paintDisplayList(painter, list, ratio, at);
     context.restore();
   });
+  // Text clips can span a merged range beyond its tile. Composite it after all tile clears and backgrounds.
+  if (text && textContext)
+    frame.tiles.forEach((tile) => {
+      textContext.reset();
+      paintDisplayList(
+        textContext as unknown as CanvasRenderingContext2D,
+        {
+          ...tile.list,
+          width: frame.viewport.width - tile.x,
+          height: frame.viewport.height - tile.y,
+          commands: tile.list.commands.filter((command) => command.op === "text"),
+        },
+        ratio,
+        { x: origin.x + tile.x * ratio, y: origin.y + tile.y * ratio },
+      );
+      context.save();
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      context.beginPath();
+      context.rect(
+        Math.round(origin.x + tile.clipX * ratio),
+        Math.round(origin.y + tile.clipY * ratio),
+        context.canvas.width,
+        context.canvas.height,
+      );
+      context.clip();
+      context.drawImage(text, 0, 0);
+      context.restore();
+    });
 }
 
 /**
