@@ -46,6 +46,7 @@ import {
   CLAUDE_PROVIDER,
   makeClaudeQueryOptions,
 } from "../src/orchestration-v2/Adapters/ClaudeAdapterV2.ts";
+import { changeRequestsCreatedBy } from "../src/orchestration-v2/PullRequestSyncReactor.ts";
 /** Agent models by id, with the display name a harness gives them. */
 const MODELS = {
   "claude-sonnet-5-5": "Sonnet 5.5",
@@ -82,7 +83,13 @@ type ApiMessage = { readonly role: "user" | "assistant"; readonly content: Reado
 type ApiTool = { readonly name: string; readonly [key: string]: unknown };
 type Usage = Record<keyof (typeof PRICES)[PricedModel], number>;
 type Call = { readonly step: number; readonly tool: string; readonly input: unknown };
-export type SampleRun = { readonly calls: ReadonlyArray<Call>; text: string; stopReason: string };
+export type SampleRun = {
+  readonly calls: ReadonlyArray<Call>;
+  text: string;
+  stopReason: string;
+  /** PRs linked to the thread when the sample ends, by the agent or by T3. */
+  readonly linked?: ReadonlyArray<string>;
+};
 
 const Rest = [Schema.Record(Schema.String, Schema.Unknown)] as const;
 
@@ -120,6 +127,8 @@ const McpToolUseExpect = Schema.Struct({
   /** Case-sensitive regexes on the agent's visible text. */
   textMust: Schema.optional(Schema.Array(Schema.String)),
   textMustNot: Schema.optional(Schema.Array(Schema.String)),
+  /** Each entry matches a PR URL linked at the end, as `args` values match. */
+  linked: Schema.optional(Schema.Array(Schema.String)),
 });
 
 /**
@@ -554,6 +563,11 @@ const codexMessages = (messages: ReadonlyArray<ApiMessage>): Array<Block> =>
   );
 /** One tool call the shell simulator has answered, or one from the case's prior turns. */
 type ShellEntry = { readonly tool: string; readonly input: unknown; readonly output: string };
+/** PRs T3 links by itself because a shell command created them, as `gh pr create` does. */
+const createdPullRequests = ({ tool, input, output }: ShellEntry) =>
+  tool === "Bash" && isRecord(input) && typeof input.command === "string"
+    ? changeRequestsCreatedBy(input.command, output).map(({ url }) => url)
+    : [];
 /**
  * One sample's state. ToolSearch adds loaded schemas to `tools`, like Claude Code. `shell` is the
  * history the simulator keeps consistent with; `linked` and `nextTask` do the same for T3 results.
@@ -593,7 +607,7 @@ export const makeSample = (testCase: McpToolUseCase, base: Base): Sample => {
     repo: testCase.setup.world?.repo ?? "acme/app",
     shell,
     shellUsage: emptyUsage(),
-    linked: new Set(urls),
+    linked: new Set([...urls, ...shell.flatMap(createdPullRequests)]),
     codeStore: {},
     nextTask: Math.max(0, ...taskNumbers) + 1,
   };
@@ -791,6 +805,15 @@ const t3Default = (sample: Sample, name: string, input: Readonly<Record<string, 
       const alreadyLinked = sample.linked.has(pr().url);
       sample.linked.add(pr().url);
       return { ...pr(), alreadyLinked };
+    }
+    case "request_secret": {
+      // T3 names both a ref and a file with 32 hex characters, and keeps files in its secrets dir.
+      const id = "5f0c9e2a7b4d4183a6e1c8d2b9f07a64";
+      const home =
+        /^\/(?:home|Users)\/[^/]+/.exec(sample.base.environment.cwd)?.[0] ?? "/home/user";
+      return input.delivery === "file"
+        ? { status: "saved", file: `${home}/.t3/userdata/secrets/files/${id}` }
+        : { status: "saved", secretRef: `secret-ref:${id}` };
     }
     case "unlink_pull_request":
       return { ...pr(), wasLinked: sample.linked.delete(pr().url) };
@@ -1009,7 +1032,9 @@ const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
     output = shellOutput(response.content);
   }
   if (call.tool === "Bash" && output === "") output = "(Bash completed with no output)";
-  sample.shell.push({ ...call, output });
+  const entry = { ...call, output };
+  sample.shell.push(entry);
+  for (const url of createdPullRequests(entry)) sample.linked.add(url);
   return output;
 });
 
@@ -1149,6 +1174,8 @@ export const gradeSample = (expect: McpToolUseCase["expect"], run: SampleRun) =>
     add(`shellMustNot /${p}/`, !shell.some((c) => test(p, c)));
   for (const p of expect.textMust ?? []) add(`textMust /${p}/`, test(p, run.text));
   for (const p of expect.textMustNot ?? []) add(`textMustNot /${p}/`, !test(p, run.text));
+  const isLinked = (url: string) => (run.linked ?? []).some((at) => matches(url, at));
+  for (const url of expect.linked ?? []) add(`linked ${url}`, isLinked(url));
   return checks;
 };
 
@@ -1472,6 +1499,7 @@ const runSample = Effect.fn("evaluateMcpToolUse.runSample")(function* (
     calls,
     text: said.join("\n\n"),
     stopReason,
+    linked: [...sample.linked],
     usage,
     shellUsage: sample.shellUsage,
     transcript: input ? transcript : messages.slice(start),
