@@ -12,6 +12,7 @@ export const AudioPreviewUnmountContext = createContext<((audio: HTMLAudioElemen
 type AudioPreviewProps = {
   readonly src: string;
   readonly name: string;
+  readonly revision?: string | null;
   readonly onError?: () => void;
   readonly compact?: boolean;
   readonly failed?: boolean;
@@ -20,21 +21,46 @@ type AudioPreviewProps = {
 };
 
 export function AudioPreview(props: AudioPreviewProps) {
+  return props.compact ? (
+    <AudioChip key={`${props.src}:${!!props.failed}`} {...props} />
+  ) : (
+    <StandardAudioPreview {...props} />
+  );
+}
+
+function StandardAudioPreview(props: AudioPreviewProps) {
   const onUnmount = useContext(AudioPreviewUnmountContext);
   const audioRef = useStableCallback((audio: HTMLAudioElement | null) => {
     if (audio) return () => onUnmount?.(audio);
   });
-  if (props.compact) return <AudioChip key={`${props.src}:${!!props.failed}`} {...props} />;
+  const [loadedSource, setLoadedSource] = useState<{ src: string; revision: string } | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const revision = props.revision ?? null;
+  // Changed files load once playback pauses.
+  if (loadedSource !== null && loadedSource.revision !== revision && !playing) {
+    setLoadedSource(revision === null ? null : { src: props.src, revision });
+  }
+  const src = loadedSource?.src ?? props.src;
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center p-6">
       <audio
         ref={audioRef}
         controls
         preload="metadata"
-        src={props.src}
+        src={src}
         aria-label={props.name}
         className="w-full max-w-xl"
-        onError={props.onError}
+        onLoadedMetadata={() => {
+          if (revision !== null && loadedSource === null) setLoadedSource({ src, revision });
+        }}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+        onError={() => {
+          setPlaying(false);
+          setLoadedSource(null);
+          if (src === props.src) props.onError?.();
+        }}
       />
     </div>
   );
