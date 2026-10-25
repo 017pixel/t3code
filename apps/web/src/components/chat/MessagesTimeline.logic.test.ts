@@ -3336,14 +3336,10 @@ describe("linked timeline resources", () => {
         event("d", "subagent"),
         event("e", "subagent", RunId.make("other-run")),
       ],
-      expandedRunIds: new Set([
-        RunId.make(`group:partial:${runId}`),
-        runId,
-        RunId.make("other-run"),
-      ]),
+      expandedRunIds: new Set([RunId.make(`group:partial:start`), runId, RunId.make("other-run")]),
     });
     expect(rows.map((row) => row.id)).toEqual([
-      `turn-fold:group:partial:${runId}`,
+      `turn-fold:group:partial:start`,
       "turn-fold:resource-run",
       "a",
       "c",
@@ -3614,7 +3610,7 @@ it.each([true, false])(
     });
     // The window opened after the prompt, so the group has no start to time from.
     const ids = rows.map((row) => row.id);
-    const group = "turn-fold:group:partial:initial";
+    const group = "turn-fold:group:partial:start";
     expect(rows[0]).toMatchObject({
       id: group,
       label: isWorking ? "Working · 2 updates" : "Worked · 2 updates",
@@ -3937,6 +3933,19 @@ describe("response groups", () => {
     const ids = settled(entries).map((row) => row.id);
     expect(ids).toContain("ack-a");
     expect(ids).not.toContain("late-a");
+
+    // The same holds when the late output lands in the latest run.
+    const latest = goalThread();
+    latest.push({
+      ...answer("late-b", "wake-b", 46),
+      attempt: {
+        id: "attempt-b" as never,
+        runId: RunId.make("wake-b"),
+        status: "superseded",
+        completedAt: time(47),
+      } as never,
+    });
+    expect(settled(latest).map((row) => row.id)).toContain("ack-b");
   });
 
   it("lets find open both the group and the run an entry hides behind", () => {

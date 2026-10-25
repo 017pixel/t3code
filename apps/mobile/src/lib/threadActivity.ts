@@ -1237,9 +1237,10 @@ export function messageFoldRunIds(
       continue;
     }
     const runId = feedEntryRunId(entry) ?? runlessKey;
-    // Runs before the first loaded prompt share a partial group named by the first.
+    // Runs before the first loaded prompt share a partial group named by that prompt.
     if (!seenPrompt && groupKey === null && runId !== null) {
-      groupKey = RunId.make(`${PARTIAL_GROUP_PREFIX}${runId}`);
+      const firstPrompt = feed.find(isResponseStartEntry);
+      groupKey = RunId.make(`${PARTIAL_GROUP_PREFIX}${firstPrompt?.id ?? "start"}`);
     }
     if (runId !== null && !isNotificationEntry(entry)) runsWithOutput.add(runId);
     if (entry.type === "message" && entry.id === entryId) {
@@ -1323,9 +1324,12 @@ function deriveThreadFeedRunFolds(
   };
   let firstPromptIndex: number | null = null;
   let partialResponse: Response | null = null;
-  const openPartialResponse = (segment: { key: RunId }): Response => {
+  // Named by the prompt it precedes, so loading older history keeps it open.
+  const openPartialResponse = (): Response => {
     const partial = {
-      key: RunId.make(`${PARTIAL_GROUP_PREFIX}${segment.key}`),
+      key: RunId.make(
+        `${PARTIAL_GROUP_PREFIX}${firstPromptIndex === null ? "start" : (feed[firstPromptIndex]?.id ?? "start")}`,
+      ),
       startedAt: null,
       segments: [],
     };
@@ -1449,7 +1453,7 @@ function deriveThreadFeedRunFolds(
       const owner =
         slice.response ??
         (segment.firstIndex < (firstPromptIndex ?? Infinity)
-          ? (partialResponse ??= openPartialResponse(segment))
+          ? (partialResponse ??= openPartialResponse())
           : null);
       owner?.segments.push(segment);
     }

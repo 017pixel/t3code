@@ -1128,9 +1128,12 @@ function deriveTurnFolds(input: {
   };
   let firstPromptIndex: number | null = null;
   let partialResponse: Response | null = null;
-  const openPartialResponse = (segment: { key: RunId }): Response => {
+  // Named by the prompt it precedes, so loading older history keeps it open.
+  const openPartialResponse = (): Response => {
     const partial = {
-      key: RunId.make(`${PARTIAL_GROUP_PREFIX}${segment.key}`),
+      key: RunId.make(
+        `${PARTIAL_GROUP_PREFIX}${firstPromptIndex === null ? "start" : (input.timelineEntries[firstPromptIndex]?.id ?? "start")}`,
+      ),
       startedAt: null,
       segments: [],
     };
@@ -1257,7 +1260,7 @@ function deriveTurnFolds(input: {
       const owner =
         slice.response ??
         (segment.firstIndex < (firstPromptIndex ?? Infinity)
-          ? (partialResponse ??= openPartialResponse(segment))
+          ? (partialResponse ??= openPartialResponse())
           : null);
       owner?.segments.push(segment);
     }
@@ -1697,13 +1700,13 @@ export function deriveMessagesTimelineRows(input: {
     if (group.trailingFold && foldExpanded(group.trailingFold.foldKeys)) {
       openTrailingFoldKeys.add(group.trailingFold.runId);
     }
-    // Its run's own fold may hide it (late output from a replaced attempt
-    // came after it), but a collapsed group always shows its answer.
-    if (group.finalEntryId !== null) collapsedEntryIds.delete(group.finalEntryId);
     for (const entryId of group.hiddenEntryIds) collapsedEntryIds.add(entryId);
     if (group.trailingFold && !foldExpanded(group.trailingFold.foldKeys)) {
       for (const entryId of group.trailingFold.hiddenEntryIds) collapsedEntryIds.add(entryId);
     }
+    // Its run's own fold may hide it (late output from a replaced attempt
+    // came after it), but a collapsed group always shows its answer.
+    if (group.finalEntryId !== null) collapsedEntryIds.delete(group.finalEntryId);
   }
   const collapsedSupersededEntryIds = new Set<string>();
   for (const fold of supersededFoldsByAnchorEntryId.values()) {

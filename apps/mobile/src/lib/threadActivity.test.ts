@@ -1331,7 +1331,7 @@ describe("retained v2 feed presentation", () => {
     const presented = deriveThreadFeedPresentation(
       feed,
       null,
-      new Set([RunId.make(`group:partial:${runId}`), runId, RunId.make("other-run")]),
+      new Set([RunId.make(`group:partial:start`), runId, RunId.make("other-run")]),
     );
     const groups = presented.flatMap((entry) =>
       entry.type === "activity-group" && entry.activities[0]?.projectedItem.item.type === "subagent"
@@ -1961,8 +1961,8 @@ describe("response groups", () => {
       },
     );
     const rows = deriveThreadFeedPresentation(feed, completed("wake-a", 20, 22), new Set());
-    expect(ids(rows)).toEqual(["run-fold:group:partial:initial", "launched"]);
-    expect(messageFoldRunIds(feed, "launched")).toEqual(["initial", "group:partial:initial"]);
+    expect(ids(rows)).toEqual(["run-fold:group:partial:start", "launched"]);
+    expect(messageFoldRunIds(feed, "launched")).toEqual(["initial", "group:partial:start"]);
     expect(rows[0]).toMatchObject({
       label: "Worked · 1 update",
       checkpointSummary: {
