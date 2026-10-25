@@ -1,6 +1,5 @@
-import { documentThumbnailKind } from "../files/documentThumbnailProtocol";
-import { DocumentAttachmentThumbnail } from "./DocumentAttachmentThumbnail";
 import { useRenderedAppearance } from "../../hooks/useTheme";
+import { documentThumbnailKind } from "../files/documentThumbnailProtocol";
 import type { Root, RootContent } from "mdast";
 import { ThreadFindTimelineContext } from "./ThreadFindProvider";
 import { shallow } from "zustand/vanilla/shallow";
@@ -2240,9 +2239,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     }),
   );
   const regularImages = userImages.filter((image) => !image.name.startsWith("preview-annotation-"));
-  const unchippedFiles = otherUserFiles.filter(
-    (file) => documentThumbnailKind(file) || !chippedAttachmentIds.has(file.id),
-  );
+  const unchippedFiles = otherUserFiles.filter((file) => !chippedAttachmentIds.has(file.id));
   const annotationRecordIds = resolvedContext.records
     .filter((record) => record.kind === "preview-annotation")
     .map((record) => record.contextId);
@@ -2472,53 +2469,49 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
               );
               if (file.downloadable !== false) {
                 return (
-                  <DocumentAttachmentThumbnail
-                    key={file.id}
-                    file={file}
-                    environmentId={ctx.activeThreadEnvironmentId}
-                    attachmentId={file.id}
-                    fallbackClassName="order-last basis-full"
-                    onOpen={() => ctx.onFileOpen(file)}
-                    fallback={
-                      <div key={file.id} className="flex min-w-0 items-center gap-1">
-                        <button
-                          type="button"
-                          aria-label={`Preview ${file.name}`}
-                          onClick={() => ctx.onFileOpen(file)}
-                          className="focus-visible:ring-ring/70 flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:outline-none"
-                        >
-                          {fileIdentity}
-                          <EyeIcon className="size-4 shrink-0" />
-                        </button>
-                        <Tooltip>
-                          <TooltipTrigger
-                            render={
-                              <Button
-                                size="icon-xs"
-                                variant="ghost-muted"
-                                aria-label={`Download ${file.name}`}
-                                onClick={() => ctx.onFileDownload(file)}
-                              />
-                            }
-                          >
-                            <DownloadIcon />
-                          </TooltipTrigger>
-                          <TooltipPopup side="top">Download {file.name}</TooltipPopup>
-                        </Tooltip>
-                      </div>
-                    }
-                  >
-                    <span className="absolute right-1 top-1 opacity-0 transition-opacity pointer-coarse:opacity-100 group-hover/attachment:opacity-100 group-focus-within/attachment:opacity-100">
-                      <Button
-                        size="icon-xs"
-                        variant="overlay"
-                        aria-label={`Download ${file.name}`}
-                        onClick={() => ctx.onFileDownload(file)}
+                  <div key={file.id} className="flex min-w-0 items-center gap-1">
+                    {documentThumbnailKind(file) ? (
+                      <FileChip
+                        name={file.name}
+                        documentPreview={{
+                          file,
+                          environmentId: ctx.activeThreadEnvironmentId,
+                          attachmentId: file.id,
+                        }}
+                        size={formatAttachmentSize(file.sizeBytes)}
+                        isVideo={false}
+                        theme={ctx.resolvedTheme}
+                        accessibleLabel={`Preview ${file.name}`}
+                        tooltip={`${file.name}\n${formatAttachmentSize(file.sizeBytes)}`}
+                        onOpen={() => ctx.onFileOpen(file)}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        aria-label={`Preview ${file.name}`}
+                        onClick={() => ctx.onFileOpen(file)}
+                        className="focus-visible:ring-ring/70 flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:outline-none"
+                      >
+                        {fileIdentity}
+                        <EyeIcon className="size-4 shrink-0" />
+                      </button>
+                    )}
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <Button
+                            size="icon-xs"
+                            variant="ghost-muted"
+                            aria-label={`Download ${file.name}`}
+                            onClick={() => ctx.onFileDownload(file)}
+                          />
+                        }
                       >
                         <DownloadIcon />
-                      </Button>
-                    </span>
-                  </DocumentAttachmentThumbnail>
+                      </TooltipTrigger>
+                      <TooltipPopup side="top">Download {file.name}</TooltipPopup>
+                    </Tooltip>
+                  </div>
                 );
               }
 
@@ -4533,6 +4526,15 @@ const userMessageContextPresentationRegistry = createContextPresentationRegistry
         return (
           <FileChip
             name={record.name}
+            documentPreview={
+              !disabled
+                ? {
+                    file: attachment,
+                    environmentId: context.environmentId,
+                    attachmentId: attachment.id,
+                  }
+                : undefined
+            }
             svgPreview={
               isSvgAttachment(attachment)
                 ? {

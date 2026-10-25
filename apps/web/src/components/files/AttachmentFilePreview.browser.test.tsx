@@ -1796,7 +1796,7 @@ it.each(["docx", "xlsx"] as const)(
     if (kind === "docx") {
       archive.file(
         "word/document.xml",
-        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Northstar planning</w:t></w:r></w:p></w:body></w:document>',
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/><w:sz w:val="96"/></w:rPr><w:t>Northstar planning</w:t></w:r></w:p></w:body></w:document>',
       );
       archive.file(
         "_rels/.rels",
@@ -1825,10 +1825,10 @@ it.each(["docx", "xlsx"] as const)(
       source: async () => null,
       ratio: 2,
     });
-    expect(thumbnail?.label).toBe(kind === "docx" ? "DOCX · Page 1" : "XLSX · Plan");
+    expect(thumbnail?.label).toBe(kind === "docx" ? "1 page" : "2 tabs");
     const bitmap = await createImageBitmap(thumbnail!.blob);
     try {
-      expect([bitmap.width, bitmap.height]).toEqual([416, 224]);
+      expect([bitmap.width, bitmap.height]).toEqual([36, 46]);
       const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
       const context = canvas.getContext("2d")!;
       context.drawImage(bitmap, 0, 0);
@@ -1849,10 +1849,10 @@ it("paints and caches a bounded CSV thumbnail without opening the viewer", async
   const source = vi.fn<() => Promise<string | null>>();
   const input = { kind: "csv" as const, file, source, ratio: 2 };
   const first = await loadDocumentThumbnail("csv-thumbnail-test", input);
-  expect(first?.label).toBe("CSV · First rows");
+  expect(first?.label).toBe("2 rows");
   expect(source).not.toHaveBeenCalled();
   const bitmap = await createImageBitmap(first!.blob);
-  expect([bitmap.width, bitmap.height]).toEqual([416, 224]);
+  expect([bitmap.width, bitmap.height]).toEqual([36, 46]);
   bitmap.close();
   expect(await loadDocumentThumbnail("csv-thumbnail-test", input)).toBe(first);
   expect(
@@ -1870,9 +1870,9 @@ it("renders PDF thumbnails and navigates, searches, zooms, and selects PDF pages
     "Delivery milestones",
     "Budget and risks",
   ].entries()) {
-    const text = `BT /F1 24 Tf 30 700 Td (${title}) Tj ET`;
+    const text = `/GS1 gs BT /F1 24 Tf 30 700 Td (${title}) Tj ET`;
     objects.push(
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 9 0 R >> >> /Contents ${4 + index * 2} 0 R >>`,
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate ${index === 2 ? 90 : 0} /Resources << /Font << /F1 9 0 R >> /ExtGState << /GS1 << /TR << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 2 >> >> >> >> /Contents ${4 + index * 2} 0 R >>`,
       `<< /Length ${text.length} >>\nstream\n${text}\nendstream`,
     );
   }
@@ -1896,9 +1896,9 @@ it("renders PDF thumbnails and navigates, searches, zooms, and selects PDF pages
     source: async () => null,
     ratio: 2,
   });
-  expect(thumbnail?.label).toBe("PDF · 3 pages");
+  expect(thumbnail?.label).toBe("3 pages");
   const bitmap = await createImageBitmap(thumbnail!.blob);
-  expect(bitmap.width).toBe(416);
+  expect([bitmap.width, bitmap.height]).toEqual([36, 46]);
   bitmap.close();
   const { default: PdfViewer } = await import("./PdfViewer");
   const url = URL.createObjectURL(file);
@@ -1927,11 +1927,14 @@ it("renders PDF thumbnails and navigates, searches, zooms, and selects PDF pages
     );
     await screen.getByRole("button", { name: "Next page", exact: true }).click();
     await vi.waitFor(() => expect(screen.container.textContent).toContain("2 / 3 pages"));
+    await screen.getByRole("button", { name: "Previous page", exact: true }).click();
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("1 / 3 pages"));
     await screen.getByRole("button", { name: "Zoom in", exact: true }).click();
     await vi.waitFor(() => expect(region.scrollWidth).toBeGreaterThan(region.clientWidth));
     await screen.getByRole("button", { name: "Fit width", exact: true }).click();
     await vi.waitFor(() => expect(region.scrollWidth).toBe(region.clientWidth));
     await screen.getByRole("searchbox", { name: "Find in PDF" }).fill("Budget");
+    await screen.getByRole("button", { name: "Zoom in", exact: true }).click();
     await vi.waitFor(() => expect(screen.container.textContent).toContain("3 / 3 pages"), {
       timeout: 15_000,
     });
@@ -1940,6 +1943,14 @@ it("renders PDF thumbnails and navigates, searches, zooms, and selects PDF pages
         (node) => node.textContent === "Budget and risks",
       );
       expect(span).toBeDefined();
+      const textBounds = span!.getBoundingClientRect();
+      const pageBounds = span!.parentElement!.getBoundingClientRect();
+      expect(textBounds.width).toBeGreaterThan(0);
+      expect(textBounds.height).toBeGreaterThan(0);
+      expect(textBounds.left).toBeGreaterThanOrEqual(pageBounds.left - 1);
+      expect(textBounds.top).toBeGreaterThanOrEqual(pageBounds.top - 1);
+      expect(textBounds.right).toBeLessThanOrEqual(pageBounds.right + 1);
+      expect(textBounds.bottom).toBeLessThanOrEqual(pageBounds.bottom + 1);
       const range = document.createRange();
       range.selectNodeContents(span!);
       const selection = window.getSelection()!;
@@ -1949,6 +1960,8 @@ it("renders PDF thumbnails and navigates, searches, zooms, and selects PDF pages
       expect(getComputedStyle(span!).userSelect).toBe("text");
       selection.removeAllRanges();
     });
+    await screen.getByRole("searchbox", { name: "Find in PDF" }).fill(" ");
+    await vi.waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("0/0"));
   } finally {
     URL.revokeObjectURL(url);
   }

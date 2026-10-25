@@ -223,6 +223,15 @@ function FileContextChip(props: {
   return (
     <FileChip
       name={props.record.name}
+      documentPreview={
+        actions.environmentId
+          ? {
+              file: props.record,
+              environmentId: props.record.uploadEnvironmentId ?? actions.environmentId,
+              attachmentId: props.record.uploadedAttachmentId,
+            }
+          : undefined
+      }
       svgPreview={
         isSvgAttachment(props.record)
           ? {

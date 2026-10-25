@@ -23,6 +23,26 @@ class ThumbnailCanvasFactory {
   }
 }
 
+// OffscreenCanvas has no SVG filter DOM; "none" selects PDF.js' software fallback.
+class ThumbnailFilterFactory {
+  addFilter() {
+    return "none";
+  }
+  addHCMFilter() {
+    return "none";
+  }
+  addAlphaFilter() {
+    return "none";
+  }
+  addLuminosityFilter() {
+    return "none";
+  }
+  addKnockoutFilter() {
+    return "none";
+  }
+  destroy() {}
+}
+
 const standardFonts = import.meta.glob<string>(
   "../../../node_modules/pdfjs-dist/standard_fonts/*",
   { query: "?url", import: "default", eager: true },
@@ -57,7 +77,9 @@ export function openPdf(bytes: ArrayBuffer) {
     useSystemFonts: !inWorker,
     useWorkerFetch: false,
     BinaryDataFactory,
-    ...(inWorker ? { CanvasFactory: ThumbnailCanvasFactory } : {}),
+    ...(inWorker
+      ? { CanvasFactory: ThumbnailCanvasFactory, FilterFactory: ThumbnailFilterFactory }
+      : {}),
     maxImageSize: 16 * 1024 * 1024,
     canvasMaxAreaInBytes: 32 * 1024 * 1024,
     useWasm: true,

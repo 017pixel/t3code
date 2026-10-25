@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { TextLayer, type PDFDocumentProxy } from "pdfjs-dist";
 import { ChevronDownIcon, ChevronUpIcon, MinusIcon, PlusIcon, ScanIcon } from "lucide-react";
 import { Input } from "~/components/ui/input";
@@ -164,10 +171,15 @@ export default function PdfViewer(props: { src: string; title: string }) {
     for (const ratio of ratios) result.push(result[result.length - 1]! + width * ratio + 16);
     return result;
   })();
-  const current = Math.max(
-    0,
-    ratios.findIndex((_, index) => offsets[index + 1]! > scrollTop + viewport.height / 2),
-  );
+  const current = ratios.reduce((best, ratio, index) => {
+    const visibleHeight = (page: number, pageRatio: number) =>
+      Math.max(
+        0,
+        Math.min(offsets[page]! + width * pageRatio, scrollTop + viewport.height) -
+          Math.max(offsets[page]!, scrollTop),
+      );
+    return visibleHeight(index, ratio) > visibleHeight(best, ratios[best]!) + 1 ? index : best;
+  }, 0);
   const visible = ratios.flatMap((ratio, index) =>
     offsets[index + 1]! >= scrollTop - viewport.height &&
     offsets[index]! <= scrollTop + viewport.height * 2
@@ -181,11 +193,18 @@ export default function PdfViewer(props: { src: string; title: string }) {
         old[index] === ratio ? old : old.map((value, i) => (i === index ? ratio : value)),
       ),
   );
+  const jumpToPage = useEffectEvent((index: number) => {
+    scroll.current?.scrollTo({ top: Math.max(0, (offsets[index] ?? 16) - 16) });
+  });
   const showPage = (index: number) => {
     scroll.current?.scrollTo({ top: Math.max(0, (offsets[index] ?? 16) - 16) });
   };
   useEffect(() => {
-    if (!pdf || !query.trim()) return;
+    if (!pdf || !query.trim()) {
+      // oxlint-disable-next-line react/set-state-in-effect -- A blank query cancels the previous search.
+      setFinding(false);
+      return;
+    }
     let cancelled = false;
     const timer = setTimeout(() => {
       setFinding(true);
@@ -207,8 +226,7 @@ export default function PdfViewer(props: { src: string; title: string }) {
         }
         if (cancelled) return;
         setMatches(found);
-        if (found.length)
-          scroll.current?.scrollTo({ top: Math.max(0, (offsets[found[0]!] ?? 16) - 16) });
+        if (found.length) jumpToPage(found[0]!);
       })()
         .catch((cause: unknown) => {
           if (!cancelled)
@@ -222,7 +240,6 @@ export default function PdfViewer(props: { src: string; title: string }) {
       cancelled = true;
       clearTimeout(timer);
     };
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Search follows the query, not viewport geometry.
   }, [pdf, query]);
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">

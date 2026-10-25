@@ -13,7 +13,10 @@ import {
 async function render(bytes: ArrayBuffer, kind: DocumentThumbnailKind, ratio: number) {
   if (bytes.byteLength > DOCUMENT_THUMBNAIL_MAX_BYTES)
     throw new Error("Thumbnail input too large.");
-  const canvas = new OffscreenCanvas(Math.ceil(208 * ratio), Math.ceil(112 * ratio));
+  const canvas = new OffscreenCanvas(
+    Math.ceil((kind === "pptx" ? 30 : 18) * ratio),
+    Math.ceil((kind === "pptx" ? 18 : 23) * ratio),
+  );
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Canvas unavailable.");
   context.fillStyle = "white";
@@ -33,10 +36,16 @@ async function render(bytes: ArrayBuffer, kind: DocumentThumbnailKind, ratio: nu
         const document = await client.call("open", input, options);
         const first = document.pages[0];
         if (!first) throw new Error("Empty document.");
-        bitmap = await client.call("paint", { index: 0, scale: 208 / first.width, ratio });
+        bitmap = await client.call("paint", {
+          index: 0,
+          scale: Math.min(canvas.width / first.width, canvas.height / first.height) / ratio,
+          ratio,
+        });
         if (!bitmap) throw new Error("Page unavailable.");
         context.drawImage(bitmap, 0, 0);
-        label = "DOCX · Page 1";
+        label = document.loading
+          ? ""
+          : `${document.pages.length} ${document.pages.length === 1 ? "page" : "pages"}`;
       } finally {
         bitmap?.close();
         client.close();
@@ -55,16 +64,16 @@ async function render(bytes: ArrayBuffer, kind: DocumentThumbnailKind, ratio: nu
           sheet: first.index,
           x: 0,
           y: 0,
-          width: 832,
+          width: 351,
           height: 448,
-          ratio: ratio / 4,
+          ratio: canvas.width / 351,
           offset: { x: 0, y: 0 },
           wider: undefined,
         });
         bitmap = frame?.bitmap;
         if (!bitmap) throw new Error("Sheet unavailable.");
         context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-        label = `XLSX · ${first.name}`;
+        label = `${workbook.tabs.length} ${workbook.tabs.length === 1 ? "tab" : "tabs"}`;
       } finally {
         bitmap?.close();
         client.close();
@@ -83,8 +92,9 @@ async function render(bytes: ArrayBuffer, kind: DocumentThumbnailKind, ratio: nu
         });
         if (painted.kind !== "painted") throw new Error("Slide unavailable.");
         bitmap = painted.bitmap;
+        if (painted.vectors.length) throw new Error("Slide needs vector rasterization.");
         context.drawImage(bitmap, 0, 0, canvas.width, (canvas.width * first.height) / first.width);
-        label = `PPTX · ${slides.length} ${slides.length === 1 ? "slide" : "slides"}`;
+        label = `${slides.length} ${slides.length === 1 ? "slide" : "slides"}`;
       } finally {
         bitmap?.close();
         client.close();
@@ -104,19 +114,19 @@ async function render(bytes: ArrayBuffer, kind: DocumentThumbnailKind, ratio: nu
         viewport,
         background: "white",
       }).promise;
-      label = `PDF · ${document.numPages} ${document.numPages === 1 ? "page" : "pages"}`;
+      label = `${document.numPages} ${document.numPages === 1 ? "page" : "pages"}`;
     } finally {
       await task.destroy();
     }
   } else if (kind === "csv") {
     // A prefix is sufficient for a thumbnail, even if its last row is incomplete.
-    const { rows } = parseDelimitedPreview(
+    const { rows, truncated } = parseDelimitedPreview(
       new TextDecoder().decode(bytes.slice(0, 64 * 1024)),
       ",",
       { maxRows: 8, maxColumns: 5, maxCellLength: 60 },
     );
     if (!rows.length) throw new Error("Empty table.");
-    context.scale(ratio, ratio);
+    context.scale(canvas.width / 208, canvas.width / 208);
     context.font = "8px sans-serif";
     const columns = Math.max(...rows.map((row) => row.length));
     const width = 208 / columns;
@@ -133,7 +143,9 @@ async function render(bytes: ArrayBuffer, kind: DocumentThumbnailKind, ratio: nu
         context.restore();
       }),
     );
-    label = "CSV · First rows";
+    const count = Math.max(0, rows.length - 1);
+    label =
+      !truncated && bytes.byteLength <= 64 * 1024 ? `${count} ${count === 1 ? "row" : "rows"}` : "";
   } else if (kind === "epub") {
     const files = await boundedZip(bytes, 8 * 1024 * 1024, { totalLimit: 24 * 1024 * 1024 });
     const parser = new XMLParser({
@@ -173,7 +185,7 @@ async function render(bytes: ArrayBuffer, kind: DocumentThumbnailKind, ratio: nu
     } finally {
       bitmap.close();
     }
-    label = "EPUB · Cover";
+    label = "";
   } else throw new Error("Unsupported thumbnail.");
   return { blob: await canvas.convertToBlob({ type: "image/webp", quality: 0.85 }), label };
 }

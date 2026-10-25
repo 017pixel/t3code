@@ -1,9 +1,6 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
-import { FileTextIcon } from "lucide-react";
 import { useAssetUrlRefresh } from "~/assets/assetUrls";
-import { cn } from "~/lib/utils";
-import { SNAP_SHOT_ATTACHMENT_FRAME_CLASS } from "./SnapShotAttachmentDetails";
 import {
   documentThumbnailKind,
   DOCUMENT_THUMBNAIL_MAX_BYTES,
@@ -17,19 +14,18 @@ type ThumbnailFile = {
   readonly file?: Blob | null;
 };
 
+const thumbnailLoader = () => import("../files/documentThumbnail");
+
 export function DocumentAttachmentThumbnail(props: {
   readonly file: ThumbnailFile;
   readonly environmentId: EnvironmentId;
   readonly attachmentId?: string | undefined;
-  readonly onOpen: () => void;
   readonly fallback: ReactNode;
-  readonly children?: ReactNode;
-  readonly detailClassName?: string | undefined;
-  readonly fallbackClassName?: string | undefined;
+  readonly children: (preview: { icon: ReactNode; label: string | undefined }) => ReactNode;
 }) {
   const { file } = props;
   const kind = documentThumbnailKind(file);
-  const target = useRef<HTMLDivElement>(null);
+  const target = useRef<HTMLSpanElement>(null);
   const [visible, setVisible] = useState(false);
   const [result, setThumbnail] = useState<{
     src: string;
@@ -82,7 +78,7 @@ export function DocumentAttachmentThumbnail(props: {
       file.file instanceof File ? file.file.lastModified : 0,
       ratio,
     ]);
-    void import("../files/documentThumbnail")
+    void thumbnailLoader()
       .then(({ loadDocumentThumbnail }) =>
         loadDocumentThumbnail(key, {
           kind,
@@ -112,53 +108,30 @@ export function DocumentAttachmentThumbnail(props: {
     props.attachmentId,
     identity,
   ]);
+  const [failedSrc, setFailedSrc] = useState<string>();
+  const available = thumbnail && thumbnail.src !== failedSrc ? thumbnail : null;
   return (
-    <div
-      ref={target}
-      className={
-        thumbnail
-          ? cn(
-              SNAP_SHOT_ATTACHMENT_FRAME_CLASS,
-              "group/attachment shrink-0 snap-start bg-background",
-            )
-          : cn("min-w-0 max-w-full shrink-0", props.fallbackClassName)
-      }
-    >
-      {thumbnail ? (
-        <>
-          <button
-            type="button"
-            aria-label={`Preview ${file.name}`}
-            onClick={props.onOpen}
-            className="block h-full w-full cursor-pointer focus-visible:outline-2 focus-visible:outline-ring"
+    <span ref={target} className="inline-flex max-w-full align-middle">
+      {props.children({
+        icon: (
+          <span
+            className="relative inline-flex shrink-0 items-center justify-center"
+            style={{ width: kind === "pptx" ? 30 : 18, height: kind === "pptx" ? 18 : 23 }}
           >
-            <img
-              src={thumbnail.src}
-              alt=""
-              className="block h-full w-full object-cover object-top"
-            />
-            <span
-              className={cn(
-                "pointer-events-none absolute inset-x-0 bottom-0 flex min-w-0 items-center gap-1.5 bg-linear-to-t from-black from-65% to-transparent px-2.5 pb-2 pt-6 text-left",
-                props.detailClassName,
-              )}
-            >
-              <FileTextIcon className="size-5 shrink-0 text-white" />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-2xs font-medium leading-3.5 text-white">
-                  {file.name}
-                </span>
-                <span className="block truncate text-3xs leading-3.5 text-white/70">
-                  {thumbnail.label}
-                </span>
-              </span>
-            </span>
-          </button>
-          {props.children}
-        </>
-      ) : (
-        props.fallback
-      )}
-    </div>
+            {available ? (
+              <img
+                src={available.src}
+                alt=""
+                className="block h-full w-full rounded-xs border border-foreground/15 bg-white object-cover object-top"
+                onError={() => setFailedSrc(available.src)}
+              />
+            ) : (
+              props.fallback
+            )}
+          </span>
+        ),
+        label: available?.label || undefined,
+      })}
+    </span>
   );
 }
