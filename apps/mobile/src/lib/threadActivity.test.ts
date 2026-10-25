@@ -1962,6 +1962,7 @@ describe("response groups", () => {
     );
     const rows = deriveThreadFeedPresentation(feed, completed("wake-a", 20, 22), new Set());
     expect(ids(rows)).toEqual(["run-fold:group:partial:initial", "launched"]);
+    expect(messageFoldRunIds(feed, "launched")).toEqual(["initial", "group:partial:initial"]);
     expect(rows[0]).toMatchObject({
       label: "Worked · 1 update",
       checkpointSummary: {

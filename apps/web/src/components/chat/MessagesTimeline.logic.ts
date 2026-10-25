@@ -1018,6 +1018,7 @@ interface ResponseGroupFold {
   label: string;
   /** The answer that stays visible; its changed-files card covers the whole group. */
   finalMessageId: MessageId | null;
+  finalEntryId: string | null;
   /** Runs whose checkpoint belongs here. A steer-split run's belongs to the later group. */
   checkpointRunIds: ReadonlyArray<RunId>;
   /** Stopped or failed runs: the group's diff cannot end at their checkpoint. */
@@ -1397,6 +1398,7 @@ function deriveTurnFolds(input: {
       trailingFold,
       label,
       finalMessageId: finalEntry?.message.id ?? null,
+      finalEntryId: finalEntry?.id ?? null,
       checkpointRunIds: ordered
         .filter((segment) => segment.lastOfRun)
         .map((segment) => segment.runId),
@@ -1695,6 +1697,9 @@ export function deriveMessagesTimelineRows(input: {
     if (group.trailingFold && foldExpanded(group.trailingFold.foldKeys)) {
       openTrailingFoldKeys.add(group.trailingFold.runId);
     }
+    // Its run's own fold may hide it (late output from a replaced attempt
+    // came after it), but a collapsed group always shows its answer.
+    if (group.finalEntryId !== null) collapsedEntryIds.delete(group.finalEntryId);
     for (const entryId of group.hiddenEntryIds) collapsedEntryIds.add(entryId);
     if (group.trailingFold && !foldExpanded(group.trailingFold.foldKeys)) {
       for (const entryId of group.trailingFold.hiddenEntryIds) collapsedEntryIds.add(entryId);

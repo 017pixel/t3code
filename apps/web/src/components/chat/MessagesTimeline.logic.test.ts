@@ -3922,6 +3922,23 @@ describe("response groups", () => {
     expect(ids).not.toContain("partial-b");
   });
 
+  it("shows the group's answer even when its own run's fold would hide it", () => {
+    const entries = goalThread({ lastWakeAnswers: false });
+    const late = answer("late-a", "wake-a", 26);
+    entries.splice(entries.findIndex((entry) => entry.id === "ack-a") + 1, 0, {
+      ...late,
+      attempt: {
+        id: "attempt-a" as never,
+        runId: RunId.make("wake-a"),
+        status: "superseded",
+        completedAt: time(27),
+      } as never,
+    });
+    const ids = settled(entries).map((row) => row.id);
+    expect(ids).toContain("ack-a");
+    expect(ids).not.toContain("late-a");
+  });
+
   it("lets find open both the group and the run an entry hides behind", () => {
     const keys = timelineTurnFoldRunIdsByEntryId({
       timelineEntries: goalThread(),

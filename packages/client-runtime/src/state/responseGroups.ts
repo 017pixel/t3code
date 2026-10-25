@@ -73,7 +73,8 @@ export function mergeResponseGroupCheckpoints(
     .filter((summary) => summary.status === "ready")
     .sort((left, right) => left.checkpointTurnCount - right.checkpointTurnCount);
   const first = ready[0];
-  const last = ready.findLast((summary) => !unfinishedRunIds.has(summary.runId)) ?? ready.at(-1);
+  const end = ready.findLast((summary) => !unfinishedRunIds.has(summary.runId));
+  const last = end ?? ready.at(-1);
   if (first === undefined || last === undefined) return null;
   if (ready.length === 1) return first;
 
@@ -100,7 +101,8 @@ export function mergeResponseGroupCheckpoints(
   }
   return {
     ...last,
-    rangeFromTurnCount: first.checkpointTurnCount - 1,
+    // With no completed run to end at, the card opens its last run's own diff.
+    ...(end === undefined ? {} : { rangeFromTurnCount: first.checkpointTurnCount - 1 }),
     files: Array.from(files, ([path, file]) => ({
       path,
       kind: file.kind !== "deleted" && file.firstKind === "added" ? "added" : file.kind,

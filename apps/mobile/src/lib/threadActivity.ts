@@ -1164,6 +1164,8 @@ interface ThreadFeedGroupFold {
   readonly label: string;
   /** Runs whose checkpoint belongs here. A steer-split run's belongs to the later group. */
   readonly checkpointRunIds: ReadonlyArray<RunId>;
+  /** The answer a collapsed group always shows. */
+  readonly finalEntryId: string | null;
   /** Stopped or failed runs: the group's diff cannot end at their checkpoint. */
   readonly unfinishedRunIds: ReadonlySet<RunId>;
 }
@@ -1212,6 +1214,7 @@ export function messageFoldRunIds(
 ): ReadonlyArray<RunId> {
   let runlessKey: RunId | null = null;
   let groupKey: RunId | null = null;
+  let seenPrompt = false;
   const runsWithOutput = new Set<RunId>();
   const steerKeyByRun = new Map<RunId, RunId>();
   for (const entry of feed) {
@@ -1229,10 +1232,15 @@ export function messageFoldRunIds(
       runlessKey = runId == null ? RunId.make(`runless:${entry.id}`) : null;
       if (messageStartsResponseGroup(entry.message)) {
         groupKey = RunId.make(responseGroupKey(entry.id));
+        seenPrompt = true;
       }
       continue;
     }
     const runId = feedEntryRunId(entry) ?? runlessKey;
+    // Runs before the first loaded prompt share a partial group named by the first.
+    if (!seenPrompt && groupKey === null && runId !== null) {
+      groupKey = RunId.make(`${PARTIAL_GROUP_PREFIX}${runId}`);
+    }
     if (runId !== null && !isNotificationEntry(entry)) runsWithOutput.add(runId);
     if (entry.type === "message" && entry.id === entryId) {
       const ownRunId = entry.message.runId ?? runlessKey;
@@ -1573,6 +1581,7 @@ function deriveThreadFeedRunFolds(
       hiddenEntryIds,
       trailingFold,
       label,
+      finalEntryId: finalEntryId ?? null,
       checkpointRunIds: ordered
         .filter((segment) => segment.lastOfRun)
         .map((segment) => segment.runId),
@@ -1794,6 +1803,7 @@ export function deriveThreadFeedPresentation(
       // A latest run opened on its own keeps its row, so it can be closed again.
       openTrailingFoldKeys.add(group.trailingFold.runId);
     }
+    if (group.finalEntryId !== null) collapsedEntryIds.delete(group.finalEntryId);
   }
   for (let sourceIndex = 0; sourceIndex < sourceFeed.length; sourceIndex += 1) {
     const entry = sourceFeed[sourceIndex]!;

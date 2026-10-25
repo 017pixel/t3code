@@ -54,6 +54,11 @@ describe("mergeResponseGroupCheckpoints", () => {
     );
     expect(merged).toMatchObject({ checkpointTurnCount: 5, rangeFromTurnCount: 4 });
     expect(merged?.files.map((file) => file.path)).toEqual(["a.ts", "late.ts"]);
+    const none = mergeResponseGroupCheckpoints(
+      [summary(5, []), stopped],
+      new Set([RunId.make("run-5"), stopped.runId]),
+    );
+    expect(none).not.toHaveProperty("rangeFromTurnCount");
   });
 
   it("returns a lone ready checkpoint unchanged, and nothing without one", () => {
