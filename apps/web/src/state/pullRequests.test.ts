@@ -1,10 +1,24 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
-import { ProjectId, type PullRequestSummary } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  type PullRequestCheck,
+  type PullRequestDetail,
+  type PullRequestListEntry,
+  type PullRequestListInput,
+  type PullRequestListResult,
+  type PullRequestSummary,
+} from "@t3tools/contracts";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  livePullRequestObservation,
+  readAtRevision,
   newestPullRequestObservation,
   newestPullRequestSummary,
+  rememberPullRequestListAnswer,
+  restorePullRequestList,
   threadPullRequestLinkToSummary,
 } from "./pullRequests";
 
@@ -112,5 +126,281 @@ describe("pull request summary cache", () => {
         stale.projectId,
       ),
     ).toBeNull();
+  });
+});
+
+describe("live pull request answers", () => {
+  const failing: PullRequestCheck = {
+    name: "build",
+    status: "failure",
+    url: null,
+    description: null,
+  };
+  const detail = { ...summary(), checks: [] } as unknown as PullRequestDetail;
+
+  it("lets whichever of detail and checks answered last decide the checks", () => {
+    const checks = { value: { state: "open" as const, checks: [failing] }, at: 200 };
+    expect(livePullRequestObservation({ detail: { value: detail, at: 100 }, checks })).toEqual({
+      summary: { ...detail, checks: [failing], checksState: "failing" },
+      observedAt: 200,
+    });
+    expect(
+      livePullRequestObservation({ detail: { value: detail, at: 300 }, checks }),
+    ).toMatchObject({ summary: { checks: [], checksState: null }, observedAt: 300 });
+  });
+
+  it("waits for a detail answer before observing checks", () => {
+    expect(
+      livePullRequestObservation({
+        detail: null,
+        checks: { value: { state: "open", checks: [failing] }, at: 1 },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("pull request list answers across a reload", () => {
+  const makeStorage = () => {
+    const held = new Map<string, string>();
+    return {
+      held,
+      getItem: (key: string) => held.get(key) ?? null,
+      setItem: (key: string, value: string) => void held.set(key, value),
+      removeItem: (key: string) => void held.delete(key),
+      key: (index: number) => [...held.keys()][index] ?? null,
+      get length() {
+        return held.size;
+      },
+    };
+  };
+  const listEntry = (number: number, updatedAt = "2026-07-02T00:00:00Z") =>
+    ({
+      provider: SourceControlProviderKind.make("github"),
+      host: "github.com",
+      projectId: ProjectId.make("project-1"),
+      projectTitle: "t3code",
+      repository: "pingdotgg/t3code",
+      number,
+      title: `Pull request ${number}`,
+      url: `https://github.com/pingdotgg/t3code/pull/${number}`,
+      author: { login: "octocat", name: null, avatarUrl: null },
+      headBranch: `feat/branch-${number}`,
+      baseBranch: "main",
+      state: "open",
+      isDraft: false,
+      mergeability: "mergeable",
+      additions: 1,
+      deletions: 0,
+      createdAt: "2026-07-01T00:00:00Z",
+      updatedAt,
+      viewerReviewRequested: false,
+      labels: [],
+    }) as PullRequestListEntry;
+  const answer = (entries: ReadonlyArray<PullRequestListEntry>, host = "github.com") =>
+    ({
+      entries,
+      viewers: { [host]: "Bilal" },
+      providers: [
+        {
+          host,
+          kind: SourceControlProviderKind.make("github"),
+          searchesOnHost: true,
+          projectCount: 1,
+          configured: true,
+          detail: null,
+        },
+      ],
+      errors: [{ projectId: ProjectId.make("project-1"), projectTitle: "t3code", message: "boom" }],
+      truncated: true,
+      nextCursors: { "pingdotgg/t3code": "cursor-1" },
+    }) as PullRequestListResult;
+  const local = EnvironmentId.make("env-local");
+  const remote = EnvironmentId.make("env-remote");
+  const input: PullRequestListInput = { state: "open", involvement: "all", limit: 99 };
+
+  it("restores every environment's first page as one merged list without stale failures or cursors", () => {
+    const storage = makeStorage();
+    rememberPullRequestListAnswer(
+      storage,
+      { environmentId: local, input },
+      answer([listEntry(1, "2026-07-01T00:00:00Z")]),
+    );
+    rememberPullRequestListAnswer(
+      storage,
+      { environmentId: remote, input },
+      answer([listEntry(2, "2026-07-03T00:00:00Z")], "gitlab.com"),
+    );
+    const restored = restorePullRequestList(storage, [
+      { environmentId: local, input },
+      { environmentId: remote, input },
+    ]);
+    expect(restored?.entries.map((row) => [row.environmentId, row.number])).toEqual([
+      [remote, 2],
+      [local, 1],
+    ]);
+    expect(restored?.viewers).toEqual({
+      "env-local github.com": "Bilal",
+      "env-remote gitlab.com": "Bilal",
+    });
+    expect(restored?.providers.map((provider) => provider.host)).toEqual([
+      "github.com",
+      "gitlab.com",
+    ]);
+    expect(restored?.errors).toEqual([]);
+    expect(restored?.nextCursors).toEqual({});
+  });
+
+  it("keeps a page of rows and only first-page reads", () => {
+    const storage = makeStorage();
+    const rows = Array.from({ length: 120 }, (_, index) => listEntry(index + 1));
+    rememberPullRequestListAnswer(storage, { environmentId: local, input }, answer(rows));
+    const searched = { ...input, query: "fix" };
+    rememberPullRequestListAnswer(storage, { environmentId: local, input: searched }, answer(rows));
+    const continued = { ...input, cursors: { "pingdotgg/t3code": "cursor-1" } };
+    rememberPullRequestListAnswer(
+      storage,
+      { environmentId: local, input: continued },
+      answer(rows),
+    );
+    expect(
+      restorePullRequestList(storage, [{ environmentId: local, input }])?.entries,
+    ).toHaveLength(99);
+    expect(restorePullRequestList(storage, [{ environmentId: local, input: searched }])).toBeNull();
+    expect(
+      restorePullRequestList(storage, [{ environmentId: local, input: continued }]),
+    ).toBeNull();
+  });
+
+  it("restores answers kept under a project assignment for a cold start that has none yet", () => {
+    const storage = makeStorage();
+    rememberPullRequestListAnswer(
+      storage,
+      {
+        environmentId: local,
+        input: { ...input, projectIds: [ProjectId.make("project-1")] },
+      },
+      answer([listEntry(1)]),
+    );
+    rememberPullRequestListAnswer(
+      storage,
+      {
+        environmentId: remote,
+        input: { ...input, projectIds: [ProjectId.make("project-2")] },
+      },
+      answer([listEntry(2, "2026-07-03T00:00:00Z")]),
+    );
+    const restored = restorePullRequestList(storage, [
+      { environmentId: local, input },
+      { environmentId: remote, input },
+    ]);
+    expect(restored?.entries.map((row) => [row.environmentId, row.number])).toEqual([
+      [remote, 2],
+      [local, 1],
+    ]);
+  });
+
+  it("shows a pull request once when answers from before a reassignment overlap", () => {
+    const storage = makeStorage();
+    rememberPullRequestListAnswer(
+      storage,
+      { environmentId: local, input },
+      answer([listEntry(1, "2026-07-01T00:00:00Z")]),
+    );
+    rememberPullRequestListAnswer(
+      storage,
+      { environmentId: remote, input },
+      answer([listEntry(1, "2026-07-03T00:00:00Z")]),
+    );
+    const restored = restorePullRequestList(storage, [
+      { environmentId: local, input },
+      { environmentId: remote, input },
+    ]);
+    expect(restored?.entries.map((row) => [row.environmentId, row.updatedAt])).toEqual([
+      [remote, "2026-07-03T00:00:00Z"],
+    ]);
+  });
+
+  it("does not keep grown pages", () => {
+    const storage = makeStorage();
+    const grown = { ...input, limit: 198 };
+    rememberPullRequestListAnswer(storage, { environmentId: local, input: grown }, answer([]));
+    expect(restorePullRequestList(storage, [{ environmentId: local, input: grown }])).toBeNull();
+  });
+
+  it("forgets whole scopes, never one environment of a scope that is kept", () => {
+    const storage = makeStorage();
+    const scoped = (projectIndex: number) => ({
+      ...input,
+      projectId: ProjectId.make(`p-${projectIndex}`),
+    });
+    for (let projectIndex = 0; projectIndex < 9; projectIndex++) {
+      for (const [offset, environmentId] of [local, remote].entries()) {
+        rememberPullRequestListAnswer(
+          storage,
+          { environmentId, input: scoped(projectIndex) },
+          answer([listEntry(projectIndex * 2 + offset + 1, `2026-07-0${2 - offset}T00:00:00Z`)]),
+        );
+      }
+    }
+    const restore = (projectIndex: number) =>
+      restorePullRequestList(storage, [
+        { environmentId: local, input: scoped(projectIndex) },
+        { environmentId: remote, input: scoped(projectIndex) },
+      ]);
+    expect(restore(0)).toBeNull();
+    for (let projectIndex = 1; projectIndex < 9; projectIndex++) {
+      expect(restore(projectIndex)?.entries.map((row) => row.environmentId)).toEqual([
+        local,
+        remote,
+      ]);
+    }
+  });
+
+  it("removes the composite snapshots it replaced", () => {
+    const storage = makeStorage();
+    storage.held.set("t3.pullRequests.list:env-local,env-remote", "{}");
+    storage.held.set("t3.pullRequests.list:env-local", "{}");
+    storage.held.set("t3.other", "kept");
+    rememberPullRequestListAnswer(storage, { environmentId: local, input }, answer([]));
+    expect(
+      [...storage.held.keys()].filter((key) => key.startsWith("t3.pullRequests.list:")),
+    ).toEqual([]);
+    expect(storage.held.get("t3.other")).toBe("kept");
+  });
+});
+
+describe("readAtRevision", () => {
+  function source() {
+    let refreshes = 0;
+    const result = Atom.make<AsyncResult.AsyncResult<number, never>>(AsyncResult.success(1));
+    const atom = Atom.readable(
+      (get) => get(result),
+      () => {
+        refreshes += 1;
+      },
+    );
+    return { atom, result, refreshes: () => refreshes };
+  }
+
+  it("refetches when the revision moves, not on the first read or a remount", () => {
+    const registry = AtomRegistry.make();
+    const { atom, refreshes } = source();
+    const release = registry.mount(readAtRevision(atom, "a"));
+    release();
+    registry.mount(readAtRevision(atom, "a"));
+    expect(refreshes()).toBe(0);
+    registry.mount(readAtRevision(atom, "b"));
+    expect(refreshes()).toBe(1);
+  });
+
+  it("lets a read in flight settle before refetching at the new revision", () => {
+    const registry = AtomRegistry.make();
+    const { atom, result, refreshes } = source();
+    registry.mount(readAtRevision(atom, "a"));
+    registry.set(result, AsyncResult.success(1, { waiting: true }));
+    registry.mount(readAtRevision(atom, "b"));
+    expect(refreshes()).toBe(0);
+    registry.set(result, AsyncResult.success(2));
+    expect(refreshes()).toBe(1);
   });
 });

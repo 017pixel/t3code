@@ -2,11 +2,10 @@ import { resolvePullRequestDetailChecks } from "@t3tools/client-runtime/pull-req
 import {
   AuthSourceControlWriteScope,
   type EnvironmentId,
-  type PullRequestDetail,
   type PullRequestListEntry,
   type PullRequestRef,
 } from "@t3tools/contracts";
-import { useEffect, useEffectEvent, useState } from "react";
+import { useState } from "react";
 
 import { usePullRequestChecksRefresh } from "~/hooks/usePullRequestChecksRefresh";
 import { useServerConfigs } from "~/state/entities";
@@ -16,21 +15,17 @@ import {
   newestPullRequestSummary,
   pullRequestEnvironment,
   pullRequestListEntryToSummary,
+  readAtRevision,
+  usePullRequestHostRefreshes,
   useSharedPullRequestSummary,
 } from "~/state/pullRequests";
 import {
   readPullRequestDetailSnapshot,
   resolveDisplayedPullRequestDetail,
-  writePullRequestDetailSnapshot,
 } from "./pullRequestDetail.logic";
-import { pullRequestChecksState } from "./pullRequestPresentation";
 
 export function pullRequestRefKey(reference: PullRequestRef) {
   return `${reference.projectId}:${reference.host ?? ""}:${reference.repository}#${reference.number}`;
-}
-
-function pullRequestDetailSummary(data: PullRequestDetail | null) {
-  return data === null ? null : { ...data, checksState: pullRequestChecksState(data.checks) };
 }
 
 /**
@@ -44,11 +39,12 @@ export function usePullRequestDetail(
 ) {
   const scopeKey = `${environmentId}:${pullRequestRefKey(reference)}`;
   const canWriteSourceControl = useEnvironmentScope(environmentId, AuthSourceControlWriteScope);
+  const hostRefreshes = usePullRequestHostRefreshes(environmentId, reference);
   const detailQuery = useEnvironmentQuery(
-    pullRequestEnvironment.detail({ environmentId, input: { ...reference, allowStale: false } }),
-  );
-  const activityQuery = useEnvironmentQuery(
-    pullRequestEnvironment.activity({ environmentId, input: reference }),
+    readAtRevision(
+      pullRequestEnvironment.detail({ environmentId, input: { ...reference, allowStale: false } }),
+      hostRefreshes,
+    ),
   );
   const serverConfigs = useServerConfigs();
   const supportsChecks =
@@ -95,35 +91,14 @@ export function usePullRequestDetail(
   } else if (detailQuery.data !== null && detailQuery.data !== cachedDetail) {
     setCachedDetail(detailQuery.data);
   }
-  const saveDetailSnapshot = useEffectEvent((data: PullRequestDetail) => {
-    writePullRequestDetailSnapshot(
-      typeof window === "undefined" ? undefined : window.localStorage,
-      environmentId,
-      reference,
-      data,
-    );
-  });
-  useEffect(() => {
-    if (detailQuery.data !== null) saveDetailSnapshot(detailQuery.data);
-  }, [detailQuery.data]);
-  const detailSummary = pullRequestDetailSummary(liveDetail);
-  const observedSummary = useSharedPullRequestSummary(
-    environmentId,
-    reference,
-    detailSummary,
-    Math.max(detailQuery.dataUpdatedAt, checksQuery.dataUpdatedAt),
-  );
-  const activity = activityQuery.data;
+  const observedSummary = useSharedPullRequestSummary(environmentId, reference);
   const resolvedCoreDetail = resolveDisplayedPullRequestDetail({
     live: liveDetail,
     cached: cachedDetail,
     reference,
   });
-  // Every hook runs above this line: a hook between the merge and the panel's plain readers of
-  // `detail` would cost it its cache scope.
   const listSummary = listEntry === null ? null : pullRequestListEntryToSummary(listEntry);
-  // The list row is also published to the shared cache, but only after this commit's layout
-  // effects run, so it is compared directly rather than trusted to be there already.
+  // The row can come from the page's stored snapshot, which no answer has published yet.
   const sharedSummary = newestPullRequestSummary(
     resolvedCoreDetail,
     newestPullRequestSummary(observedSummary, listSummary),
@@ -153,6 +128,15 @@ export function usePullRequestDetail(
               : sharedSummary.mergedAt,
           isDraft: sharedSummary.isDraft ?? resolvedCoreDetail.isDraft,
         };
+  const coreUpdatedAt = coreDetail?.updatedAt ?? null;
+  const revision = coreUpdatedAt === null ? null : `${coreUpdatedAt}#${hostRefreshes}`;
+  // Activity is read at the revision the merged core reports, so a newer one refetches it.
+  const activityQuery = useEnvironmentQuery(
+    readAtRevision(pullRequestEnvironment.activity({ environmentId, input: reference }), revision),
+  );
+  const activity = activityQuery.data;
+  // Every hook runs above this line: a hook between the merge and the panel's plain readers of
+  // `detail` would cost it its cache scope.
   const detail =
     coreDetail === null
       ? null
@@ -202,5 +186,7 @@ export function usePullRequestDetail(
     sharedSummary,
     coreDetail,
     detail,
+    hostRefreshes,
+    revision,
   };
 }

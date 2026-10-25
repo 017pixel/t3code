@@ -1,9 +1,12 @@
 import type { PullRequestInvolvement, PullRequestListState } from "@t3tools/contracts";
 import { Plug2Icon, SearchIcon } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useRef, useState, type ReactNode, type RefObject } from "react";
+import { flushSync } from "react-dom";
 
 import { isElectron } from "~/env";
+import { observeIntersection } from "~/lib/observeIntersection";
 import { cn } from "~/lib/utils";
+import { commandScopeRef } from "~/shortcuts/dispatcher";
 import { Button } from "../ui/button";
 import { RefreshIcon } from "../ui/refresh-icon";
 import {
@@ -22,37 +25,30 @@ function ExpandableSearch({
   searchValue,
   open,
   onOpenChange,
-  focusToken,
+  containerRef,
   onFocusWithin,
 }: {
   searchInput: ReactNode;
   searchValue: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  focusToken: number;
+  containerRef: RefObject<HTMLDivElement | null>;
   /**
    * An unmount fires no blur, which is the point: whoever unmounted this can still see the reader
    * was mid-typing and move the focus somewhere that continues the sentence.
    */
   onFocusWithin?: (focused: boolean) => void;
 }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    containerRef.current?.querySelector("input")?.focus();
-  }, [open]);
-  const appliedFocusToken = useRef(focusToken);
-  useEffect(() => {
-    if (appliedFocusToken.current === focusToken) return;
-    appliedFocusToken.current = focusToken;
-    const input = containerRef.current?.querySelector("input");
-    input?.focus();
-    input?.select();
-  }, [focusToken]);
   if (open || searchValue.length > 0) {
     return (
       <div
-        ref={containerRef}
+        ref={(node) => {
+          containerRef.current = node;
+          if (open) node?.querySelector("input")?.focus();
+          return () => {
+            containerRef.current = null;
+          };
+        }}
         className="w-56 min-w-24 shrink"
         onFocus={() => onFocusWithin?.(true)}
         onBlur={() => {
@@ -96,6 +92,7 @@ export function PullRequestsColumn({
   maximizedAway,
   listBody,
   scrollRef,
+  observeScrollRoot,
 }: {
   refreshing: boolean;
   onRefresh: () => void;
@@ -116,57 +113,78 @@ export function PullRequestsColumn({
   maximizedAway: boolean;
   listBody: ReactNode;
   scrollRef: RefObject<HTMLDivElement | null>;
+  /** Attaches work rooted at the scroll container for as long as it is mounted. */
+  observeScrollRoot?: ((node: HTMLDivElement) => (() => void) | undefined) | undefined;
 }) {
   const markerRef = useRef<HTMLDivElement | null>(null);
   const [condensed, setCondensed] = useState(false);
-  useEffect(() => {
-    const marker = markerRef.current;
-    if (!marker) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => setCondensed(entry ? !entry.isIntersecting : false),
-      { root: scrollRef.current },
-    );
-    observer.observe(marker);
-    return () => observer.disconnect();
-  }, [scrollRef]);
   // Typing into the topbar search narrows the list, and a short enough list un-scrolls the
   // page — which dissolves the condensed topbar and unmounts the very input being typed in.
   const topbarSearchFocusedRef = useRef(false);
+  const topbarSearchRef = useRef<HTMLDivElement | null>(null);
   const inFlowSearchRef = useRef<HTMLDivElement | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [searchFocusToken, setSearchFocusToken] = useState(0);
   const searchExpanded = searchOpen || searchValue.length > 0;
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
-      if (event.key.toLowerCase() !== "f" || !(event.metaKey || event.ctrlKey)) return;
-      if (event.altKey || event.shiftKey) return;
-      event.preventDefault();
-      if (condensed) {
-        setSearchOpen(true);
-        setSearchFocusToken((token) => token + 1);
-        return;
-      }
-      const input = inFlowSearchRef.current?.querySelector("input");
-      input?.focus();
-      input?.select();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [condensed]);
-  if (!condensed && searchOpen) setSearchOpen(false);
-  useEffect(() => {
-    if (condensed) return;
+
+  const onMarkerIntersection = (entry: IntersectionObserverEntry) => {
+    const next = !entry.isIntersecting;
+    if (next) {
+      setCondensed(true);
+      return;
+    }
+    flushSync(() => {
+      setCondensed(false);
+      setSearchOpen(false);
+    });
     if (!topbarSearchFocusedRef.current) return;
     topbarSearchFocusedRef.current = false;
     const input = inFlowSearchRef.current?.querySelector("input");
     if (!input) return;
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);
-  }, [condensed]);
+  };
+  // Children attach their refs before parents, so the marker is in place when the scroll
+  // container that roots its observer attaches.
+  const attachScrollContainer = (node: HTMLDivElement | null) => {
+    scrollRef.current = node;
+    const marker = markerRef.current;
+    const stop =
+      node === null || marker === null
+        ? undefined
+        : observeIntersection(marker, onMarkerIntersection, { root: node });
+    return () => {
+      stop?.();
+      scrollRef.current = null;
+    };
+  };
+  // attachScrollContainer is rebuilt every render, so work that must outlive renders hangs off this
+  // wrapper's ref, whose identity follows observeScrollRoot alone. Ancestors are already in the
+  // DOM when a ref attaches.
+  const attachScrollRootWork = (node: HTMLDivElement) => {
+    const root = node.closest<HTMLDivElement>("[data-pull-request-scroll-root]");
+    return root === null ? undefined : observeScrollRoot?.(root);
+  };
+
+  const shortcutScopeRef = commandScopeRef(
+    {},
+    {
+      onKeyDown: (event) => {
+        if (event.key.toLowerCase() !== "f" || !(event.metaKey || event.ctrlKey)) return false;
+        if (event.altKey || event.shiftKey) return false;
+        event.preventDefault();
+        if (condensed) flushSync(() => setSearchOpen(true));
+        const input = (condensed ? topbarSearchRef : inFlowSearchRef).current?.querySelector(
+          "input",
+        );
+        input?.focus();
+        input?.select();
+      },
+    },
+  );
 
   return (
     <div
+      ref={shortcutScopeRef}
       className={cn(
         "@container/pr-list flex min-h-0 min-w-0 flex-col overflow-x-hidden bg-background",
         maximizedAway ? "w-0 flex-none" : "flex-1",
@@ -223,7 +241,7 @@ export function PullRequestsColumn({
               searchValue={searchValue}
               open={searchOpen}
               onOpenChange={setSearchOpen}
-              focusToken={searchFocusToken}
+              containerRef={topbarSearchRef}
               onFocusWithin={(focused) => {
                 topbarSearchFocusedRef.current = focused;
               }}
@@ -235,7 +253,8 @@ export function PullRequestsColumn({
       </WorkspacePageHeader>
 
       <div
-        ref={scrollRef}
+        ref={attachScrollContainer}
+        data-pull-request-scroll-root
         className="topbar-scroll-fade scrollbar-gutter-both min-h-0 flex-1 overflow-y-auto"
       >
         <WorkspacePageContainer width="expanded" className="min-h-full gap-4">
@@ -263,7 +282,9 @@ export function PullRequestsColumn({
             <div ref={markerRef} aria-hidden className="-mt-3 h-px w-full" />
           </div>
 
-          {listBody}
+          <div ref={attachScrollRootWork} className="contents">
+            {listBody}
+          </div>
         </WorkspacePageContainer>
       </div>
     </div>

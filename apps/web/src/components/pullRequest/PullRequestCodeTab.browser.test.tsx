@@ -100,7 +100,7 @@ const detail: PullRequestDetailView = {
   },
 };
 
-const tab = (refreshToken: number) => (
+const tab = (revision: string) => (
   <PullRequestCodeTab
     scrollerRef={() => {}}
     environmentId={EnvironmentId.make("environment")}
@@ -109,17 +109,17 @@ const tab = (refreshToken: number) => (
     selectedCommitOid={null}
     onSelectedCommitChange={() => {}}
     onRefresh={() => {}}
-    refreshToken={refreshToken}
+    revision={revision}
   />
 );
 
 it("keeps the diff after a refresh that brings back the same page", async () => {
   const container = document.createElement("div");
   container.className = "flex h-[700px] w-[900px]";
-  await using screen = await render(tab(0), { container });
+  await using screen = await render(tab("2026-09-01T00:00:00Z#0"), { container });
   await expect.element(screen.getByText("1 file", { exact: true })).toBeVisible();
 
-  await screen.rerender(tab(1));
+  await screen.rerender(tab("2026-09-01T00:00:00Z#1"));
 
   await expect
     .element(screen.getByText("This pull request has no file changes."))

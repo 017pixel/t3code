@@ -15,6 +15,7 @@ import {
   findProjectForRepository,
   findScopedProject,
   mergePullRequestLists,
+  nextPullRequestStatsBatches,
   pullRequestEntryKey,
   groupPullRequestsByInvolvement,
   pullRequestStatsBatches,
@@ -22,8 +23,6 @@ import {
   pullRequestStatsRefreshBatches,
   mergePullRequestDiffStats,
   partitionPullRequestsWithPriority,
-  readPullRequestListSnapshot,
-  writePullRequestListSnapshot,
   pullRequestAuthorChoices,
   selectedPullRequestAuthor,
   pullRequestLabelChoices,
@@ -138,6 +137,63 @@ describe("visible pull request line-count targets", () => {
     expect(refresh(requestedScope)?.[0]?.input.refs.map((ref) => ref.number)).toEqual([2]);
     expect(refresh({ key: "closed", policy: "visible" })).toBeNull();
     expect(refresh({ key: "open", policy: "eager" })).toBeNull();
+  });
+
+  it("asks for newly visible rows and drops scrolled-away batches once nothing is in flight", () => {
+    const entries = [1, 2, 3].map((number) => entry({ additions: 0, deletions: 0, number }));
+    const entriesByKey = new Map(entries.map((item) => [pullRequestEntryKey(item), item]));
+    const [first, second, third] = entries.map(pullRequestEntryKey) as [string, string, string];
+    const next = (
+      batches: ReturnType<typeof nextPullRequestStatsBatches>,
+      visibleKeys: ReadonlySet<string>,
+      options: { request: boolean; pending: boolean },
+    ) =>
+      nextPullRequestStatsBatches({
+        batches,
+        entriesByKey,
+        policy: "visible",
+        visibleKeys,
+        statsByRow: new Map(),
+        ...options,
+      });
+    const keysOf = (batches: ReturnType<typeof nextPullRequestStatsBatches>) =>
+      batches.map((batch) => [...batch.keys]);
+
+    const shown = next([], new Set([first, second]), { request: true, pending: false });
+    expect(keysOf(shown)).toEqual([[first, second]]);
+    expect(next(shown, new Set([first, second]), { request: false, pending: false })).toBe(shown);
+
+    // A read in flight keeps its batch even when its rows scroll away.
+    const scrolled = next(shown, new Set([third]), { request: true, pending: true });
+    expect(keysOf(scrolled)).toEqual([[first, second], [third]]);
+    expect(keysOf(next(scrolled, new Set([third]), { request: false, pending: false }))).toEqual([
+      [third],
+    ]);
+  });
+
+  it("asks for every row once under the eager policy", () => {
+    const entries = [1, 2].map((number) => entry({ additions: 0, deletions: 0, number }));
+    const entriesByKey = new Map(entries.map((item) => [pullRequestEntryKey(item), item]));
+    const batches = nextPullRequestStatsBatches({
+      batches: [],
+      request: true,
+      entriesByKey,
+      policy: "eager",
+      visibleKeys: new Set(),
+      pending: false,
+      statsByRow: new Map(),
+    });
+    expect(batches.flatMap((batch) => [...batch.keys])).toEqual(entries.map(pullRequestEntryKey));
+    const again = nextPullRequestStatsBatches({
+      batches,
+      request: true,
+      entriesByKey,
+      policy: "eager",
+      visibleKeys: new Set(),
+      pending: false,
+      statsByRow: new Map(),
+    });
+    expect(again).toBe(batches);
   });
 });
 
@@ -347,69 +403,6 @@ describe("partitioning with the hosts' own priority reads", () => {
     expect(groups.map((group) => group.key)).toEqual(["authored", "reviewRequested"]);
     expect(groups[0]!.entries.map((item) => item.number)).toEqual([1]);
     expect(groups[1]!.entries.map((item) => item.number)).toEqual([2, 3]);
-  });
-});
-
-describe("the list snapshot across a reload", () => {
-  const makeStorage = () => {
-    const held = new Map<string, string>();
-    return {
-      getItem: (key: string) => held.get(key) ?? null,
-      setItem: (key: string, value: string) => void held.set(key, value),
-    };
-  };
-  const data = {
-    entries: [entry({ number: 1 })],
-    viewers: { "github.com": "Bilal" },
-    providers: [],
-    errors: [{ projectId: "project-1", message: "boom" }],
-    truncated: true,
-    nextCursors: { "pingdotgg/t3code": "cursor-1" },
-  } as never;
-
-  it("carries neither stale failures nor stale cursors", () => {
-    const storage = makeStorage();
-    writePullRequestListSnapshot(storage, "env-1", { scope: "s", data });
-    const snapshot = readPullRequestListSnapshot(storage, "env-1");
-    expect(snapshot?.data.errors).toEqual([]);
-    expect(snapshot?.data.nextCursors).toEqual({});
-  });
-
-  it("caps the accumulated rows but keeps the whole host set", () => {
-    const storage = makeStorage();
-    const manyEntries = Array.from({ length: 120 }, (_, index) => entry({ number: index + 1 }));
-    const viewers = { "github.com": "Bilal", "gitlab.com": "Bilal" };
-    const providers = [
-      {
-        host: "github.com",
-        kind: "github",
-        searchesOnHost: true,
-        projectCount: 1,
-        configured: true,
-        detail: null,
-      },
-      {
-        host: "gitlab.com",
-        kind: "gitlab",
-        searchesOnHost: true,
-        projectCount: 1,
-        configured: true,
-        detail: null,
-      },
-    ];
-    const accumulated = {
-      entries: manyEntries,
-      viewers,
-      providers,
-      errors: [],
-      truncated: true,
-      nextCursors: {},
-    } as never;
-    writePullRequestListSnapshot(storage, "env-1", { scope: "s", data: accumulated });
-    const snapshot = readPullRequestListSnapshot(storage, "env-1");
-    expect(snapshot?.data.entries).toHaveLength(99);
-    expect(snapshot?.data.viewers).toEqual(viewers);
-    expect(snapshot?.data.providers).toEqual(providers);
   });
 });
 

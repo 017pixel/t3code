@@ -1,6 +1,5 @@
 import { projectChangeRequestUrl } from "@t3tools/client-runtime/change-request-links";
 import { changeRequestReferenceAutolinker } from "@t3tools/client-runtime/pull-request-markdown";
-import { useAtomValue } from "@effect/atom-react";
 import { usePullRequestStack } from "~/state/usePullRequestStack";
 import {
   scopedThreadKey,
@@ -34,15 +33,8 @@ import {
   MessageSquareIcon,
   PanelRightIcon,
 } from "lucide-react";
-import {
-  lazy,
-  Suspense,
-  useEffect,
-  useEffectEvent,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
+import { lazy, Suspense, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 
 import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { type PullRequestDetailTab, useRightPanelStore } from "~/rightPanelStore";
@@ -50,8 +42,8 @@ import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { useNewThreadHandler } from "~/hooks/useHandleNewThread";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { isCommandPaletteOpen } from "~/commandPaletteBus";
-import { resolveShortcutCommand, type ShortcutMatchContext } from "~/keybindings";
-import { primaryServerKeybindingsAtom } from "~/state/server";
+import type { ShortcutMatchContext } from "~/keybindings";
+import { commandScopeRef } from "~/shortcuts/dispatcher";
 import { usePullRequestDefaultMergeMethodResolver } from "./usePullRequestActions";
 import { offHeadPullRequestCheckoutToast } from "./pullRequestCheckoutToast";
 import { usePreparePullRequestThreadAction } from "~/lib/sourceControlActions";
@@ -63,7 +55,8 @@ import { useEnvironments } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { useLiveRefresh } from "~/hooks/useLiveRefresh";
-import { pullRequestEnvironment, usePullRequestTurnRefresh } from "~/state/pullRequests";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { notePullRequestRefreshedFromHost, pullRequestEnvironment } from "~/state/pullRequests";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { PullRequestStackMenu } from "./PullRequestStackMenu";
 import { PullRequestChangeBreakdownStat } from "./PullRequestChangeBreakdownStat";
@@ -135,7 +128,6 @@ import {
   resolveBaseFreshness,
   resolvePullRequestMergeMethod,
   type PullRequestFinding,
-  shouldRefreshPullRequestActivity,
   stripPullRequestHandoffReferences,
 } from "./pullRequestDetail.logic";
 import { resolvePickableEnvironments } from "./pullRequestProjectAssignment.logic";
@@ -258,7 +250,7 @@ export function PullRequestDetailPanel({
   threadRef = null,
   reference: requestedReference,
   listEntry = null,
-  refreshToken: forcedRefreshToken = 0,
+  tabOnPage = false,
   onActed,
   onClose,
   context = "page",
@@ -276,7 +268,11 @@ export function PullRequestDetailPanel({
   threadRef?: ScopedThreadRef | null;
   reference: PullRequestRef;
   listEntry?: PullRequestListEntry | null;
-  refreshToken?: number;
+  /**
+   * The pull requests page's panel: its tab lives in the guide run store, where a review guide
+   * notification can switch it.
+   */
+  tabOnPage?: boolean;
   onActed?: (action?: PullRequestAction, phase?: "sent" | "done" | "failed") => void;
   onClose?: () => void;
   context?: "page" | "thread";
@@ -317,9 +313,34 @@ export function PullRequestDetailPanel({
       : null;
   const [threadPickerOpen, setThreadPickerOpen] = useState(false);
   const [openReviewRequest, setOpenReviewRequest] = useState(0);
-  const [tab, setTab] = useState<PullRequestDetailTab>(initialTab);
+  const {
+    canWriteSourceControl,
+    detailQuery,
+    activityQuery,
+    activity,
+    sharedSummary,
+    detail,
+    hostRefreshes,
+    revision,
+  } = usePullRequestDetail(environmentId, reference, matchingListEntry);
+  const [selectedTab, setTab] = useState<PullRequestDetailTab>(initialTab);
+  const reviewGuidesEnabled = useEnvironmentSettings(
+    environmentId,
+    (settings) => settings.reviewGuidesEnabled,
+  );
+  const guideKey = guideRunKey(environmentId, reference);
+  const pageTab = useGuideRunStore((state) =>
+    tabOnPage && state.pageDetailTab?.key === guideKey ? state.pageDetailTab.tab : null,
+  );
+  const requestedTab = tabOnPage ? (pageTab ?? initialTab) : selectedTab;
+  const isTabAvailable = (value: PullRequestDetailTab) =>
+    (value !== "code" || detail === null || detail.capabilities.diff) &&
+    (value !== "guide" || reviewGuidesEnabled);
+  // An unavailable tab falls back without overwriting the saved selection.
+  const tab = isTabAvailable(requestedTab) ? requestedTab : "summary";
   const selectTab = (next: PullRequestDetailTab) => {
-    setTab(next);
+    if (tabOnPage) useGuideRunStore.getState().showPageDetailTab(guideKey, next);
+    else setTab(next);
     onTabChange?.(next);
   };
   const [timelineOrder, setTimelineOrder] = useState<"newest" | "oldest">("newest");
@@ -346,15 +367,6 @@ export function PullRequestDetailPanel({
     void loadCodeTab();
     selectTab("code");
   };
-  const guideOpenRequested = useGuideRunStore(
-    (state) => state.openRequestKey === guideRunKey(environmentId, reference),
-  );
-  if (guideOpenRequested && tab !== "guide") setTab("guide");
-  useEffect(() => {
-    if (!guideOpenRequested) return;
-    useGuideRunStore.getState().requestOpen(null);
-    onTabChange?.("guide");
-  }, [guideOpenRequested, onTabChange]);
   const tabScopeKey = `${environmentId}:${pullRequestKey}`;
   const [tabMountState, setTabMountState] = useState(() => ({
     key: tabScopeKey,
@@ -388,25 +400,6 @@ export function PullRequestDetailPanel({
   }));
   const foldRef = useRef<HTMLDivElement | null>(null);
   const condensedRowRef = useRef<HTMLDivElement | null>(null);
-  // Save the target before collapse: the browser may clamp scrollTop as the viewport grows,
-  // so applying a delta afterward would compensate twice.
-  const compensationRef = useRef<{
-    tab: PullRequestDetailTab;
-    scroller: HTMLDivElement;
-    target: number;
-  } | null>(null);
-  useLayoutEffect(() => {
-    const compensation = compensationRef.current;
-    if (compensation === null) return;
-    compensationRef.current = null;
-    if (
-      !condensed ||
-      compensation.tab !== tab ||
-      scrollerByTab.current[tab] !== compensation.scroller
-    )
-      return;
-    compensation.scroller.scrollTop = Math.max(0, compensation.target);
-  }, [condensed, tab]);
   const lastSelectedMergeMethod = useUiStateStore((state) => state.pullRequestMergeMethod);
   const setLastSelectedMergeMethod = useUiStateStore((state) => state.setPullRequestMergeMethod);
   const resolveProjectDefaultMergeMethod = usePullRequestDefaultMergeMethodResolver(
@@ -422,21 +415,10 @@ export function PullRequestDetailPanel({
     setMergeMethodSelection({ pullRequestKey, method });
   };
   const [handoff, setHandoff] = useState<string | null>(null);
-  const turnRefresh = usePullRequestTurnRefresh(environmentId);
-  const {
-    canWriteSourceControl,
-    detailQuery,
-    activityQuery,
-    activity,
-    sharedSummary,
-    coreDetail,
-    detail,
-  } = usePullRequestDetail(environmentId, reference, matchingListEntry);
   const handoffSummary = detail ?? sharedSummary;
   const terminology = sourceControlClients.get(
     handoffSummary?.provider ?? listEntry?.provider ?? repositoryIdentity?.provider,
   ).changeRequest;
-  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const { copyToClipboard: copyReference } = useCopyToClipboard<string>({
     target: `${terminology.singular} reference`,
     onCopy: (label) => toastManager.add({ type: "success", title: `${label} copied` }),
@@ -447,21 +429,20 @@ export function PullRequestDetailPanel({
         description: error.message,
       }),
   });
-  const copyFromShortcut = useEffectEvent((event: KeyboardEvent) => {
-    if (!shortcutsEnabled || event.defaultPrevented || isCommandPaletteOpen()) return;
-    const command = resolveShortcutCommand(event, keybindings, {
-      context: getShortcutContext(),
-    });
-    if (command !== "pullRequest.copyNumber") return;
-    event.preventDefault();
-    event.stopPropagation();
-    if (!event.repeat) copyReference(`#${reference.number}`, `${terminology.shortLabel} number`);
-  });
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => copyFromShortcut(event);
-    window.addEventListener("keydown", onKeyDown, true);
-    return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, []);
+  const shortcutScopeRef = commandScopeRef(
+    {
+      "pullRequest.copyNumber": (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat)
+          copyReference(`#${reference.number}`, `${terminology.shortLabel} number`);
+      },
+    },
+    {
+      when: () => shortcutsEnabled && !isCommandPaletteOpen(),
+      context: getShortcutContext,
+    },
+  );
   const autoMergeKey = `${pullRequestKey}:${detail?.autoMergeMethod ?? ""}`;
   const [seenAutoMergeKey, setSeenAutoMergeKey] = useState<string | null>(null);
   if (seenAutoMergeKey !== autoMergeKey) {
@@ -504,7 +485,7 @@ export function PullRequestDetailPanel({
     detail !== null &&
     isStackedPullRequestBase(detail.baseBranch, branchRefsQuery.data?.refs ?? []);
   const stackReference = pullRequestStackReference(detail, reference, supportsThreadPullRequests);
-  const nativeStackQuery = usePullRequestStack(environmentId, stackReference);
+  const nativeStackQuery = usePullRequestStack(environmentId, stackReference, hostRefreshes);
   const nativeStack = nativeStackQuery.data;
   const supportsStackActions =
     supportsThreadPullRequests &&
@@ -525,31 +506,6 @@ export function PullRequestDetailPanel({
     activityQuery.refresh();
     nativeStackQuery.refresh();
   };
-  const [refreshToken, setRefreshToken] = useState(0);
-  const [activityRevision, setActivityRevision] = useState<{
-    readonly key: string;
-    readonly updatedAt: string;
-  } | null>(null);
-  const [activityRevalidations, setActivityRevalidations] = useState(0);
-  const coreUpdatedAt = coreDetail?.updatedAt ?? null;
-  if (
-    coreUpdatedAt !== null &&
-    (activityRevision?.key !== tabScopeKey || activityRevision.updatedAt !== coreUpdatedAt)
-  ) {
-    const next = { key: tabScopeKey, updatedAt: coreUpdatedAt };
-    if (!shouldRefreshPullRequestActivity(activityRevision, next)) {
-      setActivityRevision(next);
-    } else if (!activityQuery.isPending) {
-      // Interrupting a mutation's activity refresh can leave SWR displaying stale data.
-      setActivityRevision(next);
-      setActivityRevalidations((count) => count + 1);
-      setRefreshToken((token) => token + 1);
-    }
-  }
-  const revalidateActivity = useEffectEvent(() => activityQuery.refresh());
-  useEffect(() => {
-    if (activityRevalidations > 0) revalidateActivity();
-  }, [activityRevalidations]);
   useLiveRefresh(
     () => {
       detailQuery.refresh();
@@ -563,17 +519,10 @@ export function PullRequestDetailPanel({
     setIsInvalidating(true);
     // Atom commands settle without throwing, so reset always runs.
     await invalidate({ environmentId, input: { reference } });
-    refreshDetail();
-    setRefreshToken((token) => token + 1);
+    // A new revision refetches the detail, stack, activity, diff and viewed files.
+    notePullRequestRefreshedFromHost(appAtomRegistry, environmentId, reference);
     setIsInvalidating(false);
   };
-  const refreshFromHostOnRequest = useEffectEvent(() => void refreshFromHost());
-  const appliedForcedToken = useRef(forcedRefreshToken);
-  useEffect(() => {
-    if (appliedForcedToken.current === forcedRefreshToken) return;
-    appliedForcedToken.current = forcedRefreshToken;
-    refreshFromHostOnRequest();
-  }, [forcedRefreshToken]);
   const runAction = useAtomCommand(pullRequestEnvironment.runAction, {
     reportFailure: false,
   });
@@ -794,8 +743,8 @@ export function PullRequestDetailPanel({
             repository: reference.repository,
             number: reference.number,
             url: detail.url,
+            detailTab: "guide",
           });
-        useGuideRunStore.getState().requestOpen(guideRunKey(environmentId, reference));
       }
     }
     if (opened === null) {
@@ -1086,17 +1035,7 @@ export function PullRequestDetailPanel({
   const workflowApprovalsRequired =
     detail?.state === "open" ? (detail.workflowApprovalsRequired ?? 0) : 0;
   const freshness = detail === null ? null : resolveBaseFreshness(detail);
-  const reviewGuidesEnabled = useEnvironmentSettings(
-    environmentId,
-    (settings) => settings.reviewGuidesEnabled,
-  );
-  const visibleTabs = TABS.filter(
-    (item) =>
-      (item.value !== "code" || detail === null || detail.capabilities.diff) &&
-      (item.value !== "guide" || reviewGuidesEnabled),
-  );
-  // Keep unavailable-tab fallbacks out of the saved selection.
-  if (!visibleTabs.some((item) => item.value === tab)) setTab("summary");
+  const visibleTabs = TABS.filter((item) => isTabAvailable(item.value));
   const can = (action: PullRequestAction) =>
     detail?.capabilities.actions.includes(action) === true &&
     detail.viewerPermissions.actions.includes(action);
@@ -1236,7 +1175,10 @@ export function PullRequestDetailPanel({
   }
 
   return (
-    <div className="relative flex h-full min-h-0 w-full flex-col bg-background">
+    <div
+      ref={shortcutScopeRef}
+      className="relative flex h-full min-h-0 w-full flex-col bg-background"
+    >
       {threadPickerOpen && detail ? (
         <PullRequestThreadLinks
           key={`${environmentId}:${detail.url}`}
@@ -1669,15 +1611,15 @@ export function PullRequestDetailPanel({
           const top = scroller.scrollTop;
           const previous = condensedByTab[tab] ?? false;
           const foldHeight = foldRef.current?.scrollHeight ?? 0;
-          let next = previous;
           if (previous) {
-            if (top < 4 && foldHeight > 0) next = false;
+            if (top < 4 && foldHeight > 0) setCondensedByTab({ ...condensedByTab, [tab]: false });
           } else if (foldHeight > 0 && top > foldHeight + 32) {
-            const chromeDelta = foldHeight - (condensedRowRef.current?.scrollHeight ?? 0);
-            compensationRef.current = { tab, scroller, target: top - chromeDelta };
-            next = true;
+            // Target computed before the collapse: the browser may clamp scrollTop as the
+            // viewport grows, so a delta applied afterward would compensate twice.
+            const target = top - (foldHeight - (condensedRowRef.current?.scrollHeight ?? 0));
+            flushSync(() => setCondensedByTab({ ...condensedByTab, [tab]: true }));
+            scroller.scrollTop = Math.max(0, target);
           }
-          if (next !== previous) setCondensedByTab({ ...condensedByTab, [tab]: next });
         }}
       >
         {detailQuery.error && !detail ? (
@@ -1724,7 +1666,13 @@ export function PullRequestDetailPanel({
               </div>
             ) : null}
             {mountedTabs.has("guide") ? (
-              <div className={cn("absolute inset-0", tab !== "guide" && "invisible")}>
+              <div
+                className={cn("absolute inset-0", tab !== "guide" && "invisible")}
+                // Read by the guide run notifier, which stays quiet for a guide on screen.
+                data-guide-shown={
+                  tab === "guide" ? guideRunKey(environmentId, reference) : undefined
+                }
+              >
                 <PullRequestGuideTab
                   environmentId={environmentId}
                   reference={reference}
@@ -1794,8 +1742,7 @@ export function PullRequestDetailPanel({
                     fixFindingLabel={handoffLabels.fixFinding}
                     {...(canFixFindings ? { onFixFinding: startFixFinding } : {})}
                     onRefresh={refreshDetail}
-                    refreshToken={refreshToken}
-                    backgroundRefreshToken={turnRefresh ?? 0}
+                    revision={revision}
                     revealRequest={codeRevealRequest}
                   />
                 </Suspense>

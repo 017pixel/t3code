@@ -51,7 +51,6 @@ import {
   resolvePullRequestReferenceHost,
   resolvePullRequestPrimaryControl,
   allowsSinglePullRequestMerge,
-  shouldRefreshPullRequestActivity,
   resolveBaseFreshness,
   buildPullRequestTimeline,
   writePullRequestDetailSnapshot,
@@ -136,23 +135,6 @@ const TIMELINE_SOURCE: Pick<
   closedAt: null,
 };
 
-describe("pull request activity refresh", () => {
-  const first = {
-    key: "project:acme/web#7",
-    updatedAt: "2026-08-13T13:00:00Z",
-  };
-
-  it("does not duplicate the first activity read or carry a revision across pull requests", () => {
-    expect(shouldRefreshPullRequestActivity(null, first)).toBe(false);
-    expect(shouldRefreshPullRequestActivity(first, first)).toBe(false);
-    expect(
-      shouldRefreshPullRequestActivity(first, {
-        key: "project:acme/web#8",
-        updatedAt: "2026-08-13T13:01:00Z",
-      }),
-    ).toBe(false);
-  });
-});
 describe("review thread comment pages", () => {
   it("appends new comments once and keeps refreshed base comments", () => {
     expect(

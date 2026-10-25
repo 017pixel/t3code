@@ -1,10 +1,11 @@
 import type { EnvironmentId, PullRequestRef, PullRequestReviewGuide } from "@t3tools/contracts";
-import { useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 
 import { createPullRequestDiffFileContentsLoader } from "~/lib/diffFileContents";
 import { isEditableFocused } from "~/lib/editableFocus";
 import { pullRequestEnvironment } from "~/state/pullRequests";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { commandScopeRef } from "~/shortcuts/dispatcher";
 
 import { isCommandPaletteOpen } from "~/commandPaletteBus";
 
@@ -78,24 +79,26 @@ export function GuideTour({
   };
   const step = (delta: 1 | -1) => goTo(stepTourPosition(position, delta, stopCount));
 
-  const stepFromKey = useEffectEvent((event: KeyboardEvent) => {
-    if (event.defaultPrevented || event.isComposing || isCommandPaletteOpen()) return;
-    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-    if (event.key !== "j" && event.key !== "k") return;
-    if (isEditableFocused(event.target)) return;
-    event.preventDefault();
-    step(event.key === "j" ? 1 : -1);
-  });
-  useEffect(() => {
-    if (!active) return;
-    const onKeyDown = (event: KeyboardEvent) => stepFromKey(event);
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [active]);
+  const shortcutScopeRef = commandScopeRef(
+    {},
+    {
+      when: (event) => active && !event.isComposing && !isCommandPaletteOpen(),
+      onKeyDown: (event) => {
+        if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return false;
+        if (event.key !== "j" && event.key !== "k") return false;
+        if (isEditableFocused(event.target)) return false;
+        event.preventDefault();
+        step(event.key === "j" ? 1 : -1);
+      },
+    },
+  );
 
   return (
     <div ref={scrollRef} className="@container/guide h-full overflow-y-auto scrollbar-gutter-both">
-      <div className="mx-auto grid max-w-[100rem] gap-6 px-4 py-4 @min-[56rem]/guide:grid-cols-[16rem_minmax(0,1fr)] @min-[90rem]/guide:gap-8 @min-[90rem]/guide:px-6">
+      <div
+        ref={shortcutScopeRef}
+        className="mx-auto grid max-w-[100rem] gap-6 px-4 py-4 @min-[56rem]/guide:grid-cols-[16rem_minmax(0,1fr)] @min-[90rem]/guide:gap-8 @min-[90rem]/guide:px-6"
+      >
         <aside className="sticky top-4 self-start @max-[56rem]/guide:hidden">
           <GuideRail stops={guide.stops} position={position} seen={tour.seen} onSelect={goTo} />
         </aside>

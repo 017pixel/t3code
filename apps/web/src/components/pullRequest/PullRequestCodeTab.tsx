@@ -8,7 +8,6 @@ import type {
   EnvironmentId,
   PullRequestDetailView,
   PullRequestDiffSide,
-  PullRequestOmittedFileStat,
   PullRequestRef,
   PullRequestReviewPosition,
   PullRequestReviewThread,
@@ -28,18 +27,10 @@ import {
   TriangleAlertIcon,
 } from "lucide-react";
 import { ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown } from "lucide";
-import { useAtomRefresh } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
-import {
-  createContext,
-  use,
-  useEffect,
-  useEffectEvent,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { createContext, use, useState, type ReactNode } from "react";
 
+import { observeIntersection } from "~/lib/observeIntersection";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useClientSettings, updateClientSettings } from "~/hooks/useSettings";
 import { useRenderedAppearance } from "~/hooks/useTheme";
@@ -69,7 +60,7 @@ import {
   resolveDiffReviewAnchor,
   type ReviewCommentContext,
 } from "~/reviewCommentContext";
-import { pullRequestEnvironment } from "~/state/pullRequests";
+import { pullRequestEnvironment, readAtRevision } from "~/state/pullRequests";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 
@@ -105,8 +96,11 @@ import {
 import {
   isFileDiffCollapsed,
   isLineInFileDiff,
+  mergeDiffPage,
   toggleFileDiffFoldForViewed,
   type DiffFoldOverride,
+  type DiffSlice,
+  type DiffSliceState,
 } from "./pullRequestDiff.logic";
 import { PullRequestDiffStat, PullRequestMetaLine } from "./pullRequestPresentation";
 import { PullRequestDiffUnavailableState } from "./PullRequestDiffUnavailableState";
@@ -130,14 +124,6 @@ type ReviewAnnotation = DiffLineAnnotation<ReviewAnnotationGroup>;
 const COMMIT_PAGE_SIZE = 10;
 
 const PULL_REQUEST_FILE_TREE_STORAGE_KEY = "t3code.pullRequestFileTreeOpen";
-
-interface DiffSlice {
-  readonly cursor: string | null;
-  readonly patch: string;
-  readonly truncated: boolean;
-  readonly nextCursor: string | null;
-  readonly omittedFileStats: ReadonlyArray<PullRequestOmittedFileStat>;
-}
 
 // Show host counts outside the shadow root; hunk totals are zero when hosts withhold hunks.
 const REPLACE_FILE_COUNTS_CSS = `
@@ -252,8 +238,7 @@ function PullRequestCodeTab({
   onFixFinding,
   onAddToAgentSelection,
   onRefresh,
-  refreshToken = 0,
-  backgroundRefreshToken = 0,
+  revision,
   revealRequest = null,
 }: {
   scrollerRef: (node: HTMLDivElement | null) => void;
@@ -267,8 +252,8 @@ function PullRequestCodeTab({
   onFixFinding?: (finding: PullRequestFinding) => void;
   onAddToAgentSelection?: (input: PullRequestAgentSelectionInput) => void;
   onRefresh: () => void;
-  refreshToken?: number;
-  backgroundRefreshToken?: number;
+  /** The pull request's host revision: a new one refetches the diff and starts its pages over. */
+  revision: string | null;
   revealRequest?: { readonly path: string; readonly nonce: number } | null;
 }) {
   const resolvedTheme = useRenderedAppearance();
@@ -299,18 +284,23 @@ function PullRequestCodeTab({
   const [threadPending, setThreadPending] = useState(false);
   const [orphansOpen, setOrphansOpen] = useState(false);
   // Scope slices before reset to prevent using a previous pull request's data or cursor.
-  const [sliceState, setSliceState] = useState<{
-    readonly key: string;
-    readonly cursor: string | null;
-    readonly slices: ReadonlyArray<DiffSlice>;
-  }>({ key: "", cursor: null, slices: NO_SLICES });
+  const [sliceState, setSliceState] = useState<DiffSliceState>({
+    key: "",
+    cursor: null,
+    slices: NO_SLICES,
+  });
   const [viewer, setViewer] = useState<CodeViewHandle<ReviewAnnotationGroup, undefined> | null>(
     null,
   );
 
   const referenceKey = pullRequestReviewKey(reference);
-  const commit = selectedCommitOid;
+  // A commit the pull request no longer lists (a force-push dropped it) falls back to all commits.
+  const commit =
+    selectedCommitOid !== null && detail.commits.some((entry) => entry.oid === selectedCommitOid)
+      ? selectedCommitOid
+      : null;
   const scopeKey = JSON.stringify([environmentId, referenceKey, commit]);
+  const sliceKey = `${scopeKey}#${revision}`;
   // The panel keeps this mounted across pull requests, so an open composer would otherwise
   // survive the switch and attach its comment to whichever one is on screen when it is sent.
   const [stateScopeKey, setStateScopeKey] = useState(scopeKey);
@@ -322,76 +312,57 @@ function PullRequestCodeTab({
     setFoldOverride(null);
     setVisibleCommitCount(COMMIT_PAGE_SIZE);
     setOrphansOpen(false);
-    setSliceState({ key: scopeKey, cursor: null, slices: NO_SLICES });
+    setSliceState({ key: sliceKey, cursor: null, slices: NO_SLICES });
   }
 
-  const loadedSlices = sliceState.key === scopeKey ? sliceState.slices : NO_SLICES;
-  const cursor = sliceState.key === scopeKey ? sliceState.cursor : null;
-  const diffQuery = useEnvironmentQuery(
-    pullRequestEnvironment.diff({
-      environmentId,
-      input: {
-        ...reference,
-        ...(cursor === null ? {} : { cursor }),
-        ...(commit === null ? {} : { commit }),
-      },
-    }),
+  const currentSlices = sliceState.key === sliceKey ? sliceState : null;
+  const loadedSlices = currentSlices?.slices ?? NO_SLICES;
+  const cursor = currentSlices?.cursor ?? null;
+  // The first page is always read: it follows the host revision and agent turns, and a first
+  // page that changed takes the later pages with it.
+  const firstPageQuery = useEnvironmentQuery(
+    readAtRevision(
+      pullRequestEnvironment.diff({
+        environmentId,
+        input: { ...reference, ...(commit === null ? {} : { commit }) },
+      }),
+      revision,
+    ),
   );
-  const [appliedPage, setAppliedPage] = useState<{
-    readonly data: typeof diffQuery.data;
-    readonly cursor: string | null;
-    readonly scopeKey: string;
-  } | null>(null);
-  const data = diffQuery.data;
+  const nextPageQuery = useEnvironmentQuery(
+    cursor === null
+      ? null
+      : pullRequestEnvironment.diff({
+          environmentId,
+          input: { ...reference, cursor, ...(commit === null ? {} : { commit }) },
+        }),
+  );
+  const diffQuery = cursor === null ? firstPageQuery : nextPageQuery;
+  const firstPage = firstPageQuery.data;
+  const nextPage = cursor === null ? null : nextPageQuery.data;
+  const [appliedPages, setAppliedPages] = useState<{
+    readonly key: string;
+    readonly first: typeof firstPage;
+    readonly next: typeof nextPage;
+  }>({ key: "", first: null, next: null });
+  const firstPageArrived =
+    firstPage !== null && (appliedPages.key !== sliceKey || appliedPages.first !== firstPage);
+  const nextPageArrived =
+    nextPage !== null && (appliedPages.key !== sliceKey || appliedPages.next !== nextPage);
   if (
-    data !== null &&
-    (appliedPage?.data !== data ||
-      appliedPage.cursor !== cursor ||
-      appliedPage.scopeKey !== scopeKey)
+    appliedPages.key !== sliceKey ||
+    appliedPages.first !== firstPage ||
+    appliedPages.next !== nextPage
   ) {
-    setAppliedPage({ data, cursor, scopeKey });
+    setAppliedPages({ key: sliceKey, first: firstPage, next: nextPage });
     setSliceState((previous) => {
-      const slices = previous.key === scopeKey ? previous.slices : NO_SLICES;
-      const next = {
-        cursor,
-        patch: data.patch,
-        truncated: data.truncated,
-        nextCursor: data.nextCursor,
-        omittedFileStats: data.omittedFileStats ?? [],
-      };
-      const index = slices.findIndex((slice) => slice.cursor === cursor);
-      if (index === -1) {
-        return { key: scopeKey, cursor, slices: [...slices, next] };
-      }
-      const existing = slices[index];
-      if (
-        existing !== undefined &&
-        existing.patch === next.patch &&
-        existing.truncated === next.truncated &&
-        existing.nextCursor === next.nextCursor &&
-        existing.omittedFileStats.length === next.omittedFileStats.length &&
-        existing.omittedFileStats.every((file, index) => {
-          const refreshed = next.omittedFileStats[index];
-          return (
-            refreshed !== undefined &&
-            refreshed.path === file.path &&
-            refreshed.additions === file.additions &&
-            refreshed.deletions === file.deletions
-          );
-        })
-      ) {
-        return previous;
-      }
-      // Drop later slices when replacing a changed page; their cursors target the old diff.
-      return { key: scopeKey, cursor, slices: [...slices.slice(0, index), next] };
+      let state =
+        previous.key === sliceKey ? previous : { ...previous, cursor: null, slices: NO_SLICES };
+      if (firstPageArrived) state = mergeDiffPage(state, null, firstPage);
+      if (nextPageArrived && cursor !== null) state = mergeDiffPage(state, cursor, nextPage);
+      return { ...state, key: sliceKey };
     });
   }
-  const refreshFirstDiffPage = useAtomRefresh(
-    pullRequestEnvironment.diff({
-      environmentId,
-      input: { ...reference, ...(commit === null ? {} : { commit }) },
-    }),
-  );
   const reviewKey = referenceKey;
   const pendingComments = usePendingReviewComments(reference);
   const addComment = usePullRequestReviewStore((store) => store.addComment);
@@ -414,40 +385,18 @@ function PullRequestCodeTab({
   const filesViewed = usePullRequestFilesViewed({
     environmentId,
     reference,
+    revision,
     enabled: viewedFilesStore !== undefined,
   });
   const {
     setViewed,
-    refresh: refreshFilesViewed,
     enabled: filesViewedEnabled,
     isViewed: isFileViewed,
     isStale: isFileViewedStale,
   } = filesViewed;
-  const appliedRefreshToken = useRef(refreshToken);
-  useEffect(() => {
-    if (appliedRefreshToken.current === refreshToken) return;
-    appliedRefreshToken.current = refreshToken;
-    setSliceState({ key: scopeKey, cursor: null, slices: NO_SLICES });
-    // An equal refetch keeps the answer's identity, so the emptied slices refill only if the
-    // applied page is forgotten too.
-    setAppliedPage(null);
-    refreshFirstDiffPage();
-    refreshFilesViewed();
-  }, [refreshToken, scopeKey, refreshFirstDiffPage, refreshFilesViewed]);
-  const appliedBackgroundRefreshToken = useRef(backgroundRefreshToken);
-  useEffect(() => {
-    if (appliedBackgroundRefreshToken.current === backgroundRefreshToken) return;
-    appliedBackgroundRefreshToken.current = backgroundRefreshToken;
-    // Keeping slices mounted preserves scroll; the page merge invalidates changed pages.
-    setSliceState((previous) => ({ ...previous, cursor: null }));
-    refreshFirstDiffPage();
-    refreshFilesViewed();
-  }, [backgroundRefreshToken, refreshFirstDiffPage, refreshFilesViewed]);
 
-  // The viewer mounts its footer later; state ensures the observer sees the sentinel.
-  const [sentinel, setSentinel] = useState<HTMLDivElement | null>(null);
-  const requestTreeReveal = useCodeViewFileReveal(viewer, scopeKey);
-  const answeredReveal = useRef<number | null>(null);
+  const requestTreeReveal = useCodeViewFileReveal(viewer);
+  const [answeredRevealNonce, setAnsweredRevealNonce] = useState<number | null>(null);
 
   const loadDiffFiles = createPullRequestDiffFileContentsLoader(getDiffFileContents, {
     environmentId,
@@ -659,6 +608,16 @@ function PullRequestCodeTab({
     if (nextCursor === null) return;
     setSliceState((previous) => ({ ...previous, cursor: nextCursor }));
   };
+  const sentinelRef = (node: HTMLDivElement | null) => {
+    if (node === null || !canLoadNextSlice) return;
+    return observeIntersection(
+      node,
+      (entry) => {
+        if (entry.isIntersecting) loadNextSlice();
+      },
+      { rootMargin: "240px" },
+    );
+  };
 
   const toggleFile = (fileKey: string) =>
     setToggledFiles((current) => {
@@ -754,7 +713,7 @@ function PullRequestCodeTab({
   const renderCodeViewFooter = () =>
     nextCursor === null ? null : (
       <div
-        ref={setSentinel}
+        ref={sentinelRef}
         className="flex items-center justify-center gap-2 py-2 text-xs text-muted-foreground"
       >
         {diffQuery.error !== null ? (
@@ -1261,37 +1220,15 @@ function PullRequestCodeTab({
       </div>
     </div>
   );
-  // Hooks between diff derivations and their readers break compiler caching.
-  useEffect(() => {
-    if (sentinel === null || !canLoadNextSlice) return;
-    const observer = new IntersectionObserver(
-      (observed) => {
-        if (observed.some((entry) => entry.isIntersecting)) loadNextSlice();
-      },
-      { rootMargin: "240px" },
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [canLoadNextSlice, loadNextSlice, sentinel]);
-  const answerReveal = useEffectEvent(() => {
-    if (revealRequest === null || answeredReveal.current === revealRequest.nonce) return;
-    if (!items.some((item) => resolveFileDiffPath(item.fileDiff) === revealRequest.path)) {
-      if (canLoadNextSlice) loadNextSlice();
-      return;
+  // A reveal for a file not loaded yet pages forward each time a slice arrives, until it lands.
+  if (revealRequest !== null && answeredRevealNonce !== revealRequest.nonce) {
+    if (items.some((item) => resolveFileDiffPath(item.fileDiff) === revealRequest.path)) {
+      setAnsweredRevealNonce(revealRequest.nonce);
+      revealFile(revealRequest.path);
+    } else if (canLoadNextSlice) {
+      loadNextSlice();
     }
-    answeredReveal.current = revealRequest.nonce;
-    revealFile(revealRequest.path);
-  });
-  useEffect(() => {
-    // oxlint-disable-next-line react/set-state-in-effect -- A reveal for a file not loaded yet pages forward, which sets the slice cursor.
-    answerReveal();
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Re-checked as pages load until the requested file arrives.
-  }, [canLoadNextSlice, items, revealRequest]);
-  useEffect(() => {
-    if (commit !== null && selectedCommit === undefined) {
-      onSelectedCommitChange(null);
-    }
-  }, [commit, onSelectedCommitChange, selectedCommit]);
+  }
   const withToolbar = (body: ReactNode) => (
     <div className="flex h-full min-h-0 flex-col">
       {toolbar}

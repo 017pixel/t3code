@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   isFileDiffCollapsed,
   isLineInFileDiff,
+  mergeDiffPage,
   toggleFileDiffFoldForViewed,
 } from "./pullRequestDiff.logic";
 
@@ -52,5 +53,32 @@ describe("toggleFileDiffFoldForViewed", () => {
   it("moves against whatever the toolbar last asked for", () => {
     expect([...toggleFileDiffFoldForViewed("a.ts", true, "expanded", new Set())]).toEqual(["a.ts"]);
     expect(toggleFileDiffFoldForViewed("a.ts", false, "expanded", new Set()).size).toBe(0);
+  });
+});
+
+describe("mergeDiffPage", () => {
+  const page = (patch: string, nextCursor: string | null) => ({
+    patch,
+    truncated: false,
+    nextCursor,
+  });
+  const empty = { key: "k", cursor: null, slices: [] };
+
+  it("appends pages and keeps the state when a page comes back unchanged", () => {
+    const first = mergeDiffPage(empty, null, page("a", "c1"));
+    const walked = mergeDiffPage({ ...first, cursor: "c1" }, "c1", page("b", null));
+    expect(walked.slices.map((slice) => slice.patch)).toEqual(["a", "b"]);
+    expect(mergeDiffPage(walked, null, page("a", "c1"))).toBe(walked);
+  });
+
+  it("drops the later pages and their cursor when the first page changed", () => {
+    const walked = mergeDiffPage(
+      { ...mergeDiffPage(empty, null, page("a", "c1")), cursor: "c1" },
+      "c1",
+      page("b", null),
+    );
+    const moved = mergeDiffPage(walked, null, page("a2", "c9"));
+    expect(moved.slices.map((slice) => slice.patch)).toEqual(["a2"]);
+    expect(moved.cursor).toBeNull();
   });
 });

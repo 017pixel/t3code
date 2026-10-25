@@ -1,14 +1,11 @@
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
-import * as Schema from "effect/Schema";
 
-import {
+import { resolvePullRequestAuthorFilter } from "@t3tools/contracts";
+import type {
   EnvironmentId,
   PullRequestListEntry,
   PullRequestListProjectError,
   PullRequestListResult,
-  resolvePullRequestAuthorFilter,
-} from "@t3tools/contracts";
-import type {
   ProjectId,
   RepositoryIdentity,
   PullRequestAction,
@@ -388,7 +385,7 @@ export function pullRequestStatsBatches(
 }
 
 /** Size sorting needs all loaded rows' stats; other modes need only nearby rows. */
-export function pullRequestStatsRequestBatches({
+function pullRequestStatsRequestBatches({
   entriesByKey,
   candidateKeys,
   policy,
@@ -436,7 +433,48 @@ export function pullRequestStatsRefreshBatches({
   });
 }
 
-export function retainVisiblePullRequestStatsBatches(
+const NO_CANDIDATE_KEYS: ReadonlySet<string> = new Set();
+
+/**
+ * Adds batches for rows that still lack stats when the rows or visible set changed, and once no
+ * read is in flight drops visible-policy batches whose rows all scrolled away. Returns `batches`
+ * itself when nothing changes.
+ */
+export function nextPullRequestStatsBatches({
+  batches,
+  request,
+  entriesByKey,
+  policy,
+  visibleKeys,
+  pending,
+  statsByRow,
+}: {
+  readonly batches: ReadonlyArray<PullRequestStatsBatch>;
+  readonly request: boolean;
+  readonly entriesByKey: ReadonlyMap<string, EnvironmentPullRequestEntry>;
+  readonly policy: PullRequestStatsPolicy;
+  readonly visibleKeys: ReadonlySet<string>;
+  readonly pending: boolean;
+  readonly statsByRow: ReadonlyMap<string, unknown>;
+}): ReadonlyArray<PullRequestStatsBatch> {
+  const added = request
+    ? pullRequestStatsRequestBatches({
+        entriesByKey,
+        candidateKeys: policy === "visible" ? visibleKeys : NO_CANDIDATE_KEYS,
+        policy,
+        activeBatches: batches,
+        statsByRow,
+      })
+    : [];
+  const retained =
+    policy === "visible" && !pending
+      ? retainVisiblePullRequestStatsBatches(batches, visibleKeys)
+      : batches;
+  if (added.length === 0 && retained.length === batches.length) return batches;
+  return [...retained, ...added];
+}
+
+function retainVisiblePullRequestStatsBatches(
   batches: ReadonlyArray<PullRequestStatsBatch>,
   visibleKeys: ReadonlySet<string>,
 ): ReadonlyArray<PullRequestStatsBatch> {
@@ -575,98 +613,12 @@ export function mergePullRequestLists(
   };
 }
 
-const SNAPSHOT_MAX_ENTRIES = 99;
-
-type SnapshotStorage = Pick<Storage, "getItem" | "setItem">;
-
 export const pullRequestEnvironmentSetKey = (environmentIds: ReadonlyArray<string>): string =>
   [...environmentIds].sort((left, right) => left.localeCompare(right)).join(",");
-
-const snapshotStorageKey = (environmentSetKey: string) =>
-  `t3.pullRequests.list:${environmentSetKey}`;
 
 export interface PullRequestPartitionsSnapshot {
   readonly authored: ReadonlyArray<EnvironmentPullRequestEntry>;
   readonly reviewing: ReadonlyArray<EnvironmentPullRequestEntry>;
-}
-
-export interface PullRequestListSnapshot {
-  readonly scope: string;
-  readonly data: MergedPullRequestList;
-  readonly partitions?: PullRequestPartitionsSnapshot | undefined;
-}
-
-const EnvironmentPullRequestEntrySchema = Schema.Struct({
-  ...PullRequestListEntry.fields,
-  environmentId: EnvironmentId,
-});
-
-const EnvironmentPullRequestErrorSchema = Schema.Struct({
-  ...PullRequestListProjectError.fields,
-  environmentId: EnvironmentId,
-});
-
-const decodeSnapshot = Schema.decodeUnknownOption(
-  Schema.Struct({
-    scope: Schema.String,
-    data: Schema.Struct({
-      ...PullRequestListResult.fields,
-      entries: Schema.Array(EnvironmentPullRequestEntrySchema),
-      errors: Schema.Array(EnvironmentPullRequestErrorSchema),
-      nextCursors: Schema.Record(Schema.String, PullRequestListResult.fields.nextCursors),
-      truncatedEnvironments: Schema.Array(Schema.String),
-    }),
-    partitions: Schema.optional(
-      Schema.Struct({
-        authored: Schema.Array(EnvironmentPullRequestEntrySchema),
-        reviewing: Schema.Array(EnvironmentPullRequestEntrySchema),
-      }),
-    ),
-  }),
-);
-
-export function readPullRequestListSnapshot(
-  storage: SnapshotStorage | undefined,
-  environmentSetKey: string,
-): PullRequestListSnapshot | null {
-  try {
-    const raw = storage?.getItem(snapshotStorageKey(environmentSetKey));
-    if (!raw) return null;
-    const decoded = decodeSnapshot(JSON.parse(raw));
-    return decoded._tag === "Some" ? decoded.value : null;
-  } catch {
-    return null;
-  }
-}
-
-export function writePullRequestListSnapshot(
-  storage: SnapshotStorage | undefined,
-  environmentSetKey: string,
-  snapshot: PullRequestListSnapshot,
-): void {
-  try {
-    storage?.setItem(
-      snapshotStorageKey(environmentSetKey),
-      JSON.stringify({
-        scope: snapshot.scope,
-        data: {
-          ...snapshot.data,
-          entries: snapshot.data.entries.slice(0, SNAPSHOT_MAX_ENTRIES),
-          errors: [],
-          nextCursors: {},
-          truncatedEnvironments: [],
-        },
-        ...(snapshot.partitions === undefined
-          ? {}
-          : {
-              partitions: {
-                authored: snapshot.partitions.authored.slice(0, SNAPSHOT_MAX_ENTRIES),
-                reviewing: snapshot.partitions.reviewing.slice(0, SNAPSHOT_MAX_ENTRIES),
-              },
-            }),
-      }),
-    );
-  } catch {}
 }
 
 /** Retain project scope during reconnect until projects arrive. */

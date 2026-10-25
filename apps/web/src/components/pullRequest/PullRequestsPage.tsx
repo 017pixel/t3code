@@ -20,7 +20,7 @@ import type {
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { ArrowDownUpIcon, LayersIcon, Plug2Icon } from "lucide-react";
-import { useEffect, useEffectEvent, useRef, useState, type ComponentProps } from "react";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
 
 import {
   collectPullRequestListFacets,
@@ -28,11 +28,8 @@ import {
   mergePullRequestDiffStats,
   pullRequestEntryKey,
   rankPullRequestMatches,
-  readPullRequestListSnapshot,
-  writePullRequestListSnapshot,
+  nextPullRequestStatsBatches,
   pullRequestStatsRefreshBatches,
-  pullRequestStatsRequestBatches,
-  retainVisiblePullRequestStatsBatches,
   type EnvironmentPullRequestEntry,
   type MergedPullRequestList,
   type PullRequestDiffStats,
@@ -76,9 +73,11 @@ import { PullRequestListGhost } from "./PullRequestGhosts";
 import { type PullRequestRowTarget } from "./PullRequestRow";
 import { PullRequestsUnavailableState } from "./PullRequestsUnavailableState";
 import { RightPanelTabs } from "../RightPanelTabs";
+import { collapseRightPanel, collapseRightPanelIfEmptied } from "../preview/collapseRightPanel";
 import { isCommandPaletteOpen } from "~/commandPaletteBus";
 import { isElectron } from "~/env";
-import { resolveShortcutCommand, shortcutLabelForCommand } from "~/keybindings";
+import { shortcutLabelForCommand } from "~/keybindings";
+import { commandScopeRef, registerCommands } from "~/shortcuts/dispatcher";
 import { isTerminalFocused } from "~/lib/terminalFocus";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "../chat/PanelLayoutControls";
 import { Button } from "../ui/button";
@@ -99,8 +98,11 @@ import {
   type PullRequestSurface,
 } from "~/rightPanelStore";
 import { useSidebarProjectGroups } from "~/hooks/useSidebarProjectGroups";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
 import {
+  notePullRequestsRefreshedFromHost,
   pullRequestEnvironment,
+  restoredPullRequestList,
   usePullRequestList,
   usePullRequestListStats,
   usePullRequestTurnRefreshes,
@@ -137,8 +139,9 @@ const EMPTY_PREVIEW_SESSIONS = {};
 const EMPTY_PREVIEW_DESKTOP_STATE = {};
 const EMPTY_TERMINAL_LABELS = new Map<string, string>();
 const EMPTY_PENDING_SURFACES = new Set<string>();
+const NO_STATS_KEYS: ReadonlySet<string> = new Set();
 export function PullRequestsPage() {
-  useEscapeToGoBack();
+  const escapeToGoBackRef = useEscapeToGoBack();
   const search = useSearch({ from: "/_chat/pull-requests" });
   const sort = search.sort ?? "ready";
   const statsPolicy: PullRequestStatsPolicy =
@@ -277,13 +280,21 @@ export function PullRequestsPage() {
      * host forever.
      */
     regrown: ReadonlyArray<string>;
-  }>({ key: filterKey, size: PAGE_SIZE, cursors: null, regrown: [] });
+    /** The turn refreshes a continuation was read under; a later turn makes its cursors stale. */
+    turn: string;
+  }>({ key: filterKey, size: PAGE_SIZE, cursors: null, regrown: [], turn: turnRefreshToken });
   const pageSize = page.key === filterKey ? page.size : PAGE_SIZE;
   const sentCursors = page.key === filterKey ? page.cursors : null;
   const sentRegrown = page.key === filterKey ? page.regrown : [];
 
   if (page.key !== filterKey) {
-    setPage({ key: filterKey, size: PAGE_SIZE, cursors: null, regrown: [] });
+    setPage({
+      key: filterKey,
+      size: PAGE_SIZE,
+      cursors: null,
+      regrown: [],
+      turn: turnRefreshToken,
+    });
   }
 
   const listTargets = environmentQueries.flatMap(({ environmentId, projectIds }) => {
@@ -386,7 +397,6 @@ export function PullRequestsPage() {
   const authoredQuery = usePullRequestList(partitionTargets.authored);
   const reviewingQuery = usePullRequestList(partitionTargets.reviewing);
   const invalidate = useAtomCommand(pullRequestEnvironment.invalidate, { reportFailure: false });
-  const [detailRefreshToken, setDetailRefreshToken] = useState(0);
   const [invalidating, setInvalidating] = useState(false);
   const refreshing = invalidating || listQuery.isPending;
 
@@ -440,20 +450,25 @@ export function PullRequestsPage() {
   if (environmentKey.length > 0 && snapshotEnvironmentKey !== environmentKey) {
     setSnapshotEnvironmentKey(environmentKey);
     if (loaded?.environmentKey !== environmentKey) {
-      const snapshot = readPullRequestListSnapshot(
-        typeof window === "undefined" ? undefined : window.localStorage,
-        environmentKey,
-      );
+      const restored = restoredPullRequestList(baselineTargets);
+      const restoredPartition = (involvement: PullRequestInvolvement) =>
+        restoredPullRequestList(
+          baselineTargets.map((target) => ({ ...target, input: { ...target.input, involvement } })),
+        )?.entries;
+      const authored = partitionsWanted ? restoredPartition("authored") : undefined;
+      const reviewing = partitionsWanted ? restoredPartition("reviewing") : undefined;
       setLoaded(
-        snapshot === null
+        restored === null
           ? null
           : {
               environmentKey,
-              scope: snapshot.scope,
+              scope: scopeKey,
               query: "",
               source: null,
-              data: snapshot.data,
-              ...(snapshot.partitions === undefined ? {} : { partitions: snapshot.partitions }),
+              data: restored,
+              ...(authored === undefined || reviewing === undefined
+                ? {}
+                : { partitions: { authored, reviewing } }),
             },
       );
     }
@@ -497,33 +512,6 @@ export function PullRequestsPage() {
       ...(nextPartitions === undefined ? {} : { partitions: nextPartitions }),
     });
   }
-  const snapshotToWrite =
-    loaded !== null &&
-    loaded.source !== null &&
-    loaded.environmentKey.length > 0 &&
-    loaded.query.length === 0
-      ? loaded
-      : null;
-  const snapshotViewers = baselineQuery.data?.viewers;
-  const snapshotProviders = baselineQuery.data?.providers;
-  useEffect(() => {
-    if (snapshotToWrite === null) return;
-    writePullRequestListSnapshot(
-      typeof window === "undefined" ? undefined : window.localStorage,
-      snapshotToWrite.environmentKey,
-      {
-        scope: snapshotToWrite.scope,
-        data: {
-          ...snapshotToWrite.data,
-          viewers: snapshotViewers ?? snapshotToWrite.data.viewers,
-          providers: snapshotProviders ?? snapshotToWrite.data.providers,
-        },
-        ...(snapshotToWrite.partitions === undefined
-          ? {}
-          : { partitions: snapshotToWrite.partitions }),
-      },
-    );
-  }, [snapshotToWrite, snapshotViewers, snapshotProviders]);
   const narrowed = (() => {
     if (loaded === null || loaded.environmentKey !== environmentKey || loaded.scope === scopeKey) {
       return null;
@@ -604,6 +592,7 @@ export function PullRequestsPage() {
         size: regrown.length === 0 ? pageSize : Math.min(pageSize + PAGE_SIZE, MAX_PAGE_SIZE),
         cursors: nextCursors,
         regrown,
+        turn: turnRefreshToken,
       });
       return;
     }
@@ -612,8 +601,27 @@ export function PullRequestsPage() {
       size: Math.min(pageSize + PAGE_SIZE, MAX_PAGE_SIZE),
       cursors: null,
       regrown: [],
+      turn: turnRefreshToken,
     });
   };
+
+  const collapsedPage = () => {
+    const loadedCount =
+      ordered?.key === filterKey ? largestPullRequestReadCount(ordered.entries) : pageSize;
+    return {
+      key: filterKey,
+      regrown: [],
+      size: Math.min(
+        Math.max(pageSize, Math.ceil(loadedCount / PAGE_SIZE) * PAGE_SIZE),
+        MAX_PAGE_SIZE,
+      ),
+      cursors: null,
+      turn: turnRefreshToken,
+    };
+  };
+  // Every list read refetches itself when a turn completes, but a continuation would refetch only
+  // its later page and strand the rows before it, so the whole loaded list is asked for again.
+  if (sentCursors !== null && page.turn !== turnRefreshToken) setPage(collapsedPage());
 
   const refreshList = (includeRelated = false, actedEnvironmentId?: EnvironmentId) => {
     const related = (
@@ -640,30 +648,8 @@ export function PullRequestsPage() {
       return;
     }
     if (related.length > 0) listQuery.refresh(related);
-    const loadedCount =
-      ordered?.key === filterKey ? largestPullRequestReadCount(ordered.entries) : pageSize;
-    setPage({
-      key: filterKey,
-      regrown: [],
-      size: Math.min(
-        Math.max(pageSize, Math.ceil(loadedCount / PAGE_SIZE) * PAGE_SIZE),
-        MAX_PAGE_SIZE,
-      ),
-      cursors: null,
-    });
+    setPage(collapsedPage());
   };
-
-  const appliedTurnRefreshToken = useRef("");
-  const refreshAfterTurn = useEffectEvent(() => {
-    if (sentCursors !== null) refreshList();
-  });
-  useEffect(() => {
-    if (turnRefreshToken.length === 0 || appliedTurnRefreshToken.current === turnRefreshToken) {
-      return;
-    }
-    appliedTurnRefreshToken.current = turnRefreshToken;
-    refreshAfterTurn();
-  }, [turnRefreshToken]);
 
   useLiveRefresh(
     () => {
@@ -708,7 +694,6 @@ export function PullRequestsPage() {
     partitionsWanted,
   });
 
-  const visibleStatsKeys = useRef({ key: filterKey, values: new Set<string>() });
   const [statsByRow, setStatsByRow] = useState<PullRequestDiffStats>(() => new Map());
   const [statsTargetState, setStatsTargetState] = useState<{
     readonly key: string;
@@ -720,118 +705,94 @@ export function PullRequestsPage() {
     input,
   }));
   const statsQuery = usePullRequestListStats(statsTargets);
+  // Row keys inside the scroll root's 480px margin, owned by the observer the root creates.
+  const [visibleStatsKeys, setVisibleStatsKeys] = useState<ReadonlySet<string>>(NO_STATS_KEYS);
   const statsObserver = useRef<IntersectionObserver | null>(null);
   const statsRows = useRef(new Set<HTMLDivElement>());
-  // Called from a row's ref cleanup, which keeps the render it attached in; this reads the latest.
-  const releaseStatsRow = useStableCallback((key: string | undefined) => {
-    const visible = visibleStatsKeys.current;
-    if (
-      statsPolicy !== "visible" ||
-      key === undefined ||
-      !visible.values.delete(key) ||
-      statsQuery.isPending
-    ) {
-      return;
-    }
-    setStatsTargetState((current) => {
-      if (current.key !== visible.key) return current;
-      const batches = retainVisiblePullRequestStatsBatches(current.batches, visible.values);
-      return batches.length === current.batches.length ? current : { key: current.key, batches };
-    });
-  });
   // Every row takes this as its ref, so a new identity would detach and reattach them all.
   const registerStatsRow = useStableCallback((node: HTMLDivElement | null) => {
-    if (node === null || typeof IntersectionObserver === "undefined") return;
+    if (node === null) return;
     statsRows.current.add(node);
     statsObserver.current?.observe(node);
     return () => {
       statsRows.current.delete(node);
       statsObserver.current?.unobserve(node);
-      releaseStatsRow(node.dataset.pullRequestStatsKey);
+      const key = node.dataset.pullRequestStatsKey;
+      if (key === undefined) return;
+      setVisibleStatsKeys((current) => {
+        if (!current.has(key)) return current;
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
     };
   });
-  // Arriving stats must not re-run the effects that ask for them.
-  const readStatsProgress = useEffectEvent(() => ({
-    statsByRow,
+  // Eager stats need no observer, so the list scrolls without re-rendering the page. A new
+  // observer reports every row it is given, which rebuilds the visible set from scratch, and the
+  // set empties when its observer goes so a later observer never starts from stale rows.
+  const observeStatsRows =
+    statsPolicy !== "visible"
+      ? undefined
+      : (root: HTMLDivElement) => {
+          if (typeof IntersectionObserver === "undefined") return;
+          const observer = new IntersectionObserver(
+            (observed) =>
+              setVisibleStatsKeys((current) => {
+                let next: Set<string> | null = null;
+                for (const item of observed) {
+                  const key = (item.target as HTMLElement).dataset.pullRequestStatsKey;
+                  if (key === undefined || item.isIntersecting === (next ?? current).has(key)) {
+                    continue;
+                  }
+                  if (next === null) next = new Set(current);
+                  if (item.isIntersecting) next.add(key);
+                  else next.delete(key);
+                }
+                return next ?? current;
+              }),
+            { root, rootMargin: "480px" },
+          );
+          statsObserver.current = observer;
+          for (const row of statsRows.current) observer.observe(row);
+          return () => {
+            observer.disconnect();
+            if (statsObserver.current === observer) statsObserver.current = null;
+            setVisibleStatsKeys(NO_STATS_KEYS);
+          };
+        };
+  // Stats are asked for once per row set and visible set; arriving stats must not ask again.
+  const [statsRequestedFor, setStatsRequestedFor] = useState<{
+    readonly key: string;
+    readonly policy: PullRequestStatsPolicy;
+    readonly entries: typeof entriesByStatsKey;
+    readonly visible: ReadonlySet<string>;
+  } | null>(null);
+  const statsCandidateKeys = statsPolicy === "visible" ? visibleStatsKeys : NO_STATS_KEYS;
+  const statsInputsChanged =
+    statsRequestedFor?.key !== filterKey ||
+    statsRequestedFor.policy !== statsPolicy ||
+    statsRequestedFor.entries !== entriesByStatsKey ||
+    statsRequestedFor.visible !== statsCandidateKeys;
+  if (statsInputsChanged) {
+    setStatsRequestedFor({
+      key: filterKey,
+      policy: statsPolicy,
+      entries: entriesByStatsKey,
+      visible: statsCandidateKeys,
+    });
+  }
+  const nextStatsBatches = nextPullRequestStatsBatches({
+    batches: statsBatches,
+    request: statsInputsChanged,
+    entriesByKey: entriesByStatsKey,
+    policy: statsPolicy,
+    visibleKeys: visibleStatsKeys,
     pending: statsQuery.isPending,
-  }));
-  useEffect(() => {
-    if (statsPolicy !== "eager") return;
-    const { statsByRow: known } = readStatsProgress();
-    const candidateKeys = visibleStatsKeys.current.values;
-    setStatsTargetState((current) => {
-      const batches = current.key === filterKey ? current.batches : [];
-      const added = pullRequestStatsRequestBatches({
-        entriesByKey: entriesByStatsKey,
-        candidateKeys,
-        policy: statsPolicy,
-        activeBatches: batches,
-        statsByRow: known,
-      });
-      if (added.length === 0 && current.key === filterKey) return current;
-      return { key: filterKey, batches: [...batches, ...added] };
-    });
-  }, [filterKey, entriesByStatsKey, statsPolicy]);
-  // The observer outlives the rows it watches, so it reads the rows held at the time it fires.
-  const readStatsRows = useEffectEvent(() => entriesByStatsKey);
-  useEffect(() => {
-    if (statsPolicy !== "visible" || typeof IntersectionObserver === "undefined") return;
-    visibleStatsKeys.current = { key: filterKey, values: new Set() };
-    const observer = new IntersectionObserver(
-      (observed) => {
-        const visible = visibleStatsKeys.current;
-        if (visible.key !== filterKey) return;
-        let changed = false;
-        const entered = new Set<string>();
-        const entriesByKey = readStatsRows();
-        for (const item of observed) {
-          const key = (item.target as HTMLElement).dataset.pullRequestStatsKey;
-          if (key === undefined) continue;
-          const wasVisible = visible.values.has(key);
-          if (item.isIntersecting && entriesByKey.has(key)) {
-            visible.values.add(key);
-            if (!wasVisible) entered.add(key);
-          } else {
-            visible.values.delete(key);
-          }
-          if (wasVisible !== visible.values.has(key)) changed = true;
-        }
-        if (!changed) return;
-        const progress = readStatsProgress();
-        setStatsTargetState((current) => {
-          const batches = current.key === filterKey ? current.batches : [];
-          const retained = progress.pending
-            ? batches
-            : retainVisiblePullRequestStatsBatches(batches, visible.values);
-          const added = pullRequestStatsRequestBatches({
-            entriesByKey,
-            candidateKeys: entered,
-            policy: statsPolicy,
-            activeBatches: batches,
-            statsByRow: progress.statsByRow,
-          });
-          if (added.length === 0 && retained.length === batches.length) return current;
-          return { key: filterKey, batches: [...retained, ...added] };
-        });
-      },
-      { root: scrollRef.current, rootMargin: "480px" },
-    );
-    statsObserver.current = observer;
-    for (const row of statsRows.current) observer.observe(row);
-    return () => {
-      observer.disconnect();
-      if (statsObserver.current === observer) statsObserver.current = null;
-    };
-  }, [filterKey, statsPolicy]);
-  useEffect(() => {
-    if (statsPolicy !== "visible" || statsQuery.isPending) return;
-    const visible = visibleStatsKeys.current;
-    setStatsTargetState((current) => {
-      if (current.key !== filterKey || visible.key !== filterKey) return current;
-      const batches = retainVisiblePullRequestStatsBatches(current.batches, visible.values);
-      return batches.length === current.batches.length ? current : { key: current.key, batches };
-    });
-  }, [filterKey, statsPolicy, statsQuery.isPending]);
+    statsByRow,
+  });
+  if (nextStatsBatches !== statsBatches || statsTargetState.key !== filterKey) {
+    setStatsTargetState({ key: filterKey, batches: nextStatsBatches });
+  }
   const [mergedStats, setMergedStats] = useState<typeof statsQuery.stats>(null);
   if (statsQuery.stats !== null && statsQuery.stats !== mergedStats) {
     const stats = statsQuery.stats;
@@ -846,12 +807,11 @@ export function PullRequestsPage() {
       actedEnvironmentId?: EnvironmentId,
     ) => {
       refreshList(true, actedEnvironmentId);
-      const visible = visibleStatsKeys.current;
       const batches = pullRequestStatsRefreshBatches({
         requestedScope: requestedStatsScope,
         currentScope: statsScope,
         entriesByKey: entriesByStatsKey,
-        candidateKeys: visible.key === requestedStatsScope.key ? visible.values : new Set(),
+        candidateKeys: statsPolicy === "visible" ? visibleStatsKeys : NO_STATS_KEYS,
         statsByRow,
       });
       if (batches !== null) {
@@ -875,7 +835,9 @@ export function PullRequestsPage() {
     );
     setInvalidating(false);
     refreshListAndStats(requestedStatsScope);
-    setDetailRefreshToken((token) => token + 1);
+    for (const environmentId of queryEnvironmentIds) {
+      notePullRequestsRefreshedFromHost(appAtomRegistry, environmentId);
+    }
   };
   const {
     hosts,
@@ -914,15 +876,6 @@ export function PullRequestsPage() {
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- The pointer sensor lives outside React; a new list under a sweep in progress must end it.
     [filterKey, search.q, sort],
   );
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || closeSensorRef.current === null) return;
-      event.preventDefault();
-      closeSensorRef.current.cancel();
-    };
-    document.addEventListener("keydown", onKeyDown, true);
-    return () => document.removeEventListener("keydown", onKeyDown, true);
-  }, []);
   const startCloseSweep = useStableCallback(
     (entry: EnvironmentPullRequestEntry, event: PointerEvent) => {
       closeSensorRef.current?.cancel();
@@ -954,14 +907,27 @@ export function PullRequestsPage() {
         sweptKeys = resolveSidebarSweepKeys(orderedKeys, originKey, key, canClose);
         setCloseSweepKeys(new Set(sweptKeys));
       };
-      closeSensorRef.current = new SidebarPointerSensor({
+      // Captured ahead of the page's Escape-to-go-back, which an ended sweep must not trigger.
+      const releaseEscape = registerCommands(
+        {},
+        {
+          capture: true,
+          onKeyDown: (keyEvent) => {
+            if (keyEvent.key !== "Escape") return false;
+            keyEvent.preventDefault();
+            sensor.cancel();
+          },
+        },
+      );
+      const sensor = new SidebarPointerSensor({
         active: originKey,
         event,
         options: {
           distance: 6,
           onAttach: () => {},
           onFinish: () => {
-            closeSensorRef.current = null;
+            releaseEscape();
+            if (closeSensorRef.current === sensor) closeSensorRef.current = null;
             setCloseSweepKeys(new Set());
           },
         },
@@ -989,6 +955,7 @@ export function PullRequestsPage() {
         onCancel: () => {},
         onAbort: () => {},
       });
+      closeSensorRef.current = sensor;
     },
   );
   const rightPanelAvailable = selectedPullRequestSurface !== null;
@@ -1040,7 +1007,7 @@ export function PullRequestsPage() {
   const toggleRightPanel = () => {
     if (rightPanelRef === null) return;
     if (rightPanelState.isOpen) {
-      useRightPanelStore.getState().close(rightPanelRef);
+      collapseRightPanel(rightPanelRef);
       updateSearch(clearedSelection);
       return;
     }
@@ -1329,6 +1296,7 @@ export function PullRequestsPage() {
     maximizedAway: rightPanelMaximized,
     listBody,
     scrollRef,
+    observeScrollRoot: observeStatsRows,
   };
 
   const activateSurface = (surface: PullRequestSurface) => {
@@ -1338,6 +1306,7 @@ export function PullRequestsPage() {
   };
   const closeSurface = (surface: PullRequestSurface) => {
     if (rightPanelRef === null) return;
+    collapseRightPanelIfEmptied(rightPanelRef, new Set([surface.id]));
     useRightPanelStore.getState().closeSurface(rightPanelRef, surface.id);
     const next = selectActiveRightPanelSurface(
       useRightPanelStore.getState().byThreadKey,
@@ -1361,12 +1330,13 @@ export function PullRequestsPage() {
   };
   const closeAllSurfaces = () => {
     if (rightPanelRef === null) return;
+    collapseRightPanel(rightPanelRef);
     useRightPanelStore.getState().closeAllSurfaces(rightPanelRef);
     selectSurfaceInUrl(null);
   };
 
-  const copyPullRequestFromShortcut = useEffectEvent((event: KeyboardEvent) => {
-    if (!openPanelPullRequestUrl) return;
+  const copyPullRequestFromShortcut = (event: KeyboardEvent) => {
+    if (!openPanelPullRequestUrl) return false;
     event.preventDefault();
     event.stopPropagation();
     if (event.repeat) return;
@@ -1391,43 +1361,41 @@ export function PullRequestsPage() {
         });
       },
     );
-  });
-  const closeActiveSurfaceFromShortcut = useEffectEvent((event: KeyboardEvent) => {
-    if (activePullRequestSurface === null) return;
+  };
+  const closeActiveSurfaceFromShortcut = (event: KeyboardEvent) => {
+    if (activePullRequestSurface === null) return false;
     event.preventDefault();
     event.stopPropagation();
     if (!event.repeat) closeSurface(activePullRequestSurface);
-  });
-  const toggleRightPanelFromShortcut = useEffectEvent((event: KeyboardEvent) => {
-    if (!rightPanelAvailable) return;
+  };
+  const toggleRightPanelFromShortcut = (event: KeyboardEvent) => {
+    if (!rightPanelAvailable) return false;
     event.preventDefault();
     event.stopPropagation();
     if (!event.repeat) toggleRightPanel();
-  });
-  const toggleRightPanelMaximizedFromShortcut = useEffectEvent((event: KeyboardEvent) => {
-    if (!rightPanelState.isOpen) return;
+  };
+  const toggleRightPanelMaximizedFromShortcut = (event: KeyboardEvent) => {
+    if (!rightPanelState.isOpen) return false;
     event.preventDefault();
     event.stopPropagation();
     if (!event.repeat) toggleRightPanelMaximized();
-  });
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || isCommandPaletteOpen()) return;
-      const command = resolveShortcutCommand(event, keybindings, {
-        context: getShortcutContext(),
-      });
-      if (command === "rightPanel.close") closeActiveSurfaceFromShortcut(event);
-      if (command === "rightPanel.toggle") toggleRightPanelFromShortcut(event);
-      if (command === "rightPanel.toggleMaximized") toggleRightPanelMaximizedFromShortcut(event);
-      if (command === "thread.copyReference") copyPullRequestFromShortcut(event);
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [keybindings]);
+  };
+  const shortcutScopeRef = commandScopeRef(
+    {
+      "rightPanel.close": closeActiveSurfaceFromShortcut,
+      "rightPanel.toggle": toggleRightPanelFromShortcut,
+      "rightPanel.toggleMaximized": toggleRightPanelMaximizedFromShortcut,
+      "thread.copyReference": copyPullRequestFromShortcut,
+    },
+    { when: () => !isCommandPaletteOpen(), context: getShortcutContext },
+  );
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
-      <div className="relative flex min-h-0 flex-1">
+    <SidebarInset
+      ref={escapeToGoBackRef}
+      className="h-dvh min-h-0 overflow-hidden overscroll-y-none"
+    >
+      <div ref={shortcutScopeRef} className="relative flex min-h-0 flex-1">
         {pullRequestsSupported && rightPanelPresent ? openPanelControls : null}
         <PullRequestsColumn {...columnProps} />
 
@@ -1518,7 +1486,7 @@ export function PullRequestsPage() {
                   pullRequestListEntryId(renderedPullRequestSurface),
                 ) ?? null
               }
-              refreshToken={detailRefreshToken}
+              tabOnPage
               onActed={(action, phase = "done") => {
                 // From every row held, not the ones on screen: a pull request closed from an open
                 // list has left the screen, and reopening it has to find it anyway.

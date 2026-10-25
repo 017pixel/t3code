@@ -6,7 +6,7 @@ import {
   savedPullRequestStack,
   pullRequestStackView,
 } from "../components/pullRequest/pullRequestStackSnapshot";
-import { pullRequestStackAtom } from "./pullRequests";
+import { pullRequestStackAtom, readAtRevision } from "./pullRequests";
 import { useEnvironmentQuery } from "./query";
 import { environmentThreadShells } from "./threads";
 
@@ -28,11 +28,15 @@ const environmentPullRequestLinksAtom = Atom.family((environmentId: EnvironmentI
 export function usePullRequestStack(
   environmentId: EnvironmentId,
   reference: PullRequestRef | null,
+  /** A new host revision refetches the stack. */
+  revision: string | null = null,
 ) {
   const links = useAtomValue(environmentPullRequestLinksAtom(environmentId));
   const saved = reference === null ? null : savedPullRequestStack(links, reference);
   const query = useEnvironmentQuery(
-    reference === null ? null : pullRequestStackAtom({ environmentId, input: reference }),
+    reference === null
+      ? null
+      : readAtRevision(pullRequestStackAtom({ environmentId, input: reference }), revision),
   );
   return { ...query, ...pullRequestStackView(query, saved) };
 }

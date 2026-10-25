@@ -145,12 +145,6 @@ export function loadingPullRequestCheckoutCommand(
   return command;
 }
 
-export function shouldRefreshPullRequestActivity(
-  previous: { readonly key: string; readonly updatedAt: string } | null,
-  next: { readonly key: string; readonly updatedAt: string },
-): boolean {
-  return previous !== null && previous.key === next.key && previous.updatedAt !== next.updatedAt;
-}
 export function mergePullRequestThreadComments<T extends { readonly id: string }>(
   base: ReadonlyArray<T>,
   loaded: ReadonlyArray<T>,
