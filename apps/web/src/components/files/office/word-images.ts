@@ -1,6 +1,7 @@
 // Adapted from opencode (MIT). Copyright (c) 2025 opencode. See LICENSE.opencode.
 import type { ImageResolver } from "@betteroffice/docx/layout/render";
 import type { YrsMediaSource } from "@betteroffice/docx/yrs";
+import { officeImageBitmap } from "./image-bitmap";
 
 /** An embedded image's source, which names a part of the package the session reads. */
 const mediaToken = /^media:(0|[1-9]\d*)$/u;
@@ -34,12 +35,10 @@ export function createBitmapImageResolver(media: (token: string) => YrsMediaSour
       ? Promise.resolve(new Blob([new Uint8Array(found.bytes)], { type: found.mimeType }))
       : fetch(source).then((response) => response.blob());
 
-    return blob
-      .then((value) => createImageBitmap(value))
-      .then(
-        (bitmap): CanvasImageSource => bitmap,
-        () => (token ? placeholder : null),
-      );
+    return blob.then(officeImageBitmap).then(
+      (bitmap): CanvasImageSource => bitmap,
+      () => (token ? placeholder : null),
+    );
   };
 
   const resolve: ImageResolver = (source) => {
