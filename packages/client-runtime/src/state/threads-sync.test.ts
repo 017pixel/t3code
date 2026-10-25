@@ -2,7 +2,9 @@ import {
   EnvironmentId,
   EventId,
   MessageId,
+  NodeId,
   ORCHESTRATION_V2_WS_METHODS,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2ThreadDetailSnapshot,
@@ -43,7 +45,8 @@ import {
   decodeOrDiscardOrchestrationCache,
 } from "../platform/orchestrationCache.ts";
 import * as RpcSession from "../rpc/session.ts";
-import { v2Projection, v2ThreadId } from "./orchestrationV2TestFixtures.ts";
+import { v2Now, v2Projection, v2ThreadId } from "./orchestrationV2TestFixtures.ts";
+import { onThreadRequestsResolved, type ThreadRequestsResolved } from "./threadRequests.ts";
 import { EMPTY_THREAD_HISTORY_META } from "./threadHistoryMerge.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
 import {
@@ -1793,6 +1796,58 @@ describe("EnvironmentThreads", () => {
         (value) => value.status === "live" && Option.isSome(value.data),
       );
       expect(Option.getOrThrow(live.data).thread.title).toBe("Caught-up title");
+    }),
+  );
+
+  it.effect("announces request resolution only from a synchronized projection", () =>
+    Effect.gen(function* () {
+      const announced = yield* Queue.unbounded<ThreadRequestsResolved>();
+      yield* Effect.acquireRelease(
+        Effect.sync(() => onThreadRequestsResolved((event) => Queue.offerUnsafe(announced, event))),
+        (unsubscribe) => Effect.sync(unsubscribe),
+      );
+      const request = {
+        id: RuntimeRequestId.make("question"),
+        nodeId: NodeId.make("question-node"),
+        providerTurnId: null,
+        nativeRequestRef: null,
+        kind: "user_input" as const,
+        status: "pending" as const,
+        responseCapability: { type: "message" as const },
+        createdAt: v2Now,
+        resolvedAt: null,
+      };
+      const harness = yield* makeHarness({
+        cached: { ...BASE_PROJECTION, runtimeRequests: [request] },
+        completionMarker: true,
+      });
+      yield* awaitThreadState(
+        harness.observed,
+        (value) => value.status === "synchronizing" && Option.isSome(value.data),
+      );
+
+      // Answered on another device while this client was away.
+      yield* Queue.offerAll(harness.inputs, [
+        {
+          kind: "event",
+          sequence: CACHED_SNAPSHOT_SEQUENCE + 1,
+          event: {
+            id: EventId.make("event-request"),
+            type: "runtime-request.updated",
+            threadId: THREAD_ID,
+            occurredAt: v2Now,
+            payload: { ...request, status: "resolved", resolvedAt: v2Now },
+          },
+        },
+        synchronized(),
+      ]);
+
+      expect(yield* Queue.take(announced)).toEqual({
+        environmentId: TARGET.environmentId,
+        threadId: THREAD_ID,
+        pendingRequestIds: [],
+      });
+      expect(yield* Queue.size(announced)).toBe(0);
     }),
   );
 

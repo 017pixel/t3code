@@ -2,7 +2,7 @@ import { managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { appAtomRegistry } from "../../state/atom-registry";
-import { activateCloudRelayAccount, deactivateCloudRelayAccount } from "./CloudAuthProvider";
+import { activateCloudRelayAccount, deactivateCloudRelayAccount } from "./cloudAccountService";
 import { setAgentAwarenessRelayTokenProvider } from "../agent-awareness/remoteRegistration";
 
 vi.mock("@clerk/expo", () => ({
@@ -27,6 +27,10 @@ vi.mock("../../connection/catalog", () => ({
 }));
 
 vi.mock("./cloud-drafts", () => ({ removeCloudEnvironments: {} }));
+vi.mock("./connectOnboarding", () => ({
+  clearConnectOnboardingRequest: vi.fn(),
+  requestConnectOnboarding: vi.fn(),
+}));
 vi.mock("../../state/use-composer-drafts", () => ({
   getComposerCloudAccountId: vi.fn(async () => null),
   restoreCloudComposerDrafts: vi.fn(async () => undefined),
